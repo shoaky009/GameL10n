@@ -1,0 +1,12 @@
+.tools/
+.packages/
+.work/
+.idea
+artifacts/
+target/
+**/bin/
+**/obj/
+.vs/
+*.user
+*.suo
+*.bak

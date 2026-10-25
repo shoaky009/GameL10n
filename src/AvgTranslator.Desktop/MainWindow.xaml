@@ -1,0 +1,105 @@
+<Window x:Class="AvgTranslator.Desktop.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Title="AVG 汉化工具">
+  <Grid x:Name="RootGrid" Background="{ThemeResource ApplicationPageBackgroundThemeBrush}" Padding="32,24" RowSpacing="20">
+    <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="*" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+    <StackPanel Spacing="6">
+      <TextBlock Text="AVG 汉化工具" FontSize="26" FontWeight="SemiBold" />
+      <TextBlock Text="导入游戏，翻译剧情，生成并安装汉化补丁。" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+    </StackPanel>
+    <Grid Grid.Row="1" ColumnSpacing="12">
+      <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+      <TextBox x:Name="GamePathBox" Header="游戏安装目录" PlaceholderText="选择包含游戏程序和资源的文件夹" />
+      <Button x:Name="BrowseButton" Grid.Column="1" Content="选择目录" VerticalAlignment="Bottom" Click="Browse_Click" />
+      <Button x:Name="AnalyzeButton" Grid.Column="2" Content="识别游戏" VerticalAlignment="Bottom" Click="Analyze_Click" />
+    </Grid>
+    <TabView Grid.Row="2" IsAddTabButtonVisible="False" CanReorderTabs="False" CanDragTabs="False" TabWidthMode="Equal">
+      <TabViewItem Header="翻译任务" IsClosable="False">
+        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+          <StackPanel Spacing="16" Padding="0,20,8,12">
+            <InfoBar x:Name="GameInfoBar" IsOpen="True" IsClosable="False" Severity="Informational" Title="尚未导入游戏" Message="识别后可查看文本数量与适配结果。" />
+            <Grid ColumnSpacing="16">
+              <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+              <StackPanel Spacing="4"><TextBlock Text="处理状态" Foreground="{ThemeResource TextFillColorSecondaryBrush}" /><TextBlock x:Name="StageText" Text="等待导入" FontSize="20" TextWrapping="Wrap" /></StackPanel>
+              <StackPanel Grid.Column="1" Spacing="4"><TextBlock Text="已完成 / 缓存复用 / 翻译 Token" Foreground="{ThemeResource TextFillColorSecondaryBrush}" /><TextBlock x:Name="CountsText" Text="—" FontSize="20" /></StackPanel>
+            </Grid>
+            <ProgressBar x:Name="TaskProgress" Minimum="0" Maximum="100" Value="0" />
+            <TextBlock x:Name="TaskApiSummaryText" Text="分析 API：未配置　翻译 API：未配置" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            <StackPanel Orientation="Horizontal" Spacing="12">
+              <Button x:Name="TrialButton" Content="选择文本试译" Click="Trial_Click" IsEnabled="False" />
+              <Button x:Name="TranslateButton" Content="开始 / 继续全量翻译" Style="{StaticResource AccentButtonStyle}" Click="Translate_Click" IsEnabled="False" />
+              <Button x:Name="CancelButton" Content="暂停" Click="Cancel_Click" IsEnabled="False" />
+              <Button x:Name="AdaptButton" Content="自动适配未知格式" Click="Adapt_Click" IsEnabled="False" />
+            </StackPanel>
+            <TextBlock Text="任务日志" FontWeight="SemiBold" />
+            <TextBox x:Name="LogBox" IsReadOnly="True" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="180" MaxHeight="360" ScrollViewer.VerticalScrollBarVisibility="Auto" FontFamily="Consolas" />
+          </StackPanel>
+        </ScrollViewer>
+      </TabViewItem>
+      <TabViewItem Header="引擎与兼容游戏" IsClosable="False">
+        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+          <StackPanel Spacing="16" Padding="0,20,8,12">
+            <TextBlock Text="按引擎或资源模板归档，下面列出已验证的游戏版本。样本或结构验证通过，不代表游戏运行已验证。" TextWrapping="Wrap" />
+            <TextBox x:Name="CatalogSearchBox" Header="检索引擎、模板或游戏" PlaceholderText="例如 SFA16、AOS 或 DARK BLUE" TextChanged="CatalogSearch_TextChanged" />
+            <Button Content="刷新兼容记录" Click="RefreshCatalog_Click" />
+            <TextBlock x:Name="CatalogText" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+          </StackPanel>
+        </ScrollViewer>
+      </TabViewItem>
+      <TabViewItem Header="API 与术语" IsClosable="False">
+        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+          <StackPanel Spacing="16" Padding="0,20,8,12" HorizontalAlignment="Stretch">
+            <TextBlock Text="保存一份 API 配置后，分析和翻译可以共用，也可以分别选择。" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            <ComboBox x:Name="AnalysisApiBox" Header="游戏分析 / 自动适配" DisplayMemberPath="Name" PlaceholderText="选择已保存的 API 配置" HorizontalAlignment="Stretch" SelectionChanged="ApiPurpose_SelectionChanged" />
+            <ComboBox x:Name="TranslationApiBox" Header="文本翻译" DisplayMemberPath="Name" PlaceholderText="选择已保存的 API 配置" HorizontalAlignment="Stretch" SelectionChanged="ApiPurpose_SelectionChanged" />
+            <StackPanel Orientation="Horizontal" Spacing="12">
+              <Button x:Name="AddApiButton" Content="新增 API 配置" Click="AddApi_Click" Style="{StaticResource AccentButtonStyle}" />
+              <Button x:Name="EditApiButton" Content="编辑所选配置" Click="EditApi_Click" IsEnabled="False" />
+              <Button x:Name="DeleteApiButton" Content="删除所选配置" Click="DeleteApi_Click" IsEnabled="False" />
+            </StackPanel>
+            <TextBlock x:Name="ApiEmptyText" Text="还没有 API 配置。新增第一份后，分析和翻译会默认使用它。" TextWrapping="Wrap" />
+            <ListView x:Name="ApiProfileList" SelectionMode="Single" MaxHeight="210" SelectionChanged="ApiProfileList_SelectionChanged" AutomationProperties.Name="已保存的 API 配置">
+              <ListView.ItemTemplate>
+                <DataTemplate>
+                  <StackPanel Spacing="4" Padding="0,8" ToolTipService.ToolTip="{Binding Endpoint}">
+                    <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                    <TextBlock Text="{Binding Description}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextTrimming="CharacterEllipsis" />
+                  </StackPanel>
+                </DataTemplate>
+              </ListView.ItemTemplate>
+            </ListView>
+            <InfoBar x:Name="ApiSettingsInfo" IsOpen="False" IsClosable="True" />
+            <Expander Header="翻译语言与术语" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
+              <StackPanel Spacing="16">
+                <TextBox x:Name="LanguageBox" Header="目标语言" Text="简体中文" />
+                <TextBox x:Name="StyleBox" Header="翻译风格" Text="自然流畅，保留人物语气、情绪和原文含义。" TextWrapping="Wrap" />
+                <TextBox x:Name="TerminologyBox" Header="术语表（每行：原文=译文）" PlaceholderText="角色原名=中文译名" AcceptsReturn="True" MinHeight="100" TextWrapping="Wrap" />
+                <NumberBox x:Name="BatchSizeBox" Header="每批文本数" Value="24" Minimum="1" Maximum="80" SpinButtonPlacementMode="Inline" />
+                <Button Content="保存翻译设置" Click="SaveSettings_Click" HorizontalAlignment="Left" />
+              </StackPanel>
+            </Expander>
+          </StackPanel>
+        </ScrollViewer>
+      </TabViewItem>
+      <TabViewItem Header="汉化补丁" IsClosable="False">
+        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+          <StackPanel Spacing="16" Padding="0,20,8,12">
+            <TextBlock Text="生成的汉化文件可独立安装和运行，游戏运行不依赖适配器或本工具。需要替换的文件会先备份为 .bak；已有备份不会覆盖。" TextWrapping="Wrap" />
+            <TextBlock x:Name="PatchScopeText" Text="尚未生成补丁。可先选择少量文本试译，检查游戏中的显示效果。" TextWrapping="Wrap" FontWeight="SemiBold" />
+            <TextBox x:Name="PatchPathBox" Header="补丁目录" IsReadOnly="True" PlaceholderText="翻译完成后生成" />
+            <TextBlock x:Name="InstallTargetText" Text="安装位置：上方选择的游戏目录" TextWrapping="Wrap" />
+            <InfoBar x:Name="PatchInstallInfo" IsOpen="False" IsClosable="True" />
+            <TextBlock x:Name="LaunchText" Text="启动方式将在生成补丁后显示。" TextWrapping="Wrap" />
+            <TextBlock x:Name="ValidationText" Text="结构校验：未执行　游戏运行验证：未执行" TextWrapping="Wrap" />
+            <StackPanel Orientation="Horizontal" Spacing="12">
+              <Button x:Name="InstallButton" Content="安装汉化补丁" Style="{StaticResource AccentButtonStyle}" Click="Install_Click" IsEnabled="False" />
+              <Button x:Name="OpenPatchButton" Content="打开补丁目录" Click="OpenPatch_Click" IsEnabled="False" />
+              <Button x:Name="RestoreButton" Content="恢复原版" Click="Restore_Click" IsEnabled="False" />
+            </StackPanel>
+          </StackPanel>
+        </ScrollViewer>
+      </TabViewItem>
+    </TabView>
+    <TextBlock Grid.Row="3" x:Name="FooterText" Text="数据保存在本机。关闭程序后，已提交的译文仍可复用。" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" FontSize="12" />
+  </Grid>
+</Window>
