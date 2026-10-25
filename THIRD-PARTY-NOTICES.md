@@ -7,6 +7,53 @@ AOS/SCR format implementation references:
 
 Applicable MIT notices follow. Windows App SDK and .NET runtime files retain their respective upstream licenses in the distributed packages.
 
+## Engine research toolkit
+
+The intelligent adaptation tools can query documentation and source links from
+https://github.com/GalTransl/GalTransl-GalGameReverse-Skill.
+On demand, the application downloads a commit-pinned source archive and retains its
+Python implementations, catalog, engine guides, LICENSE and provenance notices in
+the data directory's shared `extensions/engine-tools` library. These materials retain
+their upstream licenses, including GPLv3 and file-specific third-party notices.
+Adapters referring to this library must meet the corresponding source and distribution
+obligations. UIF binaries, fonts and hook DLLs are not installed by this integration.
+
+The portable Windows x64 Python 3.14.10 interpreter is downloaded on demand from
+https://www.python.org/ftp/python/3.14.10/python-3.14.10-embed-amd64.zip.
+Its original LICENSE.txt and distribution files remain in the shared runtime directory.
+Versions and content hashes are recorded with the adapter dependency; the interpreter
+is used by the translator, not installed in the game directory or required to play patches.
+
+## VNTextPatch-net8 / VNTranslationTools
+
+The built-in script parsers include adapted source from
+https://github.com/rafael-vasconcellos/VNTextPatch-net8,
+commit `e68e174f3db6181e03fc7fabfa7570e1b293d148`, originally developed in
+https://github.com/arcusmaximus/VNTranslationTools.
+Source and local modification notes are in `third_party/VNTextPatch`.
+
+MIT License
+
+Copyright (c) 2021 arcusmaximus
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
 ## AosTools
 
 MIT License
@@ -55,3 +102,33 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+## Capstone
+
+PE code inspection bundles the unmodified Capstone 5.0.6 Windows x64 native library from its official PyPI wheel.
+Source: https://github.com/capstone-engine/capstone
+Distribution: https://pypi.org/project/capstone/5.0.6/
+License: BSD 3-Clause; the complete license is distributed at `tools/analysis/Capstone-LICENSE.txt`.
+Pinned artifact hashes and repository license: `third_party/Capstone/README.md` and `third_party/Capstone/LICENSE.TXT`.
+
+## SiglusSceneScriptUtility
+
+Siglus support bundles the official Windows x64 wheel of SiglusSceneScriptUtility 0.5.7.
+Source: https://github.com/Jirehlov/SiglusSceneScriptUtility
+License: Unlicense OR 0BSD (the distribution below uses the 0BSD grant).
+Local bridge modifications add ZIP import support and expose string references from the existing argument stack.
+
+BSD Zero Clause License
+
+Copyright (C) 2026 by SiglusSceneScriptUtility contributors
+
+Permission to use, copy, modify, and/or distribute this software for any purpose
+with or without fee is hereby granted.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
+REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND
+FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
+INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS
+OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER
+TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF
+THIS SOFTWARE.

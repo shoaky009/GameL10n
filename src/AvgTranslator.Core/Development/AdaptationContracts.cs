@@ -4,45 +4,29 @@ using AvgTranslator.Core.Validation;
 
 namespace AvgTranslator.Core.Development;
 
-public sealed record AdaptationSample(string RelativePath, string ContentBase64);
-public sealed record AdaptationAdapterOption(string Id, string Version, string Description);
+public sealed record AdaptationLimits(int MaximumTurns = 60, long MaximumTokens = 1_000_000,
+    int MaximumOutputTokens = 10_000);
 
-public sealed record AdaptationModelContext(
-    string GameId,
-    IReadOnlyList<AdaptationSample> Samples,
-    IReadOnlyList<AdaptationAdapterOption> ExistingAdapters,
-    IReadOnlyList<string> Diagnostics,
-    string ProtocolDescription,
-    int MaximumOutputTokens,
-    long RemainingTotalTokens,
-    IReadOnlyList<ExecutableAnalysis>? Executables = null);
-
-public sealed record AdaptationProposal(string? ReuseAdapterId, string? SourceCode, string Summary, TokenUsage Usage,
-    AdapterFamily? Family = null);
-
-public interface IAdaptationModel
-{
-    Task<AdaptationProposal> GenerateAsync(AdaptationModelContext context, CancellationToken cancellationToken);
-}
-
-public sealed record AdaptationLimits(
-    int MaximumAttempts = 2,
-    long MaximumTokens = 16_000,
-    int MaximumOutputTokens = 6_000,
-    int MaximumSampleFiles = 4,
-    int MaximumSampleBytes = 64 * 1024,
-    int MaximumTotalSampleBytes = 128 * 1024,
-    int MaximumSourceBytes = 96 * 1024,
-    TimeSpan? TotalTimeout = null);
+public enum AdaptationObjective { Develop, Repair, ExpandCoverage }
 
 public sealed record AdaptationRequest(string GameId, string GameDirectory,
-    IReadOnlyList<string> SampleFiles, IReadOnlyList<IGameAdapter> ExistingAdapters,
-    AdaptationLimits? Limits = null);
+    IReadOnlyList<IGameAdapter> ExistingAdapters,
+    AdaptationLimits? Limits = null, string? UserInstruction = null,
+    IReadOnlyList<BuiltinAdapterProbeObservation>? BuiltinProbes = null, bool ImproveExisting = false,
+    AdaptationObjective? Objective = null, IReadOnlyList<TranslationUnit>? BaselineUnits = null);
 
-public enum AdaptationStatus { Activated, Reused, Failed, Unavailable, BudgetExhausted, Cancelled }
+public enum AdaptationStatus { Activated, Reused, Failed, Unavailable, BudgetExhausted, Cancelled, Incomplete, WaitingForUser, Unsupported }
+
+public sealed record AdaptationBlocker(bool RequiresUserInput, string Reason, string NextAction, bool WorkRemaining = false);
 
 public sealed record AdaptationResult(AdaptationStatus Status, IGameAdapter? Adapter,
-    IReadOnlyList<string> Diagnostics, string WorkspacePath, TokenUsage Usage);
+    IReadOnlyList<string> Diagnostics, TokenUsage Usage, string Summary = "", string NextAction = "",
+    AdaptationBlocker? Blocker = null, AdaptationProgressNote? ProgressNote = null,
+    AdaptationProgressNote? LastBreakthrough = null, IReadOnlyList<string>? PendingCoverage = null,
+    IReadOnlyList<string>? PendingRuntimeChecks = null);
+
+public sealed record AdaptationProgress(string Stage, string Message, TokenUsage Usage,
+    AdaptationProgressNote? ProgressNote = null, AdaptationProgressNote? LastBreakthrough = null);
 
 public sealed record PinnedDotNetToolchain(string RootDirectory, string SdkVersion, string RuntimeVersion)
 {
@@ -50,7 +34,10 @@ public sealed record PinnedDotNetToolchain(string RootDirectory, string SdkVersi
 }
 
 public sealed record GeneratedAdapterPackage(string Id, string Version, string DirectoryPath,
-    IReadOnlyList<string> ResourceFiles, string SourceSha256, string AssemblySha256, AdapterFamily? Family = null);
+    IReadOnlyList<string> ResourceFiles, string SourceSha256, string AssemblySha256, AdapterFamily? Family = null,
+    IReadOnlyList<string>? ResourcePatterns = null,
+    IReadOnlyDictionary<string, string>? PackageFiles = null,
+    int ProtocolVersion = 1, int ManifestVersion = 1);
 
 public sealed record GeneratedAdapterVerification(bool Passed, IReadOnlyList<string> Diagnostics);
 

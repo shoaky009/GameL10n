@@ -8,9 +8,21 @@ using AvgTranslator.Core.Development;
 using AvgTranslator.Core.Isolation;
 using AvgTranslator.Core.Storage;
 
-if (args.Length < 3 || args[0] is not ("verify-darkblue" or "sandbox"))
+if (args.Length >= 3 && args[0] == "correct-translations")
+    return await TranslationCorrections.RunAsync(args[1], args[2], args.Contains("--apply"));
+
+if (args.Length >= 5 && args[0] == "update-adapter-coverage")
+    return await AdapterCoverageUpdate.RunAsync(args[1], args[2], args[3], args[4], args.Contains("--apply"));
+
+if (args.Length >= 5 && args[0] == "repair-system4")
+    return await System4Repair.RunAsync(args[1], args[2], args[3], args[4], args.Contains("--install"));
+
+if (args.Length >= 5 && args[0] == "repair-qlie")
+    return await QlieRepair.RunAsync(args[1], args[2], args[3], args[4], args.Contains("--install"));
+
+if (args.Length < 3 || args[0] is not ("verify-darkblue" or "toolchain"))
 {
-    Console.Error.WriteLine("Usage: verify-darkblue <game-directory> <output-directory> | sandbox <portable-dotnet-root> <output-directory>");
+    Console.Error.WriteLine("Usage: verify-darkblue <game-directory> <output-directory> | toolchain <portable-dotnet-root> <output-directory> | repair-qlie <project-directory> <work-directory> <adapter-source> <portable-dotnet-root> [--install]");
     return 1;
 }
 var output = Path.GetFullPath(args[2]);
@@ -59,49 +71,23 @@ if (args[0] == "verify-darkblue")
 }
 
 var toolchain = new PinnedDotNetToolchain(input, "10.0.402", "10.0.13");
-var runner = new WindowsAppContainerProcessRunner();
+var runner = new AdapterProcessRunner();
 var compiler = new GeneratedAdapterCompiler(toolchain, runner);
-var outside = Path.Combine(output, "outside-secret.txt");
-await File.WriteAllTextAsync(outside, "sandbox containment check");
-var outsideWrite = Path.Combine(output, "outside-write.txt");
-using var listener = new TcpListener(IPAddress.Loopback, 0);
-listener.Start();
-var port = ((IPEndPoint)listener.LocalEndpoint).Port;
-var source = """
-using System;
-using System.IO;
-using System.Diagnostics;
-using System.Net;
-using System.Net.Sockets;
-using System.Text.Json;
-using System.Collections.Generic;
-var result = new Dictionary<string,string>();
-try { File.ReadAllText(OUTSIDE); result["outsideRead"]="allowed"; } catch (UnauthorizedAccessException) { result["outsideRead"]="denied"; }
-try { File.WriteAllText(WRITE,"bad"); result["outsideWrite"]="allowed"; } catch (UnauthorizedAccessException) { result["outsideWrite"]="denied"; }
-try { File.WriteAllText("inside.txt","okay"); result["insideWrite"]="allowed"; } catch (Exception) { result["insideWrite"]="denied"; }
-try { using var socket=new Socket(AddressFamily.InterNetwork,SocketType.Stream,ProtocolType.Tcp); socket.Connect(IPAddress.Loopback,PORT); result["network"]="allowed"; } catch (SocketException e) { result["network"]=e.SocketErrorCode==SocketError.AccessDenied ? "denied" : "inconclusive:"+e.SocketErrorCode; }
-try { using var child=Process.Start(new ProcessStartInfo(DOTNET,"--info"){UseShellExecute=false,CreateNoWindow=true}); result["childProcess"]="allowed"; } catch (System.ComponentModel.Win32Exception) { result["childProcess"]="denied"; }
-Console.WriteLine(JsonSerializer.Serialize(result));
-""".Replace("OUTSIDE", JsonSerializer.Serialize(outside)).Replace("WRITE", JsonSerializer.Serialize(outsideWrite))
-    .Replace("PORT", port.ToString()).Replace("DOTNET", JsonSerializer.Serialize(toolchain.ExecutablePath));
 try
 {
-    var package = await compiler.CompileAsync(source, Path.Combine(output, "compile-" + Guid.NewGuid().ToString("N")), ["sample.dat"]);
-    var workspace = Path.Combine(output, "run-" + Guid.NewGuid().ToString("N"));
+    await compiler.CheckAvailabilityAsync(Path.Combine(output, "preflight"));
+    const string source = "using System; Console.WriteLine(Console.ReadLine());";
+    var package = await compiler.CompileAsync(source, Path.Combine(output, "compile"), ["sample.dat"]);
+    var workspace = Path.Combine(output, "run");
     Directory.CreateDirectory(workspace);
-    var execution = await runner.RunAsync(new IsolatedProcessRequest(toolchain.ExecutablePath,
-        [Path.Combine(package.DirectoryPath, "adapter.dll")], workspace, [toolchain.RootDirectory, package.DirectoryPath]), default);
-    var checks = JsonSerializer.Deserialize<Dictionary<string, string>>(execution.StandardOutput);
-    var passed = execution.ExitCode == 0 && checks is not null && checks.GetValueOrDefault("insideWrite") == "allowed"
-        && new[] { "outsideRead", "outsideWrite", "network", "childProcess" }.All(key => checks.GetValueOrDefault(key) == "denied")
-        && !File.Exists(outsideWrite);
-    await LocalFiles.WriteJsonAsync(Path.Combine(output, "sandbox-report.json"), new { status = passed ? "passed" : "failed", execution.ExitCode, checks });
-    Console.WriteLine(passed ? "Containment checks passed." : "Containment checks failed or inconclusive.");
+    var execution = await runner.RunAsync(new AdapterProcessRequest(toolchain.ExecutablePath,
+        [Path.Combine(package.DirectoryPath, "adapter.dll")], workspace, "中文 UTF-8 测试\n"), default);
+    var passed = execution.ExitCode == 0 && execution.StandardOutput.Trim() == "中文 UTF-8 测试";
+    Console.WriteLine(passed ? "Local compilation and UTF-8 process communication passed." : execution.StandardError);
     return passed ? 0 : 1;
 }
-catch (IsolationUnavailableException error)
+catch (Exception error) when (error is AdapterProcessUnavailableException or AdapterProcessLimitException or GeneratedAdapterException)
 {
-    await LocalFiles.WriteJsonAsync(Path.Combine(output, "sandbox-report.json"), new { status = "unavailable", reason = error.Message, generatedCodeExecuted = false });
-    Console.WriteLine("Sandbox unavailable: " + error.Message);
+    Console.Error.WriteLine(error.Message);
     return 2;
 }

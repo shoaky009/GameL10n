@@ -1,0 +1,355 @@
+{
+  "adapterId": "engine.unity-textasset-dialogue-json",
+  "previousVersion": "fd0edf21ac8ae4cb",
+  "sourceFingerprint": "bdf8d74b12eba69c50aeeec49f5caeb49d759cb0db40b0ec7488b1e2ffd61c3e",
+  "sourceFiles": {
+    "Il2CppText.cs": "90a6f70dfc00807461df7d9a89c308add2d1a0ce545958a85cd2a4e1eed85838",
+    "Program.cs": "be5a6b75c877f2041d3b004e55321033643e2adfc2f83de522caf8586bf49617",
+    "SerializedText.cs": "975bbd4def6a3e76cc6618f4d7a77b106ad32c4d22508c0b6195bb958b368772",
+    "TmpFallback.cs": "84257cfa9d85acd3593bdbf9ce2c6d03ed9c09b0550840d42ba66cdb4c7a9117",
+    "tools/AssetsTools.NET.dll": "938e9a8ae804315c268b4b8a501b32ae47836fe2dba3b60d6a113418219ae3cc",
+    "tools/AssetsTools.NET.LICENSE.txt": "ab26018f961d37d489bcd0f8277b602d1a41586cda867e59173778c7214ae29f",
+    "tools/sources.json": "051bc04a98e12e20ccd4cfbb116d9c7590297c074877fc8340c3ca0ef5332a15",
+    "UnityResources.cs": "725f2f671f25e82241db4496487e22f2e2794694f2683bab8e6786dbf7c0e96f",
+    "UnityTmp.cs": "771e006182fcb137294efbc6d379824a1a4d29a72cd7314e7ad1ec7dca3f5799"
+  },
+  "coverage": {
+    "samples": [
+      {
+        "resourcePath": "Tiny Rogues_Data/resources.assets",
+        "locator": "MonoBehaviour:52243/Stats.Dynamic_Stats.DynamicStat/activeDescription",
+        "sourceText": "Deal (xx0x1) Physical Damage per Armor Container<Armor> you have.\n<g>((xx0) currently)</g>"
+      },
+      {
+        "resourcePath": "Tiny Rogues_Data/resources.assets",
+        "locator": "MonoBehaviour:52243/Stats.Dynamic_Stats.DynamicStat/informativeDescription",
+        "sourceText": "Deal (xx0x1) Physical Damage per Armor Container<Armor> you have."
+      },
+      {
+        "resourcePath": "Tiny Rogues_Data/resources.assets",
+        "locator": "MonoBehaviour:52384/Stats.Dynamic_Stats.DynamicStat/activeDescription",
+        "sourceText": "(*)<i>(+x0%x1) Damage per Mana Container<Mana> you have\n<g>((+x0%) currently)</g></i>"
+      },
+      {
+        "resourcePath": "Tiny Rogues_Data/resources.assets",
+        "locator": "MonoBehaviour:52384/Stats.Dynamic_Stats.DynamicStat/informativeDescription",
+        "sourceText": "(*)<i>(+x0%x1) Damage per Mana Container<Mana> you have\n<g>((+x0%) currently)</g></i>"
+      },
+      {
+        "resourcePath": "Tiny Rogues_Data/resources.assets",
+        "locator": "MonoBehaviour:54194/World_Progression.WorldObjective/title",
+        "sourceText": "A New Dawn"
+      },
+      {
+        "resourcePath": "Tiny Rogues_Data/resources.assets",
+        "locator": "MonoBehaviour:54194/World_Progression.WorldObjective/mainDescription",
+        "sourceText": "The Bonfire calls upon you to vanquish Death and expand its dominion over this world."
+      },
+      {
+        "resourcePath": "Tiny Rogues_Data/resources.assets",
+        "locator": "MonoBehaviour:54194/World_Progression.WorldObjective/conditionDescription",
+        "sourceText": "Defeat Death."
+      },
+      {
+        "resourcePath": "Tiny Rogues_Data/resources.assets",
+        "locator": "MonoBehaviour:54194/World_Progression.WorldObjective/effectDescription",
+        "sourceText": "Unlocks a set of alternate floors to appear, bringing new events to discover and foes to defeat with it."
+      },
+      {
+        "resourcePath": "Tiny Rogues_Data/resources.assets",
+        "locator": "MonoBehaviour:54194/World_Progression.WorldObjective/unlockMessage",
+        "sourceText": "Achieving this world objective unlocked a set of alternate floors."
+      },
+      {
+        "resourcePath": "Tiny Rogues_Data/resources.assets",
+        "locator": "MonoBehaviour:54870/Player.Collection_Items.CollectionItem/title",
+        "sourceText": "Ranger Class"
+      },
+      {
+        "resourcePath": "Tiny Rogues_Data/resources.assets",
+        "locator": "MonoBehaviour:54870/Player.Collection_Items.CollectionItem/description",
+        "sourceText": "Progress beyond floor 1."
+      },
+      {
+        "resourcePath": "Tiny Rogues_Data/resources.assets",
+        "locator": "MonoBehaviour:55954/Player.Player_Class_Ability.EffectClassAbility/title",
+        "sourceText": "Defiance"
+      },
+      {
+        "sourceText": "<i>(rate)triggers\n(actionName) dealing(damage)Damage.</i>",
+        "resourcePath": "Tiny Rogues_Data/resources.assets",
+        "locator": "MonoBehaviour:51575/Effect_System.Trigger_System.Trigger_Mechanisms.PeriodicallyTrigger/description"
+      },
+      {
+        "sourceText": "Modifiers to your Attack Speed [[also]] apply to your Bleed Tick Speed.\n(current)",
+        "resourcePath": "Tiny Rogues_Data/resources.assets",
+        "locator": "MonoBehaviour:52431/Effect_System.Effects.StatConversionEffect/description"
+      },
+      {
+        "sourceText": "(+x0%) Attack Speed",
+        "resourcePath": "Tiny Rogues_Data/resources.assets",
+        "locator": "MonoBehaviour:52208/Effect_System.Effects.AttributeStatEffect/activeDescription"
+      },
+      {
+        "sourceText": "Gargoyle Enrage",
+        "resourcePath": "Tiny Rogues_Data/resources.assets",
+        "locator": "MonoBehaviour:54427/Combat.Status_Effects.PermanentBuffDebuffStatusEffect/displayName"
+      },
+      {
+        "sourceText": "Glitter",
+        "resourcePath": "Tiny Rogues_Data/resources.assets",
+        "locator": "MonoBehaviour:56016/Combat.Status_Effects.StackAblePermanentBuffDebuffStatusEffect/displayName"
+      },
+      {
+        "sourceText": "Chill",
+        "resourcePath": "Tiny Rogues_Data/resources.assets",
+        "locator": "MonoBehaviour:56010/Combat.Status_Effects.DurationBasedBuffDebuffStatusEffect/displayName"
+      },
+      {
+        "sourceText": "Path Of Vengeance",
+        "resourcePath": "Tiny Rogues_Data/resources.assets",
+        "locator": "MonoBehaviour:55929/Player.Player_Class_Ability.DemonHuntingClassAbility/title"
+      },
+      {
+        "sourceText": "Infamy",
+        "resourcePath": "Tiny Rogues_Data/resources.assets",
+        "locator": "MonoBehaviour:55960/Player.Player_Class_Ability.PirateBountyClassAbility/title"
+      },
+      {
+        "sourceText": "Pedestal",
+        "resourcePath": "Tiny Rogues_Data/resources.assets",
+        "locator": "MonoBehaviour:65960/Behaviour_Graphs.Components.Triggers.InteractionTrigger/interactionName"
+      },
+      {
+        "sourceText": "Demolitionist",
+        "resourcePath": "Tiny Rogues_Data/resources.assets",
+        "locator": "MonoBehaviour:66588/Shops.Tavernkeep.TavernNPC/npcName"
+      },
+      {
+        "sourceText": "Double-Edged Sword",
+        "resourcePath": "Tiny Rogues_Data/resources.assets",
+        "locator": "MonoBehaviour:54844/Cinder_System.CinderModifier/title"
+      },
+      {
+        "sourceText": "Rerolls offered items from\nshops, armories and boss rewards.",
+        "resourcePath": "Tiny Rogues_Data/level2",
+        "locator": "MonoBehaviour:3755/UI.Menus.Inventory.DiceButton/description"
+      },
+      {
+        "sourceText": "Welcome young traveller!\nI am here to help you\nget going on your journey.",
+        "resourcePath": "Tiny Rogues_Data/il2cpp_data/Metadata/global-metadata.dat",
+        "locator": "StringLiteral:12114"
+      },
+      {
+        "sourceText": "You can dash, with ",
+        "resourcePath": "Tiny Rogues_Data/il2cpp_data/Metadata/global-metadata.dat",
+        "locator": "StringLiteral:12320"
+      },
+      {
+        "sourceText": ".\nWhile dashing, you are\ninvincible.\nDashing costs 1 ",
+        "resourcePath": "Tiny Rogues_Data/il2cpp_data/Metadata/global-metadata.dat",
+        "locator": "StringLiteral:1574"
+      },
+      {
+        "sourceText": "MASTERY SYSTEM",
+        "resourcePath": "Tiny Rogues_Data/il2cpp_data/Metadata/global-metadata.dat",
+        "locator": "StringLiteral:7341"
+      },
+      {
+        "sourceText": "After each run you gain mastery <color=yellow>EXP</color> depending on how many bosses you have defeated.\nPer level you can allocate one perk.\nThese perks are ",
+        "resourcePath": "Tiny Rogues_Data/il2cpp_data/Metadata/global-metadata.dat",
+        "locator": "StringLiteral:2709"
+      },
+      {
+        "sourceText": "not required",
+        "resourcePath": "Tiny Rogues_Data/il2cpp_data/Metadata/global-metadata.dat",
+        "locator": "StringLiteral:15745"
+      },
+      {
+        "sourceText": " to succeed on your journey but they surely help.\nUnlock and activate ",
+        "resourcePath": "Tiny Rogues_Data/il2cpp_data/Metadata/global-metadata.dat",
+        "locator": "StringLiteral:587"
+      },
+      {
+        "sourceText": " modifiers to level up faster.",
+        "resourcePath": "Tiny Rogues_Data/il2cpp_data/Metadata/global-metadata.dat",
+        "locator": "StringLiteral:528"
+      },
+      {
+        "sourceText": "Mastery\n{0}/30",
+        "resourcePath": "Tiny Rogues_Data/il2cpp_data/Metadata/global-metadata.dat",
+        "locator": "StringLiteral:7453"
+      },
+      {
+        "sourceText": "\n•Attack Damage: ",
+        "resourcePath": "Tiny Rogues_Data/il2cpp_data/Metadata/global-metadata.dat",
+        "locator": "StringLiteral:141"
+      },
+      {
+        "sourceText": "\n•Attack Speed: ",
+        "resourcePath": "Tiny Rogues_Data/il2cpp_data/Metadata/global-metadata.dat",
+        "locator": "StringLiteral:142"
+      },
+      {
+        "sourceText": "\n•Damage Scaling: ",
+        "resourcePath": "Tiny Rogues_Data/il2cpp_data/Metadata/global-metadata.dat",
+        "locator": "StringLiteral:144"
+      },
+      {
+        "sourceText": "\n•Weapon Range: ",
+        "resourcePath": "Tiny Rogues_Data/il2cpp_data/Metadata/global-metadata.dat",
+        "locator": "StringLiteral:157"
+      },
+      {
+        "sourceText": "\n•Weapon Type: ",
+        "resourcePath": "Tiny Rogues_Data/il2cpp_data/Metadata/global-metadata.dat",
+        "locator": "StringLiteral:158"
+      },
+      {
+        "sourceText": "<ArrowWhite>Check Details",
+        "resourcePath": "Tiny Rogues_Data/il2cpp_data/Metadata/global-metadata.dat",
+        "locator": "StringLiteral:1994"
+      },
+      {
+        "sourceText": "Haha!\nYou're a natural.\nLet's meet in the next room.",
+        "resourcePath": "Tiny Rogues_Data/il2cpp_data/Metadata/global-metadata.dat",
+        "locator": "StringLiteral:6119"
+      },
+      {
+        "sourceText": ", open\nyour ",
+        "resourcePath": "Tiny Rogues_Data/il2cpp_data/Metadata/global-metadata.dat",
+        "locator": "StringLiteral:1424"
+      },
+      {
+        "sourceText": "Drag and drop, or right-click",
+        "resourcePath": "Tiny Rogues_Data/il2cpp_data/Metadata/global-metadata.dat",
+        "locator": "StringLiteral:4946"
+      },
+      {
+        "sourceText": "Time for a real battle.\nWe shall meet again\nin the next room!",
+        "resourcePath": "Tiny Rogues_Data/il2cpp_data/Metadata/global-metadata.dat",
+        "locator": "StringLiteral:11066"
+      },
+      {
+        "sourceText": "Splendid!\nNow attack the target dummy\nwith ",
+        "resourcePath": "Tiny Rogues_Data/il2cpp_data/Metadata/global-metadata.dat",
+        "locator": "StringLiteral:9732"
+      },
+      {
+        "sourceText": "Food will grant <color=yellow>EXP</color>.\nYou need <color=yellow>EXP</color> to level up\nand learn new Traits.",
+        "resourcePath": "Tiny Rogues_Data/il2cpp_data/Metadata/global-metadata.dat",
+        "locator": "StringLiteral:5746"
+      },
+      {
+        "sourceText": "CURSE",
+        "resourcePath": "Tiny Rogues_Data/il2cpp_data/Metadata/global-metadata.dat",
+        "locator": "StringLiteral:3427"
+      },
+      {
+        "sourceText": "It seems you have been Cursed",
+        "resourcePath": "Tiny Rogues_Data/il2cpp_data/Metadata/global-metadata.dat",
+        "locator": "StringLiteral:7007"
+      },
+      {
+        "sourceText": "Yummy, yummy souls<sprite name=\"Soul\">.\nOh! You are still here, aren't you?",
+        "locator": "StringLiteral:12363",
+        "resourcePath": "Tiny Rogues_Data/il2cpp_data/Metadata/global-metadata.dat"
+      },
+      {
+        "sourceText": "Got any souls<sprite name=\"Soul\">?",
+        "locator": "StringLiteral:6014",
+        "resourcePath": "Tiny Rogues_Data/il2cpp_data/Metadata/global-metadata.dat"
+      },
+      {
+        "sourceText": "Don't rely on luck.\nBring me souls<sprite name=\"Soul\">.",
+        "locator": "StringLiteral:4929",
+        "resourcePath": "Tiny Rogues_Data/il2cpp_data/Metadata/global-metadata.dat"
+      },
+      {
+        "sourceText": "Weapons gain [[x{0:0.00}]]\nDamage per Upgrade Level.",
+        "locator": "StringLiteral:12107",
+        "resourcePath": "Tiny Rogues_Data/il2cpp_data/Metadata/global-metadata.dat"
+      },
+      {
+        "sourceText": "All Lightning Damage\ninflicts Shock.",
+        "locator": "StringLiteral:2734",
+        "resourcePath": "Tiny Rogues_Data/il2cpp_data/Metadata/global-metadata.dat"
+      },
+      {
+        "sourceText": "\n2-Set: ",
+        "locator": "StringLiteral:75",
+        "resourcePath": "Tiny Rogues_Data/il2cpp_data/Metadata/global-metadata.dat"
+      },
+      {
+        "sourceText": "\nAttunement: {0}/{1}",
+        "locator": "StringLiteral:92",
+        "resourcePath": "Tiny Rogues_Data/il2cpp_data/Metadata/global-metadata.dat"
+      },
+      {
+        "sourceText": "\n{0:+0} Equip Load<sprite name=\"Arrow_Right\">{1}/{2}",
+        "locator": "StringLiteral:139",
+        "resourcePath": "Tiny Rogues_Data/il2cpp_data/Metadata/global-metadata.dat"
+      },
+      {
+        "sourceText": "Gloves",
+        "locator": "StringLiteral:5996",
+        "resourcePath": "Tiny Rogues_Data/il2cpp_data/Metadata/global-metadata.dat"
+      },
+      {
+        "sourceText": "Helmet",
+        "locator": "StringLiteral:6167",
+        "resourcePath": "Tiny Rogues_Data/il2cpp_data/Metadata/global-metadata.dat"
+      },
+      {
+        "sourceText": "•Duration: ",
+        "locator": "StringLiteral:17747",
+        "resourcePath": "Tiny Rogues_Data/il2cpp_data/Metadata/global-metadata.dat"
+      },
+      {
+        "sourceText": "\n•Max Stacks: ",
+        "locator": "StringLiteral:152",
+        "resourcePath": "Tiny Rogues_Data/il2cpp_data/Metadata/global-metadata.dat"
+      },
+      {
+        "sourceText": "seconds",
+        "locator": "StringLiteral:16327",
+        "resourcePath": "Tiny Rogues_Data/il2cpp_data/Metadata/global-metadata.dat"
+      },
+      {
+        "sourceText": "rooms",
+        "locator": "StringLiteral:16239",
+        "resourcePath": "Tiny Rogues_Data/il2cpp_data/Metadata/global-metadata.dat"
+      },
+      {
+        "sourceText": "Royal Armory",
+        "locator": "StringLiteral:9164",
+        "resourcePath": "Tiny Rogues_Data/il2cpp_data/Metadata/global-metadata.dat"
+      },
+      {
+        "sourceText": "Contains\n",
+        "locator": "StringLiteral:4193",
+        "resourcePath": "Tiny Rogues_Data/il2cpp_data/Metadata/global-metadata.dat"
+      },
+      {
+        "sourceText": "\n//weapons.",
+        "locator": "StringLiteral:74",
+        "resourcePath": "Tiny Rogues_Data/il2cpp_data/Metadata/global-metadata.dat"
+      }
+    ],
+    "pending": [
+      "武器和装备分类、稀有度、伤害类型、范围值、负重状态及部分状态/技能标签（如 Melee、Slashing、Very Short、Not Encumbered、Infusion、Buff、Ailment）：仍需区分枚举名称与显示用途，不能直接改符号名。",
+      "Skill、Attack、Enemy、Current、Count、Capacity、Duration、Radius、Cancel、Compare、Interact、Continue，以及 second、rare/epic/legendary/uncommon、Tavern/Pawn Shop 等存在输入绑定、属性查找、图节点、房间路由或框架共用用途；仍需隔离显示引用。",
+      "已补入教程、技能、角色面板、篝火随机交谈、装备套装/负重、状态持续时间/层数、元素伤害提示和房间入口文字；其他运行时生成说明及未审核的序列化类型仍需按实际界面核查。",
+      "部分完整方括号显示标签和数值强调模板仍与脚本保护规则冲突；应由适配器区分显示包装后提取，不应放宽其他 AVG 引擎的格式校验。",
+      "新增文字的显示、拼接语序和换行尚待游戏内确认；部分类别仍有已列出的共用词。"
+    ]
+  },
+  "renames": [],
+  "addedSourceFiles": [],
+  "addedResources": {},
+  "resourcePatterns": [
+    "**/*.assets",
+    "**/level*",
+    "**/global-metadata.dat"
+  ]
+}

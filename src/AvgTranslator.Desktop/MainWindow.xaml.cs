@@ -1,452 +1,533 @@
+using System.Collections.ObjectModel;
 using System.Diagnostics;
+using System.Text.Json;
 using AvgTranslator.Core;
 using AvgTranslator.Core.Adapters;
 using AvgTranslator.Core.Development;
-using AvgTranslator.Core.Isolation;
-using AvgTranslator.Core.Patching;
 using AvgTranslator.Core.Pipeline;
 using AvgTranslator.Core.Providers;
 using AvgTranslator.Core.Storage;
-using AvgTranslator.Core.Translation;
 using AvgTranslator.Desktop.Settings;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
-using Windows.Storage.Pickers;
+using Microsoft.Windows.Storage.Pickers;
 
 namespace AvgTranslator.Desktop;
 
 public sealed partial class MainWindow : Window
 {
-    private readonly string dataDirectory;
-    private readonly TranslationPipeline pipeline;
+    private string dataDirectory;
+    private TranslationPipeline pipeline;
+    private GameProjectStore projects;
+    private GameTaskCoordinator coordinator = new(2);
     private readonly HttpClient httpClient = new() { Timeout = TimeSpan.FromMinutes(3) };
-    private readonly List<IGameAdapter> adapters = [new Sfa16AosV2Adapter()];
-    private GameSession? session;
-    private PipelineResult? result;
-    private CancellationTokenSource? taskCancellation;
-    private CancellationTokenSource? adaptationCancellation;
-    private bool busy;
+    private readonly List<IGameAdapter> adapters = [new Sfa16AosV2Adapter(), .. VnTextPatchAdapters.CreateAll()];
+    private readonly ObservableCollection<GameWorkspace> games = [];
+    private GameWorkspace? selectedGame;
+    private GameWorkspace? settingsGame;
+    private GameSession? session => selectedGame?.Session;
+    private bool busy => selectedGame?.Busy == true;
     private bool initialized;
+    private bool switchingGames;
+    private bool closing;
+    private bool allowClose;
+    private FileStream? applicationLock;
+    private DesktopSettings globalSettings = new();
+    private bool navigationSettingsDirty;
     private readonly SemaphoreSlim settingsWriteLock = new(1, 1);
 
     public MainWindow()
     {
         InitializeComponent();
-        AppWindow.Resize(new Windows.Graphics.SizeInt32(1060, 820));
-        dataDirectory = Environment.GetEnvironmentVariable("AVG_TRANSLATOR_DATA") is { Length: > 0 } configuredData
-            ? Path.GetFullPath(configuredData)
-            : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AvgTranslator");
-        pipeline = new TranslationPipeline(dataDirectory, Path.Combine(AppContext.BaseDirectory, "logs"));
+        RootGrid.ActualThemeChanged += (_, _) => UpdateTitleBarTheme();
+        UpdateTitleBarTheme();
+        InitializeWorkbench();
+        AppWindow.Resize(new Windows.Graphics.SizeInt32(1440, 960));
+        dataDirectory = DataLocation.Resolve();
+        pipeline = new TranslationPipeline(dataDirectory);
+        projects = new GameProjectStore(dataDirectory);
+        InitializeProjectList();
         RootGrid.Loaded += Loaded;
-        GamePathBox.TextChanged += (_, _) =>
+        RootGrid.SizeChanged += (_, _) => SidebarColumn.Width = new GridLength(RootGrid.ActualWidth < 1200 ? 190 : 240);
+        AppWindow.Closing += async (_, args) =>
         {
-            if (busy || !initialized) return;
-            session = null; result = null;
-            PatchPathBox.Text = "";
-            PatchScopeText.Text = "尚未生成补丁。可先选择少量文本试译，检查游戏中的显示效果。";
-            InstallButton.Content = "安装汉化补丁";
-            PatchInstallInfo.IsOpen = false;
-            InstallTargetText.Text = "安装位置：" + GamePathBox.Text.Trim();
+            if (allowClose) return;
+            args.Cancel = true;
+            if (closing || changingDataDirectory || removingGames || changingAdapterLibrary || SavingEngineLibrary) return;
+            closing = true;
             UpdateControls();
+            FooterText.Text = "正在保存任务，请稍候…";
+            try
+            {
+                foreach (var game in games) game.ContentLoadCancellation?.Cancel();
+                await Task.WhenAll(games.Select(game => game.ContentLoad ?? Task.CompletedTask));
+                await Task.WhenAll(games.Select(game => game.MetadataLoad ?? Task.CompletedTask));
+                await FlushAllEditsAsync();
+                if (initialized && globalPage is null) await SaveSettingsAsync();
+                if (initialized) await SaveNavigationSettingsAsync();
+                await settingsWriteLock.WaitAsync();
+                settingsWriteLock.Release();
+                foreach (var game in games) game.Cancellation?.Cancel();
+                await Task.WhenAll(games.Select(game => game.RunningTask ?? Task.CompletedTask));
+                await Task.WhenAll(games.Select(game => game.LoadingRows ?? Task.CompletedTask));
+                await Task.WhenAll(games.Select(game => game.DurableWrites));
+            }
+            catch (Exception error)
+            {
+                Program.WriteStartupError(error); closing = false; UpdateControls();
+                FooterText.Text = "保存未完成，窗口已保留，请重试：" + error.Message;
+                return;
+            }
+            allowClose = true; Close();
         };
-        Closed += (_, _) => { taskCancellation?.Cancel(); adaptationCancellation?.Cancel(); };
+        Closed += (_, _) => { applicationLock?.Dispose(); httpClient.Dispose(); };
     }
+
+    private void UpdateTitleBarTheme() => AppWindow.TitleBar.PreferredTheme = RootGrid.ActualTheme == ElementTheme.Dark
+        ? Microsoft.UI.Windowing.TitleBarTheme.Dark : Microsoft.UI.Windowing.TitleBarTheme.Light;
 
     private async void Loaded(object sender, RoutedEventArgs e)
     {
         if (initialized) return;
         try
         {
-            var settings = await LocalFiles.ReadJsonAsync<DesktopSettings>(Path.Combine(dataDirectory, "settings.json"));
-            if (settings is not null)
-            {
-                GamePathBox.Text = settings.GameDirectory;
-                apiConfiguration = settings.ReadApiConfiguration();
-                LanguageBox.Text = settings.TargetLanguage;
-                StyleBox.Text = settings.Style;
-                TerminologyBox.Text = settings.Terminology;
-                BatchSizeBox.Value = settings.BatchSize;
-            }
-            FooterText.Text = "任务与译文保存在：" + dataDirectory;
+            applicationLock = DataDirectoryTransfer.AcquireLock(dataDirectory);
+            ApplyDataDirectory(await ReadDataDirectoryAsync(dataDirectory));
+            initialized = true;
+            RefreshApiProfiles();
+            SetWindowActivity(null);
+            GameList.SelectedItem = games.FirstOrDefault(game => game.Id == globalSettings.LastGameId) ?? games.FirstOrDefault();
+            UpdateControls();
         }
-        catch (Exception error) { Log("读取设置失败：" + error.Message); }
-        initialized = true;
-        RefreshApiProfiles();
-        RefreshCatalog();
+        catch (Exception error)
+        {
+            Program.WriteStartupError(error);
+            FooterText.Text = "无法打开数据目录：" + error.Message;
+            GameInfoBar.Title = "无法打开数据目录";
+            GameInfoBar.Message = FooterText.Text;
+            GameInfoBar.Severity = InfoBarSeverity.Error;
+            UpdateControls();
+            SetWindowActivity(null);
+        }
+    }
+
+    private async Task LoadSummaryAsync(GameWorkspace game, TranslationPipeline storagePipeline, Action<string> report)
+    {
+        game.HasSavedAnalysis = game.Project.Analysis is not null || File.Exists(Path.Combine(game.Directory, "source.json"));
+        async Task<T?> ReadSummaryAsync<T>(string name)
+        {
+            try { return await LocalFiles.ReadRecoverableJsonAsync<T>(Path.Combine(game.Directory, name)); }
+            catch (Exception error) when (error is IOException or InvalidDataException or JsonException or UnauthorizedAccessException)
+            { Program.WriteStartupError(error); report("部分任务记录无法读取，已保存的译文仍可继续使用。"); return default; }
+        }
+        var state = await ReadSummaryAsync<SavedTaskState>("task-state.json");
+        game.EngineReview = await ReadSummaryAsync<EngineReviewResult>("engine-review.json");
+        game.HasPendingTranslation = await ReadSummaryAsync<TranslationScope>("translation-scope.json") is { Completed: false };
+        if (state is not null && state.Kind != GameTaskKind.Loading)
+        {
+            game.Stage = state.Running ? "可继续" : state.Stage;
+            game.Progress = state.Progress;
+            game.Error = state.Error;
+            game.Kind = state.Kind;
+        }
+        else game.Stage = game.Project.TaskSummary is { } savedTask ? savedTask.Running ? "可继续" : savedTask.Stage
+            : game.HasSavedAnalysis ? "已提取，可继续处理" : "等待识别";
+        var adaptationPath = Path.Combine(game.Directory, "adaptation", "current", "session.json");
+        game.HasAdaptationSession = File.Exists(adaptationPath);
+        if (game.HasAdaptationSession)
+        {
+            try
+            {
+                // Read only UI metadata; do not retain the model conversation for every loaded project.
+                var adaptation = await LocalFiles.ReadJsonAsync<SavedAdaptationSummary>(adaptationPath);
+                game.AdaptationUsage = adaptation?.Usage;
+                game.AdaptationSummary = adaptation?.Summary;
+                game.AdaptationProgressNote = adaptation?.ProgressNote;
+                game.AdaptationLastBreakthrough = adaptation?.LastBreakthrough;
+                game.AdaptationStatus = adaptation?.LastStatus ?? AdaptationStatus.Incomplete;
+                game.AdaptationBlocker = adaptation?.Blocker;
+                game.AdaptationInstruction = adaptation?.UserInstruction;
+                game.AdaptationObjective = adaptation?.Objective;
+                game.PendingTextCoverage = adaptation?.TextCoverage?.Pending ?? [];
+                game.PendingRuntimeChecks = adaptation?.TextCoverage?.RuntimeChecks ?? [];
+                game.AdaptationNextAction = string.IsNullOrWhiteSpace(adaptation?.NextAction)
+                    ? AutomaticAdaptationService.NextActionFor(game.AdaptationStatus.Value, adaptation?.Blocker) : adaptation.NextAction;
+            }
+            catch (Exception error) when (error is IOException or JsonException or UnauthorizedAccessException)
+            {
+                Program.WriteStartupError(error);
+                game.AdaptationStatus = AdaptationStatus.Incomplete;
+                game.AdaptationNextAction = "适配会话无法读取。点击“继续适配”，可根据保留的源码和工作文件重新分析。";
+            }
+        }
+        var job = await ReadSummaryAsync<JsonElement?>("job.json");
+        if (job is { ValueKind: JsonValueKind.Object } element && element.TryGetProperty("progress", out var progress)
+            && (state is null || state.Running || (element.TryGetProperty("updatedAt", out var timestamp)
+                && timestamp.TryGetDateTimeOffset(out var updated) && updated > state.UpdatedAt)))
+        {
+            try { game.Progress = progress.Deserialize<PipelineProgress>(LocalFiles.JsonOptions); game.Stage = "可继续"; }
+            catch (JsonException error) { Program.WriteStartupError(error); }
+        }
+        try { game.Result = await storagePipeline.LoadLatestResultAsync(game.Directory); }
+        catch (Exception error) when (error is IOException or InvalidDataException or JsonException or UnauthorizedAccessException)
+        { Program.WriteStartupError(error); report("上次补丁记录无法读取，可以使用已保存的译文重新生成。"); }
+        if (state is null && game.Result is not null && game.Progress is null) game.Stage = "补丁已生成";
+    }
+
+    private GameTranslationSettings DefaultGameSettings() => DefaultGameSettings(globalSettings);
+
+    private static GameTranslationSettings DefaultGameSettings(DesktopSettings settings) => new()
+    {
+        TargetLanguage = settings.TargetLanguage, Style = settings.Style,
+        Terminology = settings.Terminology, BatchSize = settings.BatchSize
+    };
+
+    private async void GameList_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
         UpdateControls();
+        if (!initialized || updatingProjectList || switchingGames || changingDataDirectory || removingGames || MultiSelectGamesButton.IsChecked == true
+            || GameList.SelectedItem is not GameWorkspace next || (next == selectedGame && globalPage is null)) return;
+        switchingGames = true;
+        UpdateControls();
+        try
+        {
+            if (globalPage is null && selectedGame is not null) await SaveSettingsAsync(persistNavigation: false);
+            selectedGame = next;
+            next.LastViewed = DateTimeOffset.UtcNow;
+            if (globalSettings.LastGameId != next.Id)
+            {
+                globalSettings = globalSettings with { LastGameId = next.Id, GameDirectory = next.GameDirectory };
+                navigationSettingsDirty = true;
+            }
+            if (next.MetadataLoaded) LoadGameSettings(next);
+            ApiSettingsInfo.IsOpen = false;
+            ShowPage(null);
+            RenderSelectedGame();
+            TrimProjectContentCache();
+        }
+        catch (Exception error) { ShowError(error); return; }
+        finally { switchingGames = false; UpdateControls(); }
+        await EnsureProjectMetadataAsync(next);
+        if (selectedGame == next && globalPage is null && next.MetadataLoaded && next.Session is null && !next.Busy) await OpenGameAsync(next);
+    }
+
+    private void LoadGameSettings(GameWorkspace game)
+    {
+        var settings = game.Project.Settings;
+        apiConfiguration = ResolveGameApi(game);
+        LanguageBox.Text = settings.TargetLanguage;
+        StyleBox.Text = settings.Style;
+        TerminologyBox.Text = settings.Terminology;
+        BatchSizeBox.Value = settings.BatchSize;
+        RefreshProjectAdaptationSettings();
+        RefreshApiProfiles();
+        settingsGame = game;
     }
 
     private async void Browse_Click(object sender, RoutedEventArgs e)
     {
+        if (!initialized || closing || changingDataDirectory || changingAdapterLibrary) return;
         try
         {
-            var picker = new FolderPicker();
-            picker.FileTypeFilter.Add("*");
-            WinRT.Interop.InitializeWithWindow.Initialize(picker, WinRT.Interop.WindowNative.GetWindowHandle(this));
-            var folder = await picker.PickSingleFolderAsync();
-            if (folder is not null) { GamePathBox.Text = folder.Path; await AnalyzeAsync(); }
+            var folder = await PickFolderAsync();
+            if (folder is null) return;
+            string path = Path.TrimEndingDirectorySeparator(Path.GetFullPath(folder));
+            var existing = games.FirstOrDefault(game => game.GameDirectory.Equals(path, StringComparison.OrdinalIgnoreCase));
+            if (existing is not null) { ProjectSearchBox.Text = ""; MultiSelectGamesButton.IsChecked = false; GameList.SelectedItem = existing; return; }
+            SetWindowActivity("正在添加游戏项目…");
+            var project = projects.Create(path, DefaultGameSettings());
+            project = (await projects.GetAsync(project.Id) ?? project) with { IsRemoved = false, UpdatedAt = DateTimeOffset.UtcNow };
+            await projects.SaveAsync(project);
+            var workspace = new GameWorkspace(project, projects.GetProjectDirectory(project.Id));
+            ProjectSearchBox.Text = "";
+            games.Add(workspace);
+            MultiSelectGamesButton.IsChecked = false;
+            SetWindowActivity(null);
+            GameList.SelectedItem = workspace;
         }
         catch (Exception error) { ShowError(error); }
+        finally { if (!switchingGames) SetWindowActivity(null); }
     }
 
-    private async void Analyze_Click(object sender, RoutedEventArgs e) => await AnalyzeAsync();
-
-    private async Task AnalyzeAsync()
+    private async Task<string?> PickFolderAsync()
     {
-        if (busy) return;
-        BeginTask();
-        session = null; result = null;
-        PatchPathBox.Text = "";
-        try
-        {
-            var gamePath = Path.GetFullPath(GamePathBox.Text.Trim());
-            if (!Directory.Exists(gamePath)) throw new DirectoryNotFoundException("请选择存在的游戏目录。");
-            StageText.Text = "识别与提取";
-            var candidates = new List<IGameAdapter>(adapters);
-            var store = new LocalAdapterPackageStore(Path.Combine(dataDirectory, "extensions"));
-            var active = store.LoadActive(TranslationPipeline.GameId(gamePath));
-            if (active is not null)
-                candidates.Insert(0, new GeneratedGameAdapter(active, FindToolchain(), new WindowsAppContainerProcessRunner(), store.WorkDirectory));
-            var catalogDiagnostics = new List<string>();
-            foreach (var package in store.ListReusablePackages(catalogDiagnostics))
-                if (!candidates.Any(candidate => candidate.Id == package.Id && candidate.Version == package.Version))
-                    candidates.Add(new GeneratedGameAdapter(package, FindToolchain(), new WindowsAppContainerProcessRunner(), store.WorkDirectory));
-            foreach (var diagnostic in catalogDiagnostics) Log(diagnostic);
-            var token = taskCancellation!.Token;
-            foreach (var adapter in candidates)
-            {
-                try
-                {
-                    if (await Task.Run(() => adapter.ProbeAsync(gamePath, token), token) is null) continue;
-                    var analyzed = await Task.Run(() => pipeline.AnalyzeAsync(gamePath, adapter, token), token);
-                    if (adapter is GeneratedGameAdapter generated &&
-                        (active?.Id != generated.Id || active.Version != generated.Version))
-                    {
-                        StageText.Text = "验证已有模板与此游戏的兼容性";
-                        var verification = await Task.Run(() => new GeneratedAdapterVerifier().VerifyAsync(generated,
-                            analyzed.SourceDirectory, Path.Combine(store.WorkDirectory, "reuse-" + Guid.NewGuid().ToString("N")), token), token);
-                        foreach (var diagnostic in verification.Diagnostics) Log(diagnostic);
-                        if (!verification.Passed) continue;
-                        await store.RecordCompatibilityAsync(generated.Package.Family!, new GameCompatibility(analyzed.Id,
-                            Path.GetFileName(Path.TrimEndingDirectorySeparator(gamePath)), "模板声明的资源集合", generated.Version,
-                            analyzed.Sources.ToDictionary(file => file.RelativePath, file => file.Sha256), "resource-roundtrip-passed"), token);
-                        await store.PublishAndActivateAsync(analyzed.Id, generated.Package, verification.Diagnostics, token);
-                        Log("已复用资源模板，无需调用模型开发适配器：" + generated.Id);
-                    }
-                    session = analyzed;
-                    break;
-                }
-                catch (Exception error) when (adapter is GeneratedGameAdapter && error is not OperationCanceledException)
-                {
-                    Log($"扩展 {adapter.Id} 未匹配或验证失败：{error.Message}");
-                }
-            }
-            if (session is null)
-            {
-                GameInfoBar.Severity = InfoBarSeverity.Warning;
-                GameInfoBar.Title = "尚无适配此游戏的扩展";
-                GameInfoBar.Message = "可使用自动适配分析受限资源样本；失败时保留诊断，不修改游戏文件。";
-                StageText.Text = "等待自动适配";
-                CountsText.Text = "—";
-                Log("现有 Adapter 未识别此游戏。自动适配在单独任务中运行。");
-            }
-            else
-            {
-                GameInfoBar.Severity = InfoBarSeverity.Success;
-                GameInfoBar.Title = session.Probe.Description;
-                GameInfoBar.Message = $"已提取 {session.Extraction.Units.Count:N0} 个文本单元。";
-                StageText.Text = "可以开始翻译";
-                CountsText.Text = $"0 / 0 / 0（共 {session.Extraction.Units.Count:N0} 条）";
-                foreach (var warning in session.Extraction.Warnings) Log(warning);
-                result = await LocalFiles.ReadJsonAsync<PipelineResult>(Path.Combine(session.ProjectDirectory, "latest-result.json"));
-                if (result?.SourceFingerprint != Path.GetFileName(session.SourceDirectory)) result = null;
-                if (result is not null) DisplayResult(result);
-            }
-            await SaveSettingsAsync();
-            RefreshCatalog();
-        }
-        catch (OperationCanceledException) { Log("识别已取消。"); }
-        catch (Exception error) { ShowError(error); }
-        finally { EndTask(); }
+        var picker = new FolderPicker(AppWindow.Id);
+        return (await picker.PickSingleFolderAsync())?.Path;
     }
 
-    private async void Translate_Click(object sender, RoutedEventArgs e) => await TranslateAsync();
-
-    private async Task TranslateAsync(IReadOnlyList<string>? trialUnitIds = null)
-    {
-        if (session is null || busy) return;
-        BeginTask();
-        try
-        {
-            var provider = CreateProvider(ApiPurpose.Translation);
-            var policy = ReadPolicy();
-            var captured = session;
-            var batchSize = double.IsFinite(BatchSizeBox.Value) ? (int)BatchSizeBox.Value : 24;
-            await SaveSettingsAsync();
-            var progress = new Progress<PipelineProgress>(update =>
-            {
-                StageText.Text = update.Stage;
-                CountsText.Text = $"{update.Completed:N0} / {update.CacheHits:N0} / {update.TranslationTokens:N0}";
-                TaskProgress.IsIndeterminate = false;
-                TaskProgress.Value = update.Total > 0 ? 100.0 * update.Completed / update.Total : 0;
-                // The exception handler displays terminal failures once; progress still supplies final counts.
-                if (update.Stage != "失败") Log(update.Message);
-            });
-            result = await Task.Run(() => pipeline.RunAsync(captured, provider, policy,
-                new RunOptions(batchSize, TrialUnitIds: trialUnitIds), progress, taskCancellation!.Token));
-            DisplayResult(result);
-            RefreshCatalog();
-        }
-        catch (OperationCanceledException) { StageText.Text = "已暂停"; Log("已保存完成的译文，再次开始可继续。"); }
-        catch (TranslationRetriesExhaustedException) { StageText.Text = "已暂停"; }
-        catch (TranslationRefusedException) { StageText.Text = "已暂停"; }
-        catch (Exception error) { ShowError(error); }
-        finally { EndTask(); }
-    }
-
-    private async void Adapt_Click(object sender, RoutedEventArgs e)
-    {
-        if (adaptationCancellation is not null) { adaptationCancellation.Cancel(); return; }
-        try
-        {
-            var path = Path.GetFullPath(GamePathBox.Text.Trim());
-            if (!Directory.Exists(path)) throw new DirectoryNotFoundException("游戏目录不存在。");
-            var profile = apiConfiguration.Resolve(ApiPurpose.GameAnalysis);
-            var provider = CreateProvider(ApiPurpose.GameAnalysis);
-            var samples = FindSamples(path);
-            if (samples.Length == 0) throw new InvalidDataException("未找到可直接分析的小型文本或脚本资源。当前自动适配不上传完整大型资源包，诊断为：缺少可验证的受限样本。");
-            var dialog = new ContentDialog { XamlRoot = RootGrid.XamlRoot, Title = "分析资源样本",
-                Content = $"将以下文件作为适配样本发送到“{profile.Name}”（{new Uri(profile.Endpoint).Host}），总计最多 128 KB：\n\n" + string.Join("\n", samples) +
-                    "\n\n最多尝试 2 次，适配预算 16,000 Token。生成的扩展必须经过隔离构建和回填测试。",
-                PrimaryButtonText = "开始自动适配", CloseButtonText = "取消", DefaultButton = ContentDialogButton.Close };
-            if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
-            var store = new LocalAdapterPackageStore(Path.Combine(dataDirectory, "extensions"));
-            var compiler = new GeneratedAdapterCompiler(FindToolchain(), new WindowsAppContainerProcessRunner());
-            adaptationCancellation = new();
-            AdaptButton.Content = "取消适配";
-            UpdateControls();
-            Log("自动适配已开始：" + path);
-            var adaptation = await Task.Run(() => new AutomaticAdaptationService(provider, compiler, store)
-                .AdaptAsync(new AdaptationRequest(TranslationPipeline.GameId(path), path, samples, adapters), adaptationCancellation.Token));
-            foreach (var diagnostic in adaptation.Diagnostics) Log(diagnostic);
-            RefreshCatalog();
-            Log($"适配状态：{adaptation.Status}；开发 Token：{adaptation.Usage.TotalTokens:N0}；诊断目录：{adaptation.WorkspacePath}");
-            if (adaptation.Adapter is not null && string.Equals(path, GamePathBox.Text.Trim(), StringComparison.OrdinalIgnoreCase) && !busy)
-                await AnalyzeAsync();
-        }
-        catch (Exception error) { ShowError(error); }
-        finally
-        {
-            adaptationCancellation?.Dispose(); adaptationCancellation = null;
-            AdaptButton.Content = "自动适配未知格式";
-            UpdateControls();
-        }
-    }
-
-    private void CatalogSearch_TextChanged(object sender, TextChangedEventArgs e)
-    {
-        if (initialized) RefreshCatalog();
-    }
-
-    private void RefreshCatalog_Click(object sender, RoutedEventArgs e) => RefreshCatalog();
-
-    private void RefreshCatalog()
-    {
-        try
-        {
-            var diagnostics = new List<string>();
-            var entries = new LocalAdapterPackageStore(Path.Combine(dataDirectory, "extensions"))
-                .ReadCatalog(adapters.Select(adapter => adapter.CatalogEntry).OfType<AdapterCatalogEntry>(), CatalogSearchBox.Text, diagnostics);
-            CatalogText.Text = entries.Count == 0 ? "没有匹配的引擎、资源模板或游戏记录。" : string.Join("\n\n", entries.Select(entry =>
-                $"{entry.Family.Name}\n{entry.Family.AdapterId} · {entry.Version}\n" + string.Join("\n", entry.Games.Select(game =>
-                    $"  {game.Title} · {game.Variant}\n  {StructureLabel(game.StructureStatus)}；游戏运行：{(game.RuntimeStatus == "passed" ? "已验证" : "未验证")}"))));
-            foreach (var diagnostic in diagnostics) Log(diagnostic);
-        }
-        catch (Exception error) { CatalogText.Text = "读取兼容记录失败：" + error.Message; }
-    }
-
-    private static string StructureLabel(string status) => status switch
-    {
-        "sample-roundtrip-passed" => "样本回填通过",
-        "resource-roundtrip-passed" => "资源回填通过",
-        "patch-validated" => "汉化产物结构校验通过",
-        _ => "结构验证：" + status
-    };
-
-    private async void Install_Click(object sender, RoutedEventArgs e)
-    {
-        if (session is null || result is null || busy) return;
-        BeginTask();
-        PatchInstallInfo.IsOpen = true;
-        PatchInstallInfo.Severity = InfoBarSeverity.Informational;
-        PatchInstallInfo.Title = "正在安装";
-        PatchInstallInfo.Message = "正在备份并写入：" + session.GameDirectory;
-        try
-        {
-            var installed = await new PatchInstaller().InstallAsync(session.GameDirectory, result.PatchDirectory, taskCancellation!.Token);
-            Log($"补丁已安装：新增或替换 {installed.InstalledFiles} 个文件，跳过 {installed.UnchangedFiles} 个相同文件，保留 {installed.BackupFiles.Count} 个备份。");
-            StageText.Text = "补丁已安装";
-            PatchInstallInfo.Severity = InfoBarSeverity.Success;
-            PatchInstallInfo.Title = result.IsTrial ? "试译补丁已安装" : "汉化补丁已安装";
-            PatchInstallInfo.Message = $"已安装到 {session.GameDirectory}，新增或替换 {installed.InstalledFiles} 个文件。" +
-                (result.LaunchExecutable is { } executable ? $"请从游戏目录运行 {executable}。" : "请从游戏目录启动游戏。");
-        }
-        catch (OperationCanceledException)
-        {
-            PatchInstallInfo.Severity = InfoBarSeverity.Warning;
-            PatchInstallInfo.Title = "安装已暂停";
-            PatchInstallInfo.Message = "再次点击安装将根据记录继续。";
-            Log(PatchInstallInfo.Message);
-        }
-        catch (Exception error)
-        {
-            PatchInstallInfo.Severity = InfoBarSeverity.Error;
-            PatchInstallInfo.Title = "补丁未安装完成";
-            PatchInstallInfo.Message = error.Message;
-            ShowError(error);
-            try
-            {
-                await LocalFiles.WriteJsonAsync(Path.Combine(session.ProjectDirectory, "installation-error.json"), new
-                {
-                    failedAt = DateTimeOffset.UtcNow, session.GameDirectory, result.PatchDirectory, error = error.ToString()
-                });
-            }
-            catch (Exception logError) when (logError is IOException or UnauthorizedAccessException)
-            {
-                Log("无法保存安装诊断：" + logError.Message);
-            }
-        }
-        finally { EndTask(); }
-    }
-
-    private async void Restore_Click(object sender, RoutedEventArgs e)
-    {
-        if (busy) return;
-        BeginTask();
-        PatchInstallInfo.IsOpen = false;
-        try
-        {
-            var restored = await new PatchInstaller().RestoreAsync(GamePathBox.Text.Trim(), taskCancellation!.Token);
-            Log($"已恢复 {restored.RestoredFiles} 个原文件，移除 {restored.RemovedFiles} 个补丁新增文件。" +
-                (restored.Conflicts.Count > 0 ? "以下文件在安装后被其他程序修改，已保留：" + string.Join("、", restored.Conflicts) : ""));
-            StageText.Text = restored.Conflicts.Count > 0 ? "恢复存在冲突" : "已恢复原版";
-        }
-        catch (OperationCanceledException) { Log("恢复已暂停；再次恢复可继续。"); }
-        catch (Exception error) { ShowError(error); }
-        finally { EndTask(); }
-    }
-
-    private void Cancel_Click(object sender, RoutedEventArgs e) => taskCancellation?.Cancel();
-    private void OpenPatch_Click(object sender, RoutedEventArgs e)
-    {
-        if (result is not null && Directory.Exists(result.PatchDirectory))
-            Process.Start(new ProcessStartInfo(result.PatchDirectory) { UseShellExecute = true });
-    }
     private async void SaveSettings_Click(object sender, RoutedEventArgs e)
     {
-        try { await SaveSettingsAsync(); ShowApiStatus("翻译设置已保存。"); }
-        catch (Exception error) { ShowError(error); }
+        try { await SaveSettingsAsync(); ShowApiStatus("当前项目设置已保存，后续任务使用新设置。"); }
+        catch (Exception error) { ShowApiStatus(error.Message, true); }
     }
 
-    private OpenAiCompatibleProvider CreateProvider(ApiPurpose purpose)
+    private async Task SaveSettingsAsync(Func<GameTranslationSettings, GameTranslationSettings>? updateSettings = null,
+        bool persistNavigation = true)
     {
-        var profile = apiConfiguration.Resolve(purpose);
-        if (string.IsNullOrWhiteSpace(profile.Endpoint) || string.IsNullOrWhiteSpace(profile.Model))
-            throw new ArgumentException($"请在“API 与术语”中补全“{profile.Name}”的地址与模型名称。");
-        var provider = new OpenAiCompatibleProvider(httpClient, new ProviderSettings(profile.Endpoint,
-            ReadProfileKey(profile), profile.Model, profile.Protocol), Path.Combine(AppContext.BaseDirectory, "logs"));
-        Log($"{(purpose == ApiPurpose.GameAnalysis ? "游戏分析" : "文本翻译")}使用 API：{profile.Name} · {profile.Description}");
-        return provider;
-    }
-    private TranslationPolicy ReadPolicy()
-    {
-        var terms = new Dictionary<string, string>(StringComparer.Ordinal);
-        foreach (var line in TerminologyBox.Text.Split('\n', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
-        {
-            var separator = line.IndexOf('=');
-            if (separator < 1 || separator == line.Length - 1) throw new ArgumentException("术语表每行必须为：原文=译文。");
-            if (!terms.TryAdd(line[..separator].Trim(), line[(separator + 1)..].Trim())) throw new ArgumentException("术语表有重复的原文。");
-        }
-        return new TranslationPolicy(LanguageBox.Text.Trim(), StyleBox.Text.Trim(), terms);
-    }
-    private async Task SaveSettingsAsync(Func<ApiProfileConfiguration, ApiProfileConfiguration>? updateApiConfiguration = null)
-    {
+        var game = selectedGame;
+        if (game is null || !game.MetadataLoaded || game != settingsGame) return;
+        await FlushEditsAsync(game);
+        var language = LanguageBox.Text.Trim();
+        var style = StyleBox.Text;
+        var terminology = TerminologyBox.Text;
+        var batchSize = double.IsFinite(BatchSizeBox.Value) ? (int)BatchSizeBox.Value : 24;
+        var useGlobalLimits = UseGlobalAdaptationLimitsBox.IsChecked == true;
+        if (!useGlobalLimits) ValidateAdaptationValues(ProjectTokenBudgetBox.Value, ProjectMaximumTurnsBox.Value);
+        long? budget = useGlobalLimits ? null : (long)ProjectTokenBudgetBox.Value;
+        int? turns = useGlobalLimits ? null : (int)ProjectMaximumTurnsBox.Value;
         await settingsWriteLock.WaitAsync();
         try
         {
-            var nextApiConfiguration = updateApiConfiguration?.Invoke(apiConfiguration) ?? apiConfiguration;
-            await LocalFiles.WriteJsonAsync(Path.Combine(dataDirectory, "settings.json"), new DesktopSettings
+            var settings = game.Project.Settings with
             {
-                GameDirectory = GamePathBox.Text.Trim(), TargetLanguage = LanguageBox.Text.Trim(),
-                Style = StyleBox.Text, Terminology = TerminologyBox.Text,
-                BatchSize = double.IsFinite(BatchSizeBox.Value) ? (int)BatchSizeBox.Value : 24,
-                ApiConfiguration = nextApiConfiguration
-            });
-            apiConfiguration = nextApiConfiguration;
+                TargetLanguage = language, Style = style, Terminology = terminology, BatchSize = batchSize,
+                AdaptationTokenBudget = budget, AdaptationMaximumTurns = turns
+            };
+            settings = updateSettings?.Invoke(settings) ?? settings;
+            var nextGlobal = globalSettings with
+            {
+                LastGameId = game.Id,
+                GameDirectory = game.GameDirectory
+            };
+            if (persistNavigation && (navigationSettingsDirty || nextGlobal != globalSettings))
+            {
+                await LocalFiles.WriteJsonAsync(Path.Combine(dataDirectory, "settings.json"), nextGlobal);
+                globalSettings = nextGlobal;
+                navigationSettingsDirty = false;
+            }
+            var previousProject = game.Project;
+            if (settings == previousProject.Settings)
+            {
+                if (selectedGame == game) apiConfiguration = ResolveGameApi(game);
+                return;
+            }
+            var project = previousProject with { Settings = settings, UpdatedAt = DateTimeOffset.UtcNow };
+            // Background discovery may publish adapter metadata while the ordered write is pending.
+            game.Project = project;
+            try { await game.EnqueueWrite(() => projects.SaveAsync(project)); }
+            catch
+            {
+                if (ReferenceEquals(game.Project, project)) game.Project = previousProject;
+                throw;
+            }
+            if (selectedGame == game) apiConfiguration = ResolveGameApi(game);
         }
         finally { settingsWriteLock.Release(); }
     }
-    private void BeginTask() { busy = true; taskCancellation = new(); TaskProgress.IsIndeterminate = true; UpdateControls(); }
-    private void EndTask() { busy = false; taskCancellation?.Dispose(); taskCancellation = null; TaskProgress.IsIndeterminate = false; UpdateControls(); }
+
+    private async void SaveApplicationSettings_Click(object sender, RoutedEventArgs e)
+    {
+        if (changingDataDirectory || closing) return;
+        try
+        {
+            await settingsWriteLock.WaitAsync();
+            try
+            {
+                globalSettings = globalSettings with { MaximumTranslations = double.IsFinite(ConcurrentGamesBox.Value) ? (int)Math.Clamp(ConcurrentGamesBox.Value, 1, 8) : 2 };
+                await LocalFiles.WriteJsonAsync(Path.Combine(dataDirectory, "settings.json"), globalSettings);
+            }
+            finally { settingsWriteLock.Release(); }
+            ShowDataStatus("并行翻译数量已保存，下次启动时生效。", InfoBarSeverity.Success);
+        }
+        catch (Exception error) { ShowDataStatus(error.Message, InfoBarSeverity.Error); }
+    }
+
+    private void OpenGameData_Click(object sender, RoutedEventArgs e) => OpenDirectory(selectedGame?.Directory);
+    private void OpenLogs_Click(object sender, RoutedEventArgs e) => OpenDirectory(selectedGame is { } game ? Path.Combine(game.Directory, "logs") : Path.Combine(dataDirectory, "logs"));
+    private void OpenPatch_Click(object sender, RoutedEventArgs e) => OpenDirectory(selectedGame?.Result?.PatchDirectory);
+    private static void OpenDirectory(string? path)
+    {
+        if (path is null) return;
+        Directory.CreateDirectory(path);
+        Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
+    }
+
     private void UpdateControls()
     {
-        BrowseButton.IsEnabled = AnalyzeButton.IsEnabled = GamePathBox.IsEnabled = !busy;
-        TranslateButton.IsEnabled = TrialButton.IsEnabled = !busy && session is not null;
-        CancelButton.IsEnabled = busy;
-        AdaptButton.IsEnabled = adaptationCancellation is not null || (!busy && session is null && Directory.Exists(GamePathBox.Text.Trim()));
-        InstallButton.IsEnabled = !busy && result is not null && session is not null;
-        OpenPatchButton.IsEnabled = result is not null;
-        RestoreButton.IsEnabled = !busy && Directory.Exists(GamePathBox.Text.Trim());
+        var canNavigate = initialized && !closing && !switchingGames && !changingDataDirectory && !changingAdapterLibrary && !savingApiProfiles && pendingApiSelections == 0 && !removingGames;
+        BrowseButton.IsEnabled = GameList.IsEnabled = GlobalNavigation.IsEnabled = ProjectSearchBox.IsEnabled = canNavigate;
+        var canUseProject = canNavigate && selectedGame?.MetadataLoaded == true;
+        MultiSelectGamesButton.IsEnabled = canNavigate && games.Count > 0;
+        RemoveGamesButton.IsEnabled = canNavigate && GameList.SelectedItems.Count > 0;
+        RemoveGamesButton.Content = GameList.SelectedItems.Count > 1 ? $"移除 ({GameList.SelectedItems.Count})" : "移除";
+        ChangeDataDirectoryButton.IsEnabled = canNavigate && !SavingEngineLibrary;
+        SaveApplicationSettingsButton.IsEnabled = ConcurrentGamesBox.IsEnabled = canNavigate;
+        DefaultTokenBudgetBox.IsEnabled = DefaultMaximumTurnsBox.IsEnabled = SaveGlobalLimitsButton.IsEnabled = canNavigate;
+        ProjectTabs.IsEnabled = canUseProject;
+        AnalyzeButton.IsEnabled = canUseProject && !busy;
+        AnalyzeButton.Content = selectedGame?.Project.AdapterId is not null ? "重新识别" : "常规识别";
+        TranslateButton.IsEnabled = TrialButton.IsEnabled = canUseProject && !busy && session is not null;
+        CancelButton.IsEnabled = busy && !closing;
+        AdaptButton.IsEnabled = canUseProject && !busy;
+        EngineReviewButton.IsEnabled = canUseProject && !busy
+            && (selectedGame?.HasAdaptationSession == true || selectedGame?.Project.AdapterId is not null);
+        AdaptButton.Content = selectedGame is { HasAdaptationSession: true } || selectedGame?.Project.AdapterId is not null
+            ? "继续智能适配" : "智能识别与适配";
+        InstallButton.IsEnabled = canUseProject && selectedGame?.Result is not null && !busy;
+        OpenPatchButton.IsEnabled = selectedGame?.Result is not null;
+        RestoreButton.IsEnabled = canUseProject && !busy;
+        OpenGameDataButton.IsEnabled = canNavigate && selectedGame is not null;
+        UpdateProjectListStatus();
+        UpdateWorkbenchControls();
     }
+
+    private void RenderSelectedGame()
+    {
+        var game = selectedGame;
+        RenderEngineReview(game);
+        GameNameText.Text = game?.Name ?? "选择或添加游戏";
+        GamePathBox.Text = game?.GameDirectory ?? "";
+        StageText.Text = game?.Stage ?? "等待导入";
+        TaskMessageText.Text = game?.MetadataLoad is not null ? "正在读取项目设置与上次任务状态，可继续切换项目。"
+            : game?.ContentLoading == true && !game.Busy ? "正在读取上次保存的文本结果，可继续切换项目。" : game?.StageMessage ?? "";
+        TaskMessageText.Visibility = string.IsNullOrWhiteSpace(TaskMessageText.Text) ? Visibility.Collapsed : Visibility.Visible;
+        TaskErrorInfo.IsOpen = game?.ContentError is not null || game?.Error is not null;
+        TaskErrorInfo.Title = game?.ContentError is not null ? game.MetadataLoaded ? "已有结果未能完整加载" : "项目记录无法读取" : "任务需要处理";
+        TaskErrorInfo.Message = game?.ContentError ?? game?.Error ?? "";
+        ProjectActivityPanel.Visibility = game?.Busy == true ? Visibility.Visible : Visibility.Collapsed;
+        ProjectActivityRing.IsActive = game?.Busy == true;
+        ProjectActivityTitle.Text = game?.Stage ?? "";
+        ProjectActivityMessage.Text = string.IsNullOrWhiteSpace(game?.StageMessage)
+            ? "任务正在后台运行，可以切换到其他项目。" : game.StageMessage;
+        CountsText.Text = game?.Progress is { } p ? $"本次 {p.Completed:N0} / {p.Total:N0} 条 · 复用 {p.CacheHits:N0} 条 · {p.TranslationTokens:N0} Token"
+            : game?.Project.Analysis is { } count ? $"共 {count.UnitCount:N0} 条文本" : session is { } s ? $"共 {s.Extraction.Units.Count:N0} 条文本" : "—";
+        AdaptationPanel.Visibility = game?.HasAdaptationSession == true || game?.AdaptationUsage is not null ? Visibility.Visible : Visibility.Collapsed;
+        AdaptationUsageText.Text = game?.AdaptationUsage is { } usage
+            ? $"智能适配累计 Token：{usage.TotalTokens:N0}" + (usage.Estimated ? "（含估算）" : "") : "已保留适配工作文件。";
+        AdaptationSummaryText.Text = game?.AdaptationSummary ?? "可以继续已有适配任务。";
+        var progressNote = game?.AdaptationProgressNote;
+        AdaptationProgressTitle.Text = progressNote is null ? "适配进展" : "适配进展 · " + progressNote.Title;
+        AdaptationProgressText.Text = progressNote?.Message ?? "暂无进展说明。有关键变化时，模型可在这里更新。";
+        AdaptationProgressTimeText.Text = progressNote is null ? ""
+            : $"模型说明 · 最近更新 {progressNote.UpdatedAt.ToLocalTime():MM-dd HH:mm:ss}";
+        var breakthrough = game?.AdaptationLastBreakthrough;
+        AdaptationBreakthroughText.Visibility = breakthrough is not null && breakthrough != progressNote ? Visibility.Visible : Visibility.Collapsed;
+        AdaptationBreakthroughText.Text = breakthrough is null ? ""
+            : $"最近突破（{breakthrough.UpdatedAt.ToLocalTime():MM-dd HH:mm}）：{breakthrough.Message}";
+        AdaptationBlockerText.Visibility = !busy && game?.AdaptationBlocker is not null ? Visibility.Visible : Visibility.Collapsed;
+        AdaptationBlockerText.Text = game?.AdaptationBlocker?.Reason ?? "";
+        TaskProgress.IsIndeterminate = game?.Busy == true && (game.Progress is null || game.Kind != GameTaskKind.Translation);
+        TaskProgress.Value = game?.Progress is { Total: > 0 } progress ? 100.0 * progress.Completed / progress.Total : 0;
+        GameInfoBar.Severity = game?.Error is not null ? InfoBarSeverity.Error : session is null ? InfoBarSeverity.Informational : InfoBarSeverity.Success;
+        GameInfoBar.Title = game?.Error is not null ? "任务需要处理" : session?.Probe.Description ?? "识别游戏后可选择文本试译";
+        GameInfoBar.Message = game?.Error ?? (session is null ? "可以切换游戏，后台任务会继续运行。" : $"共 {session.Extraction.Units.Count:N0} 条文本。");
+        if (game is { Busy: true, Error: null })
+        {
+            GameInfoBar.Severity = InfoBarSeverity.Informational;
+            GameInfoBar.Title = game.Stage;
+            GameInfoBar.Message = ProjectActivityMessage.Text;
+        }
+        if (game is { Busy: false, HasAdaptationSession: true, Session: null, AdaptationStatus: { } adaptationStatus })
+        {
+            GameInfoBar.Title = AdaptationStage(adaptationStatus);
+            GameInfoBar.Message = game.AdaptationNextAction ?? AutomaticAdaptationService.NextActionFor(adaptationStatus);
+            GameInfoBar.Severity = adaptationStatus is AdaptationStatus.Failed or AdaptationStatus.Unavailable ? InfoBarSeverity.Error
+                : adaptationStatus is AdaptationStatus.WaitingForUser or AdaptationStatus.Unsupported ? InfoBarSeverity.Warning : InfoBarSeverity.Informational;
+        }
+        UpdateLog(game?.Log.ToString() ?? "");
+        if (game is { Busy: false, Error: null, Session: not null, PendingTextCoverage.Count: > 0 })
+        {
+            GameInfoBar.Severity = InfoBarSeverity.Informational;
+            GameInfoBar.Title = "已支持部分文字";
+            GameInfoBar.Message = $"已提取 {game.Session.Extraction.Units.Count:N0} 条，可继续翻译；还有 {game.PendingTextCoverage.Count} 项文字覆盖待办，详见识别说明。";
+        }
+        PatchInstallInfo.IsOpen = game is { Kind: GameTaskKind.Installation } && (game.Busy || game.RunId is not null);
+        PatchInstallInfo.Severity = game?.Error is not null ? InfoBarSeverity.Error : game?.Busy == true ? InfoBarSeverity.Informational : InfoBarSeverity.Success;
+        PatchInstallInfo.Message = game?.Error ?? (game?.Kind == GameTaskKind.Installation ? game.Stage : "");
+        PatchPathBox.Text = game?.Result?.PatchDirectory ?? "";
+        InstallTargetText.Text = "安装位置：" + game?.GameDirectory;
+        if (game?.Result is { } result) DisplayResult(result);
+        else
+        {
+            PatchScopeText.Text = "尚未生成补丁。可先选择少量文本试译。";
+            LaunchText.Text = "启动方式将在生成补丁后显示。";
+            ValidationText.Text = "结构校验：未执行　游戏运行验证：未执行";
+        }
+        RecognitionDetailsText.Text = game?.Project.Analysis is { } analysis
+            ? $"引擎：{analysis.EngineId}\n适配器：{analysis.AdapterId} · {analysis.AdapterVersion}\n已提取 {analysis.UnitCount:N0} 条文本 · {analysis.ResourceCount:N0} 个脚本 / 资源"
+            : game?.HasSavedAnalysis == true ? "已有成功提取的文本记录。首次打开时读取保存的结果。"
+            : "请选择“常规识别”匹配已有适配器，或选择“智能识别与适配”。";
+        RecognitionWarningsText.Text = session is { } recognized && recognized.Extraction.Warnings.Count > 0
+            ? string.Join("\n\n", recognized.Extraction.Warnings.Distinct()) : "暂无额外限制说明。生成补丁后仍需进入游戏验证显示效果。";
+        if (game?.PendingTextCoverage.Count > 0)
+            RecognitionWarningsText.Text += "\n\n尚未覆盖的文字：\n" + string.Join("\n", game.PendingTextCoverage);
+        if (game?.PendingRuntimeChecks.Count > 0)
+            RecognitionWarningsText.Text += "\n\n进入游戏后需验证：\n" + string.Join("\n", game.PendingRuntimeChecks);
+        RenderWorkbenchSurface();
+        UpdateControls();
+        if (game?.Session is not null && (ReferenceEquals(ProjectTabs.SelectedItem, WorkbenchTab) || ReferenceEquals(ProjectTabs.SelectedItem, PatchTab)))
+            LoadVisibleWorkbench(game);
+    }
+
+    private async void LoadVisibleWorkbench(GameWorkspace game)
+    {
+        try { await EnsureWorkbenchAsync(game); }
+        catch (Exception error)
+        {
+            if (selectedGame == game) { WorkbenchEmptyText.Text = "译文加载失败：" + error.Message; WorkbenchEmptyText.Visibility = Visibility.Visible; }
+            Program.WriteStartupError(error);
+        }
+    }
+
     private void DisplayResult(PipelineResult value)
     {
-        PatchInstallInfo.IsOpen = false;
-        InstallTargetText.Text = "安装位置：" + (session?.GameDirectory ?? GamePathBox.Text.Trim());
-        PatchScopeText.Text = value.IsTrial
-            ? $"试译补丁 · 已选文本 {value.TranslatedUnits ?? 0:N0} / 全游戏 {value.TotalUnits:N0} 条。其余文本保留原文。"
-            : $"全量汉化补丁 · 共 {value.TotalUnits:N0} 条文本。";
+        PatchScopeText.Text = value.IsTrial ? $"试译补丁 · 已选 {value.TranslatedUnits ?? 0:N0} / 共 {value.TotalUnits:N0} 条，其余保留原文。" : $"全量汉化补丁 · 共 {value.TotalUnits:N0} 条文本。";
         InstallButton.Content = value.IsTrial ? "安装试译补丁" : "安装汉化补丁";
         PatchPathBox.Text = value.PatchDirectory;
         LaunchText.Text = value.LaunchExecutable is null ? "按原游戏方式启动。" : "安装后启动：" + value.LaunchExecutable;
         ValidationText.Text = $"结构校验：{(value.Validation.Passed ? "通过" : "未通过")}　游戏运行验证：{(value.Validation.RuntimeStatus == "passed" ? "通过" : "未执行")}";
-        foreach (var warning in value.Warnings) Log(warning);
     }
+
+    private void SetStage(GameWorkspace game, string stage, string? message = null)
+    {
+        game.Stage = stage;
+        game.StageMessage = message ?? "";
+        game.Notify();
+        if (game == selectedGame) RenderSelectedGame();
+        else UpdateControls();
+    }
+
     private void ShowError(Exception error)
     {
-        GameInfoBar.Severity = InfoBarSeverity.Error; GameInfoBar.Title = "任务未完成"; GameInfoBar.Message = error.Message;
-        StageText.Text = "需要处理"; Log(error.Message);
+        if (selectedGame is { } game) { game.Error = error.Message; SetStage(game, "需要处理"); Log(game, error.Message); }
+        else { GameInfoBar.Severity = InfoBarSeverity.Error; GameInfoBar.Title = "操作未完成"; GameInfoBar.Message = error.Message; }
     }
-    private void Log(string message)
+
+    private void Log(string message) { if (selectedGame is { } game) Log(game, message); }
+
+    private void UpdateLog(string text)
     {
-        LogBox.Text += $"[{DateTime.Now:HH:mm:ss}] {message}\n";
-        if (LogBox.Text.Length > 40_000) LogBox.Text = LogBox.Text[^30_000..];
-        LogBox.SelectionStart = LogBox.Text.Length;
-    }
-    private static string[] FindSamples(string root)
-    {
-        var extensions = new HashSet<string>([".json", ".csv", ".xml", ".txt", ".scr", ".ks", ".rpy", ".dat", ".bin", ".aos", ".scn"], StringComparer.OrdinalIgnoreCase);
-        var options = new EnumerationOptions { RecurseSubdirectories = true, MaxRecursionDepth = 3, AttributesToSkip = FileAttributes.ReparsePoint, IgnoreInaccessible = true };
-        var selected = new List<string>(); long bytes = 0;
-        foreach (var file in Directory.EnumerateFiles(root, "*", options).Take(20_000)
-            .Where(f => extensions.Contains(Path.GetExtension(f))).OrderBy(f => f, StringComparer.OrdinalIgnoreCase))
+        if (LogBox.Text == text) return;
+        LogBox.Text = text;
+        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
         {
-            var relative = Path.GetRelativePath(root, file);
-            if (relative.Split(Path.DirectorySeparatorChar).Any(p => p.StartsWith('.'))) continue;
-            var length = new FileInfo(file).Length;
-            if (length == 0 || length > 64 * 1024 || bytes + length > 128 * 1024) continue;
-            selected.Add(relative); bytes += length;
-            if (selected.Count == 4) break;
-        }
-        return selected.ToArray();
+            LogScrollViewer.UpdateLayout();
+            LogScrollViewer.ChangeView(null, LogScrollViewer.ScrollableHeight, null, disableAnimation: true);
+        });
     }
-    private static PinnedDotNetToolchain FindToolchain()
+
+    private void LogScrollViewer_SizeChanged(object sender, SizeChangedEventArgs e) =>
+        LogScrollViewer.ChangeView(null, LogScrollViewer.ScrollableHeight, null, disableAnimation: true);
+
+    private void Log(GameWorkspace game, string message)
     {
-        for (var directory = new DirectoryInfo(AppContext.BaseDirectory); directory is not null; directory = directory.Parent)
+        string line = $"[{DateTime.Now:HH:mm:ss}] {message}\n";
+        game.Log.Append(line);
+        if (game.Log.Length > 40_000) game.Log.Remove(0, game.Log.Length - 30_000);
+        if (game == selectedGame) UpdateLog(game.Log.ToString());
+        string path = Path.Combine(game.Directory, "logs", $"{DateTime.Now:yyyyMMdd}.log");
+        _ = game.EnqueueWrite(async () =>
         {
-            foreach (var root in new[] { Path.Combine(directory.FullName, ".tools", "dotnet"), Path.Combine(directory.FullName, "toolchain") })
-                if (File.Exists(Path.Combine(root, "dotnet.exe")) && Directory.Exists(Path.Combine(root, "sdk", "10.0.402")))
-                    return new PinnedDotNetToolchain(root, "10.0.402", "10.0.13");
-        }
-        throw new IsolationUnavailableException("自动适配所需的固定版本编译工具未安装。请使用带 toolchain 的完整发行包；已支持游戏的翻译不需要此组件。");
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            await File.AppendAllTextAsync(path, line);
+        });
     }
+
+    private sealed record SavedTaskState(string RunId, GameTaskKind Kind, string Stage, bool Running,
+        PipelineProgress? Progress, string? Error, GameTranslationSettings Settings, DateTimeOffset UpdatedAt);
+
+    private sealed record SavedAdaptationSummary(TokenUsage? Usage, string? Summary, AdaptationStatus? LastStatus,
+        string? NextAction, AdaptationBlocker? Blocker, string? UserInstruction,
+        AdaptationProgressNote? ProgressNote = null, AdaptationProgressNote? LastBreakthrough = null,
+        TextCoverage? TextCoverage = null, AdaptationObjective? Objective = null);
 }

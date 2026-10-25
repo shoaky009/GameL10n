@@ -5,11 +5,16 @@ namespace AvgTranslator.Desktop.Settings;
 
 internal sealed record DesktopSettings
 {
+    public int SchemaVersion { get; init; } = 2;
+    public string? LastGameId { get; init; }
+    public int MaximumTranslations { get; init; } = 2;
     public string GameDirectory { get; init; } = "";
     public string TargetLanguage { get; init; } = "简体中文";
     public string Style { get; init; } = "自然流畅，保留人物语气、情绪和原文含义。";
     public string Terminology { get; init; } = "";
     public int BatchSize { get; init; } = 24;
+    public long AdaptationTokenBudget { get; init; } = 1_000_000;
+    public int AdaptationMaximumTurns { get; init; } = 60;
     public ApiProfileConfiguration? ApiConfiguration { get; init; }
 
     [JsonPropertyName("endpoint"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]

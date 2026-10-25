@@ -26,7 +26,35 @@ public static class LocalFiles
         return await JsonSerializer.DeserializeAsync<T>(stream, JsonOptions, ct);
     }
 
+    public static async Task<T?> ReadRecoverableJsonAsync<T>(string path, CancellationToken ct = default,
+        Func<T, bool>? validate = null)
+    {
+        async Task<T?> ReadValidAsync(string candidate)
+        {
+            var value = await ReadJsonAsync<T>(candidate, ct);
+            if (value is null || (validate is not null && !validate(value)))
+                throw new InvalidDataException("持久化数据校验失败：" + Path.GetFileName(candidate));
+            return value;
+        }
+        if (!File.Exists(path) && !File.Exists(path + ".bak")) return default;
+        try { return await ReadValidAsync(path); }
+        catch (Exception error) when (error is JsonException or InvalidDataException or FileNotFoundException)
+        {
+            if (!File.Exists(path + ".bak")) throw;
+            var recovered = await ReadValidAsync(path + ".bak");
+            // Repair the primary without rotating its damaged bytes over the good backup.
+            await WriteJsonAsync(path, recovered, ct);
+            return recovered;
+        }
+    }
+
     public static async Task WriteJsonAsync<T>(string path, T value, CancellationToken ct = default)
+        => await WriteAtomicJsonAsync(path, value, false, ct);
+
+    public static async Task WriteRecoverableJsonAsync<T>(string path, T value, CancellationToken ct = default)
+        => await WriteAtomicJsonAsync(path, value, true, ct);
+
+    private static async Task WriteAtomicJsonAsync<T>(string path, T value, bool keepBackup, CancellationToken ct)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
         var temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
@@ -39,7 +67,9 @@ public static class LocalFiles
                 await stream.FlushAsync(ct);
                 stream.Flush(true);
             }
-            File.Move(temporary, path, true);
+            ct.ThrowIfCancellationRequested();
+            if (keepBackup && File.Exists(path)) File.Replace(temporary, path, path + ".bak", true);
+            else File.Move(temporary, path, true);
         }
         finally { if (File.Exists(temporary)) File.Delete(temporary); }
     }

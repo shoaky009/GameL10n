@@ -23,8 +23,9 @@ internal static class Program
 
     internal static void WriteStartupError(Exception error)
     {
-        var directory = Environment.GetEnvironmentVariable("AVG_TRANSLATOR_DATA")
-            ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AvgTranslator");
+        string directory;
+        try { directory = Path.Combine(Settings.DataLocation.Resolve(), "logs"); }
+        catch { directory = Path.Combine(Settings.DataLocation.DefaultDirectory, "logs"); }
         try
         {
             Directory.CreateDirectory(directory);

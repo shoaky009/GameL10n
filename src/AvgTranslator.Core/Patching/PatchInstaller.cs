@@ -1,4 +1,7 @@
+using System.ComponentModel;
+using System.Diagnostics;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 
 namespace AvgTranslator.Core.Patching;
@@ -7,8 +10,59 @@ namespace AvgTranslator.Core.Patching;
 public sealed class PatchInstaller
 {
     public const string ManifestFilename = "patch-manifest.json";
-    private const string JournalFilename = "patch-journal.json";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = true };
+    private readonly string projectDirectory;
+    private readonly string sourceSnapshotsDirectory;
+
+    public PatchInstaller(string projectDirectory, string? sourceSnapshotsDirectory = null)
+    {
+        this.projectDirectory = Path.TrimEndingDirectorySeparator(Path.GetFullPath(projectDirectory));
+        this.sourceSnapshotsDirectory = sourceSnapshotsDirectory ?? Path.Combine(this.projectDirectory, "sources");
+    }
+
+    public string JournalPath => PatchFileSafety.UnderRoot(projectDirectory, "installation.json");
+
+    /// <summary>Holds the game installation lock and imports any legacy record before repairs or installation.</summary>
+    public async Task<IDisposable> OpenInstallationAsync(string gameDirectory, CancellationToken cancellationToken = default)
+    {
+        string gameRoot = PatchFileSafety.DirectoryRoot(gameDirectory);
+        EnsureGameClosed(gameRoot, cancellationToken);
+        var operationLock = AcquireLock(gameRoot, migrateLegacy: true);
+        try
+        {
+            await LoadJournalAsync(gameRoot, cancellationToken, migrateLegacy: true);
+            return operationLock;
+        }
+        catch { operationLock.Dispose(); throw; }
+    }
+
+    /// <summary>Rejects a running game or launcher before modifying its files or recovery journal.</summary>
+    public static void EnsureGameClosed(string gameDirectory, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        string root = PatchFileSafety.DirectoryRoot(gameDirectory);
+        if (!Path.EndsInDirectorySeparator(root)) root += Path.DirectorySeparatorChar;
+        var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        var processes = Process.GetProcesses();
+        try
+        {
+            foreach (var process in processes)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                string? executable;
+                try { executable = process.MainModule?.FileName; }
+                catch (Exception error) when (error is Win32Exception or InvalidOperationException or NotSupportedException)
+                {
+                    // Exited or inaccessible processes cannot be identified here. File/hash checks still guard writes.
+                    continue;
+                }
+                if (executable?.StartsWith(root, comparison) == true)
+                    throw new IOException("游戏或汉化启动器仍在运行：" + Path.GetFileName(executable)
+                        + "。请关闭后重试，已完成的翻译和补丁会保留。");
+            }
+        }
+        finally { foreach (var process in processes) process.Dispose(); }
+    }
 
     /// <summary>Finds verified source bytes without changing the game or recovering its journal.</summary>
     public async Task<string> ResolveOriginalFileAsync(
@@ -17,12 +71,7 @@ public sealed class PatchInstaller
         string gameRoot = PatchFileSafety.DirectoryRoot(gameDirectory);
         string relative = PatchFileSafety.NormalizeRelativePath(relativePath);
         string target = PatchFileSafety.UnderRoot(gameRoot, relative);
-        string lockPath = PatchFileSafety.UnderRoot(gameRoot,
-            PatchFileSafety.StateDirectoryName + "/install.lock", allowStateDirectory: true);
-        // Open an existing lock only: source selection must not create state in the game.
-        using FileStream? operationLock = File.Exists(lockPath)
-            ? new FileStream(lockPath, FileMode.Open, FileAccess.Read, FileShare.None)
-            : null;
+        using var operationLock = AcquireLock(gameRoot, migrateLegacy: false);
         Journal journal = await LoadJournalAsync(gameRoot, cancellationToken);
         string? actual = await HashIfPresentAsync(target, cancellationToken);
         if (actual is null)
@@ -36,10 +85,8 @@ public sealed class PatchInstaller
             return target; // An external game update becomes new analysis input; installation still detects the conflict.
         if (entry.OriginalSha256 is null || entry.BackupRelativePath is null)
             throw new InvalidDataException("The requested file was added by a patch and has no original source.");
-        string backup = PatchFileSafety.UnderRoot(gameRoot, entry.BackupRelativePath);
-        if (!File.Exists(backup) || !SameHash(await HashFileAsync(backup, cancellationToken), entry.OriginalSha256))
-            throw new IOException($"The original source backup is missing or has changed: {entry.BackupRelativePath}");
-        return backup;
+        return await FindOriginalCopyAsync(gameRoot, entry, cancellationToken)
+            ?? throw MissingOriginal(entry);
     }
 
     public async Task<PatchInstallResult> InstallAsync(
@@ -80,7 +127,7 @@ public sealed class PatchInstaller
             if (targetPaths.Any(other => other.StartsWith(target + '/', StringComparison.OrdinalIgnoreCase)))
                 throw new InvalidDataException($"A patch file is also used as a directory: {target}");
 
-        using FileStream operationLock = AcquireLock(gameRoot);
+        using var operationLock = await OpenInstallationAsync(gameRoot, cancellationToken);
         Journal journal = await LoadJournalAsync(gameRoot, cancellationToken);
         List<string> recoveryConflicts = await RecoverAsync(gameRoot, journal, cancellationToken);
         if (recoveryConflicts.Count != 0)
@@ -112,6 +159,12 @@ public sealed class PatchInstaller
             Entry? entry = journal.Entries.SingleOrDefault(e => e.RelativePath.Equals(file.RelativePath, StringComparison.OrdinalIgnoreCase));
             if (entry is not null && !SameHash(currentHash, entry.InstalledSha256))
                 throw new IOException($"The installed file changed outside the installer: {file.RelativePath}");
+            if (entry?.OriginalSha256 is not null)
+            {
+                var recovered = await EnsureOriginalBackupAsync(gameRoot, journal, entry, reservedPaths, cancellationToken);
+                if (recovered is null) throw MissingOriginal(entry);
+                if (recovered.Recovered) backups.Add(entry.BackupRelativePath!);
+            }
             if (SameHash(currentHash, file.Sha256))
             {
                 unchanged++;
@@ -162,9 +215,12 @@ public sealed class PatchInstaller
     public async Task<PatchRestoreResult> RestoreAsync(string gameDirectory, CancellationToken cancellationToken = default)
     {
         string gameRoot = PatchFileSafety.DirectoryRoot(gameDirectory);
-        using FileStream operationLock = AcquireLock(gameRoot);
+        using var operationLock = await OpenInstallationAsync(gameRoot, cancellationToken);
         Journal journal = await LoadJournalAsync(gameRoot, cancellationToken);
         List<string> conflicts = await RecoverAsync(gameRoot, journal, cancellationToken);
+        var reservedPaths = new HashSet<string>(journal.Entries.Select(entry => entry.RelativePath), StringComparer.OrdinalIgnoreCase);
+        foreach (var entry in journal.Entries)
+            if (entry.BackupRelativePath is not null) reservedPaths.Add(entry.BackupRelativePath);
         int restored = 0;
         int removed = 0;
         foreach (Entry entry in journal.Entries.ToArray().Reverse())
@@ -187,10 +243,9 @@ public sealed class PatchInstaller
                 continue;
             }
 
-            string? backup = entry.BackupRelativePath is null ? null : PatchFileSafety.UnderRoot(gameRoot, entry.BackupRelativePath);
-            if (entry.OriginalSha256 is not null &&
-                (backup is null || !File.Exists(backup) ||
-                 !SameHash(await HashFileAsync(backup, cancellationToken), entry.OriginalSha256)))
+            var backup = entry.OriginalSha256 is null ? null :
+                await EnsureOriginalBackupAsync(gameRoot, journal, entry, reservedPaths, cancellationToken);
+            if (entry.OriginalSha256 is not null && backup is null)
             {
                 conflicts.Add(entry.RelativePath);
                 continue;
@@ -207,7 +262,7 @@ public sealed class PatchInstaller
             }
             else
             {
-                await AtomicCopyAsync(backup!, target, entry.OriginalSha256, overwrite: true, cancellationToken, entry.InstalledSha256);
+                await AtomicCopyAsync(backup!.Path, target, entry.OriginalSha256, overwrite: true, cancellationToken, entry.InstalledSha256);
                 RestoreReadOnly(target, entry);
                 restored++;
             }
@@ -217,7 +272,81 @@ public sealed class PatchInstaller
         return new PatchRestoreResult(restored, removed, conflicts);
     }
 
-    private static async Task<List<string>> RecoverAsync(string gameRoot, Journal journal, CancellationToken cancellationToken)
+    private static IOException MissingOriginal(Entry entry) => new(
+        $"无法找到可用的原始文件：{entry.RelativePath}。游戏目录中的备份和本地原文快照均缺失或校验未通过，请恢复原版资源后重试。已保存的译文仍可继续使用。");
+
+    private async Task<string?> FindOriginalCopyAsync(string gameRoot, Entry entry, CancellationToken cancellationToken)
+    {
+        string backup = PatchFileSafety.UnderRoot(gameRoot, entry.BackupRelativePath!);
+        if (await MatchesOriginalAsync(backup, entry, cancellationToken)) return backup;
+
+        // A renamed or older backup is usable only when its bytes match the recorded original.
+        string target = PatchFileSafety.UnderRoot(gameRoot, entry.RelativePath);
+        string directory = Path.GetDirectoryName(target)!;
+        string prefix = Path.GetFileName(target) + '.';
+        foreach (var candidate in Directory.EnumerateFiles(directory, "*.bak").Order(StringComparer.OrdinalIgnoreCase))
+        {
+            if (!Path.GetFileName(candidate).StartsWith(prefix, StringComparison.OrdinalIgnoreCase) ||
+                candidate.Equals(backup, StringComparison.OrdinalIgnoreCase)) continue;
+            if (await MatchesOriginalAsync(candidate, entry, cancellationToken)) return candidate;
+        }
+
+        if (sourceSnapshotsDirectory is not null && Directory.Exists(sourceSnapshotsDirectory))
+        {
+            string snapshots = PatchFileSafety.DirectoryRoot(sourceSnapshotsDirectory);
+            foreach (var snapshot in Directory.EnumerateDirectories(snapshots).Order(StringComparer.OrdinalIgnoreCase))
+            {
+                string name = Path.GetFileName(snapshot);
+                // Only committed content-addressed snapshots, never incomplete staging directories.
+                if (name.Length != 64 || name.Any(c => !Uri.IsHexDigit(c))) continue;
+                string candidate = PatchFileSafety.UnderRoot(snapshot, entry.RelativePath);
+                if (await MatchesOriginalAsync(candidate, entry, cancellationToken)) return candidate;
+            }
+        }
+        return null;
+    }
+
+    private static async Task<bool> MatchesOriginalAsync(string path, Entry entry, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return File.Exists(path) && SameHash(await HashFileAsync(path, cancellationToken), entry.OriginalSha256);
+    }
+
+    private sealed record OriginalBackup(string Path, bool Recovered);
+
+    private async Task<OriginalBackup?> EnsureOriginalBackupAsync(string gameRoot, Journal journal, Entry entry,
+        HashSet<string> reservedPaths, CancellationToken cancellationToken)
+    {
+        string recorded = PatchFileSafety.UnderRoot(gameRoot, entry.BackupRelativePath!);
+        string? source = await FindOriginalCopyAsync(gameRoot, entry, cancellationToken);
+        if (source is null) return null;
+        if (source.Equals(recorded, StringComparison.OrdinalIgnoreCase)) return new(source, false);
+
+        string relative = Path.GetRelativePath(gameRoot, source).Replace('\\', '/');
+        if (!relative.StartsWith("../", StringComparison.Ordinal) && !Path.IsPathRooted(relative) &&
+            !reservedPaths.Contains(relative) && relative.StartsWith(entry.RelativePath + '.', StringComparison.OrdinalIgnoreCase) &&
+            relative.EndsWith(".bak", StringComparison.OrdinalIgnoreCase))
+        {
+            // Reuse an existing verified backup without duplicating it or modifying it.
+            entry.BackupRelativePath = relative;
+            reservedPaths.Add(relative);
+            await SaveJournalAsync(gameRoot, journal);
+            return new(source, true);
+        }
+
+        if (Path.Exists(recorded))
+        {
+            // Preserve a modified backup. Recovery writes to a new path instead.
+            entry.BackupRelativePath = ChooseBackupPath(gameRoot, entry.RelativePath, reservedPaths);
+            reservedPaths.Add(entry.BackupRelativePath);
+            await SaveJournalAsync(gameRoot, journal);
+            recorded = PatchFileSafety.UnderRoot(gameRoot, entry.BackupRelativePath);
+        }
+        await AtomicCopyAsync(source, recorded, entry.OriginalSha256!, overwrite: false, cancellationToken);
+        return new(recorded, true);
+    }
+
+    private async Task<List<string>> RecoverAsync(string gameRoot, Journal journal, CancellationToken cancellationToken)
     {
         var conflicts = new List<string>();
         foreach (Entry entry in journal.Entries.ToArray())
@@ -267,23 +396,82 @@ public sealed class PatchInstaller
         return conflicts;
     }
 
-    private static FileStream AcquireLock(string gameRoot)
+    private IDisposable AcquireLock(string gameRoot, bool migrateLegacy)
     {
-        string directory = PatchFileSafety.UnderRoot(gameRoot, PatchFileSafety.StateDirectoryName, allowStateDirectory: true);
-        Directory.CreateDirectory(directory);
-        PatchFileSafety.CheckPath(directory);
-        string lockPath = PatchFileSafety.UnderRoot(gameRoot, PatchFileSafety.StateDirectoryName + "/install.lock", allowStateDirectory: true);
-        return new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+        if (RootsOverlap(gameRoot, projectDirectory))
+            throw new InvalidDataException("项目数据目录与游戏目录必须分开。");
+        PatchFileSafety.CheckPath(projectDirectory);
+        // Use the game path, not the data location, so separate application instances share the same lock.
+        string identity = OperatingSystem.IsWindows() ? gameRoot.ToUpperInvariant() : gameRoot;
+        string key = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(identity)));
+        string lockPath = Path.Combine(Path.GetTempPath(), "AvgTranslator-install-" + key + ".lock");
+        PatchFileSafety.CheckPath(lockPath);
+        var operationLock = new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None,
+            1, FileOptions.DeleteOnClose);
+        try
+        {
+            string legacyDirectory = PatchFileSafety.UnderRoot(gameRoot, PatchFileSafety.StateDirectoryName, allowStateDirectory: true);
+            string legacyPath = PatchFileSafety.UnderRoot(gameRoot, PatchFileSafety.StateDirectoryName + "/install.lock", allowStateDirectory: true);
+            var legacyLock = File.Exists(legacyPath) ? new FileStream(legacyPath, FileMode.Open,
+                migrateLegacy ? FileAccess.ReadWrite : FileAccess.Read, FileShare.None, 1,
+                migrateLegacy ? FileOptions.DeleteOnClose : FileOptions.None) : null;
+            return new InstallationLock(operationLock, legacyLock, migrateLegacy ? legacyDirectory : null);
+        }
+        catch { operationLock.Dispose(); throw; }
     }
 
-    private static async Task<Journal> LoadJournalAsync(string gameRoot, CancellationToken cancellationToken)
+    private sealed class InstallationLock(FileStream operationLock, FileStream? legacyLock, string? legacyDirectory) : IDisposable
     {
-        string path = JournalPath(gameRoot);
-        if (!File.Exists(path))
-            return new Journal();
+        public void Dispose()
+        {
+            try
+            {
+                legacyLock?.Dispose();
+                // Remove only the now-empty legacy folder; unrelated files are never deleted.
+                if (legacyDirectory is not null && Directory.Exists(legacyDirectory))
+                {
+                    try
+                    {
+                        if (!Directory.EnumerateFileSystemEntries(legacyDirectory).Any()) Directory.Delete(legacyDirectory);
+                    }
+                    catch (IOException) { }
+                    catch (UnauthorizedAccessException) { }
+                }
+            }
+            finally { operationLock.Dispose(); }
+        }
+    }
+
+    private async Task<Journal> LoadJournalAsync(string gameRoot, CancellationToken cancellationToken, bool migrateLegacy = false)
+    {
+        string legacyPath = PatchFileSafety.UnderRoot(gameRoot,
+            PatchFileSafety.StateDirectoryName + "/patch-journal.json", allowStateDirectory: true);
+        Journal? journal = File.Exists(JournalPath) ? await ReadJournalAsync(JournalPath, gameRoot, cancellationToken) : null;
+        if (File.Exists(legacyPath))
+        {
+            var legacy = await ReadJournalAsync(legacyPath, gameRoot, cancellationToken);
+            if (journal is not null && JsonSerializer.Serialize(journal, JsonOptions) != JsonSerializer.Serialize(legacy, JsonOptions))
+                throw new InvalidDataException("项目与游戏目录的安装记录不一致，已保留两份记录，请确认使用的是对应项目数据。");
+            journal ??= legacy;
+            if (migrateLegacy)
+            {
+                // Durable project copy first: interruption leaves either the old record or two equivalent copies.
+                await SaveJournalAsync(gameRoot, journal);
+                File.Delete(legacyPath);
+            }
+        }
+        return journal ?? new Journal { GameDirectory = gameRoot };
+    }
+
+    private static async Task<Journal> ReadJournalAsync(string path, string gameRoot, CancellationToken cancellationToken)
+    {
         Journal journal = await ReadJsonAsync<Journal>(path, cancellationToken);
         if (journal.SchemaVersion != 1 || journal.Entries is null)
             throw new InvalidDataException("Unsupported or incomplete installation journal.");
+        if (journal.GameDirectory is not null && !gameRoot.Equals(journal.GameDirectory,
+                OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
+            throw new InvalidDataException("安装记录属于另一个游戏目录，请使用对应的项目数据。");
+        journal.GameDirectory = gameRoot;
         var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var backups = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (Entry entry in journal.Entries)
@@ -389,9 +577,11 @@ public sealed class PatchInstaller
             File.SetAttributes(target, File.GetAttributes(target) | FileAttributes.ReadOnly);
     }
 
-    private static async Task SaveJournalAsync(string gameRoot, Journal journal)
+    private async Task SaveJournalAsync(string gameRoot, Journal journal)
     {
-        string target = JournalPath(gameRoot);
+        journal.GameDirectory = gameRoot;
+        string target = JournalPath;
+        Directory.CreateDirectory(projectDirectory);
         string temporary = Path.Combine(Path.GetDirectoryName(target)!, "journal-" + Guid.NewGuid().ToString("N") + ".tmp");
         try
         {
@@ -409,9 +599,6 @@ public sealed class PatchInstaller
             if (File.Exists(temporary)) File.Delete(temporary);
         }
     }
-
-    private static string JournalPath(string root) => PatchFileSafety.UnderRoot(root,
-        PatchFileSafety.StateDirectoryName + '/' + JournalFilename, allowStateDirectory: true);
 
     private static async Task<T> ReadJsonAsync<T>(string path, CancellationToken cancellationToken)
     {
@@ -459,6 +646,7 @@ public sealed class PatchInstaller
     {
         public Journal() { }
         public int SchemaVersion { get; set; } = 1;
+        public string? GameDirectory { get; set; }
         public List<Entry> Entries { get; set; } = [];
     }
 

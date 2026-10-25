@@ -7,15 +7,15 @@ public sealed class Sfa16AosV2Adapter : IGameAdapter
 {
     public static AdapterFamily Family { get; } = new("engine", "sfa16.aos-v2", "LiLiM SFA16 / AOS v2 / SCR");
     public string Id => Family.AdapterId;
-    public string Version => "2.0.3";
+    public string Version => "2.0.4";
     public AdapterCatalogEntry CatalogEntry => new(Family, Version, Sfa16ExecutableProfiles.Known.Select(profile =>
         new GameCompatibility(profile.GameId, profile.GameTitle, profile.Variant, Version,
             new Dictionary<string, string> { ["sfa16.exe"] = profile.OriginalHash }, "resource-roundtrip-passed")).ToArray());
     private const string ArchiveName = "scr.aos";
     private static readonly string[] Warnings =
     [
-        "中文补丁使用 CP936 和 Windows SimSun 字体；仅对此版本 sfa16.exe 做静态字节验证，尚未运行游戏验证显示、换行或存档兼容性。",
-        "仅处理脚本文本、角色名称和选择项；图片内文字、视频、程序菜单及其他 AOS 版本不在此适配器范围内。"
+        "建议先选择少量文本试译，进入游戏确认中文显示和换行正常后，再开始全量翻译。",
+        "支持翻译剧情对白、旁白、角色名和选项；图片、视频中的文字及游戏菜单不在翻译范围内。"
     ];
 
     public IReadOnlyList<ValidationIssue> ValidateTranslation(TranslationUnit unit, string text)
@@ -126,7 +126,7 @@ public sealed class Sfa16AosV2Adapter : IGameAdapter
                 return Sfa16Script.NormalizeChineseDisplayText(text) != text;
             });
             IReadOnlyList<string> warnings = substitutions == 0 ? Warnings : [.. Warnings,
-                $"{substitutions} 条文本含 CP936 不支持的符号，补丁中将“・”显示为“·”、“♪”显示为“～”；原文快照和译文缓存未改动。"];
+                $"{substitutions} 条文本中的特殊符号已按游戏支持的形式替换：・→·，♪→～。"];
             return new AdapterBuildResult([ArchiveName, Sfa16Executable.FileName], warnings, Sfa16Executable.FileName);
         }
         return new AdapterBuildResult([ArchiveName], Warnings);

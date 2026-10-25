@@ -23,11 +23,17 @@ public sealed record PipelineResult(string PatchDirectory, string? LaunchExecuta
     bool IsTrial = false, int? TranslatedUnits = null);
 
 public sealed record RunOptions(int BatchSize = 24, bool RetryUncertainRequests = true,
-    IReadOnlyList<string>? TrialUnitIds = null);
-public sealed record SourceSnapshot(string Directory, string AdapterId, string AdapterVersion, IReadOnlyList<SourceFile> Files);
+    IReadOnlyList<string>? TrialUnitIds = null)
+{
+    public IProgress<IReadOnlyDictionary<string, string>>? TranslationUpdates { get; init; }
+    internal bool CandidateOnly { get; init; }
+    public string? RetranslationId { get; init; }
+}
+public sealed record SourceSnapshot(string Directory, string AdapterId, string AdapterVersion, IReadOnlyList<SourceFile> Files,
+    GameProbe? Probe = null);
 public sealed record PendingTranslation(string Id, string MemoryKey);
 public sealed record TranslationIntent(string RequestKey, string Provider, DateTimeOffset SentAt,
-    IReadOnlyList<PendingTranslation> Units);
+    IReadOnlyList<PendingTranslation> Units, bool CandidateOnly = false, string? RetranslationId = null);
 public sealed record TranslationRefusal(TranslationIntent Request, DateTimeOffset RecordedAt, ProviderResponseDiagnostic? Diagnostic);
 
 public sealed class UncertainRequestException(string message) : Exception(message);
@@ -35,31 +41,105 @@ public sealed class TranslationRetriesExhaustedException(TranslationProviderExce
     : Exception("API 请求重试 5 次后仍失败，任务已暂停。已完成译文已保存，可继续相同范围的翻译。最后一次失败：" + error.FailureSummary + "。", error);
 
 public sealed class TranslationRefusedException(bool alreadyRecorded = false)
-    : Exception((alreadyRecorded ? "这批内容已有模型拒绝记录，本次未再次调用 API。" : "模型拒绝处理这批内容（服务商内容限制），已停止自动重试。") +
-        "任务已暂停，已完成译文已保存。请先处理被拒绝的内容；拒绝说明保存在日志和任务记录中。");
+    : Exception((alreadyRecorded ? "这批内容在翻译 API 链中的所有接口均已有拒绝记录，本次未再次调用 API。" : "翻译 API 链中的所有接口均拒绝处理这批内容（服务商内容限制），已停止尝试。") +
+        "任务已暂停，已完成译文已保存。可调整翻译 API 链或处理被拒绝的内容后继续；拒绝说明保存在日志和任务记录中。");
 
-public sealed class TranslationPipeline(string dataDirectory, string? diagnosticDirectory = null)
+public sealed partial class TranslationPipeline(string dataDirectory, string? diagnosticDirectory = null)
 {
     public string DataDirectory { get; } = Path.GetFullPath(dataDirectory);
 
     public static string GameId(string gameDirectory) => LocalFiles.HashText(
         Path.GetFullPath(gameDirectory).TrimEnd(Path.DirectorySeparatorChar).ToUpperInvariant())[..24];
 
+    /// <summary>Opens the saved analysis, without scanning the game or hashing source archives.
+    /// RunAsync verifies snapshot bytes before using them; explicit analysis discovers game updates.</summary>
+    public async Task<GameSession?> LoadSessionAsync(string gameDirectory, IGameAdapter adapter,
+        CancellationToken ct = default, string? projectId = null, Action<string, string>? reportProgress = null)
+    {
+        var gameRoot = Path.GetFullPath(gameDirectory);
+        var id = projectId ?? GameId(gameRoot);
+        var project = LocalFiles.UnderRoot(Path.Combine(DataDirectory, "games"), id);
+        GameSession? NeedsAnalysis(string reason)
+        {
+            reportProgress?.Invoke("需要重新识别", reason + " 请点击“重新识别”；已保存译文会继续保留。");
+            return null;
+        }
+        if (!Directory.Exists(project)) return NeedsAnalysis("项目尚无已保存的识别结果。");
+        await using var projectLock = AcquireProjectLock(project);
+        try
+        {
+            var snapshotPath = Path.Combine(project, "source.json");
+            var snapshot = await LocalFiles.ReadJsonAsync<SourceSnapshot>(snapshotPath, ct);
+            if (snapshot is null) return NeedsAnalysis("项目缺少已保存的原文快照记录。");
+            if (snapshot.AdapterId != adapter.Id || snapshot.AdapterVersion != adapter.Version)
+                return NeedsAnalysis("已保存识别结果的 Adapter 或版本与当前项目不一致。");
+            if (snapshot.Files is not { Count: > 0 } || string.IsNullOrWhiteSpace(snapshot.Directory))
+                return NeedsAnalysis("已保存的原文快照缺少资源目录或文件列表。");
+            if (snapshot.Files.Any(file => file is null || string.IsNullOrWhiteSpace(file.RelativePath)
+                || file.Sha256 is not { Length: 64 } || file.Sha256.Any(character => !Uri.IsHexDigit(character))))
+                return NeedsAnalysis("已保存的原文快照包含无效的资源路径或校验值。");
+            var probe = snapshot.Probe;
+            if (probe is null)
+                return NeedsAnalysis("旧版识别记录缺少引擎和启动信息，需要重新识别补充。");
+            var source = LocalFiles.UnderRoot(project, snapshot.Directory);
+            var fingerprint = LocalFiles.HashText(JsonSerializer.Serialize(snapshot.Files.OrderBy(file => file.RelativePath)));
+            if (Path.GetFileName(source) != fingerprint)
+                return NeedsAnalysis("已保存的原文快照目录与资源指纹不一致。");
+            var resources = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var file in snapshot.Files)
+            {
+                ct.ThrowIfCancellationRequested();
+                if (!resources.Add(file.RelativePath))
+                    return NeedsAnalysis("已保存的原文快照包含重复资源：" + file.RelativePath);
+                if (!File.Exists(LocalFiles.UnderRoot(source, file.RelativePath)))
+                    return NeedsAnalysis("已保存的原文快照缺少资源：" + file.RelativePath);
+            }
+            reportProgress?.Invoke("加载已保存文本", "正在读取上次识别结果；游戏更新后可点击“重新识别”。");
+            var extraction = await new ExtractionStore(project).LoadAsync(fingerprint, adapter.Id, adapter.Version, ct);
+            if (extraction is null || extraction.Units.Count == 0)
+                return NeedsAnalysis("与已保存原文快照对应的文本缓存缺失或已损坏。");
+            if (probe.AdapterId != adapter.Id || probe.AdapterVersion != adapter.Version
+                || probe.RequiredFiles is null || probe.Warnings is null || !resources.SetEquals(probe.RequiredFiles)
+                || (probe.OriginalExecutable is { } executable && !resources.Contains(executable)))
+                return NeedsAnalysis("已保存的引擎、启动信息或资源列表与原文快照不一致。");
+            if (adapter is GeneratedGameAdapter generated) generated.RestoreProbe(probe);
+            extraction = extraction with { Warnings = probe.Warnings.Concat(extraction.Warnings).Distinct(StringComparer.Ordinal).ToArray() };
+            return new(id, gameRoot, project, source, probe, snapshot.Files, extraction, adapter);
+        }
+        catch (JsonException)
+        {
+            return NeedsAnalysis("已保存的识别记录不是有效的 JSON，无法恢复。");
+        }
+        catch (InvalidDataException error)
+        {
+            return NeedsAnalysis("已保存的识别记录无效：" + error.Message);
+        }
+        catch (Exception error) when (error is FileNotFoundException or DirectoryNotFoundException)
+        {
+            return NeedsAnalysis("已保存的识别记录或文本缓存文件缺失。");
+        }
+    }
+
     public async Task<GameSession> AnalyzeAsync(string gameDirectory, IGameAdapter adapter,
-        CancellationToken ct = default)
+        CancellationToken ct = default, string? projectId = null, GameProbe? knownProbe = null,
+        Action<string, string>? reportProgress = null, bool commitSnapshot = true)
     {
         var gameRoot = Path.GetFullPath(gameDirectory);
         if (!Directory.Exists(gameRoot)) throw new DirectoryNotFoundException("游戏目录不存在。");
-        var probe = await adapter.ProbeAsync(gameRoot, ct)
+        reportProgress?.Invoke("识别游戏资源", "正在确认引擎和需要处理的资源文件。");
+        var probe = knownProbe ?? await adapter.ProbeAsync(gameRoot, ct)
             ?? throw new InvalidDataException("当前 Adapter 不支持此游戏版本。");
-        var id = GameId(gameRoot);
-        var project = Path.Combine(DataDirectory, "games", id);
+        if (probe.AdapterId != adapter.Id || probe.AdapterVersion != adapter.Version)
+            throw new InvalidDataException("识别结果与当前 Adapter 不一致，请重新识别游戏。");
+        var id = projectId ?? GameId(gameRoot);
+        var project = LocalFiles.UnderRoot(Path.Combine(DataDirectory, "games"), id);
         Directory.CreateDirectory(project);
         await using var projectLock = AcquireProjectLock(project);
-        var installer = new PatchInstaller();
+        var installer = new PatchInstaller(project);
         var sourceFiles = new List<(SourceFile File, string Path)>();
         foreach (var relative in probe.RequiredFiles.Distinct(StringComparer.OrdinalIgnoreCase))
         {
+            reportProgress?.Invoke("校验原始资源", $"{sourceFiles.Count + 1} / {probe.RequiredFiles.Count} · {relative}");
             LocalFiles.UnderRoot(gameRoot, relative);
             var sourcePath = await installer.ResolveOriginalFileAsync(gameRoot, relative, ct);
             sourceFiles.Add((new SourceFile(relative, await LocalFiles.HashFileAsync(sourcePath, ct)), sourcePath));
@@ -73,6 +153,7 @@ public sealed class TranslationPipeline(string dataDirectory, string? diagnostic
             Directory.CreateDirectory(staging);
             foreach (var (file, sourcePath) in sourceFiles)
             {
+                reportProgress?.Invoke("保存原文快照", "正在复制并校验：" + file.RelativePath);
                 var target = LocalFiles.UnderRoot(staging, file.RelativePath);
                 Directory.CreateDirectory(Path.GetDirectoryName(target)!);
                 File.Copy(sourcePath, target, false);
@@ -83,29 +164,105 @@ public sealed class TranslationPipeline(string dataDirectory, string? diagnostic
             Directory.Move(staging, snapshotDirectory);
         }
         var files = sourceFiles.Select(f => f.File).ToArray();
+        reportProgress?.Invoke("校验原文快照", "正在确认已保存资源完整，文件较大时需要一些时间。");
         await VerifySourcesAsync(snapshotDirectory, files, ct);
         var executableAnalysis = new List<ExecutableAnalysis>();
         foreach (var file in files.Where(file => file.RelativePath.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)))
             executableAnalysis.Add(ExecutableChecks.Analyze(file.RelativePath,
                 await File.ReadAllBytesAsync(LocalFiles.UnderRoot(snapshotDirectory, file.RelativePath), ct)));
         await LocalFiles.WriteJsonAsync(Path.Combine(project, "executable-analysis.json"), executableAnalysis, ct);
-        var snapshot = new SourceSnapshot(snapshotDirectory, adapter.Id, adapter.Version, files);
-        await LocalFiles.WriteJsonAsync(Path.Combine(project, "source.json"), snapshot, ct);
-        var extraction = await adapter.ExtractAsync(snapshotDirectory, ct);
+        var store = new ExtractionStore(project);
+        reportProgress?.Invoke("加载文本缓存", "正在读取已有的提取结果。");
+        var extraction = await store.LoadAsync(fingerprint, adapter.Id, adapter.Version, ct);
+        var cachedExtraction = extraction is not null;
+        // Legacy extraction.json has no fingerprint of its own and may belong to an older
+        // source snapshot. Only a verified cache can replace extraction from current resources.
+        if (extraction is null)
+        {
+            reportProgress?.Invoke("提取剧情文本", "正在从游戏资源提取对白、名称和选项。");
+            extraction = await adapter.ExtractAsync(snapshotDirectory, ct);
+        }
         if (extraction.Units.Count == 0) throw new InvalidDataException("未提取到可翻译文本，不能报告为汉化成功。");
         if (extraction.Units.Any(u => string.IsNullOrWhiteSpace(u.Id) || string.IsNullOrWhiteSpace(u.SourceText)) ||
             extraction.Units.Select(u => u.Id).Distinct(StringComparer.Ordinal).Count() != extraction.Units.Count)
             throw new InvalidDataException("提取结果包含空文本或重复的文本 ID。");
-        await LocalFiles.WriteJsonAsync(Path.Combine(project, "extraction.json"), extraction, ct);
-        return new GameSession(id, gameRoot, project, snapshotDirectory, probe, files, extraction, adapter);
+        reportProgress?.Invoke("整理项目文本", $"已读取 {extraction.Units.Count:N0} 条文本，正在保存项目记录。");
+        if (!cachedExtraction) await store.StoreAsync(fingerprint, adapter.Id, adapter.Version, extraction, ct);
+        if (Directory.Exists(Path.Combine(project, "memory")))
+        {
+            reportProgress?.Invoke("核对已保存译文", "正在核对已提交的翻译记录，已有译文会继续复用。");
+            await CleanupCommittedResponsesAsync(project, new TranslationMemory(Path.Combine(project, "memory")), ct);
+        }
+        // Probe may exclude unsupported files outside the snapshot; keep that coverage visible on cache hits too.
+        extraction = extraction with { Warnings = probe.Warnings.Concat(extraction.Warnings).Distinct(StringComparer.Ordinal).ToArray() };
+        var session = new GameSession(id, gameRoot, project, snapshotDirectory, probe, files, extraction, adapter);
+        ct.ThrowIfCancellationRequested();
+        if (commitSnapshot) await CommitAnalysisCoreAsync(session, ct);
+        return session;
     }
 
-    public async Task<PipelineResult> RunAsync(GameSession session, ITranslationProvider provider,
-        TranslationPolicy policy, RunOptions? options = null, IProgress<PipelineProgress>? progress = null,
-        CancellationToken ct = default)
+    /// <summary>Commits a completed analysis after the caller's additional validation has succeeded.</summary>
+    public async Task CommitAnalysisAsync(GameSession session, CancellationToken ct = default)
     {
+        ct.ThrowIfCancellationRequested();
+        await using var projectLock = AcquireProjectLock(session.ProjectDirectory);
+        await CommitAnalysisCoreAsync(session, ct);
+    }
+
+    private static Task CommitAnalysisCoreAsync(GameSession session, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        var snapshot = new SourceSnapshot(Path.GetRelativePath(session.ProjectDirectory, session.SourceDirectory),
+            session.Probe.AdapterId, session.Probe.AdapterVersion, session.Sources, session.Probe);
+        return LocalFiles.WriteJsonAsync(Path.Combine(session.ProjectDirectory, "source.json"), snapshot, ct);
+    }
+
+    public async Task<PipelineResult?> LoadLatestResultAsync(string projectDirectory, CancellationToken ct = default)
+    {
+        var result = await LocalFiles.ReadRecoverableJsonAsync<PipelineResult>(Path.Combine(projectDirectory, "latest-result.json"), ct);
+        return result is null ? null : ResolveResult(projectDirectory, result);
+    }
+
+    private static PipelineResult ResolveResult(string project, PipelineResult result) => result with
+    {
+        PatchDirectory = Path.IsPathRooted(result.PatchDirectory) ? result.PatchDirectory : LocalFiles.UnderRoot(project, result.PatchDirectory)
+    };
+
+    private static PipelineResult PersistedResult(string project, PipelineResult result) => result with
+    {
+        PatchDirectory = Path.GetRelativePath(project, result.PatchDirectory)
+    };
+
+    public Task<PipelineResult> RunAsync(GameSession session, ITranslationProvider provider,
+        TranslationPolicy policy, RunOptions? options = null, IProgress<PipelineProgress>? progress = null,
+        CancellationToken ct = default) => RunAsync(session, new[] { provider }, policy, options, progress, ct);
+
+    public async Task<PipelineResult> RunAsync(GameSession session, IReadOnlyList<ITranslationProvider> translationProviders,
+        TranslationPolicy policy, RunOptions? options = null, IProgress<PipelineProgress>? progress = null,
+        CancellationToken ct = default) =>
+        (await RunCoreAsync(session, translationProviders, policy, options, progress, true, ct))!;
+
+    public async Task TranslateOnlyAsync(GameSession session, IReadOnlyList<ITranslationProvider> providers,
+        TranslationPolicy policy, RunOptions? options = null, IProgress<PipelineProgress>? progress = null,
+        CancellationToken ct = default) => await RunCoreAsync(session, providers, policy, options, progress, false, ct);
+
+    private async Task<PipelineResult?> RunCoreAsync(GameSession session, IReadOnlyList<ITranslationProvider> translationProviders,
+        TranslationPolicy policy, RunOptions? options, IProgress<PipelineProgress>? progress, bool buildPatch,
+        CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(translationProviders);
+        var providers = translationProviders.ToArray();
+        if (providers.Length == 0 || providers.Any(provider => provider is null))
+            throw new ArgumentException("翻译 API 链至少需要一个有效配置。", nameof(translationProviders));
         options ??= new();
         if (options.BatchSize is < 1 or > 80) throw new ArgumentOutOfRangeException(nameof(options), "每批文本数必须在 1 到 80 之间。");
+        if (providers.Any(provider => provider.MaximumBatchSize < 1))
+            throw new ArgumentException("翻译 API 的批次上限必须大于零。", nameof(translationProviders));
+        var batchSize = Math.Min(options.BatchSize, providers.Min(provider => provider.MaximumBatchSize));
+        var retranslating = options.RetranslationId is not null;
+        if (retranslating && (options.CandidateOnly || buildPatch || options.TrialUnitIds is null
+            || !Guid.TryParseExact(options.RetranslationId, "N", out _)))
+            throw new ArgumentException("重新翻译必须指定有效任务标识和文本选区。", nameof(options));
         if (string.IsNullOrWhiteSpace(policy.TargetLanguage)) throw new ArgumentException("目标语言不能为空。", nameof(policy));
         var allUnits = session.Extraction.Units;
         var trialIds = options.TrialUnitIds?.ToHashSet(StringComparer.Ordinal);
@@ -114,81 +271,76 @@ public sealed class TranslationPipeline(string dataDirectory, string? diagnostic
             throw new ArgumentException("请重新选择试译文本：选区为空或包含不属于当前游戏的文本。", nameof(options));
         var isTrial = trialIds is not null;
         await using var projectLock = AcquireProjectLock(session.ProjectDirectory);
-        var memory = new TranslationMemory(Path.Combine(DataDirectory, "memory", session.Id));
+        var memory = new TranslationMemory(Path.Combine(session.ProjectDirectory, "memory"), Path.Combine(DataDirectory, "memory", session.Id));
         var completed = new Dictionary<string, string>(StringComparer.Ordinal);
         var cacheHits = 0;
         long inputTokens = 0, outputTokens = 0;
         var estimated = false;
         var stage = "准备";
         var runId = Guid.NewGuid().ToString("N");
+        var taskDirectory = Path.Combine(session.ProjectDirectory, "tasks", runId);
+        Directory.CreateDirectory(taskDirectory);
+        var logDirectory = diagnosticDirectory ?? Path.Combine(session.ProjectDirectory, "logs");
         var started = DateTimeOffset.UtcNow;
         var responseDirectory = Path.Combine(session.ProjectDirectory, "responses");
         Directory.CreateDirectory(responseDirectory);
+        var validationFeedbackPath = Path.Combine(session.ProjectDirectory, "translation-errors.json");
+        var previousIssues = new List<RecordedTranslationIssue>();
         async Task ReportAsync(string nextStage, string message, CancellationToken token = default)
         {
             stage = nextStage;
             var update = new PipelineProgress(stage, completed.Count, units.Count, cacheHits,
                 inputTokens + outputTokens, message);
-            await LocalFiles.WriteJsonAsync(Path.Combine(session.ProjectDirectory, "job.json"), new
+            var state = new
             {
                 runId, started, updatedAt = DateTimeOffset.UtcNow, session.GameDirectory,
                 adapterId = session.Adapter.Id, adapterVersion = session.Adapter.Version,
                 sourceHashes = session.Sources, isTrial, trialUnitIds = trialIds, progress = update
-            }, token);
+            };
+            await LocalFiles.WriteJsonAsync(Path.Combine(taskDirectory, "job.json"), state, token);
+            await LocalFiles.WriteJsonAsync(Path.Combine(session.ProjectDirectory, "job.json"), state, token);
             progress?.Report(update);
         }
-        try
+        string ApiLabel(int index) => providers[index].DisplayName is { Length: > 0 } name
+            ? $"{name}({index + 1}/{providers.Length})"
+            : $"第 {index + 1} / {providers.Length} 个翻译 API";
+
+        async Task<(TranslationResponse Response, ITranslationProvider Provider, string ResponsePath, string IntentPath)>
+            TranslateBatchAsync(TranslationUnit[] representatives)
         {
-            await VerifySourcesAsync(session.SourceDirectory, session.Sources, ct);
-            if (isTrial)
-                await LocalFiles.WriteJsonAsync(Path.Combine(session.ProjectDirectory, "trial-selection.json"), units.Select(u => u.Id).ToArray(), ct);
-            await ReportAsync("查询缓存", "正在复用已提交且上下文兼容的译文。", ct);
-            await RecoverResponsesAsync(responseDirectory, memory, units, policy, session.Adapter, ct);
-            foreach (var unit in units)
+            var feedback = representatives.Select(unit => new
+            {
+                unit.Id,
+                Messages = (IReadOnlyList<string>)previousIssues.Where(issue => issue.UnitId == unit.Id
+                    && (issue.MemoryKey is null || issue.MemoryKey == memory.Key(unit, policy)))
+                    .Select(issue => issue.Message).Distinct(StringComparer.Ordinal).ToArray()
+            }).Where(item => item.Messages.Count > 0).ToDictionary(item => item.Id, item => item.Messages, StringComparer.Ordinal);
+            var request = new TranslationRequest(representatives, policy.TargetLanguage, policy.Terminology, policy.Style)
+            { ValidationFeedback = feedback.Count > 0 ? feedback : null };
+            var anyNewRefusal = false;
+            for (var index = 0; index < providers.Length; index++)
             {
                 ct.ThrowIfCancellationRequested();
-                var translation = await memory.FindAsync(unit, policy, ct);
-                if (translation is not null && ValidateTranslation(session.Adapter, unit, translation).Count == 0)
-                {
-                    completed.Add(unit.Id, translation);
-                    cacheHits++;
-                }
-            }
-            var groups = units.Where(u => !completed.ContainsKey(u.Id)).GroupBy(u => memory.Key(u, policy))
-                .Select(g => g.ToArray()).ToArray();
-            if (!options.RetryUncertainRequests)
-            {
-                var missingKeys = groups.Select(g => memory.Key(g[0], policy)).ToHashSet(StringComparer.Ordinal);
-                foreach (var intentFile in Directory.EnumerateFiles(responseDirectory, "*.request.json"))
-                {
-                    var intent = await LocalFiles.ReadJsonAsync<TranslationIntent>(intentFile, ct);
-                    var receipt = intentFile[..^".request.json".Length] + ".json";
-                    if (!File.Exists(receipt) && !File.Exists(intentFile[..^".request.json".Length] + ".refusal.json") &&
-                        intent?.Units?.Any(u => missingKeys.Contains(u.MemoryKey)) == true)
-                        throw new UncertainRequestException("上次请求的部分文本没有响应记录，服务商可能已处理或计费。请确认是否重新发送；调整批大小也不会自动重发这些文本。");
-                }
-            }
-            foreach (var batch in Batch(groups, options.BatchSize))
-            {
-                ct.ThrowIfCancellationRequested();
-                var representatives = batch.Select(g => g[0]).ToArray();
+                var provider = providers[index];
+                var providerLabel = ApiLabel(index);
                 var requestKey = LocalFiles.HashText(JsonSerializer.Serialize(new
                 {
                     Provider = provider.Identity,
                     Units = representatives.Select(u => new { u.Id, Key = memory.Key(u, policy) })
-                }));
+                }) + (options.CandidateOnly ? "\ncandidate" : "")
+                    + (retranslating ? "\nretranslate:" + options.RetranslationId : ""));
                 var responsePath = Path.Combine(responseDirectory, requestKey + ".json");
                 var intentPath = Path.Combine(responseDirectory, requestKey + ".request.json");
                 var intent = new TranslationIntent(requestKey, provider.Identity, DateTimeOffset.UtcNow,
-                    representatives.Select(u => new PendingTranslation(u.Id, memory.Key(u, policy))).ToArray());
-                var response = await LocalFiles.ReadJsonAsync<TranslationResponse>(responsePath, ct);
-                if (response is null)
+                    representatives.Select(u => new PendingTranslation(u.Id, memory.Key(u, policy))).ToArray(), options.CandidateOnly, options.RetranslationId);
+                var response = await LocalFiles.ReadRecoverableJsonAsync<TranslationResponse>(responsePath, ct);
+                if (response is not null) return (response, provider, responsePath, intentPath);
+                var recordedRefusal = await FindRecordedRefusalAsync(responseDirectory, intent, ct);
+                if (recordedRefusal is null)
                 {
-                    if (await FindRecordedRefusalAsync(responseDirectory, intent, ct) is not null)
-                        throw new TranslationRefusedException(alreadyRecorded: true);
                     if (File.Exists(intentPath) && !options.RetryUncertainRequests)
                         throw new UncertainRequestException("上次翻译请求未记录到响应，服务商可能已处理或计费。请确认是否重新发送这批文本；已保存译文不会重发。");
-                    await ReportAsync("翻译", $"正在翻译 {representatives.Length} 条新文本；已复用 {cacheHits} 条。", ct);
+                    await ReportAsync("翻译", $"正在使用 {providerLabel} 翻译 {representatives.Length} 条新文本。", ct);
                     await LocalFiles.WriteJsonAsync(intentPath, intent, ct);
                     const int maximumRetries = 5;
                     for (var attempt = 0; ; attempt++)
@@ -196,8 +348,7 @@ public sealed class TranslationPipeline(string dataDirectory, string? diagnostic
                         ct.ThrowIfCancellationRequested();
                         try
                         {
-                            response = await provider.TranslateAsync(new TranslationRequest(representatives,
-                                policy.TargetLanguage, policy.Terminology, policy.Style), ct);
+                            response = await provider.TranslateAsync(request, ct);
                             break;
                         }
                         catch (TranslationProviderException error)
@@ -214,32 +365,107 @@ public sealed class TranslationPipeline(string dataDirectory, string? diagnostic
                             {
                                 await LocalFiles.WriteJsonAsync(Path.Combine(responseDirectory, requestKey + ".refusal.json"),
                                     new TranslationRefusal(intent, DateTimeOffset.UtcNow, error.Diagnostic), CancellationToken.None);
-                                throw new TranslationRefusedException();
+                                DeleteReceipt(intentPath);
+                                anyNewRefusal = true;
+                                break;
                             }
+                            // Operational and response-format errors retry this provider only.
                             if (attempt == maximumRetries)
                             {
-                                File.Delete(intentPath);
+                                if (!error.OutcomeUnknown) DeleteReceipt(intentPath);
                                 throw new TranslationRetriesExhaustedException(error);
                             }
-                            await ReportAsync("等待重试", $"API 请求失败：{error.FailureSummary}。10 秒后进行第 {attempt + 1} / {maximumRetries} 次重试。", ct);
+                            await ReportAsync("等待重试", $"{providerLabel} 请求失败：{error.FailureSummary}。10 秒后进行第 {attempt + 1} / {maximumRetries} 次重试。", ct);
                             await Task.Delay(TimeSpan.FromSeconds(10), ct);
-                            await ReportAsync("翻译", $"正在进行第 {attempt + 1} / {maximumRetries} 次重试。", ct);
+                            await ReportAsync("翻译", $"正在对 {providerLabel} 进行第 {attempt + 1} / {maximumRetries} 次重试。", ct);
                         }
                     }
-                    // Persist the complete response before committing entries. A restart can finish the commit without another API call.
-                    await LocalFiles.WriteJsonAsync(responsePath, response, CancellationToken.None);
+                    if (response is not null)
+                    {
+                        // Persist before committing entries so a restart can recover without another API call.
+                        await LocalFiles.WriteJsonAsync(responsePath, response, CancellationToken.None);
+                        return (response, provider, responsePath, intentPath);
+                    }
                 }
+                if (index + 1 < providers.Length)
+                    await ReportAsync("切换翻译 API", $"{providerLabel} " +
+                        (recordedRefusal is null ? "拒绝处理当前内容" : "已有当前内容的拒绝记录，已跳过") +
+                        $"，正在交给 {ApiLabel(index + 1)}。", ct);
+            }
+            throw new TranslationRefusedException(alreadyRecorded: !anyNewRefusal);
+        }
+
+        try
+        {
+            await VerifySourcesAsync(session.SourceDirectory, session.Sources, ct);
+            await memory.InitializeAsync(ct);
+            previousIssues = await ReadTranslationIssuesAsync(validationFeedbackPath, ct);
+            if (isTrial && !options.CandidateOnly)
+                await LocalFiles.WriteJsonAsync(Path.Combine(session.ProjectDirectory, "trial-selection.json"), units.Select(u => u.Id).ToArray(), ct);
+            await ReportAsync("查询缓存", "正在加载历史译文。", ct);
+            if (!options.CandidateOnly && !retranslating)
+                await RecoverResponsesAsync(responseDirectory, memory, units, policy, session.Adapter, ct);
+            var edits = await TranslationEdits.LoadAsync(session.ProjectDirectory, ct);
+            await CleanupCommittedResponsesAsync(session.ProjectDirectory, memory, ct);
+            foreach (var unit in units)
+            {
+                ct.ThrowIfCancellationRequested();
+                if (options.CandidateOnly) continue;
+                var edit = edits.Find(unit, policy.TargetLanguage);
+                if (retranslating && edit?.RetranslationId != options.RetranslationId) continue;
+                var translation = edit?.Text ?? await memory.FindAsync(unit, policy, ct);
+                // Unfinished manual corrections are protected from model replacement too.
+                if (translation is not null && ((!retranslating && edit is not null) || ValidateTranslation(session.Adapter, unit, translation).Count == 0))
+                {
+                    completed.Add(unit.Id, translation);
+                    cacheHits++;
+                }
+            }
+            options.TranslationUpdates?.Report(units.Where(unit => completed.ContainsKey(unit.Id)
+                && (retranslating || edits.Find(unit, policy.TargetLanguage) is null)).ToDictionary(unit => unit.Id, unit => completed[unit.Id]));
+            await ReportAsync("查询缓存", retranslating ? $"重新翻译所选 {units.Count} 条文本；本次任务已完成 {cacheHits} 条，其余将重新请求 API。"
+                : $"已加载 {cacheHits} 条历史译文。", ct);
+            if (batchSize < options.BatchSize)
+                await ReportAsync("翻译", $"根据翻译 API 支持的输入格式，每次提交 {batchSize} 条文本，成功后立即保存。", ct);
+            var groups = units.Where(u => !completed.ContainsKey(u.Id)).GroupBy(u => memory.Key(u, policy))
+                .Select(g => g.ToArray()).ToArray();
+            if (!options.RetryUncertainRequests)
+            {
+                var missingKeys = groups.Select(g => memory.Key(g[0], policy)).ToHashSet(StringComparer.Ordinal);
+                foreach (var intentFile in Directory.EnumerateFiles(responseDirectory, "*.request.json"))
+                {
+                    var intent = await LocalFiles.ReadJsonAsync<TranslationIntent>(intentFile, ct);
+                    var receipt = intentFile[..^".request.json".Length] + ".json";
+                    if (!File.Exists(receipt) && !File.Exists(intentFile[..^".request.json".Length] + ".refusal.json") &&
+                        intent?.CandidateOnly == options.CandidateOnly && intent.RetranslationId == options.RetranslationId
+                        && intent.Units?.Any(u => missingKeys.Contains(u.MemoryKey)) == true)
+                        throw new UncertainRequestException("上次请求的部分文本没有响应记录，服务商可能已处理或计费。请确认是否重新发送；调整批大小也不会自动重发这些文本。");
+                }
+            }
+            foreach (var plannedBatch in Batch(groups, batchSize))
+            {
+                ct.ThrowIfCancellationRequested();
+                var batch = plannedBatch;
+                if (!options.CandidateOnly && !retranslating)
+                {
+                    edits = await TranslationEdits.LoadAsync(session.ProjectDirectory, ct);
+                    batch = plannedBatch.Select(group => group.Where(unit =>
+                    {
+                        if (edits.Find(unit, policy.TargetLanguage) is not { } edit) return true;
+                        completed[unit.Id] = edit.Text; cacheHits++; return false;
+                    }).ToArray()).Where(group => group.Length > 0).ToArray();
+                    if (batch.Length == 0) continue;
+                }
+                var representatives = batch.Select(g => g[0]).ToArray();
+                var (response, provider, responsePath, intentPath) = await TranslateBatchAsync(representatives);
                 inputTokens += response.Usage.InputTokens;
                 outputTokens += response.Usage.OutputTokens;
                 estimated |= response.Usage.Estimated;
                 var expected = representatives.Select(u => u.Id).ToHashSet(StringComparer.Ordinal);
-                if (response.Translations.Count != expected.Count || response.Translations.Keys.Any(id => !expected.Contains(id)))
-                {
-                    File.Move(responsePath, responsePath + ".invalid-" + Guid.NewGuid().ToString("N"));
-                    File.Delete(intentPath);
-                    throw new InvalidDataException("模型返回的文本 ID 与请求不一致，响应已保存，尚未回填资源。");
-                }
                 var issues = new List<ValidationIssue>();
+                if (response.Translations.Keys.Any(id => !expected.Contains(id)))
+                    issues.Add(new("unexpected-unit", "模型返回了请求之外的文本 ID。"));
+                var validEntries = new List<MemoryEntry>();
                 foreach (var group in batch)
                 {
                     var representative = group[0];
@@ -250,18 +476,41 @@ public sealed class TranslationPipeline(string dataDirectory, string? diagnostic
                     }
                     var validation = ValidateTranslation(session.Adapter, representative, translation);
                     if (validation.Count != 0) { issues.AddRange(validation); continue; }
-                    await memory.StoreAsync(representative, policy, translation, provider.Identity, CancellationToken.None);
+                    validEntries.Add(new(memory.Key(representative, policy), representative.SourceText, representative.Context,
+                        translation, provider.Identity, DateTimeOffset.UtcNow));
                     foreach (var unit in group) completed[unit.Id] = translation;
                     cacheHits += group.Length - 1;
                 }
+                if (retranslating && validEntries.Count > 0)
+                {
+                    // Selected units can share a memory key with unselected units. Store accepted
+                    // retranslations by unit ID, leaving unrelated texts and old drafts intact.
+                    edits = await TranslationEdits.LoadAsync(session.ProjectDirectory, CancellationToken.None);
+                    var replacements = new Dictionary<string, TranslationEdit>(edits.Entries, StringComparer.Ordinal);
+                    var candidates = new Dictionary<string, TranslationEdit>(edits.Candidates ?? new Dictionary<string, TranslationEdit>(), StringComparer.Ordinal);
+                    foreach (var unit in batch.SelectMany(group => group).Where(unit => completed.ContainsKey(unit.Id)))
+                    {
+                        replacements[unit.Id] = new(TranslationEdits.Signature(unit), policy.TargetLanguage,
+                            completed[unit.Id], false, DateTimeOffset.UtcNow, options.RetranslationId, IsGenerated: true);
+                        candidates.Remove(unit.Id);
+                    }
+                    await new TranslationEdits(1, replacements, candidates).SaveAsync(session.ProjectDirectory, CancellationToken.None);
+                }
+                else if (!options.CandidateOnly && !retranslating) await memory.StoreBatchAsync(validEntries, CancellationToken.None);
+                options.TranslationUpdates?.Report(batch.SelectMany(group => group)
+                    .Where(unit => completed.ContainsKey(unit.Id)).ToDictionary(unit => unit.Id, unit => completed[unit.Id]));
+                var feedbackChanged = previousIssues.RemoveAll(issue => issue.UnitId is { } id && expected.Contains(id)) > 0;
+                previousIssues.AddRange(issues.Select(issue => new RecordedTranslationIssue(issue.Code, issue.Message, issue.UnitId,
+                    representatives.FirstOrDefault(unit => unit.Id == issue.UnitId) is { } failed ? memory.Key(failed, policy) : null)));
+                if (feedbackChanged || issues.Count > 0)
+                    await LocalFiles.WriteJsonAsync(validationFeedbackPath, previousIssues, CancellationToken.None);
                 if (issues.Count != 0)
                 {
-                    await LocalFiles.WriteJsonAsync(Path.Combine(session.ProjectDirectory, "translation-errors.json"), issues, CancellationToken.None);
-                    if (diagnosticDirectory is not null)
+                    if (logDirectory is not null)
                     {
                         try
                         {
-                            await LocalFiles.WriteJsonAsync(Path.Combine(diagnosticDirectory, $"validation-{DateTime.UtcNow:yyyyMMdd-HHmmssfff}-{Guid.NewGuid():N}.json"),
+                            await LocalFiles.WriteJsonAsync(Path.Combine(logDirectory, $"validation-{DateTime.UtcNow:yyyyMMdd-HHmmssfff}-{Guid.NewGuid():N}.json"),
                                 new
                                 {
                                     timestamp = DateTimeOffset.UtcNow, session.Id, adapterId = session.Adapter.Id, adapterVersion = session.Adapter.Version,
@@ -280,7 +529,8 @@ public sealed class TranslationPipeline(string dataDirectory, string? diagnostic
                     }
                     // Valid entries survive; the failed subset receives a new batch key on retry.
                     File.Move(responsePath, responsePath + ".invalid-" + Guid.NewGuid().ToString("N"));
-                    File.Delete(intentPath);
+                    DeleteReceipt(responsePath);
+                    DeleteReceipt(intentPath);
                     int failedUnits = issues.Select(issue => issue.UnitId).Distinct().Count();
                     var first = issues[0];
                     var failedUnit = representatives.FirstOrDefault(unit => unit.Id == first.UnitId);
@@ -295,79 +545,24 @@ public sealed class TranslationPipeline(string dataDirectory, string? diagnostic
                     throw new InvalidDataException($"{failedUnits} 条译文未通过格式检查：{location}{reason} 有效译文已保存，继续时只重试失败文本。");
                 }
                 await ReportAsync("翻译", $"已完成 {completed.Count} / {units.Count} 条文本。", ct);
+                // Translations and usage are durable. Receipts are only needed until this point.
+                DeleteReceipt(responsePath);
+                DeleteReceipt(intentPath);
             }
-            await VerifySourcesAsync(session.SourceDirectory, session.Sources, ct);
-            // Original-text fallbacks belong only to the patch; they are never committed as translations.
-            var buildTexts = isTrial
-                ? allUnits.ToDictionary(u => u.Id, u => completed.GetValueOrDefault(u.Id, u.SourceText), StringComparer.Ordinal)
-                : completed;
-            var buildKey = LocalFiles.HashText(JsonSerializer.Serialize(new
+            if (!buildPatch)
             {
-                session.Adapter.Id, session.Adapter.Version, session.Sources, isTrial,
-                TrialUnitIds = trialIds?.Order(StringComparer.Ordinal).ToArray(),
-                Translations = buildTexts.OrderBy(k => k.Key, StringComparer.Ordinal)
-            }));
-            var patchDirectory = Path.Combine(session.ProjectDirectory, "patches", buildKey);
-            var reportPath = Path.Combine(patchDirectory, "translation-report.json");
-            var existing = await LocalFiles.ReadJsonAsync<PipelineResult>(reportPath, ct);
-            if (existing is not null && await PatchIsIntactAsync(patchDirectory, ct))
-            {
-                var manifest = await LocalFiles.ReadJsonAsync<PatchManifest>(Path.Combine(patchDirectory, PatchInstaller.ManifestFilename), ct);
-                var executableCheck = await ValidateExecutablesAsync(session, patchDirectory, manifest!.Files.Select(file => file.RelativePath).ToArray(), ct);
-                if (!executableCheck.Passed)
-                    throw new InvalidDataException("已有补丁未通过程序加载检查：" + string.Join("；", executableCheck.Issues.Select(issue => issue.Message)));
-                await RecordCompatibilityAsync(session, existing, ct);
-                var reused = existing with { CacheHits = cacheHits, TranslationUsage = new(inputTokens, outputTokens, estimated) };
-                await LocalFiles.WriteJsonAsync(Path.Combine(session.ProjectDirectory, "latest-result.json"), reused, ct);
-                await ReportAsync(isTrial ? "试译完成" : "完成", isTrial
-                    ? "已复用试译补丁。可安装后进入所选片段检查显示效果；其余文本保留原文。"
-                    : "译文和补丁均未变化，直接复用已完成结果。", ct);
-                return reused;
+                await ReportAsync("翻译完成", retranslating ? "所选文本已重新翻译并保存，可以继续校对或生成补丁。"
+                    : options.CandidateOnly ? "候选译文已生成，采用后才会替换当前译文。"
+                    : "本次翻译已保存，可以继续校对或生成补丁。", ct);
+                return null;
             }
-            await ReportAsync("生成补丁", "正在回填译文并生成游戏目录所需文件。", ct);
-            var staging = patchDirectory + ".pending-" + Guid.NewGuid().ToString("N");
-            Directory.CreateDirectory(staging);
-            var build = await session.Adapter.BuildPatchAsync(session.SourceDirectory, buildTexts, staging, ct);
-            if (build.Files.Count == 0) throw new InvalidDataException("Adapter 未生成补丁文件。");
-            if (build.Files.Distinct(StringComparer.OrdinalIgnoreCase).Count() != build.Files.Count)
-                throw new InvalidDataException("Adapter 生成了重复的文件路径。");
-            await ReportAsync("校验补丁", "正在校验资源结构、文本和文件哈希。", ct);
-            var validationResult = await session.Adapter.ValidatePatchAsync(session.SourceDirectory, staging, ct);
-            var executableValidation = await ValidateExecutablesAsync(session, staging, build.Files, ct);
-            validationResult = validationResult with
-            {
-                Passed = validationResult.Passed && executableValidation.Passed,
-                Issues = validationResult.Issues.Concat(executableValidation.Issues).ToArray()
-            };
-            if (!validationResult.Passed)
-            {
-                await LocalFiles.WriteJsonAsync(Path.Combine(staging, "validation-errors.json"), validationResult, ct);
-                throw new InvalidDataException("补丁未通过结构校验：" + string.Join("；", validationResult.Issues.Select(i => i.Message).Take(5)));
-            }
-            var patchFiles = new List<PatchFile>();
-            foreach (var relative in build.Files)
-                patchFiles.Add(new(relative, await LocalFiles.HashFileAsync(LocalFiles.UnderRoot(staging, relative), ct),
-                    session.Sources.FirstOrDefault(f => f.RelativePath.Equals(relative, StringComparison.OrdinalIgnoreCase))?.Sha256));
-            await LocalFiles.WriteJsonAsync(Path.Combine(staging, PatchInstaller.ManifestFilename), new PatchManifest(1, patchFiles), ct);
-            var result = new PipelineResult(patchDirectory, build.LaunchExecutable ?? session.Probe.OriginalExecutable,
-                allUnits.Count, cacheHits, new(inputTokens, outputTokens, estimated), validationResult,
-                session.Extraction.Warnings.Concat(build.Warnings).Distinct().ToArray(), Path.GetFileName(session.SourceDirectory),
-                isTrial, completed.Count);
-            await LocalFiles.WriteJsonAsync(Path.Combine(staging, "translation-report.json"), result, ct);
-            if (isTrial)
-                await LocalFiles.WriteJsonAsync(Path.Combine(staging, "trial-texts.json"), units.Select(u => new
-                {
-                    u.Id, u.ResourcePath, u.Locator, u.Kind, u.Speaker, u.SourceText, translation = completed[u.Id]
-                }).ToArray(), ct);
-            if (Directory.Exists(patchDirectory))
-                Directory.Move(patchDirectory, patchDirectory + ".damaged-" + Guid.NewGuid().ToString("N"));
-            Directory.Move(staging, patchDirectory);
-            await LocalFiles.WriteJsonAsync(Path.Combine(session.ProjectDirectory, "latest-result.json"), result, ct);
-            await RecordCompatibilityAsync(session, result, ct);
-            await ReportAsync(isTrial ? "试译完成" : "完成", isTrial
-                ? $"已生成 {completed.Count} 条文本的试译补丁，其余文本保留原文。请在“汉化补丁”安装后进入所选片段验证。"
-                : "汉化补丁已生成。结构校验通过；游戏运行效果尚未验证。", ct);
+            edits = await TranslationEdits.LoadAsync(session.ProjectDirectory, ct);
+            foreach (var unit in units)
+                if (edits.Find(unit, policy.TargetLanguage) is { } edit) completed[unit.Id] = edit.Text;
+            var result = await BuildSnapshotAsync(session, completed, cacheHits, new(inputTokens, outputTokens, estimated), progress, ct);
+            await ReportAsync(result.IsTrial ? "试译完成" : "完成", "补丁已生成并通过结构校验，可安装后进入游戏验证。", ct);
             return result;
+
         }
         catch (OperationCanceledException)
         {
@@ -390,6 +585,23 @@ public sealed class TranslationPipeline(string dataDirectory, string? diagnostic
         {
             await ReportAsync("失败", error.Message);
             throw;
+        }
+    }
+
+    private sealed record RecordedTranslationIssue(string Code, string Message, string? UnitId, string? MemoryKey = null);
+
+    private static async Task<List<RecordedTranslationIssue>> ReadTranslationIssuesAsync(string path, CancellationToken ct)
+    {
+        try
+        {
+            var issues = await LocalFiles.ReadJsonAsync<List<RecordedTranslationIssue>>(path, ct);
+            return issues?.Where(issue => issue is not null && !string.IsNullOrWhiteSpace(issue.Message)).ToList() ?? [];
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException)
+        {
+            // Optional retry hints must not prevent translating from the source and committed memory.
+            System.Diagnostics.Debug.WriteLine("Could not read translation feedback: " + error.GetType().Name);
+            return [];
         }
     }
 
@@ -458,25 +670,84 @@ public sealed class TranslationPipeline(string dataDirectory, string? diagnostic
     private static async Task RecoverResponsesAsync(string directory, TranslationMemory memory,
         IReadOnlyList<TranslationUnit> units, TranslationPolicy policy, IGameAdapter adapter, CancellationToken ct)
     {
-        var byKey = units.GroupBy(u => memory.Key(u, policy)).ToDictionary(g => g.Key, g => g.First(), StringComparer.Ordinal);
+        var byKey = new Dictionary<string, TranslationUnit>(StringComparer.Ordinal);
+        foreach (var unit in units)
+            if (await memory.FindAsync(unit, policy, ct) is null) byKey.TryAdd(memory.Key(unit, policy), unit);
+        if (byKey.Count == 0) return;
+        var recovered = new Dictionary<string, MemoryEntry>(StringComparer.Ordinal);
         foreach (var intentPath in Directory.EnumerateFiles(directory, "*.request.json"))
         {
-            var intent = await LocalFiles.ReadJsonAsync<TranslationIntent>(intentPath, ct);
-            if (intent?.Units is null) continue;
+            var intent = await LocalFiles.ReadRecoverableJsonAsync<TranslationIntent>(intentPath, ct);
+            if (intent?.Units is null || intent.CandidateOnly || intent.RetranslationId is not null) continue;
+            if (!intent.Units.Any(unit => byKey.ContainsKey(unit.MemoryKey))) continue;
             var responsePath = intentPath[..^".request.json".Length] + ".json";
-            var response = await LocalFiles.ReadJsonAsync<TranslationResponse>(responsePath, ct);
+            var response = await LocalFiles.ReadRecoverableJsonAsync<TranslationResponse>(responsePath, ct);
             if (response is null) continue;
-            if (response.Translations.Count != intent.Units.Count ||
-                response.Translations.Keys.Any(id => !intent.Units.Any(u => u.Id == id))) continue;
             foreach (var requested in intent.Units)
             {
                 if (!byKey.TryGetValue(requested.MemoryKey, out var current) ||
                     !response.Translations.TryGetValue(requested.Id, out var translated) ||
                     ValidateTranslation(adapter, current, translated).Count != 0) continue;
-                if (await memory.FindAsync(current, policy, ct) is null)
-                    await memory.StoreAsync(current, policy, translated, intent.Provider, ct);
+                recovered[requested.MemoryKey] = new(requested.MemoryKey, current.SourceText, current.Context,
+                    translated, intent.Provider, DateTimeOffset.UtcNow);
             }
         }
+        await memory.StoreBatchAsync(recovered.Values, ct);
+    }
+
+    public static async Task CleanupCommittedResponsesAsync(string projectDirectory, TranslationMemory memory, CancellationToken ct = default)
+    {
+        try
+        {
+            await memory.InitializeAsync(ct);
+            foreach (var path in await FindCommittedResponseFilesAsync(Path.Combine(projectDirectory, "responses"), memory.Entries, ct))
+                DeleteReceipt(path);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or InvalidDataException)
+        { System.Diagnostics.Debug.WriteLine("Could not clean translation receipts: " + error.Message); }
+    }
+
+    internal static async Task<IReadOnlyList<string>> FindCommittedResponseFilesAsync(string directory,
+        IReadOnlyDictionary<string, MemoryEntry> entries, CancellationToken ct)
+    {
+        var files = new List<string>();
+        if (!Directory.Exists(directory)) return files;
+        foreach (var intentPath in Directory.EnumerateFiles(directory, "*.request.json"))
+        {
+            ct.ThrowIfCancellationRequested();
+            try
+            {
+                var key = Path.GetFileName(intentPath)[..^".request.json".Length];
+                if (key.Length != 64 || !key.All(Uri.IsHexDigit)) continue;
+                var intent = await LocalFiles.ReadJsonAsync<TranslationIntent>(intentPath, ct);
+                if (intent?.RequestKey != key || intent.CandidateOnly || intent.RetranslationId is not null || intent.Units is not { Count: > 0 } ||
+                    intent.Units.Any(unit => unit is null || unit.Id is null || unit.MemoryKey is null || !entries.ContainsKey(unit.MemoryKey))) continue;
+                var responsePath = Path.Combine(directory, key + ".json");
+                var response = await LocalFiles.ReadJsonAsync<TranslationResponse>(responsePath, ct);
+                // Only discard confirmed successes. Failed, incomplete or unrecognizable records stay available.
+                if (response?.Translations is null || response.Translations.Count != intent.Units.Count ||
+                    intent.Units.Select(unit => unit.Id).Distinct(StringComparer.Ordinal).Count() != intent.Units.Count ||
+                    intent.Units.Any(unit => !response.Translations.TryGetValue(unit.Id, out var text) ||
+                        text != entries[unit.MemoryKey].Translation)) continue;
+                files.Add(responsePath);
+                files.Add(intentPath);
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException)
+            {
+                System.Diagnostics.Debug.WriteLine("Could not inspect translation receipt: " + error.Message);
+            }
+        }
+        return files;
+    }
+
+    private static void DeleteReceipt(string path)
+    {
+        // An old recovery copy must not resurrect a completed request. Failure to tidy up
+        // does not invalidate committed translations; the next run can try again.
+        foreach (var candidate in new[] { path + ".bak", path })
+            try { File.Delete(candidate); }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+            { System.Diagnostics.Debug.WriteLine("Could not remove translation receipt: " + error.Message); }
     }
 
     private static IReadOnlyList<ValidationIssue> ValidateTranslation(IGameAdapter adapter, TranslationUnit unit, string text) =>

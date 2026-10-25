@@ -14,7 +14,8 @@ public sealed class PatchInstallerTests : IDisposable
     private readonly string _root;
     private readonly string _game;
     private readonly string _patch;
-    private readonly PatchInstaller _installer = new();
+    private readonly string _project;
+    private readonly PatchInstaller _installer;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     public PatchInstallerTests()
@@ -23,6 +24,8 @@ public sealed class PatchInstallerTests : IDisposable
         _root = Path.Combine(FindWorkspace(), "target", "patch-installer-tests", Guid.NewGuid().ToString("N"));
         _game = Path.Combine(_root, "game");
         _patch = Path.Combine(_root, "patch");
+        _project = Path.Combine(_root, "project");
+        _installer = new(_project);
         Directory.CreateDirectory(_game);
         Directory.CreateDirectory(_patch);
     }
@@ -139,6 +142,57 @@ public sealed class PatchInstallerTests : IDisposable
         Assert.Equal("same bytes", await ReadGameAsync("extra.dll"));
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RunningGameBlocksChangesAndOperationCanResumeAfterExit(bool restore)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        await WriteGameAsync("script.dat", "original");
+        await WritePatchAsync(("script.dat", "translated"));
+        if (restore) await _installer.InstallAsync(_game, _patch);
+        string? journalBefore = File.Exists(JournalPath) ? await File.ReadAllTextAsync(JournalPath) : null;
+
+        // A real process beneath the game root also covers launchers in subdirectories.
+        string executable = GamePath("tools/running-game.exe");
+        Directory.CreateDirectory(Path.GetDirectoryName(executable)!);
+        File.Copy(Path.Combine(Environment.SystemDirectory, "cmd.exe"), executable);
+        var start = new ProcessStartInfo(executable)
+        {
+            UseShellExecute = false, CreateNoWindow = true, WorkingDirectory = _game,
+            RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true
+        };
+        start.ArgumentList.Add("/d");
+        start.ArgumentList.Add("/q");
+        using (var process = Process.Start(start)!)
+        {
+            try
+            {
+                Assert.False(process.HasExited);
+                var error = await Assert.ThrowsAsync<IOException>(async () =>
+                {
+                    if (restore) await _installer.RestoreAsync(_game);
+                    else await _installer.InstallAsync(_game, _patch);
+                });
+                Assert.Contains("running-game.exe", error.Message);
+                Assert.Contains("请关闭后重试", error.Message);
+                Assert.Equal(restore ? "translated" : "original", await ReadGameAsync("script.dat"));
+                Assert.Equal(journalBefore, File.Exists(JournalPath) ? await File.ReadAllTextAsync(JournalPath) : null);
+                if (!restore) Assert.False(Directory.Exists(GamePath(".avg-translator")));
+            }
+            finally
+            {
+                if (!process.HasExited) process.Kill();
+                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                await process.WaitForExitAsync(timeout.Token);
+            }
+        }
+
+        if (restore) Assert.Empty((await _installer.RestoreAsync(_game)).Conflicts);
+        else Assert.Equal(1, (await _installer.InstallAsync(_game, _patch)).InstalledFiles);
+        Assert.Equal(restore ? "original" : "translated", await ReadGameAsync("script.dat"));
+    }
+
     [Fact]
     public async Task OriginalSourceSelectionRemainsOriginalAcrossPatchRevisions()
     {
@@ -167,6 +221,96 @@ public sealed class PatchInstallerTests : IDisposable
         Assert.Equal(GamePath("scr.aos"), await _installer.ResolveOriginalFileAsync(_game, "scr.aos"));
         Assert.Equal("official update", await ReadGameAsync("scr.aos"));
         await Assert.ThrowsAsync<IOException>(() => _installer.InstallAsync(_game, _patch));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task MissingRecordedBackupUsesAnotherVerifiedBackup(bool restore)
+    {
+        await WriteGameAsync("data/story.txt", "original");
+        await WriteGameAsync("data/story.txt.bak", "original");
+        await WritePatchAsync(("data/story.txt", "patch one"));
+        string recorded = Assert.Single((await _installer.InstallAsync(_game, _patch)).BackupFiles);
+        File.Delete(GamePath(recorded));
+        string journalBefore = await File.ReadAllTextAsync(JournalPath);
+
+        Assert.Equal(GamePath("data/story.txt.bak"), await _installer.ResolveOriginalFileAsync(_game, "data/story.txt"));
+        Assert.Equal(journalBefore, await File.ReadAllTextAsync(JournalPath));
+        Assert.False(File.Exists(GamePath(recorded)));
+        if (restore)
+        {
+            Assert.Empty((await _installer.RestoreAsync(_game)).Conflicts);
+            Assert.Equal("original", await ReadGameAsync("data/story.txt"));
+        }
+        else
+        {
+            await WritePatchAsync(("data/story.txt", "patch two"));
+            Assert.Equal(1, (await _installer.InstallAsync(_game, _patch)).InstalledFiles);
+            Assert.Equal("data/story.txt.bak", ReadJournal()["entries"]![0]!["backupRelativePath"]!.GetValue<string>());
+            Assert.Equal("patch two", await ReadGameAsync("data/story.txt"));
+        }
+        Assert.Equal("original", await ReadGameAsync("data/story.txt.bak"));
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task SnapshotRecoversDeletedOrModifiedBackup(bool corrupt, bool restore)
+    {
+        await WriteGameAsync("scr.aos", "original");
+        await WritePatchAsync(("scr.aos", "patch"));
+        string recorded = Assert.Single((await _installer.InstallAsync(_game, _patch)).BackupFiles);
+        string snapshots = Path.Combine(_root, "sources");
+        string snapshot = Path.Combine(snapshots, new string('a', 64), "scr.aos");
+        Directory.CreateDirectory(Path.GetDirectoryName(snapshot)!);
+        File.Copy(GamePath(recorded), snapshot);
+        if (corrupt) await WriteGameAsync(recorded, "modified backup");
+        else File.Delete(GamePath(recorded));
+        var installer = new PatchInstaller(_project, snapshots);
+
+        Assert.Equal(snapshot, await installer.ResolveOriginalFileAsync(_game, "scr.aos"));
+        Assert.Equal("patch", await ReadGameAsync("scr.aos"));
+        if (restore)
+        {
+            Assert.Equal(1, (await installer.RestoreAsync(_game)).RestoredFiles);
+            Assert.Equal("original", await ReadGameAsync("scr.aos"));
+        }
+        else
+        {
+            // Even reinstalling an unchanged patch repairs its missing original backup.
+            var installed = await installer.InstallAsync(_game, _patch);
+            Assert.Equal(1, installed.UnchangedFiles);
+            Assert.Equal("original", await ReadGameAsync(Assert.Single(installed.BackupFiles)));
+            Assert.Empty((await new PatchInstaller(_project).RestoreAsync(_game)).Conflicts);
+            Assert.Equal("original", await ReadGameAsync("scr.aos"));
+        }
+        if (corrupt) Assert.Equal("modified backup", await ReadGameAsync(recorded));
+        Assert.Equal("original", await File.ReadAllTextAsync(snapshot));
+    }
+
+    [Fact]
+    public async Task RecoveryRejectsWrongSnapshotAndIncompleteSnapshotWithoutTouchingGame()
+    {
+        await WriteGameAsync("scr.aos", "original");
+        await WritePatchAsync(("scr.aos", "patch one"));
+        File.Delete(GamePath(Assert.Single((await _installer.InstallAsync(_game, _patch)).BackupFiles)));
+        string snapshots = Path.Combine(_root, "sources");
+        foreach (var (name, text) in new[] { (new string('a', 64), "wrong version"), (new string('b', 64) + ".pending-x", "original") })
+        {
+            string directory = Path.Combine(snapshots, name);
+            Directory.CreateDirectory(directory);
+            await File.WriteAllTextAsync(Path.Combine(directory, "scr.aos"), text);
+        }
+        var installer = new PatchInstaller(_project, snapshots);
+        await Assert.ThrowsAsync<IOException>(() => installer.ResolveOriginalFileAsync(_game, "scr.aos"));
+        await WritePatchAsync(("scr.aos", "patch two"));
+        await Assert.ThrowsAsync<IOException>(() => installer.InstallAsync(_game, _patch));
+        Assert.Equal("scr.aos", Assert.Single((await installer.RestoreAsync(_game)).Conflicts));
+        Assert.Equal("patch one", await ReadGameAsync("scr.aos"));
+        Assert.False(File.Exists(GamePath("scr.aos.bak")));
     }
 
     [Fact]
@@ -425,9 +569,7 @@ public sealed class PatchInstallerTests : IDisposable
     {
         await WriteGameAsync("game.exe", "original");
         await WritePatchAsync(("game.exe", "patch"));
-        Directory.CreateDirectory(GamePath(".avg-translator"));
-        using var held = new FileStream(GamePath(".avg-translator/install.lock"), FileMode.CreateNew,
-            FileAccess.ReadWrite, FileShare.None);
+        using var held = await _installer.OpenInstallationAsync(_game);
 
         await Assert.ThrowsAsync<IOException>(() => _installer.InstallAsync(_game, _patch));
         Assert.Equal("original", await ReadGameAsync("game.exe"));
@@ -474,7 +616,7 @@ public sealed class PatchInstallerTests : IDisposable
 
     private Task<string> ReadGameAsync(string relativePath) => File.ReadAllTextAsync(GamePath(relativePath));
     private string GamePath(string relativePath) => Path.Combine(_game, relativePath.Replace('/', Path.DirectorySeparatorChar));
-    private string JournalPath => GamePath(".avg-translator/patch-journal.json");
+    private string JournalPath => _installer.JournalPath;
     private JsonObject ReadJournal() => JsonNode.Parse(File.ReadAllText(JournalPath))!.AsObject();
 
     private Task WriteJournalAsync(JsonObject journal)

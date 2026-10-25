@@ -7,7 +7,11 @@ public sealed record GameProbe(
 
 public sealed record TranslationUnit(
     string Id, string ResourcePath, string Locator, string SourceText,
-    string Context, string? Speaker = null, string Kind = "dialogue");
+    string Context, string? Speaker = null, string Kind = "dialogue")
+{
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<string>? ProtectedTokens { get; init; }
+}
 
 public sealed record ExtractionResult(
     IReadOnlyList<TranslationUnit> Units, IReadOnlyList<string> Warnings);
@@ -37,7 +41,10 @@ public interface IGameAdapter
 }
 
 public sealed record TranslationRequest(IReadOnlyList<TranslationUnit> Units, string TargetLanguage,
-    IReadOnlyDictionary<string, string> Terminology, string Style);
+    IReadOnlyDictionary<string, string> Terminology, string Style)
+{
+    public IReadOnlyDictionary<string, IReadOnlyList<string>>? ValidationFeedback { get; init; }
+}
 
 public sealed record TokenUsage(long InputTokens, long OutputTokens, bool Estimated = false)
 {
@@ -50,6 +57,8 @@ public sealed record TranslationResponse(IReadOnlyDictionary<string, string> Tra
 public interface ITranslationProvider
 {
     string Identity { get; }
+    string? DisplayName => null;
+    int MaximumBatchSize => 256;
     Task<TranslationResponse> TranslateAsync(TranslationRequest request,
         CancellationToken cancellationToken = default);
 }

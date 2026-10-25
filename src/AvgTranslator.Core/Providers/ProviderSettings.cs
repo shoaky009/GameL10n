@@ -6,11 +6,16 @@ namespace AvgTranslator.Core.Providers;
 [JsonConverter(typeof(JsonStringEnumConverter<ProviderApiProtocol>))]
 public enum ProviderApiProtocol { ChatCompletions, Responses }
 
+[JsonConverter(typeof(JsonStringEnumConverter<TranslationInputFormat>))]
+public enum TranslationInputFormat { JsonBatch, PlainText }
+
 public sealed record ProviderSettings(Uri Endpoint, string ApiKey, string Model,
-    ProviderApiProtocol Protocol = ProviderApiProtocol.ChatCompletions)
+    ProviderApiProtocol Protocol = ProviderApiProtocol.ChatCompletions, string? AnalysisReasoningEffort = null,
+    TranslationInputFormat TranslationFormat = TranslationInputFormat.JsonBatch)
 {
-    public ProviderSettings(string endpoint, string apiKey, string model, ProviderApiProtocol protocol = ProviderApiProtocol.ChatCompletions)
-        : this(new Uri(endpoint, UriKind.Absolute), apiKey, model, protocol) { }
+    public ProviderSettings(string endpoint, string apiKey, string model, ProviderApiProtocol protocol = ProviderApiProtocol.ChatCompletions,
+        string? analysisReasoningEffort = null, TranslationInputFormat translationFormat = TranslationInputFormat.JsonBatch)
+        : this(new Uri(endpoint, UriKind.Absolute), apiKey, model, protocol, analysisReasoningEffort, translationFormat) { }
 
     public override string ToString() => $"ProviderSettings {{ Endpoint = {Endpoint.GetLeftPart(UriPartial.Path)}, ApiKey = [redacted], Model = {Model}, Protocol = {Protocol} }}";
 }
@@ -34,6 +39,13 @@ public sealed class TranslationProviderException : Exception
     public ProviderResponseDiagnostic? Diagnostic { get; }
     public bool IsModelRefusal => Diagnostic?.Code == "model-refusal";
 
+    public string AnalysisFailureSummary => Diagnostic?.Code switch
+    {
+        "output-token-limit" => "本次分析响应达到单次输出上限，结果被截断",
+        "request-size-limit" => "分析请求内容超过接口限制",
+        _ => FailureSummary
+    };
+
     /// <summary>A short UI explanation derived only from known status codes and diagnostic categories.</summary>
     public string FailureSummary => StatusCode switch
     {
@@ -56,6 +68,7 @@ public sealed class TranslationProviderException : Exception
             "translation-root" or "translation-json-syntax" or "api-json-syntax" or "api-envelope" or
                 "chat-choices" or "responses-status" or "responses-output" or "response-format" => "返回格式不正确",
             "empty-content" => "模型返回了空内容",
+            "agent-tool-format" => "工具调用格式不正确，请检查模型及接口是否支持工具调用",
             "model-refusal" => "模型拒绝处理这批内容（服务商内容限制）",
             "chat-incomplete" or "responses-incomplete" => "模型未返回完整结果",
             "request-size-limit" => "请求内容过大，可减少每批文本数",
