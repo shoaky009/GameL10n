@@ -2028,6 +2028,52 @@ public sealed class AutomaticAdaptationTests : IDisposable
     }
 
     [Fact]
+    public async Task FailedReuseEvidenceReachesModelAndSurvivesCheckpointAndRestart()
+    {
+        var store = new LocalAdapterPackageStore(Path.Combine(root, "store"));
+        var published = await store.PublishAndActivateAsync("first-game", CreatePackage(), ["previously passed"]);
+        var request = Request();
+        var runs = 0;
+        var runner = new ScriptedRunner { CorruptUntouchedTrialText = true, ObserveRequest = _ => runs++ };
+        void CheckEvidence(AgentRequest context)
+        {
+            Assert.Contains(context.Messages, message => message.Role == "user"
+                && message.Content.Contains("\"id\":\"template.line-script\"", StringComparison.Ordinal)
+                && message.Content.Contains("\"version\":\"one\"", StringComparison.Ordinal)
+                && message.Content.Contains("\"failedStage\":\"partial-translation-re-extraction\"", StringComparison.Ordinal)
+                && message.Content.Contains("Re-extraction mismatch", StringComparison.Ordinal)
+                && message.Content.Contains("\"originalRoundtripPassed\":true", StringComparison.Ordinal)
+                && message.Content.Contains("\"sourceDirectory\":" + JsonSerializer.Serialize(published.DirectoryPath, Json), StringComparison.Ordinal)
+                && message.Content.Contains("copy_adapter", StringComparison.Ordinal));
+        }
+        var model = new FakeModel(context =>
+        {
+            CheckEvidence(context);
+            return context.Messages.Any(message => message.Content.Contains("Continue repairing the partial writer.", StringComparison.Ordinal))
+                ? Blocked("needs_input", "需要实际运行反馈。", "提供画面后继续。")
+                : new(new("assistant", ToolCalls: [new("save", "checkpoint", """{"summary":"Continue repairing the partial writer."}""")]), new(100, 20));
+        });
+        var result = await new AutomaticAdaptationService(model, Compiler(runner), store).AdaptAsync(request);
+        Assert.Equal(AdaptationStatus.WaitingForUser, result.Status);
+        Assert.Equal(2, model.Calls);
+        var saved = await LocalFiles.ReadJsonAsync<AdaptationSession>(Path.Combine(store.WorkDirectory, "current", "session.json"));
+        var failure = Assert.Single(saved!.ReuseFailures);
+        Assert.Equal("partial-translation-re-extraction", failure.FailedStage);
+        Assert.True(failure.OriginalRoundtripPassed);
+        Assert.Equal(published.DirectoryPath, failure.SourceDirectory);
+        Assert.All(failure.Evidence, item => Assert.InRange(item.Length, 1, 1500));
+        var previousRuns = runs;
+        var resumedModel = new FakeModel(context =>
+        {
+            CheckEvidence(context);
+            return Blocked("needs_input", "需要实际运行反馈。", "提供画面后继续。");
+        });
+        await new AutomaticAdaptationService(resumedModel, Compiler(runner), store).AdaptAsync(request);
+        Assert.Equal(previousRuns, runs);
+        Assert.Equal(published.SourceSha256, Hash(Path.Combine(published.DirectoryPath, "Program.cs")));
+    }
+
+    [Fact]
     public async Task PublishedTemplateIsVerifiedAndReusedForAnotherGameWithoutModelCalls()
     {
         var store = new LocalAdapterPackageStore(Path.Combine(root, "store"));

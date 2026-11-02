@@ -97,20 +97,28 @@ public sealed class AutomaticAdaptationService(IAdaptationAgentModel model, Gene
                 var loaders = request.ExistingAdapters.Where(adapter => adapter is not VnTextPatchAdapter)
                     .Append(new SiglusAdapter(toolkit, compiler.Runner, Report))
                     .Where(adapter => !disabledFamilies.Contains(adapter.CatalogEntry?.Family.AdapterId ?? adapter.Id))
-                    .Select(adapter => (adapter.Id, Load: (Func<IGameAdapter>)(() => adapter)))
-                    .Concat(candidates.Select(candidate => (candidate.Id, Load: (Func<IGameAdapter>)(() =>
+                    .Select(adapter => (adapter.Id, adapter.Version, Generated: adapter is GeneratedGameAdapter, RecognitionEvidence: 0,
+                        Load: (Func<IGameAdapter>)(() => adapter)))
+                    .Concat(candidates.Select(candidate => (candidate.Id, candidate.Version, Generated: true,
+                        RecognitionEvidence: candidate.Match.Evidence, Load: (Func<IGameAdapter>)(() =>
                         new GeneratedGameAdapter(packageStore.LoadVersion(candidate.Id, candidate.Version), compiler.Toolchain,
                             compiler.Runner, packageStore.WorkDirectory, toolkit, Report, discovery)))));
                 foreach (var loader in loaders)
                 {
                     var candidateWatch = Stopwatch.StartNew();
                     string phase = "load";
+                    string? sourceDirectory = null;
+                    var recognized = false;
                     try
                     {
                         var adapter = loader.Load();
+                        if (adapter is GeneratedGameAdapter loaded)
+                            sourceDirectory = Directory.Exists(Path.Combine(loaded.Package.DirectoryPath, "src"))
+                                ? Path.Combine(loaded.Package.DirectoryPath, "src") : loaded.Package.DirectoryPath;
                         phase = "probe";
                         var probe = await adapter.ProbeAsync(request.GameDirectory, cancellationToken);
                         if (probe is null) continue;
+                        recognized = true;
                         phase = "verify";
                         if (adapter is GeneratedGameAdapter generated)
                         {
@@ -118,7 +126,20 @@ public sealed class AutomaticAdaptationService(IAdaptationAgentModel model, Gene
                             GeneratedGameAdapter.DeleteStagedTree(verificationDirectory);
                             var verification = await new GeneratedAdapterVerifier().VerifyAsync(generated, request.GameDirectory,
                                 verificationDirectory, cancellationToken);
-                            if (!verification.Passed) { diagnostics.AddRange(verification.Diagnostics); continue; }
+                            if (!verification.Passed)
+                            {
+                                diagnostics.AddRange(verification.Diagnostics);
+                                var evidence = verification.Diagnostics.TakeLast(3)
+                                    .Select(item => item[..Math.Min(item.Length, 1500)]).ToArray();
+                                var failure = verification.Diagnostics.LastOrDefault();
+                                var end = failure?.IndexOf(']') ?? -1;
+                                var failedStage = failure?.StartsWith('[') == true && end is > 1 and < 80
+                                    ? failure[1..end] : phase;
+                                if (state.ReuseFailures.Count < 6)
+                                    state.ReuseFailures.Add(new(loader.Id, loader.Version, failedStage, evidence,
+                                        sourceDirectory, verification.OriginalRoundtripPassed));
+                                continue;
+                            }
                             var hashes = new Dictionary<string, string>();
                             foreach (var file in probe.RequiredFiles)
                                 hashes[file] = await LocalFiles.HashFileAsync(Isolation.WorkspaceFiles.Resolve(request.GameDirectory, file), cancellationToken);
@@ -131,7 +152,12 @@ public sealed class AutomaticAdaptationService(IAdaptationAgentModel model, Gene
                         return await CompleteAsync(AdaptationStatus.Reused, "已找到可用适配器，可以选择文本试译。", adapter);
                     }
                     catch (Exception error) when (error is not OperationCanceledException)
-                    { diagnostics.Add("Existing adapter " + loader.Id + ": " + error.Message); }
+                    {
+                        diagnostics.Add("Existing adapter " + loader.Id + ": " + error.Message);
+                        if (loader.Generated && (recognized || loader.RecognitionEvidence > 0) && state.ReuseFailures.Count < 6)
+                            state.ReuseFailures.Add(new(loader.Id, loader.Version, phase,
+                                [error.Message[..Math.Min(error.Message.Length, 1500)]], sourceDirectory));
+                    }
                     finally { await TraceAsync(new { operation = "reuse-candidate", adapterId = loader.Id, phase, elapsedMs = candidateWatch.ElapsedMilliseconds }); }
                 }
             }
@@ -159,6 +185,7 @@ public sealed class AutomaticAdaptationService(IAdaptationAgentModel model, Gene
                 }
             }
             state.ReleaseFiles ??= state.VerifiedPackage?.ReleaseFiles;
+            state.ReuseFailures ??= [];
             // Recover before changing models, so an interrupted tool cannot retain a stale verification.
             var changedObjective = continuing && request.Objective.HasValue && request.Objective != state.Objective;
             state.Objective = ResolveObjective(request, state.Objective);
@@ -241,7 +268,7 @@ public sealed class AutomaticAdaptationService(IAdaptationAgentModel model, Gene
                     state.BuiltinDiscovery.FilesScanned, state.BuiltinDiscovery.Partial,
                     candidates = state.BuiltinDiscovery.Candidates.Select(candidate => candidate.Format).ToArray() });
             }
-            continuation += BuiltinContext(state, disabledFamilies);
+            continuation += BuiltinContext(state, disabledFamilies) + ReuseFailureContext(state);
             var continuationPending = false;
             if (state.ModelIdentity != model.Identity || state.Messages.Count == 0)
             {
@@ -388,6 +415,7 @@ public sealed class AutomaticAdaptationService(IAdaptationAgentModel model, Gene
                         + BuiltinContext(state, disabledFamilies)
                         + ProtocolContext(state)
                         + ReleaseContext(state)
+                        + ReuseFailureContext(state)
                         + state.TextCoverage.Context()
                         + (string.IsNullOrWhiteSpace(state.UserInstruction) ? "" : "\n用户补充要求：" + state.UserInstruction)));
                     state.Messages.AddRange(recent);
@@ -644,6 +672,12 @@ public sealed class AutomaticAdaptationService(IAdaptationAgentModel model, Gene
             + JsonSerializer.Serialize(state.SuccessfulProbes.TakeLast(3), ContextJson)
             + "\n复用这些文件及完整调用参数。已有结论可直接接入实现；仅输入或相关代码变化、或确需新证据时再运行，不要重新整理同一套依赖。";
 
+    private static string ReuseFailureContext(AdaptationSession state) => state.ReuseFailures.Count == 0 ? ""
+        : "\n主程序已检查的外置适配器复用失败记录（仅代表本次游戏，不否定整个引擎的支持）：\n"
+            + JsonSerializer.Serialize(state.ReuseFailures, ContextJson)
+            + "\nsourceDirectory 仅为已有源码位置记录。沿用这些探测与验收证据，优先用 copy_adapter 的 id/version 将相关源码复制到当前 src 后修复失败环节；"
+            + "已确认的原文回填结果不代表中文或局部试译通过。仅相关源码或输入变化、或确需新证据时重测，不要重复查找同一适配器或从头实现。";
+
     private static string ReleaseContext(AdaptationSession state) =>
         $"\n发布清单已独立保存 {(state.ReleaseFiles ?? state.VerifiedPackage?.ReleaseFiles)?.Count ?? 0} 项，test_adapter 默认复用；"
         + "仅有依赖变化时调用 update_release_files 增删，确需查看清单才无参数调用。不需要重列全部文件。";
@@ -888,6 +922,7 @@ public sealed class AdaptationSession
     public IReadOnlyList<BuiltinAdapterProbeObservation> BuiltinProbes { get; set; } = [];
     public List<BuiltinAdapterTrialObservation> BuiltinTrials { get; set; } = [];
     public List<SuccessfulAnalysisProbe> SuccessfulProbes { get; set; } = [];
+    public List<GeneratedAdapterReuseFailure> ReuseFailures { get; set; } = [];
     public string GameId { get; set; } = "";
     public string GameDirectory { get; set; } = "";
     public string ModelIdentity { get; set; } = "";
@@ -927,3 +962,6 @@ public sealed class AdaptationSession
 }
 
 public sealed record SuccessfulAnalysisProbe(string Tool, string Arguments, int Turn);
+
+public sealed record GeneratedAdapterReuseFailure(string Id, string Version, string FailedStage,
+    IReadOnlyList<string> Evidence, string? SourceDirectory, bool OriginalRoundtripPassed = false);
