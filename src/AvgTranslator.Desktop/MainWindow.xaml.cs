@@ -186,7 +186,7 @@ public sealed partial class MainWindow : Window
     {
         UpdateControls();
         if (!initialized || updatingProjectList || switchingGames || changingDataDirectory || removingGames || MultiSelectGamesButton.IsChecked == true
-            || GameList.SelectedItem is not GameWorkspace next || (next == selectedGame && globalPage is null)) return;
+            || GameList.SelectedItem is not GameWorkspace next || (next == selectedGame && globalPage is null && next.MetadataLoaded)) return;
         switchingGames = true;
         UpdateControls();
         try

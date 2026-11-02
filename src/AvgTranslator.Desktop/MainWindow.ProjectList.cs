@@ -24,6 +24,17 @@ public sealed partial class MainWindow
         if (GameList is not null && !switchingGames) RefreshProjectList(preservePosition: false);
     }
 
+    private async void GameList_ItemClick(object sender, ItemClickEventArgs e)
+    {
+        // Selecting an already selected row doesn't raise SelectionChanged; allow retrying unreadable metadata.
+        if (!initialized || switchingGames || changingDataDirectory || removingGames || closing || globalPage is not null
+            || MultiSelectGamesButton.IsChecked == true || e.ClickedItem is not GameWorkspace game || selectedGame != game
+            || game.MetadataLoaded || game.MetadataLoad is not null) return;
+        await EnsureProjectMetadataAsync(game);
+        if (selectedGame == game && globalPage is null && game.MetadataLoaded && game.Session is null && !game.Busy)
+            await OpenGameAsync(game);
+    }
+
     // Refilter only on query/membership/task-boundary changes. Progress notifications update their own row.
     private void RefreshProjectList(bool preservePosition = true)
     {
@@ -67,7 +78,7 @@ public sealed partial class MainWindow
         GameEmptyText.Text = games.Count == 0 ? "添加游戏目录，开始识别和翻译。" : "没有匹配的项目，请调整搜索。";
         var running = games.Count(game => game.Busy);
         ActiveTasksText.Text = (ProjectSearchBox.Text.Trim().Length == 0 ? $"{games.Count:N0} 个项目" : $"{visibleGames.Length:N0} / {games.Count:N0} 个项目")
-            + (running > 0 ? $" · {running} 个任务置顶" : "");
+            + (running > 0 ? $" · {running} 个任务运行或排队中" : "");
     }
 
     private async Task EnsureProjectMetadataAsync(GameWorkspace game)

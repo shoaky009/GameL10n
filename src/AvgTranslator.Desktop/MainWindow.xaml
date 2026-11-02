@@ -15,7 +15,7 @@
         </Grid>
       </StackPanel>
       <Grid Grid.Row="3">
-        <ListView x:Name="GameList" SelectionMode="Single" SelectionChanged="GameList_SelectionChanged" HorizontalContentAlignment="Stretch" AutomationProperties.Name="游戏项目">
+        <ListView x:Name="GameList" SelectionMode="Single" SelectionChanged="GameList_SelectionChanged" IsItemClickEnabled="True" ItemClick="GameList_ItemClick" HorizontalContentAlignment="Stretch" AutomationProperties.Name="游戏项目">
           <ListView.ItemTemplate><DataTemplate><StackPanel Spacing="4" Padding="0,6">
             <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
             <TextBlock Text="{Binding Status}" FontSize="12" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding Status}" />
