@@ -389,7 +389,7 @@ public sealed partial class MainWindow : Window
         ProjectActivityTitle.Text = game?.Stage ?? "";
         ProjectActivityMessage.Text = string.IsNullOrWhiteSpace(game?.StageMessage)
             ? "任务正在后台运行，可以切换到其他项目。" : game.StageMessage;
-        CountsText.Text = game?.Progress is { } p ? $"本次 {p.Completed:N0} / {p.Total:N0} 条 · 复用 {p.CacheHits:N0} 条 · {p.TranslationTokens:N0} Token"
+        CountsText.Text = game?.Progress is { } p ? $"本次成功 {p.Completed:N0} / {p.Total:N0} 条" + (p.Failed > 0 ? $" · 失败 {p.Failed:N0} 条" : "") + $" · 复用 {p.CacheHits:N0} 条 · {p.TranslationTokens:N0} Token"
             : game?.Project.Analysis is { } count ? $"共 {count.UnitCount:N0} 条文本" : session is { } s ? $"共 {s.Extraction.Units.Count:N0} 条文本" : "—";
         AdaptationPanel.Visibility = game?.HasAdaptationSession == true || game?.AdaptationUsage is not null ? Visibility.Visible : Visibility.Collapsed;
         AdaptationUsageText.Text = game?.AdaptationUsage is { } usage
@@ -407,10 +407,11 @@ public sealed partial class MainWindow : Window
         AdaptationBlockerText.Visibility = !busy && game?.AdaptationBlocker is not null ? Visibility.Visible : Visibility.Collapsed;
         AdaptationBlockerText.Text = game?.AdaptationBlocker?.Reason ?? "";
         TaskProgress.IsIndeterminate = game?.Busy == true && (game.Progress is null || game.Kind != GameTaskKind.Translation);
-        TaskProgress.Value = game?.Progress is { Total: > 0 } progress ? 100.0 * progress.Completed / progress.Total : 0;
-        GameInfoBar.Severity = game?.Error is not null ? InfoBarSeverity.Error : session is null ? InfoBarSeverity.Informational : InfoBarSeverity.Success;
-        GameInfoBar.Title = game?.Error is not null ? "任务需要处理" : session?.Probe.Description ?? "识别游戏后可选择文本试译";
-        GameInfoBar.Message = game?.Error ?? (session is null ? "可以切换游戏，后台任务会继续运行。" : $"共 {session.Extraction.Units.Count:N0} 条文本。");
+        TaskProgress.Value = game?.Progress is { Total: > 0 } progress ? 100.0 * Math.Min(progress.Total, progress.Completed + progress.Failed) / progress.Total : 0;
+        var hasTranslationFailures = game?.Progress is { Failed: > 0 };
+        GameInfoBar.Severity = game?.Error is not null ? InfoBarSeverity.Error : hasTranslationFailures ? InfoBarSeverity.Warning : session is null ? InfoBarSeverity.Informational : InfoBarSeverity.Success;
+        GameInfoBar.Title = game?.Error is not null ? "任务需要处理" : hasTranslationFailures ? "有翻译失败的文本" : session?.Probe.Description ?? "识别游戏后可选择文本试译";
+        GameInfoBar.Message = game?.Error ?? (hasTranslationFailures ? "已保存成功译文。可筛选“翻译失败”查看原因，再继续任务或人工校对。" : session is null ? "可以切换游戏，后台任务会继续运行。" : $"共 {session.Extraction.Units.Count:N0} 条文本。");
         if (game is { Busy: true, Error: null })
         {
             GameInfoBar.Severity = InfoBarSeverity.Informational;

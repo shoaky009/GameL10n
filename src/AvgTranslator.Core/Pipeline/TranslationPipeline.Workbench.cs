@@ -9,6 +9,18 @@ public sealed record PatchTranslationSnapshot(int SchemaVersion, IReadOnlyDictio
 
 public sealed partial class TranslationPipeline
 {
+    public async Task<IReadOnlyDictionary<string, string>> LoadTranslationFailuresAsync(GameSession session,
+        TranslationPolicy policy, CancellationToken ct = default)
+    {
+        var issues = await ReadTranslationIssuesAsync(Path.Combine(session.ProjectDirectory, "translation-errors.json"), ct);
+        var units = session.Extraction.Units.ToDictionary(unit => unit.Id, StringComparer.Ordinal);
+        var memory = new TranslationMemory(Path.Combine(session.ProjectDirectory, "memory"));
+        return issues.Where(issue => issue.UnitId is { } id && units.TryGetValue(id, out var unit)
+                && (issue.MemoryKey is null || issue.MemoryKey == memory.Key(unit, policy)))
+            .GroupBy(issue => issue.UnitId!, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => string.Join("；", group.Select(issue => issue.Message).Distinct()), StringComparer.Ordinal);
+    }
+
     public async Task<PipelineResult> BuildFromSavedAsync(GameSession session, TranslationPolicy policy,
         IReadOnlyList<string>? unitIds = null, bool reviewedOnly = false,
         IProgress<PipelineProgress>? progress = null, CancellationToken ct = default)

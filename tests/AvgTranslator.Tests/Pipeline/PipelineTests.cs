@@ -24,6 +24,110 @@ public sealed class PipelineTests : IDisposable
     }
 
     [Fact]
+    public async Task FullTranslationContinuesAfterInvalidTextAndRetriesOnlyFailedAliases()
+    {
+        await WriteGame(("1", "bad {name}"), ("2", "later one"), ("3", "later two"), ("4", "bad {name}"));
+        var adapter = new JsonGameAdapter();
+        var session = await CreatePipeline().AnalyzeAsync(Game, adapter);
+        var provider = new FakeProvider { Translate = unit => unit.SourceText.StartsWith("bad") ? "缺少占位符" : "翻译 " + unit.SourceText };
+        var progress = new List<PipelineProgress>();
+        var result = await CreatePipeline().TranslateOnlyAsync(session, [provider], policy, new(1), new ImmediateProgress(progress.Add));
+        Assert.Equal(new TranslationRunSummary(4, 2, 2), result);
+        Assert.Equal(new[] { "1", "2", "3" }, provider.Batches.Select(batch => batch[0].Id));
+        Assert.Equal(0, adapter.Builds);
+        Assert.Equal(2, progress[^1].Failed);
+        var errors = await CreatePipeline().LoadTranslationFailuresAsync(session, policy);
+        Assert.Equal(new[] { "1", "4" }, errors.Keys.Order());
+        var retry = new FakeProvider();
+        result = await CreatePipeline().TranslateOnlyAsync(session, [retry], policy, new(1));
+        Assert.Equal(new TranslationRunSummary(4, 4, 0), result);
+        Assert.Equal("1", Assert.Single(Assert.Single(retry.Batches)).Id);
+        Assert.NotNull(Assert.Single(retry.Requests).ValidationFeedback);
+        Assert.Empty(await CreatePipeline().LoadTranslationFailuresAsync(session, policy));
+    }
+
+    [Fact]
+    public async Task FullTranslationReconcilesCorrectionsToEarlierFailuresBeforeCompletion()
+    {
+        await WriteGame(("1", "bad {name}"), ("2", "later"));
+        var session = await CreatePipeline().AnalyzeAsync(Game, new JsonGameAdapter());
+        var unit = session.Extraction.Units[0];
+        var calls = 0;
+        var provider = new FakeProvider
+        {
+            Translate = item => item.Id == "1" ? "缺少标记" : "后续文本",
+            AfterResponse = () =>
+            {
+                if (++calls == 2)
+                    new TranslationEdits(1, new Dictionary<string, TranslationEdit>
+                    {
+                        [unit.Id] = new(TranslationEdits.Signature(unit), policy.TargetLanguage, "人工修正 {name}", true, DateTimeOffset.UtcNow)
+                    }).SaveAsync(session.ProjectDirectory).GetAwaiter().GetResult();
+            }
+        };
+        var result = await CreatePipeline().TranslateOnlyAsync(session, [provider], policy, new(1));
+        Assert.Equal(new TranslationRunSummary(2, 2, 0), result);
+        Assert.Empty(await CreatePipeline().LoadTranslationFailuresAsync(session, policy));
+        Assert.Equal("人工修正 {name}", (await TranslationEdits.LoadAsync(session.ProjectDirectory)).Find(unit, policy.TargetLanguage)!.Text);
+    }
+
+    [Fact]
+    public async Task FullTranslationContinuesAfterRefusalAndDoesNotResendSuccessfulOrRefusedBatches()
+    {
+        await WriteGame(("1", "refused"), ("2", "allowed"), ("3", "later"));
+        var session = await CreatePipeline().AnalyzeAsync(Game, new JsonGameAdapter());
+        var provider = new FakeProvider { FailureFor = request => request.Units[0].Id == "1" ? Refusal() : null };
+        var result = await CreatePipeline().TranslateOnlyAsync(session, [provider], policy, new(1));
+        Assert.Equal(new TranslationRunSummary(3, 2, 1), result);
+        Assert.Equal(3, provider.Calls);
+        Assert.Equal("1", Assert.Single(await CreatePipeline().LoadTranslationFailuresAsync(session, policy)).Key);
+        result = await CreatePipeline().TranslateOnlyAsync(session, [new FakeProvider { FailIfCalled = true }], policy, new(1));
+        Assert.Equal(1, result.Failed);
+        var fallback = new FakeProvider { Identity = "new-provider" };
+        result = await CreatePipeline().TranslateOnlyAsync(session, [new FakeProvider { FailIfCalled = true }, fallback], policy, new(1));
+        Assert.Equal(0, result.Failed);
+        Assert.Equal("1", Assert.Single(Assert.Single(fallback.Batches)).Id);
+        Assert.Null(Assert.Single(fallback.Requests).ValidationFeedback);
+        Assert.Empty(await CreatePipeline().LoadTranslationFailuresAsync(session, policy));
+    }
+
+    [Fact]
+    public async Task FullTranslationContinuesAfterRetryExhaustionWithoutChangingProviderChain()
+    {
+        await WriteGame(("1", "network failure"), ("2", "later"));
+        var session = await CreatePipeline().AnalyzeAsync(Game, new JsonGameAdapter());
+        var provider = new FakeProvider { FailureFor = request => request.Units[0].Id == "1"
+            ? new TranslationProviderException("HTTP429", statusCode: System.Net.HttpStatusCode.TooManyRequests) : null };
+        var fallback = new FakeProvider { Identity = "fallback", FailIfCalled = true };
+        var result = await CreatePipeline().TranslateOnlyAsync(session, [provider, fallback], policy, new(1));
+        Assert.Equal(new TranslationRunSummary(2, 1, 1), result);
+        Assert.Equal(7, provider.Calls);
+        Assert.Equal(0, fallback.Calls);
+        Assert.Contains("重试", Assert.Single(await CreatePipeline().LoadTranslationFailuresAsync(session, policy)).Value);
+        var retry = new FakeProvider();
+        result = await CreatePipeline().TranslateOnlyAsync(session, [retry], policy, new(1));
+        Assert.Equal(0, result.Failed);
+        Assert.Equal("1", Assert.Single(Assert.Single(retry.Batches)).Id);
+    }
+
+    [Fact]
+    public async Task FullTranslationSkipsUncertainRequestsWithoutBlockingUnrelatedText()
+    {
+        await WriteGame(("1", "uncertain"), ("2", "later"));
+        var session = await CreatePipeline().AnalyzeAsync(Game, new JsonGameAdapter());
+        var memory = new TranslationMemory(Path.Combine(session.ProjectDirectory, "memory"));
+        var responseDirectory = Path.Combine(session.ProjectDirectory, "responses");
+        await LocalFiles.WriteJsonAsync(Path.Combine(responseDirectory, "pending.request.json"),
+            new TranslationIntent("pending", "test-provider", DateTimeOffset.UtcNow, [new("1", memory.Key(session.Extraction.Units[0], policy))]));
+        var provider = new FakeProvider();
+        var result = await CreatePipeline().TranslateOnlyAsync(session, [provider], policy, new(1, RetryUncertainRequests: false));
+        Assert.Equal(new TranslationRunSummary(2, 1, 1), result);
+        Assert.Equal("2", Assert.Single(Assert.Single(provider.Batches)).Id);
+        Assert.True(File.Exists(Path.Combine(responseDirectory, "pending.request.json")));
+        Assert.Equal("1", Assert.Single(await CreatePipeline().LoadTranslationFailuresAsync(session, policy)).Key);
+    }
+
+    [Fact]
     public async Task OpeningSavedProjectDoesNotProbeExtractOrReadSourceArchives()
     {
         await WriteGame(("1", "hello"));

@@ -15,7 +15,9 @@ public sealed record GameSession(string Id, string GameDirectory, string Project
     ExtractionResult Extraction, IGameAdapter Adapter);
 
 public sealed record PipelineProgress(string Stage, int Completed, int Total, int CacheHits,
-    long TranslationTokens, string Message);
+    long TranslationTokens, string Message, int Failed = 0);
+
+public sealed record TranslationRunSummary(int Total, int Completed, int Failed);
 
 public sealed record PipelineResult(string PatchDirectory, string? LaunchExecutable,
     int TotalUnits, int CacheHits, TokenUsage TranslationUsage, ValidationResult Validation,
@@ -26,6 +28,7 @@ public sealed record RunOptions(int BatchSize = 24, bool RetryUncertainRequests 
     IReadOnlyList<string>? TrialUnitIds = null)
 {
     public IProgress<IReadOnlyDictionary<string, string>>? TranslationUpdates { get; init; }
+    public IProgress<IReadOnlyDictionary<string, string?>>? FailureUpdates { get; init; }
     internal bool CandidateOnly { get; init; }
     public string? RetranslationId { get; init; }
 }
@@ -240,13 +243,15 @@ public sealed partial class TranslationPipeline(string dataDirectory, string? di
     public async Task<PipelineResult> RunAsync(GameSession session, IReadOnlyList<ITranslationProvider> translationProviders,
         TranslationPolicy policy, RunOptions? options = null, IProgress<PipelineProgress>? progress = null,
         CancellationToken ct = default) =>
-        (await RunCoreAsync(session, translationProviders, policy, options, progress, true, ct))!;
+        (await RunCoreAsync(session, translationProviders, policy, options, progress, true, ct)).Patch!;
 
-    public async Task TranslateOnlyAsync(GameSession session, IReadOnlyList<ITranslationProvider> providers,
+    public async Task<TranslationRunSummary> TranslateOnlyAsync(GameSession session, IReadOnlyList<ITranslationProvider> providers,
         TranslationPolicy policy, RunOptions? options = null, IProgress<PipelineProgress>? progress = null,
-        CancellationToken ct = default) => await RunCoreAsync(session, providers, policy, options, progress, false, ct);
+        CancellationToken ct = default) => (await RunCoreAsync(session, providers, policy, options, progress, false, ct)).Summary;
 
-    private async Task<PipelineResult?> RunCoreAsync(GameSession session, IReadOnlyList<ITranslationProvider> translationProviders,
+    private sealed record TranslationRunOutcome(PipelineResult? Patch, TranslationRunSummary Summary);
+
+    private async Task<TranslationRunOutcome> RunCoreAsync(GameSession session, IReadOnlyList<ITranslationProvider> translationProviders,
         TranslationPolicy policy, RunOptions? options, IProgress<PipelineProgress>? progress, bool buildPatch,
         CancellationToken ct)
     {
@@ -270,6 +275,9 @@ public sealed partial class TranslationPipeline(string dataDirectory, string? di
         if (trialIds is not null && (trialIds.Count == 0 || units.Count != trialIds.Count))
             throw new ArgumentException("请重新选择试译文本：选区为空或包含不属于当前游戏的文本。", nameof(options));
         var isTrial = trialIds is not null;
+        var continueOnTextError = !isTrial && !options.CandidateOnly;
+        Exception? firstBatchError = null;
+        var failedIds = new HashSet<string>(StringComparer.Ordinal);
         await using var projectLock = AcquireProjectLock(session.ProjectDirectory);
         var memory = new TranslationMemory(Path.Combine(session.ProjectDirectory, "memory"), Path.Combine(DataDirectory, "memory", session.Id));
         var completed = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -290,7 +298,7 @@ public sealed partial class TranslationPipeline(string dataDirectory, string? di
         {
             stage = nextStage;
             var update = new PipelineProgress(stage, completed.Count, units.Count, cacheHits,
-                inputTokens + outputTokens, message);
+                inputTokens + outputTokens, message, failedIds.Count);
             var state = new
             {
                 runId, started, updatedAt = DateTimeOffset.UtcNow, session.GameDirectory,
@@ -301,6 +309,20 @@ public sealed partial class TranslationPipeline(string dataDirectory, string? di
             await LocalFiles.WriteJsonAsync(Path.Combine(session.ProjectDirectory, "job.json"), state, token);
             progress?.Report(update);
         }
+        async Task MarkBatchFailedAsync(IEnumerable<TranslationUnit> failedUnits, Exception error, string code, string reason)
+        {
+            ct.ThrowIfCancellationRequested();
+            firstBatchError ??= error;
+            var failed = failedUnits.ToArray();
+            var ids = failed.Select(unit => unit.Id).ToHashSet(StringComparer.Ordinal);
+            previousIssues.RemoveAll(issue => issue.UnitId is { } id && ids.Contains(id));
+            previousIssues.AddRange(failed.Select(unit => new RecordedTranslationIssue(code, reason, unit.Id, memory.Key(unit, policy))));
+            failedIds.UnionWith(ids);
+            await LocalFiles.WriteJsonAsync(validationFeedbackPath, previousIssues, CancellationToken.None);
+            options.FailureUpdates?.Report(failed.ToDictionary(unit => unit.Id, _ => (string?)reason, StringComparer.Ordinal));
+            await ReportAsync("翻译", $"{failed.Length} 条文本翻译失败：{reason} 已标记失败，继续后续文本。", ct);
+        }
+
         string ApiLabel(int index) => providers[index].DisplayName is { Length: > 0 } name
             ? $"{name}({index + 1}/{providers.Length})"
             : $"第 {index + 1} / {providers.Length} 个翻译 API";
@@ -312,7 +334,8 @@ public sealed partial class TranslationPipeline(string dataDirectory, string? di
             {
                 unit.Id,
                 Messages = (IReadOnlyList<string>)previousIssues.Where(issue => issue.UnitId == unit.Id
-                    && (issue.MemoryKey is null || issue.MemoryKey == memory.Key(unit, policy)))
+                    && (issue.MemoryKey is null || issue.MemoryKey == memory.Key(unit, policy))
+                    && issue.Code is not ("provider-refusal" or "provider-request-failed" or "request-outcome-unknown"))
                     .Select(issue => issue.Message).Distinct(StringComparer.Ordinal).ToArray()
             }).Where(item => item.Messages.Count > 0).ToDictionary(item => item.Id, item => item.Messages, StringComparer.Ordinal);
             var request = new TranslationRequest(representatives, policy.TargetLanguage, policy.Terminology, policy.Style)
@@ -421,6 +444,9 @@ public sealed partial class TranslationPipeline(string dataDirectory, string? di
                     cacheHits++;
                 }
             }
+            if (previousIssues.RemoveAll(issue => issue.UnitId is { } id && completed.ContainsKey(id)) > 0)
+                await LocalFiles.WriteJsonAsync(validationFeedbackPath, previousIssues, CancellationToken.None);
+            options.FailureUpdates?.Report(completed.Keys.ToDictionary(id => id, _ => (string?)null, StringComparer.Ordinal));
             options.TranslationUpdates?.Report(units.Where(unit => completed.ContainsKey(unit.Id)
                 && (retranslating || edits.Find(unit, policy.TargetLanguage) is null)).ToDictionary(unit => unit.Id, unit => completed[unit.Id]));
             await ReportAsync("查询缓存", retranslating ? $"重新翻译所选 {units.Count} 条文本；本次任务已完成 {cacheHits} 条，其余将重新请求 API。"
@@ -432,6 +458,7 @@ public sealed partial class TranslationPipeline(string dataDirectory, string? di
             if (!options.RetryUncertainRequests)
             {
                 var missingKeys = groups.Select(g => memory.Key(g[0], policy)).ToHashSet(StringComparer.Ordinal);
+                var uncertainKeys = new HashSet<string>(StringComparer.Ordinal);
                 foreach (var intentFile in Directory.EnumerateFiles(responseDirectory, "*.request.json"))
                 {
                     var intent = await LocalFiles.ReadJsonAsync<TranslationIntent>(intentFile, ct);
@@ -439,7 +466,18 @@ public sealed partial class TranslationPipeline(string dataDirectory, string? di
                     if (!File.Exists(receipt) && !File.Exists(intentFile[..^".request.json".Length] + ".refusal.json") &&
                         intent?.CandidateOnly == options.CandidateOnly && intent.RetranslationId == options.RetranslationId
                         && intent.Units?.Any(u => missingKeys.Contains(u.MemoryKey)) == true)
-                        throw new UncertainRequestException("上次请求的部分文本没有响应记录，服务商可能已处理或计费。请确认是否重新发送；调整批大小也不会自动重发这些文本。");
+                    {
+                        if (!continueOnTextError)
+                            throw new UncertainRequestException("上次请求的部分文本没有响应记录，服务商可能已处理或计费。请确认是否重新发送；调整批大小也不会自动重发这些文本。");
+                        uncertainKeys.UnionWith(intent.Units.Where(unit => missingKeys.Contains(unit.MemoryKey)).Select(unit => unit.MemoryKey));
+                    }
+                }
+                if (uncertainKeys.Count > 0)
+                {
+                    const string reason = "上次请求结果未知，未授权重新发送；请确认后重试。";
+                    await MarkBatchFailedAsync(groups.Where(group => uncertainKeys.Contains(memory.Key(group[0], policy))).SelectMany(group => group),
+                        new UncertainRequestException(reason), "request-outcome-unknown", reason);
+                    groups = groups.Where(group => !uncertainKeys.Contains(memory.Key(group[0], policy))).ToArray();
                 }
             }
             foreach (var plannedBatch in Batch(groups, batchSize))
@@ -457,7 +495,18 @@ public sealed partial class TranslationPipeline(string dataDirectory, string? di
                     if (batch.Length == 0) continue;
                 }
                 var representatives = batch.Select(g => g[0]).ToArray();
-                var (response, provider, responsePath, intentPath) = await TranslateBatchAsync(representatives);
+                TranslationResponse response;
+                ITranslationProvider provider;
+                string responsePath, intentPath;
+                try { (response, provider, responsePath, intentPath) = await TranslateBatchAsync(representatives); }
+                catch (Exception error) when (continueOnTextError && error is (TranslationRefusedException or TranslationRetriesExhaustedException))
+                {
+                    var code = error is TranslationRefusedException ? "provider-refusal" : "provider-request-failed";
+                    var reason = error is TranslationRetriesExhaustedException { InnerException: TranslationProviderException failure }
+                        ? "API 重试后仍失败：" + failure.FailureSummary : "翻译 API 链均拒绝处理此批内容。";
+                    await MarkBatchFailedAsync(batch.SelectMany(group => group), error, code, reason);
+                    continue;
+                }
                 inputTokens += response.Usage.InputTokens;
                 outputTokens += response.Usage.OutputTokens;
                 estimated |= response.Usage.Estimated;
@@ -475,7 +524,7 @@ public sealed partial class TranslationPipeline(string dataDirectory, string? di
                         continue;
                     }
                     var validation = ValidateTranslation(session.Adapter, representative, translation);
-                    if (validation.Count != 0) { issues.AddRange(validation); continue; }
+                    if (validation.Count != 0) { issues.AddRange(validation.Select(issue => issue with { UnitId = representative.Id })); continue; }
                     validEntries.Add(new(memory.Key(representative, policy), representative.SourceText, representative.Context,
                         translation, provider.Identity, DateTimeOffset.UtcNow));
                     foreach (var unit in group) completed[unit.Id] = translation;
@@ -499,9 +548,18 @@ public sealed partial class TranslationPipeline(string dataDirectory, string? di
                 else if (!options.CandidateOnly && !retranslating) await memory.StoreBatchAsync(validEntries, CancellationToken.None);
                 options.TranslationUpdates?.Report(batch.SelectMany(group => group)
                     .Where(unit => completed.ContainsKey(unit.Id)).ToDictionary(unit => unit.Id, unit => completed[unit.Id]));
-                var feedbackChanged = previousIssues.RemoveAll(issue => issue.UnitId is { } id && expected.Contains(id)) > 0;
-                previousIssues.AddRange(issues.Select(issue => new RecordedTranslationIssue(issue.Code, issue.Message, issue.UnitId,
-                    representatives.FirstOrDefault(unit => unit.Id == issue.UnitId) is { } failed ? memory.Key(failed, policy) : null)));
+                var batchIds = batch.SelectMany(group => group).Select(unit => unit.Id).ToHashSet(StringComparer.Ordinal);
+                var feedbackChanged = previousIssues.RemoveAll(issue => issue.UnitId is { } id && batchIds.Contains(id)) > 0;
+                foreach (var group in batch)
+                    foreach (var issue in issues.Where(issue => issue.UnitId == group[0].Id))
+                        previousIssues.AddRange(group.Select(unit => new RecordedTranslationIssue(issue.Code, issue.Message, unit.Id, memory.Key(unit, policy))));
+                previousIssues.AddRange(issues.Where(issue => issue.UnitId is null)
+                    .Select(issue => new RecordedTranslationIssue(issue.Code, issue.Message, null)));
+                var failureUpdates = batch.SelectMany(group => group).ToDictionary(unit => unit.Id,
+                    unit => completed.ContainsKey(unit.Id) ? null : previousIssues.FirstOrDefault(issue => issue.UnitId == unit.Id)?.Message,
+                    StringComparer.Ordinal);
+                failedIds.UnionWith(batchIds.Where(id => !completed.ContainsKey(id)));
+                options.FailureUpdates?.Report(failureUpdates);
                 if (feedbackChanged || issues.Count > 0)
                     await LocalFiles.WriteJsonAsync(validationFeedbackPath, previousIssues, CancellationToken.None);
                 if (issues.Count != 0)
@@ -542,26 +600,58 @@ public sealed partial class TranslationPipeline(string dataDirectory, string? di
                         "script-text-invalid" => "译文不符合脚本规则，请检查控制标记、括号、引号或换行。",
                         _ => "译文不符合引擎格式要求，详情见 logs 日志。"
                     };
-                    throw new InvalidDataException($"{failedUnits} 条译文未通过格式检查：{location}{reason} 有效译文已保存，继续时只重试失败文本。");
+                    var error = new InvalidDataException($"{failedUnits} 条译文未通过格式检查：{location}{reason} 有效译文已保存，继续时只重试失败文本。");
+                    if (!continueOnTextError) throw error;
+                    // Unexpected extra response IDs do not invalidate correctly matched translations.
+                    if (batchIds.Any(id => !completed.ContainsKey(id))) firstBatchError ??= error;
+                    var failures = batchIds.Count(id => !completed.ContainsKey(id));
+                    await ReportAsync("翻译", failures > 0
+                        ? $"本批 {failures} 条文本翻译失败；有效译文已保存，继续后续文本。{location}{reason}"
+                        : "本批译文已保存，模型返回的多余文本已忽略，继续后续文本。", ct);
                 }
-                await ReportAsync("翻译", $"已完成 {completed.Count} / {units.Count} 条文本。", ct);
+                await ReportAsync("翻译", $"已完成 {completed.Count} / {units.Count} 条文本" + (failedIds.Count > 0 ? $"，失败 {failedIds.Count} 条。" : "。"), ct);
                 // Translations and usage are durable. Receipts are only needed until this point.
                 DeleteReceipt(responsePath);
                 DeleteReceipt(intentPath);
             }
+            if (continueOnTextError && failedIds.Count > 0)
+            {
+                // A user can correct an earlier failed unit while later batches are running.
+                edits = await TranslationEdits.LoadAsync(session.ProjectDirectory, ct);
+                var resolved = new Dictionary<string, string?>();
+                foreach (var unit in units.Where(unit => failedIds.Contains(unit.Id)))
+                    if (edits.Find(unit, policy.TargetLanguage) is { } edit && ValidateTranslation(session.Adapter, unit, edit.Text).Count == 0)
+                    {
+                        completed[unit.Id] = edit.Text;
+                        failedIds.Remove(unit.Id);
+                        resolved[unit.Id] = null;
+                    }
+                if (resolved.Count > 0)
+                {
+                    previousIssues.RemoveAll(issue => issue.UnitId is { } id && resolved.ContainsKey(id));
+                    await LocalFiles.WriteJsonAsync(validationFeedbackPath, previousIssues, CancellationToken.None);
+                    options.FailureUpdates?.Report(resolved);
+                }
+            }
+            var summary = new TranslationRunSummary(units.Count, completed.Count, failedIds.Count);
             if (!buildPatch)
             {
-                await ReportAsync("翻译完成", retranslating ? "所选文本已重新翻译并保存，可以继续校对或生成补丁。"
+                if (summary.Failed > 0)
+                    await ReportAsync("翻译完成（有失败）", $"已处理全部文本：成功 {summary.Completed} 条，失败 {summary.Failed} 条。可筛选“翻译失败”查看原因，继续任务时复用已成功译文。", ct);
+                else await ReportAsync("翻译完成", retranslating ? "所选文本已重新翻译并保存，可以继续校对或生成补丁。"
                     : options.CandidateOnly ? "候选译文已生成，采用后才会替换当前译文。"
                     : "本次翻译已保存，可以继续校对或生成补丁。", ct);
-                return null;
+                return new(null, summary);
             }
+            // Automatic patch workflows must not silently publish an incomplete full translation.
+            // All remaining batches have been attempted before reporting the first failure.
+            if (failedIds.Count > 0 && firstBatchError is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(firstBatchError).Throw();
             edits = await TranslationEdits.LoadAsync(session.ProjectDirectory, ct);
             foreach (var unit in units)
                 if (edits.Find(unit, policy.TargetLanguage) is { } edit) completed[unit.Id] = edit.Text;
             var result = await BuildSnapshotAsync(session, completed, cacheHits, new(inputTokens, outputTokens, estimated), progress, ct);
             await ReportAsync(result.IsTrial ? "试译完成" : "完成", "补丁已生成并通过结构校验，可安装后进入游戏验证。", ct);
-            return result;
+            return new(result, summary);
 
         }
         catch (OperationCanceledException)

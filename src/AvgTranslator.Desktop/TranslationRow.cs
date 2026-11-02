@@ -10,6 +10,8 @@ internal sealed class TranslationRow(TranslationUnit unit, int number, IGameAdap
     public int Number { get; } = number;
     public string Signature { get; } = TranslationEdits.Signature(unit);
     public string? ModelText { get; set; }
+    public string? TranslationFailure { get; set; }
+    public string? Failure => Text is null ? TranslationFailure : null;
     public TranslationEdit? Edit { get; set; }
     public TranslationEdit? PreviousEdit { get; set; }
     public bool Selected { get; set; }
@@ -25,7 +27,7 @@ internal sealed class TranslationRow(TranslationUnit unit, int number, IGameAdap
         "name" => "角色名", "choice" => "选项", "dialogue" => "对白 / 旁白",
         "ui" => "菜单 / 界面", "item" => "物品 / 装备", "skill" => "技能 / 天赋", "system" => "提示 / 说明", _ => Unit.Kind
     };
-    public string Status => Issues.Count > 0 ? "格式问题" : Reviewed ? "已校对"
+    public string Status => Failure is not null ? "翻译失败" : Issues.Count > 0 ? "格式问题" : Reviewed ? "已校对"
         : Edit is { IsGenerated: false } ? "已编辑" : Text is null ? "未翻译" : "待校对";
     public string Metadata => $"{Kind}{(Unit.Speaker is { Length: > 0 } speaker ? " · " + speaker : "")} · {Status}";
     public void Refresh()

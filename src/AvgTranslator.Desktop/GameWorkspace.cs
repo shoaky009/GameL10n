@@ -80,7 +80,7 @@ internal sealed class GameWorkspace(GameProject project, string directory) : INo
     public bool HasPendingTranslation { get; set; }
     public bool Retranslating { get; set; }
     public string Status => Progress is { Total: > 0 } progress && (!Busy || Kind == GameTaskKind.Translation)
-        ? $"{Stage} · {progress.Completed:N0} / {progress.Total:N0}"
+        ? $"{Stage} · {progress.Completed:N0} / {progress.Total:N0}" + (progress.Failed > 0 ? $" · 失败 {progress.Failed:N0}" : "")
         : !MetadataLoaded && Project.TaskSummary is { Total: > 0 } saved
             ? $"{Stage} · {saved.Completed:N0} / {saved.Total:N0}" : Stage;
     public string PathLabel => GameDirectory;

@@ -207,19 +207,21 @@ public sealed partial class MainWindow
                 game.HasPendingTranslation = true;
                 var progress = TranslationProgress(game);
                 var options = new RunOptions(settings.BatchSize, TrialUnitIds: trialUnitIds)
-                { TranslationUpdates = TranslationUpdates(game, retranslationId), RetranslationId = retranslationId };
-                try { await Task.Run(() => pipeline.TranslateOnlyAsync(capturedSession, providers, policy, options, progress, token)); }
+                { TranslationUpdates = TranslationUpdates(game, retranslationId), FailureUpdates = TranslationFailureUpdates(game), RetranslationId = retranslationId };
+                TranslationRunSummary summary;
+                try { summary = await Task.Run(() => pipeline.TranslateOnlyAsync(capturedSession, providers, policy, options, progress, token)); }
                 finally { if (retranslationId is not null) await RefreshSavedRetranslationsAsync(game); }
-                if (buildPatchAfter)
+                if (buildPatchAfter && summary.Failed == 0)
                 {
                     await FlushEditsAsync(game);
                     game.Result = await Task.Run(() => pipeline.BuildFromSavedAsync(capturedSession, policy, trialUnitIds, progress: progress, ct: token));
                     await LoadPatchIndexAsync(game);
                     foreach (var warning in game.Result.Warnings.Distinct(StringComparer.Ordinal)) Log(game, warning);
                 }
-                await LocalFiles.WriteJsonAsync(Path.Combine(game.Directory, "translation-scope.json"), scope with { Completed = true });
-                game.HasPendingTranslation = false;
-                SetStage(game, buildPatchAfter ? "试译补丁已生成" : "翻译完成，可继续校对");
+                await LocalFiles.WriteJsonAsync(Path.Combine(game.Directory, "translation-scope.json"), scope with { Completed = summary.Failed == 0 });
+                game.HasPendingTranslation = summary.Failed > 0;
+                SetStage(game, summary.Failed > 0 ? $"翻译结束，{summary.Failed} 条失败，可继续重试"
+                    : buildPatchAfter ? "试译补丁已生成" : "翻译完成，可继续校对");
             });
             if (buildPatchAfter && selectedGame == game && game.Error is null) ProjectTabs.SelectedItem = PatchTab;
         }

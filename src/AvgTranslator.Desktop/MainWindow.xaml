@@ -143,7 +143,7 @@
               <ComboBoxItem Content="菜单 / 界面" Tag="ui"/><ComboBoxItem Content="物品 / 装备" Tag="item"/><ComboBoxItem Content="技能 / 天赋" Tag="skill"/><ComboBoxItem Content="提示 / 说明" Tag="system"/>
             </ComboBox>
             <ComboBox x:Name="StatusFilterBox" Grid.Column="3" HorizontalAlignment="Stretch" SelectedIndex="0" SelectionChanged="TextFilter_Changed" AutomationProperties.Name="校对状态">
-              <ComboBoxItem Content="全部状态" Tag="all"/><ComboBoxItem Content="未翻译" Tag="missing"/><ComboBoxItem Content="待校对" Tag="pending"/><ComboBoxItem Content="已编辑" Tag="edited"/><ComboBoxItem Content="已校对" Tag="reviewed"/><ComboBoxItem Content="格式问题" Tag="invalid"/>
+              <ComboBoxItem Content="全部状态" Tag="all"/><ComboBoxItem Content="未翻译" Tag="missing"/><ComboBoxItem Content="翻译失败" Tag="failed"/><ComboBoxItem Content="待校对" Tag="pending"/><ComboBoxItem Content="已编辑" Tag="edited"/><ComboBoxItem Content="已校对" Tag="reviewed"/><ComboBoxItem Content="格式问题" Tag="invalid"/>
             </ComboBox>
           </Grid>
           <Grid Grid.Row="1" ColumnSpacing="8">

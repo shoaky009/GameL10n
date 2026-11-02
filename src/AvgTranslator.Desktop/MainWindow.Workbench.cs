@@ -112,6 +112,7 @@ public sealed partial class MainWindow
                     var memory = new TranslationMemory(Path.Combine(game.Directory, "memory"), memoryDirectory);
                     await memory.InitializeAsync();
                     var edits = await TranslationEdits.LoadAsync(game.Directory);
+                    var failures = await pipeline.LoadTranslationFailuresAsync(captured, policy);
                     var selection = await LocalFiles.ReadRecoverableJsonAsync<string[]>(Path.Combine(game.Directory, "trial-selection.json"));
                     var rows = new TranslationRow[captured.Extraction.Units.Count];
                     for (var i = 0; i < rows.Length; i++)
@@ -120,6 +121,7 @@ public sealed partial class MainWindow
                         var row = new TranslationRow(unit, i + 1, captured.Adapter)
                         {
                             ModelText = await memory.FindAsync(unit, policy),
+                            TranslationFailure = failures.GetValueOrDefault(unit.Id),
                             Edit = edits.Find(unit, policy.TargetLanguage),
                             PreviousEdit = edits.Entries.GetValueOrDefault(unit.Id)
                         };
@@ -393,7 +395,7 @@ public sealed partial class MainWindow
                 if (selected is not null && !selected.Contains(row.Unit.Id)) return false;
                 if (!(filter.Status switch
                 {
-                    "missing" => row.Text is null, "pending" => row.Text is not null && !row.Reviewed,
+                    "missing" => row.Text is null, "failed" => row.Failure is not null, "pending" => row.Text is not null && !row.Reviewed,
                     "edited" => row.Edit is { IsGenerated: false }, "reviewed" => row.Reviewed, "invalid" => row.Issues.Count > 0, _ => true
                 })) return false;
                 return filter.Query.Length == 0 || row.Source.Contains(filter.Query, StringComparison.OrdinalIgnoreCase)
@@ -609,10 +611,10 @@ public sealed partial class MainWindow
         EditorSaveText.Text = selectedGame?.EditSaveError is { } saveError ? "未保存：" + saveError + "。请点击保存重试。"
             : selectedGame?.EditsDirty == true ? "等待保存…" : row?.Edit is { IsGenerated: true } ? "已保存 · 重新翻译结果，等待校对" : row?.Edit is not null
             ? (row.Reviewed ? "已校对 · 手工译文受保护" : "已保存 · 手工译文受保护") : row?.Text is null ? "尚未翻译" : "已保存 · 等待校对";
-        EditorValidationInfo.IsOpen = row?.Text is not null;
-        EditorValidationInfo.Severity = row?.Issues.Count > 0 ? InfoBarSeverity.Warning : InfoBarSeverity.Success;
-        EditorValidationInfo.Title = row?.Issues.Count > 0 ? "格式需要修正" : "文本格式检查通过";
-        EditorValidationInfo.Message = row?.Issues.Count > 0 ? string.Join("；", row.Issues.Select(issue => issue.Message)) : "";
+        EditorValidationInfo.IsOpen = row?.Text is not null || row?.Failure is not null;
+        EditorValidationInfo.Severity = row?.Failure is not null || row?.Issues.Count > 0 ? InfoBarSeverity.Warning : InfoBarSeverity.Success;
+        EditorValidationInfo.Title = row?.Failure is not null ? "翻译失败" : row?.Issues.Count > 0 ? "格式需要修正" : "文本格式检查通过";
+        EditorValidationInfo.Message = row?.Failure ?? (row?.Issues.Count > 0 ? string.Join("；", row.Issues.Select(issue => issue.Message)) : "");
     }
 
     private void TranslationEditor_TextChanged(object sender, TextChangedEventArgs e)

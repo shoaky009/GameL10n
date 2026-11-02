@@ -58,6 +58,21 @@ public sealed partial class MainWindow
         });
     }
 
+    private IProgress<IReadOnlyDictionary<string, string?>> TranslationFailureUpdates(GameWorkspace game)
+    {
+        var captured = game.Session;
+        var policyKey = WorkbenchPolicy(game);
+        var runId = game.RunId;
+        return new Progress<IReadOnlyDictionary<string, string?>>(updates =>
+        {
+            if (game.RunId != runId || !ReferenceEquals(game.RowsSession, captured) || game.RowsPolicy != policyKey) return;
+            foreach (var (id, reason) in updates)
+                if (game.RowsById.TryGetValue(id, out var row)) { row.TranslationFailure = reason; row.Refresh(); }
+            InvalidateWorkbenchCache(game);
+            if (selectedGame == game) { RenderEditorValidation(); QueueTextFilter(); }
+        });
+    }
+
     private async Task RefreshSavedRetranslationsAsync(GameWorkspace game)
     {
         // Discard late updates before applying the authoritative snapshot. Keep the same rows
