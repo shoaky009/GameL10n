@@ -26,9 +26,10 @@ public sealed partial class GeneratedAdapterCompiler(PinnedDotNetToolchain toolc
 
     public async Task<GeneratedAdapterPackage> CompileWorkspaceAsync(string sourceDirectory, string destinationDirectory,
         IReadOnlyList<string> resourcePatterns, IReadOnlyList<AdapterReleaseFile> releaseFiles,
-        CancellationToken cancellationToken = default, AdapterFamily? family = null)
+        CancellationToken cancellationToken = default, AdapterFamily? family = null, AdapterRecognition? recognition = null)
     {
         family?.Validate();
+        recognition?.Validate();
         GeneratedAdapterResources.ValidatePatterns(resourcePatterns);
         sourceDirectory = Path.GetFullPath(sourceDirectory);
         destinationDirectory = Path.GetFullPath(destinationDirectory);
@@ -63,10 +64,11 @@ public sealed partial class GeneratedAdapterCompiler(PinnedDotNetToolchain toolc
             var normalizedPatterns = resourcePatterns.Select(GeneratedAdapterResources.Normalize).Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.Ordinal).ToArray();
             var versionHash = HashText(GeneratedAdapterResources.HashEntries(files) + "\n" + Toolchain.RuntimeVersion + "\n"
                 + JsonSerializer.Serialize(normalizedPatterns) + "\n" + JsonSerializer.Serialize(family)
-                + "\n" + JsonSerializer.Serialize(selection));
+                + "\n" + JsonSerializer.Serialize(selection)
+                + (recognition is null ? "" : "\n" + JsonSerializer.Serialize(recognition)));
             var package = new GeneratedAdapterPackage(family?.AdapterId ?? "unpublished", versionHash[..16], pending, [],
                 sourceHash, files["adapter.dll"], family, normalizedPatterns, files,
-                ManifestVersion: 3, ReleaseFiles: selection);
+                ManifestVersion: 3, ReleaseFiles: selection, Recognition: recognition);
             GeneratedAdapterResources.VerifyPackage(package);
             cancellationToken.ThrowIfCancellationRequested();
             WorkspaceFiles.RejectLinkAncestors(destinationDirectory);

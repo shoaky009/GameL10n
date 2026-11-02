@@ -231,7 +231,7 @@ public sealed partial class LocalAdapterPackageStore
             family.Family = publishedFamily;
             var prior = family.Versions.GetValueOrDefault(published.Version);
             family.Versions[published.Version] = new(published.Version, EngineLibrarySource.External, true,
-                prior?.PublishedAt ?? DateTimeOffset.UtcNow);
+                prior?.PublishedAt ?? DateTimeOffset.UtcNow, Discovery: Descriptor(published), DiscoveryLoaded: true);
         }
         foreach (var (id, setting) in state.Families)
         {
@@ -288,7 +288,8 @@ public sealed partial class LocalAdapterPackageStore
         public static IndexGame From(GameCompatibility game) => new(game.GameId, game.Title, game.Variant, game.AdapterVersion,
             game.StructureStatus, game.RuntimeStatus, game.PatchDirectory);
     }
-    private sealed record IndexVersion(string Version, EngineLibrarySource Source, bool Exists, DateTimeOffset? PublishedAt = null, bool IsCandidate = false);
+    private sealed record IndexVersion(string Version, EngineLibrarySource Source, bool Exists, DateTimeOffset? PublishedAt = null,
+        bool IsCandidate = false, AdapterDiscoveryDescriptor? Discovery = null, bool DiscoveryLoaded = false);
     private sealed class IndexFamily
     {
         public required AdapterFamily Family { get; set; }
@@ -299,6 +300,7 @@ public sealed partial class LocalAdapterPackageStore
     private sealed class LibraryIndex
     {
         [JsonRequired] public int SchemaVersion { get; init; } = 1;
+        public bool DiscoveryInitialized { get; set; }
         [JsonRequired] public Dictionary<string, IndexFamily> Families { get; init; } = new(StringComparer.Ordinal);
         [JsonRequired] public Dictionary<string, EngineKnowledgeSummary> Knowledge { get; init; } = new(StringComparer.Ordinal);
         [JsonRequired] public List<string> Diagnostics { get; init; } = [];

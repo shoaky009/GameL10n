@@ -219,6 +219,45 @@ public sealed class EngineLibraryTests : IDisposable
         Assert.Equal(indexed.Games.Select(game => game.AdapterVersion).Order(), rebuilt.Games.Select(game => game.AdapterVersion).Order());
     }
 
+    [Fact]
+    public async Task DiscoveryIndexDoesNotOpenPayloadsAndRegistryChangesApplyWithoutRebuilding()
+    {
+        var store = Store;
+        var first = await PublishAsync("one");
+        await PublishAsync("two");
+        var indexed = await store.ReadDiscoveryCandidatesAsync();
+        Assert.Equal(2, indexed.Count);
+        await store.RollbackAsync(GameId);
+        File.Delete(Path.Combine(first.DirectoryPath, "adapter.dll"));
+        File.Delete(Path.Combine(first.DirectoryPath, "package.json"));
+        Assert.Single(await new LocalAdapterPackageStore(store.RootDirectory).ReadDiscoveryCandidatesAsync());
+        Assert.ThrowsAny<Exception>(() => store.LoadVersion(Family.AdapterId, "one"));
+        Assert.Equal("one", Assert.Single(await store.ReadDiscoveryCandidatesAsync()).Version);
+        await store.SetFamilyEnabledAsync(Family.AdapterId, false);
+        Assert.Empty(await store.ReadDiscoveryCandidatesAsync());
+        await store.SetFamilyEnabledAsync(Family.AdapterId, true);
+        Assert.Equal("one", Assert.Single(await store.ReadDiscoveryCandidatesAsync()).Version);
+    }
+
+    [Fact]
+    public async Task OldIndexAndMissingIndexRecoverDiscoveryMetadataWithoutHashingPayloads()
+    {
+        var store = Store;
+        var package = await PublishAsync("one");
+        var indexPath = Path.Combine(store.RootDirectory, "library-index.json");
+        var old = System.Text.Json.Nodes.JsonNode.Parse(await File.ReadAllTextAsync(indexPath))!;
+        old.AsObject().Remove("discoveryInitialized");
+        var version = old["families"]![Family.AdapterId]!["versions"]!["one"]!.AsObject();
+        version.Remove("discovery"); version.Remove("discoveryLoaded");
+        await File.WriteAllTextAsync(indexPath, old.ToJsonString());
+        File.Delete(Path.Combine(package.DirectoryPath, "adapter.dll"));
+        var recovered = Assert.Single(await store.ReadDiscoveryCandidatesAsync());
+        Assert.Equal("script.dat", Assert.Single(recovered.Descriptor!.ResourceFiles));
+        File.Delete(indexPath);
+        var rebuilt = Assert.Single(await store.ReadDiscoveryCandidatesAsync());
+        Assert.Equal(recovered.Descriptor.ResourceFiles, rebuilt.Descriptor!.ResourceFiles);
+    }
+
     private async Task<GeneratedAdapterPackage> PublishAsync(string version)
     {
         var directory = Path.Combine(root, "build", version);

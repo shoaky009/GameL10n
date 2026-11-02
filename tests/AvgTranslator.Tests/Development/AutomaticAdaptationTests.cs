@@ -17,6 +17,71 @@ public sealed class AutomaticAdaptationTests : IDisposable
 
     public AutomaticAdaptationTests() => Directory.CreateDirectory(root);
 
+    [Fact]
+    public async Task RecognitionDeclarationIsVerifiedPersistedAndVersionedIndependentlyOfTheCli()
+    {
+        var workspace = Path.Combine(root, "workspace");
+        var state = new AdaptationSession();
+        var store = new LocalAdapterPackageStore(Path.Combine(root, "store"));
+        var compiler = Compiler(new ScriptedRunner());
+        var tools = new AdaptationTools(Request(), state, workspace, compiler, store);
+        await tools.ExecuteAsync(new("source", "write_file", """{"path":"src/Program.cs","content":"// fixture"}"""), default);
+        await tools.ExecuteAsync(new("stage", "stage_resources", """{"files":["script.txt"]}"""), default);
+        var initial = await tools.ExecuteAsync(new("test", "test_adapter", """
+            {"kind":"template","key":"line-script","name":"Line script","resourcePatterns":["*.txt"],
+             "recognition":{"schemaVersion":1,"required":[{"patterns":["script.txt"],"signatures":[{"offset":0,"hex":"FFFF"}]}],"hints":[]}}
+            """), default);
+        Assert.Contains("识别声明未在真实游戏上确认", initial);
+        Assert.Null(state.VerifiedPackage);
+        await tools.ExecuteAsync(new("test", "test_adapter", """
+            {"kind":"template","key":"line-script","name":"Line script","resourcePatterns":["*.txt"],
+             "recognition":{"schemaVersion":1,"required":[{"patterns":["*.txt"],"signatures":[{"offset":0,"hex":"4669727374"}]}],"hints":[]}}
+            """), default);
+        var package = state.VerifiedPackage!;
+        Assert.NotNull(package);
+        Assert.Equal(1, package.ProtocolVersion);
+        Assert.Equal(3, package.ManifestVersion);
+        var restored = JsonSerializer.Deserialize<AdaptationSession>(JsonSerializer.Serialize(state, Json), Json)!;
+        Assert.NotNull(restored.Recognition);
+        var resumed = new AdaptationTools(Request(), restored, workspace, compiler, store);
+        await resumed.ExecuteAsync(new("retest", "test_adapter", """
+            {"kind":"template","key":"line-script","name":"Line script","resourcePatterns":["*.txt"]}
+            """), default);
+        Assert.Equal(package.Version, restored.VerifiedPackage!.Version);
+        await resumed.ExecuteAsync(new("finish", "finish", """{"summary":"通过"}"""), default);
+        var loaded = store.LoadActive(Request().GameId)!;
+        Assert.NotNull(loaded.Recognition);
+        Assert.NotNull(Assert.Single(await store.ReadDiscoveryCandidatesAsync()).Descriptor!.Recognition);
+        var without = await compiler.CompileWorkspaceAsync(Path.Combine(workspace, "src"), Path.Combine(root, "plain"),
+            ["*.txt"], restored.ReleaseFiles!, family: loaded.Family);
+        Assert.NotEqual(loaded.Version, without.Version);
+    }
+
+    [Fact]
+    public async Task SharedProbeHeadersRemainIndependentWhenOneAdapterModifiesItsInput()
+    {
+        var request = Request();
+        var source = Path.Combine(root, "source");
+        Directory.CreateDirectory(source);
+        await File.WriteAllTextAsync(Path.Combine(source, "Program.cs"), "// fixture");
+        var compiler = Compiler(new ScriptedRunner());
+        var package = await compiler.CompileWorkspaceAsync(source, Path.Combine(root, "compiled"), ["*.txt"],
+            [new("src/Program.cs", "source", "Entry")]);
+        var inventory = GameDiscoverySession.Scan(request.GameDirectory);
+        var corrupting = new ScriptedRunner { ObserveRequest = call =>
+        {
+            using var message = JsonDocument.Parse(call.StandardInput);
+            var path = message.RootElement.GetProperty("sourceDirectory").GetString()!;
+            File.WriteAllText(Path.Combine(path, "script.txt"), "corrupted");
+        } };
+        var bad = new GeneratedGameAdapter(package, compiler.Toolchain, corrupting, Path.Combine(root, "bad"), discovery: inventory);
+        await Assert.ThrowsAsync<GeneratedAdapterException>(() => bad.ProbeAsync(request.GameDirectory));
+        var good = new GeneratedGameAdapter(package, compiler.Toolchain, new ScriptedRunner(), Path.Combine(root, "good"), discovery: inventory);
+        Assert.NotNull(await good.ProbeAsync(request.GameDirectory));
+        Assert.Equal(1, inventory.RangeReads);
+        Assert.Equal("First line\nSecond line", await File.ReadAllTextAsync(Path.Combine(request.GameDirectory, "script.txt")));
+    }
+
     [Theory]
     [InlineData("same", true)]
     [InlineData("missing", false)]

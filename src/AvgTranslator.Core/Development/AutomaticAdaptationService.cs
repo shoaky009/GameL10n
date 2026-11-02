@@ -87,19 +87,31 @@ public sealed class AutomaticAdaptationService(IAdaptationAgentModel model, Gene
                 && string.IsNullOrWhiteSpace(request.UserInstruction))
             {
                 Report("检查现有适配器", "正在检查可复用的引擎能力。");
-                var packages = packageStore.ListReusablePackages(diagnostics);
+                var discovery = await Task.Run(() => GameDiscoverySession.Scan(request.GameDirectory, cancellationToken), cancellationToken);
+                diagnostics.AddRange(discovery.Diagnostics);
+                var indexed = await packageStore.ReadDiscoveryCandidatesAsync(diagnostics, cancellationToken);
+                var candidates = await AdapterDiscoveryPlanner.SelectAsync(discovery, indexed, cancellationToken);
+                Report("检查现有适配器", $"已扫描 {discovery.FileCount:N0} 个文件，外置适配器由 {indexed.Count:N0} 个版本筛选为 {candidates.Count:N0} 个候选。");
+                var toolkit = new EngineReferenceToolkit(Path.Combine(packageStore.RootDirectory, "engine-tools"), researchClient, Report);
                 // Generic loose-script support must not short-circuit requested archive or Chinese-runtime development.
-                foreach (var adapter in request.ExistingAdapters.Where(adapter => adapter is not VnTextPatchAdapter)
-                    .Append(new SiglusAdapter(new EngineReferenceToolkit(Path.Combine(packageStore.RootDirectory, "engine-tools"), researchClient, Report), compiler.Runner, Report))
+                var loaders = request.ExistingAdapters.Where(adapter => adapter is not VnTextPatchAdapter)
+                    .Append(new SiglusAdapter(toolkit, compiler.Runner, Report))
                     .Where(adapter => !disabledFamilies.Contains(adapter.CatalogEntry?.Family.AdapterId ?? adapter.Id))
-                    .Concat(packages.Select(package =>
-                    (IGameAdapter)new GeneratedGameAdapter(package, compiler.Toolchain, compiler.Runner, packageStore.WorkDirectory,
-                        new EngineReferenceToolkit(Path.Combine(packageStore.RootDirectory, "engine-tools"), researchClient, Report), Report))))
+                    .Select(adapter => (adapter.Id, Load: (Func<IGameAdapter>)(() => adapter)))
+                    .Concat(candidates.Select(candidate => (candidate.Id, Load: (Func<IGameAdapter>)(() =>
+                        new GeneratedGameAdapter(packageStore.LoadVersion(candidate.Id, candidate.Version), compiler.Toolchain,
+                            compiler.Runner, packageStore.WorkDirectory, toolkit, Report, discovery)))));
+                foreach (var loader in loaders)
                 {
+                    var candidateWatch = Stopwatch.StartNew();
+                    string phase = "load";
                     try
                     {
+                        var adapter = loader.Load();
+                        phase = "probe";
                         var probe = await adapter.ProbeAsync(request.GameDirectory, cancellationToken);
                         if (probe is null) continue;
+                        phase = "verify";
                         if (adapter is GeneratedGameAdapter generated)
                         {
                             var verificationDirectory = Isolation.WorkspaceFiles.Resolve(packageStore.WorkDirectory, "reuse-check");
@@ -119,7 +131,8 @@ public sealed class AutomaticAdaptationService(IAdaptationAgentModel model, Gene
                         return await CompleteAsync(AdaptationStatus.Reused, "已找到可用适配器，可以选择文本试译。", adapter);
                     }
                     catch (Exception error) when (error is not OperationCanceledException)
-                    { diagnostics.Add("Existing adapter " + adapter.Id + ": " + error.Message); }
+                    { diagnostics.Add("Existing adapter " + loader.Id + ": " + error.Message); }
+                    finally { await TraceAsync(new { operation = "reuse-candidate", adapterId = loader.Id, phase, elapsedMs = candidateWatch.ElapsedMilliseconds }); }
                 }
             }
 
@@ -859,6 +872,7 @@ public sealed class AdaptationSession
     public string? VerifiedCoverageFingerprint { get; set; }
     public AdaptationObjective? VerifiedObjective { get; set; }
     public string? VerifiedBaselineFingerprint { get; set; }
+    public AdapterRecognition? Recognition { get; set; }
     public EngineReferencePin? EngineReference { get; set; }
     public GameLaunchInspection? LaunchInspection { get; set; }
     public BuiltinAdapterDiscoveryReport? BuiltinDiscovery { get; set; }

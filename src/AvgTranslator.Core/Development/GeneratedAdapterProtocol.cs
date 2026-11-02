@@ -19,10 +19,16 @@ public static class GeneratedAdapterProtocol
         Optional tools/engine-reference.json pins the shared Python source library and interpreter. use_engine_reference writes
         this dependency and EngineReferencePython.cs. With it, toolPaths:{python,engineLibrary} contains host-resolved local paths.
         A small tools/*.py JSON CLI can call existing python.engines/python.archives modules without rewriting their algorithms.
-        The same pinned files are used for test_adapter and all published operations; missing downloads are restored by the host.
+        The same pinned files are used for test_adapter and all published operations; use bundled/shared dependencies, restoring missing files from a complete release.
         Never hardcode these paths, download libraries from adapter code, or copy shared runtimes into game output.
         Always enumerate the current resourceFiles or sourceDirectory; filenames from the development game must not be pinned.
-        Resource discovery patterns accept *, ? and ** with / separators (e.g. **/*.dat).
+        Resource discovery patterns accept *, ? and ** with / separators (e.g. **/*.dat), and form a union, not required-file conditions.
+        Optional test_adapter recognition is a separate schemaVersion:1 declaration of required and hints file rules.
+        Each rule selects ANY of patterns; size constraints and ALL signatures hold on one file. All required rules must match;
+        hints only rank candidates. Signatures use hex bytes and offset>=0: origin start (default) counts to signature start;
+        origin end counts backwards from EOF to signature end. Unknown evidence retains a candidate for CLI probe.
+        Omit recognition to keep saved conditions; do not add game-title filenames or research extra facts merely to fill it.
+        The host owns indexing, ranking and I/O budgets; declaration changes version the package without changing CLI v1.
         During probe, sourceDirectory contains only up to 65536 header bytes per candidate. probeFiles reports original lengths
         and actual headerBytes. To inspect a footer, index or PE resource outside that header, return
         {protocolVersion:1,success:true,probeReads:[{path,offset,length}]} without a probe result. The host invokes probe again
@@ -36,7 +42,7 @@ public static class GeneratedAdapterProtocol
         For build, load the unit-ID-to-text dictionary from translationsFile when non-null, else from inline translations.
         Write the full response JSON to the absolute responseFile path when supplied (File.Create + JsonSerializer.SerializeAsync
         supports large extractions). An inline stdout JSON response is also supported for legacy adapters.
-        Each CLI operation is cancellable and has a ten-minute timeout. stdout/stderr diagnostics are limited to 8 MiB for new
+        Each CLI operation is cancellable. Probe has a 45-second total budget; other operations have a ten-minute timeout. stdout/stderr diagnostics are limited to 8 MiB for new
         packages; extraction responses written to responseFile have no fixed byte limit. Do not print extraction data to stdout.
         Response: {protocolVersion:1,success:true,error:null,probe|extraction|build|validation:...}; failures use success:false,error.
         Probe: {engineId,adapterId,adapterVersion,description,requiredFiles:[relativePath],warnings:[],originalExecutable:null}.

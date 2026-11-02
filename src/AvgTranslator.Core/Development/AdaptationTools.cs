@@ -89,8 +89,8 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
             """{"executable":{"type":"string"},"arguments":{"type":"array","items":{"type":"string"}},"workingDirectory":{"type":"string"},"stdin":{"type":"string"},"timeoutSeconds":{"type":"integer"}}""", "executable", "arguments"),
         Define("run_csharp", "Compile and run explicitly selected UTF-8 .cs files under work/ or src/ with pinned .NET 10. Use a work/ test entry point plus existing src/ parser helpers; do not copy helpers or include an unrelated Program.cs. No directory-wide compilation. Main or top-level statements, explicit using directives. Optional references lists local managed DLLs under work/ or src/tools/ (include dependencies). No project/restore/NuGet. Default workingDirectory is workspace root; arguments/stdin/stdout/stderr use UTF-8. Register CodePagesEncodingProvider for cp932/cp936. Timeout defaults to 120s (1-600); compiler capped at 120s. Returns compiled, exitCode, stdout, stderr; temporary build files are deleted, sources retained. Use staged resources; never modify originals.",
             """{"sourceFiles":{"type":"array","items":{"type":"string"}},"references":{"type":"array","items":{"type":"string"}},"arguments":{"type":"array","items":{"type":"string"}},"workingDirectory":{"type":"string"},"stdin":{"type":"string"},"timeoutSeconds":{"type":"integer"}}""", "sourceFiles"),
-        Define("test_adapter", "Compile and verify the saved release selection. Omit releaseFiles to reuse it; supplying releaseFiles replaces the entire selection. New src C# files and copied built-in dependencies are registered automatically. Use update_release_files only for dependency changes or exclusions. Paths are FINAL PACKAGE paths: src/Program.cs maps to workspace src/Program.cs; tools/parser.py maps to workspace src/tools/parser.py. No globs or automatic directory inclusion. Exclude probes, samples, logs, unused tools and old implementations. Test this exact release before finish. Check discovery against real game/staged samples and independently verify extraction/roundtrip; repair also checks the existing baseline. discoveryOnly=true cannot publish.",
-            """{"kind":{"type":"string","enum":["engine","template"]},"key":{"type":"string"},"name":{"type":"string"},"resourcePatterns":{"type":"array","items":{"type":"string"}},"releaseFiles":{"type":"array","minItems":1,"maxItems":512,"items":{"type":"object","properties":{"path":{"type":"string","maxLength":512},"role":{"type":"string","enum":["source","runtime","asset","license"]},"purpose":{"type":"string","minLength":1,"maxLength":240}},"required":["path","role","purpose"],"additionalProperties":false}},"discoveryOnly":{"type":"boolean"}}""", "kind", "key", "name", "resourcePatterns"),
+        Define("test_adapter", "Compile and verify the saved release selection. Omit releaseFiles to reuse it; supplying releaseFiles replaces the entire selection. New src C# files and copied built-in dependencies are registered automatically. Use update_release_files only for dependency changes or exclusions. Paths are FINAL PACKAGE paths: src/Program.cs maps to workspace src/Program.cs; tools/parser.py maps to workspace src/tools/parser.py. No globs or automatic directory inclusion. Exclude probes, samples, logs, unused tools and old implementations. Test this exact release before finish. Check discovery against real game/staged samples and independently verify extraction/roundtrip; repair also checks the existing baseline. discoveryOnly=true cannot publish. Optional recognition declares proven required file/signature facts and nonblocking hints; omit to retain the saved declaration. It is independent of resourcePatterns. Do not invent game-specific filenames or do extra research solely to fill it.",
+            """{"kind":{"type":"string","enum":["engine","template"]},"key":{"type":"string"},"name":{"type":"string"},"resourcePatterns":{"type":"array","items":{"type":"string"}},"releaseFiles":{"type":"array","minItems":1,"maxItems":512,"items":{"type":"object","properties":{"path":{"type":"string","maxLength":512},"role":{"type":"string","enum":["source","runtime","asset","license"]},"purpose":{"type":"string","minLength":1,"maxLength":240}},"required":["path","role","purpose"],"additionalProperties":false}},"discoveryOnly":{"type":"boolean"},"recognition":""" + AdapterRecognition.JsonSchema + "}", "kind", "key", "name", "resourcePatterns"),
         Define("update_release_files", "Inspect or incrementally update the saved release selection. files upserts exact PACKAGE paths with source/runtime/asset/license roles and purposes; remove excludes paths without deleting files. No arguments lists selection and unregistered files. Use only for changed dependencies or exclusions; test_adapter reuses this state across failures/restarts/checkpoints. Game originals belong to resources, modified game files to patch output, never release assets.",
             """{"files":{"type":"array","maxItems":512,"items":{"type":"object","properties":{"path":{"type":"string"},"role":{"type":"string","enum":["source","runtime","asset","license"]},"purpose":{"type":"string","maxLength":240}},"required":["path","role","purpose"],"additionalProperties":false}},"remove":{"type":"array","maxItems":512,"items":{"type":"string"}}}"""),
         Define("finish", "Publish and activate the last successfully tested package. Checks source/dependency/resource contents still match verification. Reading files and updating work/ reports do not require retesting.",
@@ -146,6 +146,7 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
         var args = document.RootElement;
         if (args.ValueKind != JsonValueKind.Object) throw new InvalidDataException("工具参数必须为对象。");
         session.ReleaseFiles ??= session.VerifiedPackage?.ReleaseFiles;
+        session.Recognition ??= session.VerifiedPackage?.Recognition;
         if (call.Name != "report_blocker") unresolvedStopReports = 0;
         object result = call.Name switch
         {
@@ -558,13 +559,18 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
             return result;
         }
         var pinned = store.LoadActive(request.GameId);
-        var package = (pinned?.Id == Text(args, "id") && pinned.Version == Text(args, "version") ? pinned : null)
-            ?? store.ListReusablePackages().SingleOrDefault(item =>
-            item.Id == Text(args, "id") && item.Version == Text(args, "version"))
-            ?? throw new InvalidDataException("未找到此版本的适配器。");
+        var package = pinned?.Id == Text(args, "id") && pinned.Version == Text(args, "version") ? pinned : null;
+        if (package is null)
+        {
+            var candidate = (await store.ReadDiscoveryCandidatesAsync(ct: ct)).SingleOrDefault(item =>
+                item.Id == Text(args, "id") && item.Version == Text(args, "version"))
+                ?? throw new InvalidDataException("未找到此版本的适配器。");
+            package = store.LoadVersion(candidate.Id, candidate.Version);
+        }
         if (Directory.Exists(SourceDirectory) && Directory.EnumerateFileSystemEntries(SourceDirectory).Any())
             throw new InvalidDataException("src 已包含代码。请先检查现有文件，避免覆盖已有开发成果。");
         session.VerifiedPackage = null;
+        session.Recognition = package.Recognition;
         var source = Directory.Exists(Path.Combine(package.DirectoryPath, "src"))
             ? Path.Combine(package.DirectoryPath, "src") : package.DirectoryPath;
         foreach (var file in Directory.EnumerateFiles(source, "*", SearchOption.AllDirectories))
@@ -655,6 +661,10 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
     private async Task<object> TestAsync(JsonElement args, CancellationToken ct)
     {
         UpdateCoverage(args);
+        if (args.TryGetProperty("recognition", out var recognitionDeclaration))
+            session.Recognition = recognitionDeclaration.ValueKind == JsonValueKind.Null ? null
+                : recognitionDeclaration.Deserialize<AdapterRecognition>(Json);
+        session.Recognition?.Validate();
         var releaseFiles = args.TryGetProperty("releaseFiles", out var declared)
             ? AdapterReleaseFiles.Validate(declared.Deserialize<AdapterReleaseFile[]>(Json))
             : session.ReleaseFiles;
@@ -671,7 +681,7 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
         var patterns = Strings(args, "resourcePatterns");
         releaseFiles = AdapterReleaseFiles.Validate(releaseFiles);
         var timer = System.Diagnostics.Stopwatch.StartNew();
-        var package = await compiler.CompileWorkspaceAsync(SourceDirectory, Path.Combine(workspace, "build"), patterns, releaseFiles, ct, family);
+        var package = await compiler.CompileWorkspaceAsync(SourceDirectory, Path.Combine(workspace, "build"), patterns, releaseFiles, ct, family, session.Recognition);
         CheckReleaseGameInputs(package);
         var compileMs = timer.ElapsedMilliseconds;
         timer.Restart();
@@ -788,6 +798,14 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
 
     private async Task<GameProbe> CheckDiscoveryAsync(GeneratedGameAdapter adapter, CancellationToken ct)
     {
+        if (adapter.Package.Recognition is not null)
+        {
+            var inventory = GameDiscoverySession.Scan(request.GameDirectory, ct);
+            var recognition = await inventory.EvaluateAsync(new(adapter.Package.ResourceFiles,
+                adapter.Package.ResourcePatterns, adapter.Package.Recognition), content: true, ct);
+            if (recognition.Status != RecognitionStatus.Match)
+                throw new InvalidDataException("识别声明未在真实游戏上确认，请修正必要条件或签名；不确定的文件特征应放入 hints。识别声明可省略。");
+        }
         var gameCandidates = adapter.DiscoverResources(request.GameDirectory);
         var sampleCandidates = adapter.DiscoverResources(ResourceDirectory);
         var candidateDifferences = Differences(gameCandidates, sampleCandidates);

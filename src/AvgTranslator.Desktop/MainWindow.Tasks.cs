@@ -30,39 +30,66 @@ public sealed partial class MainWindow
         await FlushEditsAsync(game);
         GameSession? nextSession = null;
         game.BuiltinProbes.Clear();
-        SetStage(game, "加载适配器", "正在读取并校验可复用的引擎适配器。");
+        SetStage(game, "扫描游戏目录", "正在收集资源路径和文件大小。");
+        var discovery = await Task.Run(() => GameDiscoverySession.Scan(game.GameDirectory, token), token);
         var diagnostics = new List<string>();
-        var (active, reusable, disabled) = await Task.Run(() =>
-            (store.LoadActive(game.Id), store.ListReusablePackages(diagnostics), store.ReadDisabledFamilyIds()), token);
+        diagnostics.AddRange(discovery.Diagnostics);
+        SetStage(game, "筛选引擎候选", $"已扫描 {discovery.FileCount:N0} 个文件，正在匹配引擎索引。");
+        var indexed = await store.ReadDiscoveryCandidatesAsync(diagnostics, token);
+        var reusable = await Task.Run(() => AdapterDiscoveryPlanner.SelectAsync(discovery, indexed, token), token);
+        var (active, disabled) = await Task.Run(() => (store.LoadActive(game.Id), store.ReadDisabledFamilyIds()), token);
         bool CanMatch(IGameAdapter adapter) => !disabled.Contains(adapter.CatalogEntry?.Family.AdapterId ?? adapter.Id)
             || (game.Project.AdapterId == adapter.Id && game.Project.AdapterVersion == adapter.Version);
-        var candidates = adapters.Where(adapter => adapter is not VnTextPatchAdapter).Where(CanMatch).ToList();
-        var siglus = new SiglusAdapter(engineToolkit, reportProgress: report);
-        if (CanMatch(siglus)) candidates.Add(siglus);
+        var candidates = new List<(string Id, string Version, string Name, Func<IGameAdapter> Load)>();
+        var candidateKeys = new HashSet<(string, string)>();
+        void AddCandidate(IGameAdapter adapter)
+        {
+            if (candidateKeys.Add((adapter.Id, adapter.Version)))
+                candidates.Add((adapter.Id, adapter.Version, adapter.CatalogEntry?.Family.Name ?? adapter.Id, () => adapter));
+        }
         if (active is not null)
-            candidates.Insert(0, new GeneratedGameAdapter(active, FindToolchain(), new AdapterProcessRunner(), store.WorkDirectory, engineToolkit, report));
-        foreach (var package in reusable)
-            if (!candidates.Any(candidate => candidate.Id == package.Id && candidate.Version == package.Version))
-                candidates.Add(new GeneratedGameAdapter(package, FindToolchain(), new AdapterProcessRunner(), store.WorkDirectory, engineToolkit, report));
-        // Each game owns its discovery pass and diagnostics while other games are being analyzed.
-        candidates.AddRange(VnTextPatchAdapters.CreateAll().Where(CanMatch));
+            AddCandidate(new GeneratedGameAdapter(active, FindToolchain(), new AdapterProcessRunner(), store.WorkDirectory, engineToolkit, report, discovery));
+        foreach (var adapter in adapters.Where(adapter => adapter is not VnTextPatchAdapter).Where(CanMatch)) AddCandidate(adapter);
+        var siglus = new SiglusAdapter(engineToolkit, reportProgress: report);
+        if (CanMatch(siglus)) AddCandidate(siglus);
+        foreach (var candidate in reusable)
+        {
+            if (!candidateKeys.Add((candidate.Id, candidate.Version))) continue;
+            // No package payload is opened until this candidate is actually attempted.
+            candidates.Add((candidate.Id, candidate.Version, candidate.Family?.Name ?? candidate.Id, () => new GeneratedGameAdapter(
+                store.LoadVersion(candidate.Id, candidate.Version), FindToolchain(), new AdapterProcessRunner(),
+                store.WorkDirectory, engineToolkit, report, discovery)));
+        }
+        foreach (var builtin in VnTextPatchAdapters.CreateAll(discoverySession: discovery).Where(CanMatch)) AddCandidate(builtin);
         foreach (var diagnostic in diagnostics) Log(game, diagnostic);
+        SetStage(game, "筛选引擎候选", $"外置适配器由 {indexed.Count:N0} 个版本筛选为 {reusable.Count:N0} 个候选，准备深入探测。");
+        LogDiscoveryDiagnostic(game, new { stage = "selection", elapsedMs = watch.ElapsedMilliseconds,
+            files = discovery.FileCount, indexedVersions = indexed.Count, candidates = reusable.Count,
+            signatureReads = discovery.RangeReads, signatureBytes = discovery.BytesRead });
         var candidateIndex = 0;
-        foreach (var adapter in candidates)
+        foreach (var candidate in candidates)
         {
             token.ThrowIfCancellationRequested();
-            SetStage(game, "匹配游戏引擎", $"正在检查 {++candidateIndex} / {candidates.Count}：{adapter.CatalogEntry?.Family.Name ?? adapter.Id}");
+            SetStage(game, "匹配游戏引擎", $"正在检查 {++candidateIndex} / {candidates.Count}：{candidate.Name}");
+            IGameAdapter? adapter = null;
+            var candidateWatch = Stopwatch.StartNew();
+            string phase = "load";
+            bool accepted = false;
             try
             {
+                adapter = await Task.Run(candidate.Load, token);
+                phase = "probe";
                 var probe = await Task.Run(() => adapter.ProbeAsync(game.GameDirectory, token), token);
                 if (adapter is VnTextPatchAdapter builtin && (probe is not null || builtin.LastProbeDiagnostic is not null))
                     game.BuiltinProbes.Add(new(builtin.FormatKey, probe is null ? "failed" : "script-probe-passed",
                         probe?.RequiredFiles.Take(8).ToArray() ?? [], builtin.LastProbeDiagnostic, DateTimeOffset.UtcNow));
                 if (probe is null) continue;
+                phase = "extract";
                 var analyzed = await Task.Run(() => pipeline.AnalyzeAsync(game.GameDirectory, adapter, token, game.Id, probe, report,
                     commitSnapshot: false), token);
                 if (adapter is GeneratedGameAdapter generated && (active?.Id != generated.Id || active.Version != generated.Version))
                 {
+                    phase = "verify";
                     SetStage(game, "验证资源兼容性", "正在验证原文回填、中文修改和部分试译，确认适配器可用于当前游戏。");
                     var verification = await Task.Run(() => new GeneratedAdapterVerifier().VerifyAsync(generated,
                         analyzed.SourceDirectory, Path.Combine(store.WorkDirectory, "reuse-" + Guid.NewGuid().ToString("N")), token), token);
@@ -73,9 +100,11 @@ public sealed partial class MainWindow
                     await store.PublishAndActivateAsync(analyzed.Id, generated.Package, verification.Diagnostics, token);
                 }
                 nextSession = analyzed;
+                accepted = true;
                 break;
             }
-            catch (Exception error) when (adapter is GeneratedGameAdapter or VnTextPatchAdapter or SiglusAdapter && error is not OperationCanceledException)
+            catch (Exception error) when (error is not OperationCanceledException
+                && (adapter is null or GeneratedGameAdapter or VnTextPatchAdapter or SiglusAdapter))
             {
                 if (adapter is VnTextPatchAdapter builtin)
                 {
@@ -84,8 +113,13 @@ public sealed partial class MainWindow
                 }
                 if (adapter is SiglusAdapter)
                     game.BuiltinProbes.Add(new("Siglus", "failed", [], error.Message[..Math.Min(error.Message.Length, 2000)], DateTimeOffset.UtcNow));
-                Log(game, $"适配器 {adapter.Id} 未匹配：{error.Message}");
+                Log(game, $"适配器 {candidate.Id} 未匹配：{error.Message}");
                 if (adapter is VnTextPatchAdapter && error is AdapterProcessUnavailableException) break;
+            }
+            finally
+            {
+                LogDiscoveryDiagnostic(game, new { stage = "candidate", adapterId = candidate.Id, version = candidate.Version,
+                    phase, accepted, elapsedMs = candidateWatch.ElapsedMilliseconds });
             }
         }
         if (nextSession is null)
@@ -105,6 +139,17 @@ public sealed partial class MainWindow
             await CompleteAnalysisAsync(game, watch, restored: false, token);
         }
     });
+
+    private static void LogDiscoveryDiagnostic(GameWorkspace game, object detail)
+    {
+        var line = $"[{DateTime.Now:HH:mm:ss}] [识别诊断] " + JsonSerializer.Serialize(detail) + "\n";
+        var path = Path.Combine(game.Directory, "logs", $"{DateTime.Now:yyyyMMdd}.log");
+        _ = game.EnqueueWrite(async () =>
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            await File.AppendAllTextAsync(path, line);
+        });
+    }
 
     private async Task<GameSession?> LoadSavedSessionAsync(GameWorkspace game, LocalAdapterPackageStore store,
         EngineReferenceToolkit toolkit, Action<string, string> report, TranslationPipeline storagePipeline, CancellationToken token)

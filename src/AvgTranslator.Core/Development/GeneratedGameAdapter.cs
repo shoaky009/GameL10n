@@ -13,7 +13,7 @@ public sealed class GeneratedGameAdapter(
     IAdapterProcessRunner runner,
     string workRoot,
     EngineReferenceToolkit? engineToolkit = null,
-    Action<string, string>? reportProgress = null) : IGameAdapter
+    Action<string, string>? reportProgress = null, GameDiscoverySession? discovery = null) : IGameAdapter
 {
     private const int ProbeHeaderBytes = 64 * 1024;
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web) { MaxDepth = 64 };
@@ -36,23 +36,32 @@ public sealed class GeneratedGameAdapter(
 
     public async Task<GameProbe?> ProbeAsync(string gameDirectory, CancellationToken cancellationToken = default)
     {
-        var resources = DiscoverResources(gameDirectory);
-        if (resources.Count == 0 || resources.Any(path => !File.Exists(WorkspaceFiles.Resolve(gameDirectory, path)))) return null;
-        var response = await InvokeAsync("probe", gameDirectory, resources, null, null, cancellationToken);
-        if (response.Probe is null) return null;
-        var probe = response.Probe;
-        if (probe.RequiredFiles is null || probe.Warnings is null || probe.RequiredFiles.Count == 0
-            || probe.RequiredFiles.Select(GeneratedAdapterResources.Normalize).Distinct(StringComparer.OrdinalIgnoreCase).Count() != probe.RequiredFiles.Count)
-            throw new GeneratedAdapterException("The adapter returned an invalid probe result.");
-        foreach (var path in probe.RequiredFiles) RequireResourcePath(path, resources);
-        if (probe.OriginalExecutable is { } executable)
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(TimeSpan.FromSeconds(45));
+        try
         {
-            RequireResourcePath(executable, resources);
-            if (!probe.RequiredFiles.Contains(executable, StringComparer.OrdinalIgnoreCase))
-                throw new GeneratedAdapterException("The original executable must be included in requiredFiles so the host preserves its source.");
+            var resources = discovery is { Complete: true } && Path.GetFullPath(gameDirectory).Equals(discovery.DirectoryPath, StringComparison.OrdinalIgnoreCase)
+                ? discovery.Resources(new(package.ResourceFiles, package.ResourcePatterns, package.Recognition), deadline.Token)
+                : DiscoverResources(gameDirectory);
+            if (resources.Count == 0 || resources.Any(path => !File.Exists(WorkspaceFiles.Resolve(gameDirectory, path)))) return null;
+            var response = await InvokeAsync("probe", gameDirectory, resources, null, null, deadline.Token);
+            if (response.Probe is null) return null;
+            var probe = response.Probe;
+            if (probe.RequiredFiles is null || probe.Warnings is null || probe.RequiredFiles.Count == 0
+                || probe.RequiredFiles.Select(GeneratedAdapterResources.Normalize).Distinct(StringComparer.OrdinalIgnoreCase).Count() != probe.RequiredFiles.Count)
+                throw new GeneratedAdapterException("The adapter returned an invalid probe result.");
+            foreach (var path in probe.RequiredFiles) RequireResourcePath(path, resources);
+            if (probe.OriginalExecutable is { } executable)
+            {
+                RequireResourcePath(executable, resources);
+                if (!probe.RequiredFiles.Contains(executable, StringComparer.OrdinalIgnoreCase))
+                    throw new GeneratedAdapterException("The original executable must be included in requiredFiles so the host preserves its source.");
+            }
+            originalExecutable = probe.OriginalExecutable;
+            return probe with { EngineId = package.Family?.Key ?? probe.EngineId, AdapterId = Id, AdapterVersion = Version };
         }
-        originalExecutable = probe.OriginalExecutable;
-        return probe with { EngineId = package.Family?.Key ?? probe.EngineId, AdapterId = Id, AdapterVersion = Version };
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        { throw new AdapterProcessLimitException("适配器探测超过 45 秒，本次未完成检查，可使用智能适配进一步分析。"); }
     }
 
     public async Task<ExtractionResult> ExtractAsync(string sourceDirectory, CancellationToken cancellationToken = default)
@@ -143,6 +152,19 @@ public sealed class GeneratedGameAdapter(
                     var original = WorkspaceFiles.Resolve(sourceDirectory, resource);
                     var destination = WorkspaceFiles.Resolve(source, resource);
                     Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+                    if (package.ManifestVersion >= 2 && discovery is not null
+                        && Path.GetFullPath(sourceDirectory).Equals(discovery.DirectoryPath, StringComparison.OrdinalIgnoreCase))
+                    {
+                        var cachedLength = new FileInfo(original).Length;
+                        int cachedHeaderLength = (int)Math.Min(cachedLength, ProbeHeaderBytes);
+                        var cached = cachedHeaderLength == 0 ? [] : await discovery.ReadRangeAsync(resource, 0, cachedHeaderLength, cancellationToken);
+                        if (cached is not null)
+                        {
+                            await File.WriteAllBytesAsync(destination, cached, cancellationToken);
+                            headers.Add(new(resource, cachedLength, cachedHeaderLength));
+                            continue;
+                        }
+                    }
                     await using var input = new FileStream(original, FileMode.Open, FileAccess.Read, FileShare.Read,
                         ProbeHeaderBytes, FileOptions.Asynchronous | FileOptions.SequentialScan);
                     var length = input.Length;

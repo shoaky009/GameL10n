@@ -1,9 +1,10 @@
 using AvgTranslator.Core.Isolation;
+using AvgTranslator.Core.Development;
 
 namespace AvgTranslator.Core.Adapters;
 
 /// <summary>Shares one filename scan across a sequence of format probes; snapshots are always scanned afresh.</summary>
-internal sealed class VnTextPatchDiscovery
+internal sealed class VnTextPatchDiscovery(GameDiscoverySession? inventory = null)
 {
     private readonly object sync = new();
     private readonly HashSet<string> probedFormats = new(StringComparer.Ordinal);
@@ -26,7 +27,13 @@ internal sealed class VnTextPatchDiscovery
             // Seeing the same format twice starts a new pass, including callers outside the desktop UI.
             if (!string.Equals(root, probeDirectory, StringComparison.OrdinalIgnoreCase) || probedFormats.Contains(format.Key))
             {
-                probeResources = Scan(root, cancellationToken);
+                probeResources = inventory is { Complete: true } && root.Equals(inventory.DirectoryPath, StringComparison.OrdinalIgnoreCase)
+                    ? inventory.Select(Extensions.Select(extension => "**/*" + extension).Concat(Companions.Select(name => "**/" + name)).ToArray(), cancellationToken)
+                        .Where(path => !path.Split('/').SkipLast(1).Any(ExcludedDirectories.Contains)
+                            && !path.Split('/').Any(part => part.EndsWith(".bak", StringComparison.OrdinalIgnoreCase)
+                                || part.Contains(".pending-", StringComparison.OrdinalIgnoreCase)
+                                || part.Contains(".damaged-", StringComparison.OrdinalIgnoreCase))).ToArray()
+                    : Scan(root, cancellationToken);
                 probeDirectory = root;
                 probedFormats.Clear();
             }

@@ -20,8 +20,9 @@ public sealed partial class AdaptationTools
         var disabled = store.ReadDisabledFamilyIds();
         // A project can repair its pinned version even when the family is disabled for new games.
         var pinned = store.LoadActive(request.GameId);
-        var published = store.ListReusablePackages().AsEnumerable();
-        if (pinned is not null) published = published.Prepend(pinned);
+        var published = (await store.ReadDiscoveryCandidatesAsync(ct: ct)).AsEnumerable();
+        if (pinned is not null) published = published.Prepend(new(pinned.Id, pinned.Version, null,
+            new(pinned.ResourceFiles, pinned.ResourcePatterns, pinned.Recognition), new(RecognitionStatus.Unknown, 0), pinned.Family));
         return new
         {
             candidates = session.BuiltinDiscovery with { Candidates = session.BuiltinDiscovery.Candidates.Where(candidate => !disabled.Contains(candidate.AdapterId)).ToArray() },

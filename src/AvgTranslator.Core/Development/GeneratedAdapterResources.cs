@@ -14,6 +14,7 @@ internal static class GeneratedAdapterResources
         if (patterns.Count == 0) throw new GeneratedAdapterException("At least one resource discovery pattern is required.");
         foreach (var pattern in patterns)
         {
+            if (string.IsNullOrWhiteSpace(pattern)) throw new GeneratedAdapterException("A resource pattern cannot be empty.");
             // Validate the path components as usual after replacing the supported glob characters.
             _ = WorkspaceFiles.Resolve(Path.GetTempPath(), Normalize(pattern).Replace('*', 'x').Replace('?', 'x'));
             if (pattern.Length > 1024) throw new GeneratedAdapterException("A resource pattern is too long.");
@@ -35,7 +36,7 @@ internal static class GeneratedAdapterResources
             .Order(StringComparer.Ordinal).ToArray();
     }
 
-    private static Regex Pattern(string pattern)
+    internal static Regex Pattern(string pattern)
     {
         var expression = new StringBuilder("\\A");
         pattern = Normalize(pattern);
@@ -79,6 +80,7 @@ internal static class GeneratedAdapterResources
             family.Validate();
             if (package.Id != family.AdapterId) throw new GeneratedAdapterException("The engine/template and package identities disagree.");
         }
+        if (package.Recognition is { SchemaVersion: 1 } recognition) recognition.Validate();
         if (package.ResourceFiles is null) throw new GeneratedAdapterException("The resource manifest is invalid.");
         foreach (var file in package.ResourceFiles) _ = WorkspaceFiles.Resolve(package.DirectoryPath, file);
         if (package.ResourcePatterns is { } patterns) ValidatePatterns(patterns);
