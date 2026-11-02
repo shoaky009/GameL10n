@@ -13,7 +13,7 @@ public sealed class GeneratedAdapterVerifier
     /// <summary>Checks host-observed bytes and extraction; an extension's validation claim is never sufficient.</summary>
     public async Task<GeneratedAdapterVerification> VerifyAsync(GeneratedGameAdapter adapter, string sampleDirectory,
         string verificationDirectory, CancellationToken cancellationToken = default, bool sourceIsSnapshot = false,
-        TextCoverage? coverage = null, IReadOnlyList<TranslationUnit>? baselineUnits = null)
+        TextCoverage? coverage = null, IReadOnlyList<TranslationUnit>? baselineUnits = null, bool requireExactBaseline = false)
     {
         if (Directory.Exists(verificationDirectory) && Directory.EnumerateFileSystemEntries(verificationDirectory).Any())
             throw new InvalidDataException("适配验证需要空的临时目录。");
@@ -52,8 +52,10 @@ public sealed class GeneratedAdapterVerifier
             if (baselineUnits is { Count: > 0 })
             {
                 phase = "existing-text-compatibility";
+                if (requireExactBaseline && first.Units.Count != baselineUnits.Count)
+                    throw new GeneratedAdapterException($"发布包提取数量与已有记录不同：已有 {baselineUnits.Count} 条，本次 {first.Units.Count} 条。");
                 RequireCompatibleBaseline(baselineUnits, first);
-                diagnostics.Add($"已核对 {baselineUnits.Count} 条已有文本的身份与缓存字段，修复未改变已有译文和校对记录的匹配依据。");
+                diagnostics.Add($"已核对 {baselineUnits.Count} 条已有文本的身份与缓存字段，未改变已有译文和校对记录的匹配依据。");
             }
             if (coverage is not null)
             {
@@ -169,7 +171,7 @@ public sealed class GeneratedAdapterVerifier
         }
         if (incompatible == 0) return;
         throw new GeneratedAdapterException(GeneratedAdapterCompiler.LimitDiagnostic(
-            $"修复适配改变了 {incompatible} / {baseline.Count} 条已有文本的身份或缓存字段，不能直接复用已有译文与校对记录。"
+            $"本次适配改变了 {incompatible} / {baseline.Count} 条已有文本的身份或缓存字段，不能直接复用已有译文与校对记录。"
             + "保留原 ID、位置、原文、上下文、说话人、类型及保护标记，在适配器内部维护新的编码/槽位映射。"
             + "使用 inspect_existing_text 分页读取原字段，不要靠原文相似度合并。\n" + string.Join("\n", details)));
     }

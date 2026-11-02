@@ -72,7 +72,7 @@ internal static class GeneratedAdapterResources
 
     internal static void VerifyPackage(GeneratedAdapterPackage package)
     {
-        if (package.ProtocolVersion != 1 || package.ManifestVersion is < 1 or > 2)
+        if (package.ProtocolVersion != 1 || package.ManifestVersion is < 1 or > 3)
             throw new GeneratedAdapterException("The local adapter uses an unsupported package or CLI protocol version.");
         if (package.Family is { } family)
         {
@@ -95,6 +95,13 @@ internal static class GeneratedAdapterResources
         if (package.PackageFiles is not { Count: > 0 } files || !files.ContainsKey("adapter.dll")
             || !files.ContainsKey("adapter.runtimeconfig.json"))
             throw new GeneratedAdapterException("The adapter package has an incomplete file manifest.");
+        if (package.ManifestVersion >= 3)
+        {
+            var release = AdapterReleaseFiles.Validate(package.ReleaseFiles);
+            var expected = release.Select(file => file.Path).Append("adapter.dll").Append("adapter.runtimeconfig.json");
+            if (!files.Keys.ToHashSet(StringComparer.Ordinal).SetEquals(expected))
+                throw new GeneratedAdapterException("正式包文件与 releaseFiles 发布清单不一致。");
+        }
         var actual = GeneratedGameAdapter.EnumerateFiles(package.DirectoryPath)
             .Select(path => Normalize(Path.GetRelativePath(package.DirectoryPath, path)))
             .Where(path => path is not ("package.json" or "verification.json"))

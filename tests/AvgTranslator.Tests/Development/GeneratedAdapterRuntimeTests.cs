@@ -25,7 +25,8 @@ public sealed class GeneratedAdapterRuntimeTests : IDisposable
         var toolchain = FindToolchain();
         var runner = new AdapterProcessRunner();
         var package = await new GeneratedAdapterCompiler(toolchain, runner).CompileWorkspaceAsync(source,
-            Path.Combine(root, "package"), ["**/*.dat"]);
+            Path.Combine(root, "package"), ["**/*.dat"], releaseFiles:
+            [new("src/Program.cs", "source", "Entry"), new("src/EngineReferencePython.cs", "source", "Python bridge")]);
         var result = await runner.RunAsync(new(toolchain.ExecutablePath, [Path.Combine(package.DirectoryPath, "adapter.dll")], root), default);
         Assert.Equal(0, result.ExitCode);
         Assert.Equal("EngineReferencePython", result.StandardOutput.Trim());
@@ -191,7 +192,7 @@ public sealed class GeneratedAdapterRuntimeTests : IDisposable
         var tools = new AdaptationTools(new("discovery", game, []), session, root,
             new(FindToolchain(), new AdapterProcessRunner()), new(Path.Combine(root, "store")));
         await tools.ExecuteAsync(new("stage", "stage_resources", """{"files":["first.lines"]}"""), default);
-        const string options = """{"kind":"template","key":"fixture-lines","name":"Fixture lines","resourcePatterns":["*.lines"]}""";
+        const string options = """{"kind":"template","key":"fixture-lines","name":"Fixture lines","resourcePatterns":["*.lines"],"releaseFiles":[{"path":"src/Program.cs","role":"source","purpose":"Entry"},{"path":"src/Records.cs","role":"source","purpose":"Parser types"},{"path":"tools/font.ini","role":"asset","purpose":"Font configuration"}]}""";
         using (var failed = JsonDocument.Parse(await tools.ExecuteAsync(new("test", "test_adapter", options), default)))
         {
             var result = failed.RootElement.GetProperty("result");
@@ -252,7 +253,7 @@ public sealed class GeneratedAdapterRuntimeTests : IDisposable
             """);
         var compiler = new GeneratedAdapterCompiler(FindToolchain(), new AdapterProcessRunner());
         var package = await compiler.CompileWorkspaceAsync(source, Path.Combine(root, "build"), ["*.pack"],
-            family: new("template", "footer-index", "Footer indexed scripts"));
+            family: new("template", "footer-index", "Footer indexed scripts"), releaseFiles: [new("src/Program.cs", "source", "Parser")]);
         var game = Path.Combine(root, "game");
         Directory.CreateDirectory(game);
         foreach (var (name, size, kind) in new[] { ("media.pack", 8 * 1024 * 1024, "DATA"), ("scripts.pack", 128 * 1024, "TEXT") })
@@ -287,7 +288,7 @@ public sealed class GeneratedAdapterRuntimeTests : IDisposable
         await File.WriteAllTextAsync(Path.Combine(source, "Program.cs"), "System.Console.WriteLine(\"unused\");");
         var compiler = new GeneratedAdapterCompiler(FindToolchain(), new AdapterProcessRunner());
         var package = await compiler.CompileWorkspaceAsync(source, Path.Combine(root, "build"), ["*.bin"],
-            family: new("template", "range-validation", "Range validation"));
+            family: new("template", "range-validation", "Range validation"), releaseFiles: [new("src/Program.cs", "source", "Parser")]);
         var game = Path.Combine(root, "game");
         Directory.CreateDirectory(game);
         var original = new byte[128 * 1024];
@@ -332,7 +333,8 @@ public sealed class GeneratedAdapterRuntimeTests : IDisposable
             catch (EndOfStreamException) { Console.Error.WriteLine("probe payload is incomplete"); return 1; }
             return 0;
             """);
-        var package = await compiler.CompileWorkspaceAsync(source, Path.Combine(root, "build"), ["*.bin"], family: new("template", "probe-contract", "Probe contract"));
+        var package = await compiler.CompileWorkspaceAsync(source, Path.Combine(root, "build"), ["*.bin"], family: new("template", "probe-contract", "Probe contract"),
+            releaseFiles: [new("src/Program.cs", "source", "Parser")]);
         var game = Path.Combine(root, "game");
         Directory.CreateDirectory(game);
         await File.WriteAllBytesAsync(Path.Combine(game, "payload.bin"), new byte[120000]);
@@ -352,19 +354,25 @@ public sealed class GeneratedAdapterRuntimeTests : IDisposable
         await File.WriteAllTextAsync(Path.Combine(source, "Records.cs"), FixtureRecords);
         await File.WriteAllTextAsync(Path.Combine(source, "tools", "font.ini"), "charset=gbk");
         await File.WriteAllTextAsync(Path.Combine(source, "tools", "sources.json"), "{}");
+        await File.WriteAllTextAsync(Path.Combine(source, "UnusedProbe.cs"), "not a compilable adapter source");
+        await File.WriteAllTextAsync(Path.Combine(source, "tools", "unused.log"), "analysis output");
         await File.WriteAllTextAsync(Path.Combine(source, "unused.csproj"), "must not execute or publish");
         var toolchain = FindToolchain();
         var runner = new RecordingRunner();
         var compiler = new GeneratedAdapterCompiler(toolchain, runner);
         var family = new AdapterFamily("template", "fixture-lines", "Fixture line scripts");
-        var package = await compiler.CompileWorkspaceAsync(source, Path.Combine(root, "build"), ["**/*.lines", "**/*.pad"], family: family);
-        var repeated = await compiler.CompileWorkspaceAsync(source, Path.Combine(root, "repeated"), ["**/*.lines", "**/*.pad"], family: family);
+        AdapterReleaseFile[] releaseFiles = [new("src/Program.cs", "source", "Entry"), new("src/Records.cs", "source", "Parser types"),
+            new("tools/font.ini", "asset", "Font configuration"), new("tools/sources.json", "license", "Dependency provenance")];
+        var package = await compiler.CompileWorkspaceAsync(source, Path.Combine(root, "build"), ["**/*.lines", "**/*.pad"], family: family, releaseFiles: releaseFiles);
+        var repeated = await compiler.CompileWorkspaceAsync(source, Path.Combine(root, "repeated"), ["**/*.lines", "**/*.pad"], family: family, releaseFiles: releaseFiles.Reverse().ToArray());
         Assert.Equal(package.Version, repeated.Version);
-        Assert.Equal(2, package.ManifestVersion);
+        Assert.Equal(3, package.ManifestVersion);
         Assert.Empty(package.ResourceFiles);
         Assert.Contains("src/Records.cs", package.PackageFiles!.Keys);
         Assert.Contains("tools/font.ini", package.PackageFiles.Keys);
         Assert.DoesNotContain("src/unused.csproj", package.PackageFiles.Keys);
+        Assert.DoesNotContain("src/UnusedProbe.cs", package.PackageFiles.Keys);
+        Assert.DoesNotContain("tools/unused.log", package.PackageFiles.Keys);
 
         var game = Path.Combine(root, "first-game");
         Directory.CreateDirectory(game);
@@ -411,7 +419,8 @@ public sealed class GeneratedAdapterRuntimeTests : IDisposable
         var toolchain = FindToolchain();
         var runner = new AdapterProcessRunner();
         var package = await new GeneratedAdapterCompiler(toolchain, runner).CompileWorkspaceAsync(source,
-            Path.Combine(root, "build"), ["*.lines"], family: new("template", "spacing-fixture", "Spacing fixture"));
+            Path.Combine(root, "build"), ["*.lines"], family: new("template", "spacing-fixture", "Spacing fixture"), releaseFiles:
+            [new("src/Program.cs", "source", "Entry"), new("src/Records.cs", "source", "Parser types"), new("tools/font.ini", "asset", "Font configuration")]);
         var game = Path.Combine(root, "game");
         Directory.CreateDirectory(game);
         var original = "AVG_LINE_V1\n  \nrepeat\n\nrepeat\n\t\u3000";

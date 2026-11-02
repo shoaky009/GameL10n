@@ -61,7 +61,10 @@ public sealed class AdapterComponentAssetsTests : IDisposable
     {
         var assets = new AdapterComponentAssets();
         var workspace = Path.Combine(root, "workspace");
-        await assets.CopyAsync(["cp932-glyph-map"], workspace);
+        var release = new List<AdapterReleaseFile>();
+        await assets.CopyAsync(["cp932-glyph-map"], workspace, releaseFiles: release);
+        Assert.Equal("src/Components/Cp932GlyphEncoding.cs", Assert.Single(release).Path);
+        Assert.Equal("source", release[0].Role);
         var repeat = JsonSerializer.SerializeToElement(await assets.CopyAsync(["cp932-glyph-map"], workspace), Json);
         Assert.True(repeat.GetProperty("files")[0].GetProperty("reused").GetBoolean());
         var path = Path.Combine(workspace, "src", "Components", "Cp932GlyphEncoding.cs");
@@ -140,7 +143,10 @@ public sealed class AdapterComponentAssetsTests : IDisposable
             """, new UTF8Encoding(false));
         var toolchain = new PinnedDotNetToolchain(Path.Combine(repository, ".tools/dotnet"), "10.0.402", "10.0.13");
         var package = await new GeneratedAdapterCompiler(toolchain, runner).CompileWorkspaceAsync(
-            Path.Combine(workspace, "src"), Path.Combine(root, "compiled"), ["*.txt"]);
+            Path.Combine(workspace, "src"), Path.Combine(root, "compiled"), ["*.txt"], releaseFiles:
+            [new("src/Program.cs", "source", "Entry"), new("src/Components/Cp932GlyphEncoding.cs", "source", "Codec"),
+             new("src/QlieFont.cs", "source", "Font"), new("src/GlyphRasterizer.cs", "source", "Glyphs"),
+             new("tools/QlieLauncher.cs", "asset", "Launcher source"), new("tools/QlieLauncher.exe", "asset", "Launcher")]);
         Assert.Contains("tools/QlieLauncher.exe", package.PackageFiles!.Keys);
         Assert.Contains("tools/QlieLauncher.cs", package.PackageFiles.Keys);
         Assert.Contains("src/Components/Cp932GlyphEncoding.cs", package.PackageFiles.Keys);

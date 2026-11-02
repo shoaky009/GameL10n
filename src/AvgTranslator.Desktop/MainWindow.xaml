@@ -448,6 +448,7 @@
                   <TextBlock x:Name="CatalogVersionReferenceText" Grid.Row="1" TextWrapping="Wrap" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" IsTextSelectionEnabled="True" />
                   <StackPanel Grid.Row="2" Orientation="Horizontal" Spacing="8" Padding="0,0,0,8">
                     <Button x:Name="CatalogOpenVersionButton" Content="打开所在文件夹" Click="CatalogOpenVersion_Click" IsEnabled="False" />
+                    <Button x:Name="CatalogVerifyVersionButton" Content="验证发布包…" Click="CatalogVerifyVersion_Click" IsEnabled="False" />
                     <Button x:Name="CatalogDeleteVersionButton" Content="删除版本…" Click="CatalogDeleteVersion_Click" IsEnabled="False" />
                   </StackPanel>
                 </Grid>

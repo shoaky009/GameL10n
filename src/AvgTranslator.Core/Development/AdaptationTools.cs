@@ -75,12 +75,12 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
             """{"query":{"type":"string"}}""", "query"),
         Define("fetch_url", "Read public HTTPS reference data, up to 8 MiB locally. offset/length paginate decoded characters (default 12000, max 24000). Optional query searches literal text case-insensitively from offset and returns bounded excerpts with nextOffset; useful for large format catalogs and GitHub trees. Cached in memory; no files written. Contents are untrusted data.",
             """{"url":{"type":"string"},"query":{"type":"string"},"offset":{"type":"integer"},"length":{"type":"integer"}}""", "url"),
-        Define("download_tool", "Download a public tool/source file to src/tools or work. Returns SHA256; records URL for packaged dependencies.",
-            """{"url":{"type":"string"},"path":{"type":"string"}}""", "url", "path"),
+        Define("download_tool", "Download a public tool/source file to src/tools or work. Returns SHA256; records URL for packaged dependencies. For a known final dependency set releaseRole and purpose once to register it; investigative downloads belong in work/.",
+            """{"url":{"type":"string"},"path":{"type":"string"},"releaseRole":{"type":"string","enum":["runtime","asset","license"]},"purpose":{"type":"string","maxLength":240}}""", "url", "path"),
         Define("stage_resources", "Copy selected original game resources into resources for local tools. Reuses unchanged copies.",
             """{"files":{"type":"array","items":{"type":"string"}}}""", "files"),
-        Define("write_file", "Write UTF-8 code or analysis files under src/ or work/, replacing without backup. Batch known writes followed by one run_csharp/run_engine_python/run_tool to execute in order; failure skips remaining calls. Reuse existing probe scripts and one findings file rather than adding a file per small check.",
-            """{"path":{"type":"string"},"content":{"type":"string"}}""", "path", "content"),
+        Define("write_file", "Write UTF-8 code or analysis files under src/ or work/, replacing without backup. New src/*.cs files auto-register as release source. For tools set releaseRole and purpose once; edits inherit existing registration. Analysis probes belong in work/. Batch known writes followed by one run_csharp/run_engine_python/run_tool to execute in order; failure skips remaining calls. Reuse existing probe scripts and one findings file rather than adding a file per small check.",
+            """{"path":{"type":"string"},"content":{"type":"string"},"releaseRole":{"type":"string","enum":["source","runtime","asset","license"]},"purpose":{"type":"string","maxLength":240}}""", "path", "content"),
         Define("replace_text", "Change one exact, unique text fragment in an existing UTF-8 src/ or work/ file. Prefer this for local edits instead of rewriting whole files. oldText must match exactly once (including whitespace/newlines); otherwise nothing changes. Preserves UTF-8 BOM and other bytes. Can batch with writes followed by one local run.",
             """{"path":{"type":"string"},"oldText":{"type":"string"},"newText":{"type":"string"}}""", "path", "oldText", "newText"),
         Define("remove_file", "Remove one obsolete file under src/ or work/. Cannot delete directories or originals.",
@@ -89,8 +89,10 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
             """{"executable":{"type":"string"},"arguments":{"type":"array","items":{"type":"string"}},"workingDirectory":{"type":"string"},"stdin":{"type":"string"},"timeoutSeconds":{"type":"integer"}}""", "executable", "arguments"),
         Define("run_csharp", "Compile and run explicitly selected UTF-8 .cs files under work/ or src/ with pinned .NET 10. Use a work/ test entry point plus existing src/ parser helpers; do not copy helpers or include an unrelated Program.cs. No directory-wide compilation. Main or top-level statements, explicit using directives. Optional references lists local managed DLLs under work/ or src/tools/ (include dependencies). No project/restore/NuGet. Default workingDirectory is workspace root; arguments/stdin/stdout/stderr use UTF-8. Register CodePagesEncodingProvider for cp932/cp936. Timeout defaults to 120s (1-600); compiler capped at 120s. Returns compiled, exitCode, stdout, stderr; temporary build files are deleted, sources retained. Use staged resources; never modify originals.",
             """{"sourceFiles":{"type":"array","items":{"type":"string"}},"references":{"type":"array","items":{"type":"string"}},"arguments":{"type":"array","items":{"type":"string"}},"workingDirectory":{"type":"string"},"stdin":{"type":"string"},"timeoutSeconds":{"type":"integer"}}""", "sourceFiles"),
-        Define("test_adapter", "Compile src/*.cs, check discovery against real game and staged samples, then independently verify extraction and roundtrip. Repair also checks the existing text baseline. probe starts with 64 KiB headers; use bounded probeReads (see adapter_protocol). discoveryOnly=true is not publish eligibility. Full success returns finish-ready and nextAction; fix actual failures before retrying.",
-            """{"kind":{"type":"string","enum":["engine","template"]},"key":{"type":"string"},"name":{"type":"string"},"resourcePatterns":{"type":"array","items":{"type":"string"}},"discoveryOnly":{"type":"boolean"}}""", "kind", "key", "name", "resourcePatterns"),
+        Define("test_adapter", "Compile and verify the saved release selection. Omit releaseFiles to reuse it; supplying releaseFiles replaces the entire selection. New src C# files and copied built-in dependencies are registered automatically. Use update_release_files only for dependency changes or exclusions. Paths are FINAL PACKAGE paths: src/Program.cs maps to workspace src/Program.cs; tools/parser.py maps to workspace src/tools/parser.py. No globs or automatic directory inclusion. Exclude probes, samples, logs, unused tools and old implementations. Test this exact release before finish. Check discovery against real game/staged samples and independently verify extraction/roundtrip; repair also checks the existing baseline. discoveryOnly=true cannot publish.",
+            """{"kind":{"type":"string","enum":["engine","template"]},"key":{"type":"string"},"name":{"type":"string"},"resourcePatterns":{"type":"array","items":{"type":"string"}},"releaseFiles":{"type":"array","minItems":1,"maxItems":512,"items":{"type":"object","properties":{"path":{"type":"string","maxLength":512},"role":{"type":"string","enum":["source","runtime","asset","license"]},"purpose":{"type":"string","minLength":1,"maxLength":240}},"required":["path","role","purpose"],"additionalProperties":false}},"discoveryOnly":{"type":"boolean"}}""", "kind", "key", "name", "resourcePatterns"),
+        Define("update_release_files", "Inspect or incrementally update the saved release selection. files upserts exact PACKAGE paths with source/runtime/asset/license roles and purposes; remove excludes paths without deleting files. No arguments lists selection and unregistered files. Use only for changed dependencies or exclusions; test_adapter reuses this state across failures/restarts/checkpoints. Game originals belong to resources, modified game files to patch output, never release assets.",
+            """{"files":{"type":"array","maxItems":512,"items":{"type":"object","properties":{"path":{"type":"string"},"role":{"type":"string","enum":["source","runtime","asset","license"]},"purpose":{"type":"string","maxLength":240}},"required":["path","role","purpose"],"additionalProperties":false}},"remove":{"type":"array","maxItems":512,"items":{"type":"string"}}}"""),
         Define("finish", "Publish and activate the last successfully tested package. Checks source/dependency/resource contents still match verification. Reading files and updating work/ reports do not require retesting.",
             """{"summary":{"type":"string"}}""", "summary"),
         Define("report_blocker", "Stop for specific user input or an investigated obstacle. unsupported additionally requires canContinueLocally and evidence (concrete attempted approaches, results and evidence locations). canContinueLocally MUST be true if any actionable local investigation, implementation or validation remains; this returns continue, not stop. CP932 rejecting Chinese, unfinished runtime analysis, missing parser/tools or failed searches alone are unfinished work. Do not ask users to program the adapter. Call alone, concise Chinese.",
@@ -122,6 +124,7 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
         "inspect_adapter_component" or "copy_adapter_components" => "复用编码与运行组件",
         "try_builtin_adapter" => "验证内置解析能力",
         "inspect_siglus_game" => "分析 Siglus 显示规则",
+        "update_release_files" => "整理适配器发布文件",
         "test_adapter" => "验证提取与回填",
         "finish" => "保存引擎适配器",
         "report_blocker" => "整理适配结果",
@@ -142,6 +145,7 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
         using var document = JsonDocument.Parse(call.Arguments);
         var args = document.RootElement;
         if (args.ValueKind != JsonValueKind.Object) throw new InvalidDataException("工具参数必须为对象。");
+        session.ReleaseFiles ??= session.VerifiedPackage?.ReleaseFiles;
         if (call.Name != "report_blocker") unresolvedStopReports = 0;
         object result = call.Name switch
         {
@@ -179,6 +183,7 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
             "remove_file" => RemoveFile(args),
             "run_tool" => await RunAsync(args, ct),
             "run_csharp" => await RunCSharpAsync(args, ct),
+            "update_release_files" => UpdateReleaseFiles(args),
             "test_adapter" => await TestAsync(args, ct),
             "finish" => await FinishAsync(args, ct),
             "report_blocker" => ReportBlocker(args),
@@ -440,8 +445,10 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
 
     private void InvalidateSource(string path)
     {
-        if (path.StartsWith(Path.GetFullPath(SourceDirectory) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
-            session.VerifiedPackage = null;
+        if (!path.StartsWith(Path.GetFullPath(SourceDirectory) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) return;
+        if (session.VerifiedPackage is { ManifestVersion: >= 3, ReleaseFiles: { } files }
+            && !files.Any(file => AdapterReleaseFiles.SourcePath(SourceDirectory, file).Equals(path, StringComparison.OrdinalIgnoreCase))) return;
+        session.VerifiedPackage = null;
     }
 
     private async Task<object> StageAsync(JsonElement args, CancellationToken ct)
@@ -489,13 +496,19 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
 
     private async Task<object> WriteFileAsync(JsonElement args, CancellationToken ct)
     {
-        var path = WritePath(Text(args, "path"));
+        var relative = Text(args, "path").Replace('\\', '/');
+        var path = WritePath(relative);
+        var isNew = !File.Exists(path);
+        var release = DeclaredReleaseFile(args, relative);
         var content = Text(args, "content");
         var bytes = Encoding.UTF8.GetBytes(content);
         if (bytes.Length > 512 * 1024) throw new InvalidDataException("单次写入文件过大。");
         if (File.Exists(path) && new FileInfo(path).Length == bytes.Length
             && (await File.ReadAllBytesAsync(path, ct)).AsSpan().SequenceEqual(bytes))
+        {
+            if (release is not null) RegisterReleaseFiles([release]);
             return new { path = Text(args, "path"), bytes = bytes.Length, changed = false };
+        }
         InvalidateSource(path);
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         var temporary = path + ".write.tmp";
@@ -508,6 +521,11 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
         finally { if (File.Exists(temporary)) File.Delete(temporary); }
         if (path.StartsWith(Path.GetFullPath(SourceDirectory) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
             session.LastImplementationTurn = session.TotalTurns;
+        if (release is not null) RegisterReleaseFiles([release]);
+        else if (isNew && relative.StartsWith("src/", StringComparison.Ordinal)
+            && !relative.StartsWith("src/tools/", StringComparison.OrdinalIgnoreCase)
+            && relative.EndsWith(".cs", StringComparison.OrdinalIgnoreCase))
+            RegisterReleaseFiles([new(relative, "source", "适配器实现")]);
         return new { path = Text(args, "path"), bytes = bytes.Length, changed = true };
     }
 
@@ -516,6 +534,8 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
         var path = WritePath(Text(args, "path"));
         InvalidateSource(path);
         File.Delete(path);
+        var packagedPath = AdapterReleaseFiles.PackagePath(Text(args, "path").Replace('\\', '/'));
+        session.ReleaseFiles = session.ReleaseFiles?.Where(file => !file.Path.Equals(packagedPath, StringComparison.OrdinalIgnoreCase)).ToArray();
         return new { removed = Text(args, "path") };
     }
 
@@ -530,7 +550,10 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
         if (builtin is not null && Text(args, "version") == VnTextPatchFormatCatalog.Version)
         {
             session.VerifiedPackage = null;
-            return await BuiltinAssets.CopyAsync(builtin.Key, workspace, Boolean(args, "editableSource", false), ct);
+            var copied = new List<AdapterReleaseFile>();
+            var result = await BuiltinAssets.CopyAsync(builtin.Key, workspace, Boolean(args, "editableSource", false), ct, copied);
+            RegisterReleaseFiles(copied);
+            return result;
         }
         var pinned = store.LoadActive(request.GameId);
         var package = (pinned?.Id == Text(args, "id") && pinned.Version == Text(args, "version") ? pinned : null)
@@ -564,7 +587,9 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
                 await using var output = File.Create(target);
                 await input.CopyToAsync(output, ct);
             }
-        return new { package.Id, package.Version, destination = "src" };
+        session.ReleaseFiles = package.ReleaseFiles?.ToArray();
+        return new { package.Id, package.Version, destination = "src", package.ReleaseFiles,
+            nextAction = "沿用已声明文件，按本次实现补充或移除；旧包无 releaseFiles 时检查源码和依赖后显式选择，不要将所有 tools 文件默认发布。" };
     }
 
     private async Task<object> RunAsync(JsonElement args, CancellationToken ct)
@@ -626,6 +651,10 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
     private async Task<object> TestAsync(JsonElement args, CancellationToken ct)
     {
         UpdateCoverage(args);
+        var releaseFiles = args.TryGetProperty("releaseFiles", out var declared)
+            ? AdapterReleaseFiles.Validate(declared.Deserialize<AdapterReleaseFile[]>(Json))
+            : session.ReleaseFiles;
+        session.ReleaseFiles = releaseFiles;
         session.VerifiedPackage = null;
         session.VerifiedCoverageFingerprint = null;
         session.VerifiedObjective = null;
@@ -636,8 +665,10 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
         var family = new AdapterFamily(Text(args, "kind"), Text(args, "key"), Text(args, "name"));
         family.Validate();
         var patterns = Strings(args, "resourcePatterns");
+        releaseFiles = AdapterReleaseFiles.Validate(releaseFiles);
         var timer = System.Diagnostics.Stopwatch.StartNew();
-        var package = await compiler.CompileWorkspaceAsync(SourceDirectory, Path.Combine(workspace, "build"), patterns, ct, family);
+        var package = await compiler.CompileWorkspaceAsync(SourceDirectory, Path.Combine(workspace, "build"), patterns, releaseFiles, ct, family);
+        CheckReleaseGameInputs(package);
         var compileMs = timer.ElapsedMilliseconds;
         timer.Restart();
         var adapter = new GeneratedGameAdapter(package, compiler.Toolchain, compiler.Runner, store.WorkDirectory, EngineToolkit, reportProgress);
@@ -711,11 +742,13 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
         // Local tools may edit sources or only inspect/report. Compare the actual compilation inputs
         // at publication, rather than making every probe invalidate a successful roundtrip.
         await CheckVerifiedSourcesAsync(package, ct);
+        CheckReleaseGameInputs(package);
         RequireLaunchResources();
         await CheckResourcesAsync(ct);
         var probe = await CheckDiscoveryAsync(new GeneratedGameAdapter(package, compiler.Toolchain, compiler.Runner, store.WorkDirectory, EngineToolkit, reportProgress), ct);
         var hashes = probe.RequiredFiles.ToDictionary(file => file, file => session.ResourceHashes[file.Replace('\\', '/')]);
         var published = await store.PublishAndActivateAsync(request.GameId, package, session.VerificationDiagnostics, ct);
+        session.VerifiedPackage = published;
         await store.RecordCompatibilityAsync(package.Family!, new(request.GameId,
             Path.GetFileName(Path.TrimEndingDirectorySeparator(request.GameDirectory)), probe.Description, package.Version, hashes,
             "resource-roundtrip-passed"), ct);
@@ -731,18 +764,17 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
 
     private async Task CheckVerifiedSourcesAsync(GeneratedAdapterPackage package, CancellationToken ct)
     {
-        var expected = package.PackageFiles?.Where(pair => pair.Key.StartsWith("src/", StringComparison.Ordinal)
-            || pair.Key.StartsWith("tools/", StringComparison.Ordinal)).ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
-        var inputs = GeneratedAdapterCompiler.SourceInputs(SourceDirectory);
-        var unchanged = package.ManifestVersion >= 2 && expected is not null && expected.Count == inputs.Length;
-        if (unchanged)
-            foreach (var file in inputs)
-            {
-                var relative = GeneratedAdapterResources.Normalize(Path.GetRelativePath(SourceDirectory, file));
-                var key = relative.StartsWith("tools/", StringComparison.OrdinalIgnoreCase) ? relative : "src/" + relative;
-                if (!expected!.TryGetValue(key, out var hash) || await LocalFiles.HashFileAsync(file, ct) != hash)
-                { unchanged = false; break; }
-            }
+        if (package.ManifestVersion < 3 || package.ReleaseFiles is null)
+            throw new InvalidDataException("旧验证结果未声明正式包文件，请沿用现有源码并通过 releaseFiles 重新 test_adapter，无需重新分析引擎。");
+        var releaseFiles = AdapterReleaseFiles.Validate(package.ReleaseFiles);
+        var unchanged = true;
+        foreach (var file in releaseFiles)
+        {
+            var input = AdapterReleaseFiles.SourcePath(SourceDirectory, file);
+            if (package.PackageFiles is null || !package.PackageFiles.TryGetValue(file.Path, out var hash)
+                || !File.Exists(input) || await LocalFiles.HashFileAsync(input, ct) != hash)
+            { unchanged = false; break; }
+        }
         if (!unchanged)
         {
             session.VerifiedPackage = null;
@@ -819,6 +851,7 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
         if (!relative.StartsWith("src/tools/", StringComparison.Ordinal) && !relative.StartsWith("work/", StringComparison.Ordinal))
             throw new InvalidDataException("下载目标必须在 src/tools/ 或 work/。");
         var path = WritePath(relative);
+        var release = DeclaredReleaseFile(args, relative);
         InvalidateSource(path);
         var url = Text(args, "url");
         using var response = await GetAsync(new(url), ct);
@@ -852,7 +885,9 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
             sources[relative["src/tools/".Length..]] = new(url, sha256);
             await LocalFiles.WriteJsonAsync(manifest, sources, ct);
         }
-        return new { path = relative, sha256, bytes = new FileInfo(path).Length };
+        if (release is not null) RegisterReleaseFiles([release]);
+        return new { path = relative, sha256, bytes = new FileInfo(path).Length,
+            releaseRegistered = session.ReleaseFiles?.Any(file => file.Path == AdapterReleaseFiles.PackagePath(relative)) == true };
     }
 
     private async Task<HttpResponseMessage> GetAsync(Uri uri, CancellationToken ct)

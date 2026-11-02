@@ -79,7 +79,10 @@ public sealed partial class AdaptationTools
     private async Task<object> CopyAdapterComponentsAsync(JsonElement args, CancellationToken ct)
     {
         session.VerifiedPackage = null;
-        return await ComponentAssets.CopyAsync(Strings(args, "ids"), workspace, ct);
+        var copied = new List<AdapterReleaseFile>();
+        var result = await ComponentAssets.CopyAsync(Strings(args, "ids"), workspace, ct, copied);
+        RegisterReleaseFiles(copied);
+        return result;
     }
 
     private async Task<object> TryBuiltinAdapterAsync(JsonElement args, CancellationToken ct)

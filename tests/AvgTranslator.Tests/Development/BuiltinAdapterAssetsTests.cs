@@ -54,7 +54,11 @@ public sealed class BuiltinAdapterAssetsTests : IDisposable
         Assert.Throws<InvalidDataException>(() => assets.ReadSource("Renpy", "../Worker.cs"));
 
         string workspace = Path.Combine(root, "workspace");
-        await assets.CopyAsync("Renpy", workspace, false);
+        var release = new List<AdapterReleaseFile>();
+        await assets.CopyAsync("Renpy", workspace, false, releaseFiles: release);
+        Assert.Contains(release, file => file.Path == "src/BuiltinScriptParser.cs" && file.Role == "source");
+        Assert.Contains(release, file => file.Role == "runtime" && file.Path.EndsWith(".dll", StringComparison.Ordinal));
+        Assert.Contains(release, file => file.Role == "license" && file.Path.EndsWith("VNTextPatch.LICENSE", StringComparison.Ordinal));
         string bridge = Path.Combine(workspace, "src/BuiltinScriptParser.cs");
         byte[] original = await File.ReadAllBytesAsync(bridge);
         Assert.True(File.Exists(Path.Combine(workspace, "src/tools/vntextpatch/AvgTranslator.VnTextPatch.dll")));
@@ -100,7 +104,15 @@ public sealed class BuiltinAdapterAssetsTests : IDisposable
         var toolchain = new PinnedDotNetToolchain(Path.Combine(Repository(), ".tools/dotnet"), "10.0.402", "10.0.13");
         var runner = new AdapterProcessRunner();
         var compiler = new GeneratedAdapterCompiler(toolchain, runner);
-        var package = await compiler.CompileWorkspaceAsync(Path.Combine(workspace, "src"), Path.Combine(root, "compiled"), ["**/*"]);
+        var source = Path.Combine(workspace, "src");
+        var releaseFiles = Directory.GetFiles(source, "*", SearchOption.AllDirectories).Select(file =>
+        {
+            var relative = Path.GetRelativePath(source, file).Replace('\\', '/');
+            return relative.StartsWith("tools/", StringComparison.Ordinal)
+                ? new AdapterReleaseFile(relative, relative.EndsWith(".dll") ? "runtime" : "license", "Selected parser dependency")
+                : new AdapterReleaseFile("src/" + relative, "source", "Selected parser implementation");
+        }).ToArray();
+        var package = await compiler.CompileWorkspaceAsync(source, Path.Combine(root, "compiled"), ["**/*"], releaseFiles: releaseFiles);
         string resources = Directory.CreateDirectory(Path.Combine(root, "resources")).FullName;
         string file = format == "Renpy" ? "scene.rpy" : "scene.ks";
         string script = format == "Renpy" ? "label start:\n    \"こんにちは。\"\n" : "*start\r\nこんにちは。[p]\r\n";

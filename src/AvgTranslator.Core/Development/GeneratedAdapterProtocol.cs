@@ -5,7 +5,11 @@ public static class GeneratedAdapterProtocol
     public const string Description = """
         Standalone .NET 10 CLI protocol v1, with no dependency on the translator assembly.
         Compile multiple src/**/*.cs files with framework references only. No csproj, NuGet restore or build tasks.
-        Optional tools from src/tools are packaged as tools/ beside adapter.dll. Locate them with AppContext.BaseDirectory,
+        test_adapter reuses the persisted release selection; optional releaseFiles replaces it. update_release_files changes
+        only selected entries. New src/*.cs and copied built-ins auto-register; other dependencies declare source/runtime/asset/license
+        roles and short purposes once through write_file/download_tool or update_release_files. tools/* maps to workspace src/tools/*. Include required indirect dependencies/notices, not probes,
+        samples, reports or unused tools. Only this selected package is compiled, tested and published (manifest v3).
+        Optional selected tools are packaged as tools/ beside adapter.dll. Locate them with AppContext.BaseDirectory,
         use ProcessStartInfo.ArgumentList, and keep any attribution/source metadata in tools/sources.json.
         Read one UTF-8 JSON request from stdin. Write diagnostics to stderr. All JSON properties use camelCase.
         User-facing warnings, errors and issue messages must be concise, actionable Chinese; keep detailed research in development notes.

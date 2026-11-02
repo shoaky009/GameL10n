@@ -51,7 +51,14 @@ internal static class QlieRepair
             var package = await new GeneratedAdapterCompiler(toolchain, runner).CompileWorkspaceAsync(adapterSource,
                 Path.Combine(workDirectory, "build"),
                 ["**/data0.pack", "**/*.fkey", "**/*.exe", "**/config.txt", "**/*.exe.le.config", "**/qlie-l10n/**"],
-                family: family);
+                family: family,
+                releaseFiles: new[] { "QlieArchive.cs", "QlieEncoding.cs", "QlieScript.cs", "QlieKey.cs", "QlieCli.cs",
+                    "QlieFont.cs", "QlieCodec.cs", "QlieMersenneTwister.cs" }
+                    .Select(path => new AdapterReleaseFile("src/" + path, "source", "QLIE 封包、脚本、编码与字体实现"))
+                    .Concat(new[] { "QlieLauncher.exe", "NotoSansSC-VF.ttf", "NotoSerifSC-VF.ttf" }
+                        .Select(path => new AdapterReleaseFile("tools/" + path, "asset", "生成汉化启动器与字库所需素材")))
+                    .Concat(new[] { "NotoSans-LICENSE.txt", "NotoSerif-LICENSE.txt", "FONT-DERIVATION.txt" }
+                        .Select(path => new AdapterReleaseFile("tools/" + path, "license", "字体许可与衍生说明"))).ToArray());
             var adapter = new GeneratedGameAdapter(package, toolchain, runner, Path.Combine(workDirectory, "run"));
             var pipeline = new TranslationPipeline(dataDirectory);
             // The engine can rewrite live config.txt after a failed launch. Reuse verified originals instead of promoting it to source.
@@ -287,6 +294,7 @@ internal static class QlieRepair
         const string correction = "当前 QLIE 适配器保留原 EXE，输出独立 启动汉化.exe 并声明 build.launchExecutable，通过本机 Locale Emulator 沿用原 EXE 的日语配置，临时字体保留到游戏退出。system_fix 排除比例字体，七个非外字槽改成 system；槽5独立外字不变。引擎按 elfFullName 匹配配置，Windows 为变体 Regular 实例附加后缀，但 Locale Emulator 的 AdjustFontDataInternal 从 name 表 ID4 重新读取日语完整名称（缺失时用英语）。旧字体 ID4 误写为族名，导致宿主探针通过而转区游戏回退；实际游戏内存与 Locale Emulator 开源实现均印证此差异。生成字体的 ID4 现在与 config.txt、launch.xml 一致为族名加 Regular，ID1/16 保持族名，字体指纹包含元数据版本。启动器检查 name 表及原生枚举，不代表已运行游戏。参考 VNTextPatch-net8 的 QlieScript/SjisTunnelEncoding 及 VNTranslationTools 的 VNTextProxy，可提供脚本复用与另一种运行时字符转换方案，但不能只接入提取器就认为显示可用。原始快照位于 resources/，源码和工具在 src/，不要把游戏回退后的配置提升为原始资源。试译复用缓存且 API 调用为0；真实游戏内显示尚待确认。";
         const string metrics = " 字号检查：此 QLIE 路径传递正的 LOGFONT.lfHeight 和半角 lfWidth；Noto 原始 WinAscent/Descent 总和大于 em，xAvgCharWidth 为全角，导致字符缩小并横向压缩。字体生成器按 MS Gothic/Mincho 的 256 em、220/36 升降部和128平均宽度比例归一化 OS/2 与 hhea 度量，移除冲突的 MVAR；不改变原脚本字号和字形轮廓。使用与引擎一致的字高/字宽请求比较实际尺寸，不能只测负字号且宽度为0的普通 GDI 绘制。";
         var checkpoint = correction + metrics;
+        state.ReleaseFiles = published.ReleaseFiles;
         state.VerifiedPackage = published;
         state.VerificationDiagnostics = diagnostics.ToArray();
         state.Stage = "适配完成";

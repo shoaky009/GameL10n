@@ -76,7 +76,7 @@ public sealed class AdapterComponentAssets(string? assetsDirectory = null)
             totalLength = content.Length, more = next < content.Length, content = content[start..next] };
     }
 
-    public async Task<object> CopyAsync(IReadOnlyList<string> ids, string workspace, CancellationToken ct = default)
+    public async Task<object> CopyAsync(IReadOnlyList<string> ids, string workspace, CancellationToken ct = default, ICollection<AdapterReleaseFile>? releaseFiles = null)
     {
         if (ids.Count is < 1 or > 4) throw new InvalidDataException("每次选择 1 到 4 个组件。");
         var selected = ids.Distinct(StringComparer.OrdinalIgnoreCase).Select(Find).ToArray();
@@ -116,6 +116,13 @@ public sealed class AdapterComponentAssets(string? assetsDirectory = null)
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
             await using var output = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
             await output.WriteAsync(content, ct);
+        }
+        foreach (var path in files.Keys)
+        {
+            // The editable launcher source is development material; its precompiled EXE is the patch asset.
+            if (path.StartsWith("src/tools/", StringComparison.Ordinal) && path.EndsWith(".cs", StringComparison.OrdinalIgnoreCase)) continue;
+            releaseFiles?.Add(new(AdapterReleaseFiles.PackagePath(path),
+                path.StartsWith("src/tools/", StringComparison.Ordinal) ? "asset" : "source", "内置编码、字体或启动组件"));
         }
         return new
         {

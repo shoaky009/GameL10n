@@ -37,7 +37,8 @@ public sealed record GeneratedAdapterPackage(string Id, string Version, string D
     IReadOnlyList<string> ResourceFiles, string SourceSha256, string AssemblySha256, AdapterFamily? Family = null,
     IReadOnlyList<string>? ResourcePatterns = null,
     IReadOnlyDictionary<string, string>? PackageFiles = null,
-    int ProtocolVersion = 1, int ManifestVersion = 1);
+    int ProtocolVersion = 1, int ManifestVersion = 1,
+    IReadOnlyList<AdapterReleaseFile>? ReleaseFiles = null);
 
 public sealed record GeneratedAdapterVerification(bool Passed, IReadOnlyList<string> Diagnostics);
 

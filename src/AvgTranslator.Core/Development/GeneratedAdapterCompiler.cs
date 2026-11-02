@@ -25,7 +25,8 @@ public sealed partial class GeneratedAdapterCompiler(PinnedDotNetToolchain toolc
     }
 
     public async Task<GeneratedAdapterPackage> CompileWorkspaceAsync(string sourceDirectory, string destinationDirectory,
-        IReadOnlyList<string> resourcePatterns, CancellationToken cancellationToken = default, AdapterFamily? family = null)
+        IReadOnlyList<string> resourcePatterns, IReadOnlyList<AdapterReleaseFile> releaseFiles,
+        CancellationToken cancellationToken = default, AdapterFamily? family = null)
     {
         family?.Validate();
         GeneratedAdapterResources.ValidatePatterns(resourcePatterns);
@@ -36,7 +37,8 @@ public sealed partial class GeneratedAdapterCompiler(PinnedDotNetToolchain toolc
             || destinationDirectory.StartsWith(sourceDirectory + Path.DirectorySeparatorChar, comparison)
             || sourceDirectory.StartsWith(destinationDirectory + Path.DirectorySeparatorChar, comparison))
             throw new ArgumentException("Source and build directories must be separate.");
-        var inputs = SourceInputs(sourceDirectory);
+        var selection = AdapterReleaseFiles.Validate(releaseFiles);
+        var inputs = selection.Select(file => AdapterReleaseFiles.SourcePath(sourceDirectory, file)).ToArray();
         var sources = inputs.Where(path => path.EndsWith(".cs", StringComparison.OrdinalIgnoreCase)
             && !GeneratedAdapterResources.Normalize(Path.GetRelativePath(sourceDirectory, path)).StartsWith("tools/", StringComparison.OrdinalIgnoreCase)).ToArray();
         if (sources.Length == 0) throw new GeneratedAdapterException("The adapter workspace contains no C# source files.");
@@ -60,9 +62,11 @@ public sealed partial class GeneratedAdapterCompiler(PinnedDotNetToolchain toolc
                 && pair.Key.EndsWith(".cs", StringComparison.OrdinalIgnoreCase)));
             var normalizedPatterns = resourcePatterns.Select(GeneratedAdapterResources.Normalize).Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.Ordinal).ToArray();
             var versionHash = HashText(GeneratedAdapterResources.HashEntries(files) + "\n" + Toolchain.RuntimeVersion + "\n"
-                + JsonSerializer.Serialize(normalizedPatterns) + "\n" + JsonSerializer.Serialize(family));
+                + JsonSerializer.Serialize(normalizedPatterns) + "\n" + JsonSerializer.Serialize(family)
+                + "\n" + JsonSerializer.Serialize(selection));
             var package = new GeneratedAdapterPackage(family?.AdapterId ?? "unpublished", versionHash[..16], pending, [],
-                sourceHash, files["adapter.dll"], family, normalizedPatterns, files, ManifestVersion: 2);
+                sourceHash, files["adapter.dll"], family, normalizedPatterns, files,
+                ManifestVersion: 3, ReleaseFiles: selection);
             GeneratedAdapterResources.VerifyPackage(package);
             cancellationToken.ThrowIfCancellationRequested();
             WorkspaceFiles.RejectLinkAncestors(destinationDirectory);
@@ -77,11 +81,6 @@ public sealed partial class GeneratedAdapterCompiler(PinnedDotNetToolchain toolc
         }
         finally { GeneratedGameAdapter.DeleteStagedTree(pending); }
     }
-
-    internal static string[] SourceInputs(string sourceDirectory) => Directory.Exists(sourceDirectory)
-        ? GeneratedGameAdapter.EnumerateFiles(sourceDirectory).Where(path => path.EndsWith(".cs", StringComparison.OrdinalIgnoreCase)
-            || GeneratedAdapterResources.Normalize(Path.GetRelativePath(sourceDirectory, path)).StartsWith("tools/", StringComparison.OrdinalIgnoreCase)).ToArray()
-        : [];
 
     // Keep the original single-file package contract available to existing callers.
     public async Task<GeneratedAdapterPackage> CompileAsync(string sourceCode, string workspace,

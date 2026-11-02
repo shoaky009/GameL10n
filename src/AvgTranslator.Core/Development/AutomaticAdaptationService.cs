@@ -145,6 +145,7 @@ public sealed class AutomaticAdaptationService(IAdaptationAgentModel model, Gene
                         Summary = "之前的会话状态无法读取，现有源码和工作文件仍可使用，请先检查这些文件。" };
                 }
             }
+            state.ReleaseFiles ??= state.VerifiedPackage?.ReleaseFiles;
             // Recover before changing models, so an interrupted tool cannot retain a stale verification.
             var changedObjective = continuing && request.Objective.HasValue && request.Objective != state.Objective;
             state.Objective = ResolveObjective(request, state.Objective);
@@ -365,6 +366,7 @@ public sealed class AutomaticAdaptationService(IAdaptationAgentModel model, Gene
                         + LaunchContext(state)
                         + BuiltinContext(state, disabledFamilies)
                         + ProtocolContext(state)
+                        + ReleaseContext(state)
                         + state.TextCoverage.Context()
                         + (string.IsNullOrWhiteSpace(state.UserInstruction) ? "" : "\n用户补充要求：" + state.UserInstruction)));
                     state.Messages.AddRange(recent);
@@ -616,7 +618,8 @@ public sealed class AutomaticAdaptationService(IAdaptationAgentModel model, Gene
         {
             objective = state.Objective?.ToString(), previousSummary = state.Summary, confirmedNotes = state.Notes, sourceFiles, engineReference = state.EngineReference,
             stagedResources = state.ResourceHashes.Keys.Take(256).ToArray(),
-            lastVerification = state.VerificationDiagnostics, verifiedPackage = state.VerifiedPackage?.Id, workingNotes
+            lastVerification = state.VerificationDiagnostics, verifiedPackage = state.VerifiedPackage?.Id,
+            registeredReleaseFiles = (state.ReleaseFiles ?? state.VerifiedPackage?.ReleaseFiles)?.Count ?? 0, workingNotes
         }, ContextJson) + WorkspaceInventory(directory) + ProgressContext(state) + ProbeContext(state) + ProtocolContext(state) + state.TextCoverage.Context();
     }
 
@@ -624,6 +627,10 @@ public sealed class AutomaticAdaptationService(IAdaptationAgentModel model, Gene
         : "\n最近成功执行的本地探针调用（历史执行成功不代表当前输入未变或游戏验证通过）："
             + JsonSerializer.Serialize(state.SuccessfulProbes.TakeLast(3), ContextJson)
             + "\n复用这些文件及完整调用参数。已有结论可直接接入实现；仅输入或相关代码变化、或确需新证据时再运行，不要重新整理同一套依赖。";
+
+    private static string ReleaseContext(AdaptationSession state) =>
+        $"\n发布清单已独立保存 {(state.ReleaseFiles ?? state.VerifiedPackage?.ReleaseFiles)?.Count ?? 0} 项，test_adapter 默认复用；"
+        + "仅有依赖变化时调用 update_release_files 增删，确需查看清单才无参数调用。不需要重列全部文件。";
 
     private static string ProtocolContext(AdaptationSession state) => state.ProtocolRead
         ? "\n已读取的适配器协议（保持可查，无需再次调用 adapter_protocol）：\n" + ProtocolDescription : "";
@@ -774,6 +781,17 @@ public sealed class AutomaticAdaptationService(IAdaptationAgentModel model, Gene
         - run_tool PowerShell is Windows PowerShell 5.1, not PowerShell 7 or modern .NET. Tools run as the current user; respect scoped paths.
         - src/ holds adapter code/dependencies, resources/ holds chosen original copies, work/ holds probes/results, build/ is host output.
           Use AppContext.BaseDirectory for packaged dependencies; don't depend on temporary absolute workspace paths.
+        - The host persists the release selection separately from verification. test_adapter defaults to this saved list;
+          do not repeat it after failures or checkpoints. New src/*.cs written with write_file and copied built-in components
+          auto-register. Analysis code belongs in work/. For new tools dependencies use write_file/download_tool releaseRole
+          and purpose once, or update_release_files for incremental additions/exclusions. It also lists unregistered files.
+          Explicit test_adapter releaseFiles replaces the list (useful for legacy workspaces); never select every tool by default.
+          Roles: source (src/*.cs), runtime (tools/* scripts/DLLs), asset (tools/* patch fonts/launchers/data), license (tools/* notices).
+          Paths are package-relative: tools/* maps to workspace src/tools/*. Include indirect imports and native dependencies.
+          Game executables/resources are per-game inputs under resources/, never reusable engine assets. Generate modified
+          EXEs/resources in patch output from checked current-game originals. Do not embed a whole game EXE in src/tools/.
+          Only selected files are compiled/tested/published. Editing unselected files does not require retesting. Do not clean
+          existing workspace or old packages; their development/source/translation state remains available.
         - Read bounded ranges and print concise findings, offsets and errors. Do not upload whole game resources or dump entire disassemblies.
           A successful write needs no confirmation read. Use search_text byteOffsets for the relevant function/field instead of whole-file reads.
           Keep work/ text reports in UTF-8 and use write_file for text edits; PowerShell 5.1 defaults can corrupt non-ASCII source.
@@ -873,6 +891,7 @@ public sealed class AdaptationSession
     public TokenUsage Usage { get; set; } = new(0, 0);
     public Dictionary<string, string> ResourceHashes { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public GeneratedAdapterPackage? VerifiedPackage { get; set; }
+    public IReadOnlyList<AdapterReleaseFile>? ReleaseFiles { get; set; }
     public int VerificationRevision { get; set; }
     public string[] VerificationDiagnostics { get; set; } = [];
 }

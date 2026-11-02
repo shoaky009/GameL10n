@@ -29,7 +29,9 @@ internal static class System4Repair
             var compiler = new GeneratedAdapterCompiler(toolchain, runner);
             Console.WriteLine("正在编译 System4 适配器并验证运行程序版本。");
             var package = await compiler.CompileWorkspaceAsync(adapterSource, Path.Combine(workDirectory, "build"),
-                ["**/*.ain", "**/*.fnl", "**/*.exe"], family: family);
+                ["**/*.ain", "**/*.fnl", "**/*.exe"], family: family,
+                releaseFiles: new[] { "Program.cs", "Ain.cs", "Fnl.cs", "GlyphRasterizer.cs", "RuntimePatch.cs" }
+                    .Select(path => new AdapterReleaseFile("src/" + path, "source", "System4 消息、字库与运行时补丁实现")).ToArray());
             var adapter = new GeneratedGameAdapter(package, toolchain, runner, Path.Combine(workDirectory, "run"));
             var pipeline = new TranslationPipeline(dataDirectory);
             var session = await pipeline.AnalyzeAsync(project.GameDirectory, adapter, projectId: project.Id);
@@ -73,6 +75,7 @@ internal static class System4Repair
                 var state = await LocalFiles.ReadJsonAsync<AdaptationSession>(statePath);
                 if (state is not null)
                 {
+                    state.ReleaseFiles = published.ReleaseFiles;
                     state.VerifiedPackage = published;
                     state.VerificationDiagnostics = verification.Diagnostics.ToArray();
                     state.Stage = "适配完成";

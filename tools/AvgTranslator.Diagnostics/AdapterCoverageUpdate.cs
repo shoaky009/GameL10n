@@ -9,7 +9,7 @@ internal sealed record UnitRename(string PreviousId, string CurrentId);
 internal sealed record CoverageUpdateManifest(string AdapterId, string PreviousVersion, string SourceFingerprint,
     IReadOnlyDictionary<string, string> SourceFiles, TextCoverage Coverage, IReadOnlyList<UnitRename> Renames,
     IReadOnlyList<string>? AddedSourceFiles = null, IReadOnlyDictionary<string, string>? AddedResources = null,
-    IReadOnlyList<string>? ResourcePatterns = null);
+    IReadOnlyList<string>? ResourcePatterns = null, IReadOnlyList<AdapterReleaseFile>? ReleaseFiles = null);
 
 // Deterministic update of reviewed adapter sources. Uses the existing original snapshot and
 // extraction/memory contracts; no model, game writes, installation or new original backups.
@@ -97,7 +97,22 @@ internal static class AdapterCoverageUpdate
             var compiler = new GeneratedAdapterCompiler(toolchain, runner);
             Console.WriteLine("正在编译已验证字段更新，不调用模型。");
             var package = await compiler.CompileWorkspaceAsync(candidate, Path.Combine(workDirectory, "build"),
-                manifest.ResourcePatterns ?? previous.ResourcePatterns!, family: previous.Family);
+                manifest.ResourcePatterns ?? previous.ResourcePatterns!, family: previous.Family,
+                releaseFiles: manifest.ReleaseFiles ?? (previous.ReleaseFiles is { } existing
+                    ? existing.Select(file => file.Path.StartsWith("src/", StringComparison.Ordinal) ? file.Path[4..] : file.Path)
+                    : manifest.SourceFiles.Keys).Concat(addedSources).Distinct(StringComparer.OrdinalIgnoreCase).Select(path =>
+                {
+                    var packagedPath = path.StartsWith("tools/", StringComparison.Ordinal) ? path : "src/" + path;
+                    if (previous.ReleaseFiles?.FirstOrDefault(file => file.Path == packagedPath) is { } selected) return selected;
+                    if (packagedPath.StartsWith("src/", StringComparison.Ordinal))
+                        return new AdapterReleaseFile(packagedPath, "source", "已审核更新清单中的解析实现");
+                    var name = Path.GetFileName(path);
+                    var role = path.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) ? "runtime"
+                        : name.Contains("LICENSE", StringComparison.OrdinalIgnoreCase) || name.Contains("NOTICE", StringComparison.OrdinalIgnoreCase)
+                            || name == "sources.json" ? "license" : null;
+                    return role is null ? throw new InvalidDataException("更新清单需要通过 releaseFiles 声明此依赖的用途：" + path)
+                        : new AdapterReleaseFile(path, role, "已审核更新清单中的解析依赖或来源声明");
+                }).ToArray());
             var adapter = new GeneratedGameAdapter(package, toolchain, runner, Path.Combine(workDirectory, "run"));
             Console.WriteLine("正在检查独立原文样本、原字节往返、中文变长回填及局部试译。");
             var verification = await new GeneratedAdapterVerifier().VerifyAsync(adapter, updatedSource,
@@ -169,6 +184,7 @@ internal static class AdapterCoverageUpdate
             }
             state.TextCoverage = manifest.Coverage;
             state.VerifiedCoverageFingerprint = manifest.Coverage.Fingerprint();
+            state.ReleaseFiles = package.ReleaseFiles;
             state.VerifiedPackage = published;
             state.VerificationRevision = GeneratedAdapterVerifier.Revision;
             state.VerificationDiagnostics = verification.Diagnostics.ToArray();

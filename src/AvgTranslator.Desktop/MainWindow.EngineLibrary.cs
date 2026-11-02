@@ -331,6 +331,7 @@ public sealed partial class MainWindow
         var selected = (CatalogVersionsList.SelectedItem as EngineVersionRow)?.Data;
         var version = SelectedInspectedLibraryVersion;
         CatalogOpenVersionButton.IsEnabled = !SavingEngineLibrary && version is { Source: EngineLibrarySource.External, Exists: true, DirectoryPath: not null };
+        CatalogVerifyVersionButton.IsEnabled = !SavingEngineLibrary && version is { Source: EngineLibrarySource.External, Exists: true };
         CatalogDeleteVersionButton.IsEnabled = !SavingEngineLibrary && version is { Source: EngineLibrarySource.External, Exists: true }
             && (!version.ReferencesKnown || version.References.Count == 0);
         if (selected is null)

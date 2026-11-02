@@ -5,6 +5,8 @@ using AvgTranslator.Core;
 using AvgTranslator.Core.Development;
 using AvgTranslator.Core.Isolation;
 using AvgTranslator.Core.Adapters;
+using AvgTranslator.Core.Pipeline;
+using AvgTranslator.Core.Storage;
 
 namespace AvgTranslator.Tests.Development;
 
@@ -14,6 +16,219 @@ public sealed class AutomaticAdaptationTests : IDisposable
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
     public AutomaticAdaptationTests() => Directory.CreateDirectory(root);
+
+    [Theory]
+    [InlineData("same", true)]
+    [InlineData("missing", false)]
+    [InlineData("extra", false)]
+    [InlineData("changed", false)]
+    public async Task PublishedPackageVerificationUsesRelocatedFilesAndRejectsBaselineChanges(string change, bool passed)
+    {
+        var (package, project, source) = await PackageVerificationFixtureAsync();
+        var operations = new List<AdapterProcessRequest>();
+        var runner = new ScriptedRunner { ObserveRequest = operations.Add, RewriteExtraction = units => change switch
+        {
+            "missing" => units.Take(1).ToArray(),
+            "extra" => [.. units, units[0] with { Id = "extra", Locator = "extra" }],
+            "changed" => units.Select(unit => unit with { SourceText = unit.SourceText + " changed" }).ToArray(),
+            _ => units
+        } };
+        var originalHash = Hash(Path.Combine(package.DirectoryPath, "adapter.dll"));
+        var result = await new PublishedPackageVerifier(Toolchain(), runner).VerifyAsync(package, project, Path.Combine(root, "verification"));
+        Assert.Equal(passed, result.Passed);
+        Assert.NotEmpty(operations);
+        Assert.All(operations, operation => Assert.NotEqual(Path.Combine(package.DirectoryPath, "adapter.dll"), operation.Arguments[0]));
+        Assert.All(operations, operation => Assert.DoesNotContain(source, operation.StandardInput));
+        Assert.False(result.RuntimeTested);
+        Assert.NotNull(result.PackageFingerprint);
+        Assert.NotNull(result.SourceFingerprint);
+        Assert.NotNull(result.BaselineFingerprint);
+        Assert.Equal(originalHash, Hash(Path.Combine(package.DirectoryPath, "adapter.dll")));
+        Assert.Empty(Directory.GetFileSystemEntries(Path.Combine(root, "verification")));
+        var saved = await LocalFiles.ReadJsonAsync<PublishedPackageVerification>(Path.Combine(project, "package-verification.json"));
+        Assert.Equal(result.Status, saved!.Status);
+    }
+
+    [Fact]
+    public async Task PublishedPackageVerificationRefusesChangedSourcesAndMissingBaselineWithoutRegeneratingIt()
+    {
+        var (package, project, source) = await PackageVerificationFixtureAsync();
+        var operations = new List<AdapterProcessRequest>();
+        var verifier = new PublishedPackageVerifier(Toolchain(), new ScriptedRunner { ObserveRequest = operations.Add });
+        await File.AppendAllTextAsync(Path.Combine(source, "script.txt"), "changed");
+        var result = await verifier.VerifyAsync(package, project, Path.Combine(root, "verification"));
+        Assert.False(result.Passed);
+        Assert.Contains(result.Diagnostics, text => text.Contains("原文快照内容已变化"));
+        Assert.Empty(operations);
+        // Remove only the fixture cache, not the saved source record.
+        var manifest = Directory.GetFiles(project, "manifest.sha256", SearchOption.AllDirectories).Single();
+        File.Delete(manifest);
+        result = await verifier.VerifyAsync(package, project, Path.Combine(root, "verification"));
+        Assert.False(result.Passed);
+        Assert.Contains(result.Diagnostics, text => text.Contains("已有提取记录缺失或损坏"));
+        Assert.False(File.Exists(manifest));
+        Assert.Empty(operations);
+    }
+
+    [Fact]
+    public async Task PublishedPackageCancellationAndProcessFailureReplacePreviousSuccessReport()
+    {
+        var (package, project, _) = await PackageVerificationFixtureAsync();
+        var runner = new ScriptedRunner();
+        var verifier = new PublishedPackageVerifier(Toolchain(), runner);
+        Assert.True((await verifier.VerifyAsync(package, project, Path.Combine(root, "verification"))).Passed);
+        using var cancel = new CancellationTokenSource();
+        cancel.Cancel();
+        var result = await verifier.VerifyAsync(package, project, Path.Combine(root, "verification"), cancel.Token);
+        Assert.Equal("cancelled", result.Status);
+        var failing = new ScriptedRunner { ObserveRequest = _ => throw new AdapterProcessLimitException("fixture timeout") };
+        result = await new PublishedPackageVerifier(Toolchain(), failing).VerifyAsync(package, project, Path.Combine(root, "verification"));
+        Assert.False(result.Passed);
+        Assert.Contains("fixture timeout", result.Diagnostics);
+        Assert.Empty(Directory.GetFileSystemEntries(Path.Combine(root, "verification")));
+        Assert.False((await LocalFiles.ReadJsonAsync<PublishedPackageVerification>(Path.Combine(project, "package-verification.json")))!.Passed);
+    }
+
+    private async Task<(GeneratedAdapterPackage Package, string Project, string Source)> PackageVerificationFixtureAsync()
+    {
+        var package = CreatePackage();
+        var project = Directory.CreateDirectory(Path.Combine(root, "project")).FullName;
+        var game = Request().GameDirectory;
+        SourceFile[] files = [new("script.txt", Hash(Path.Combine(game, "script.txt")))];
+        var fingerprint = LocalFiles.HashText(JsonSerializer.Serialize(files.OrderBy(file => file.RelativePath)));
+        var source = Directory.CreateDirectory(Path.Combine(project, "sources", fingerprint)).FullName;
+        File.Copy(Path.Combine(game, "script.txt"), Path.Combine(source, "script.txt"));
+        await LocalFiles.WriteJsonAsync(Path.Combine(project, "source.json"),
+            new SourceSnapshot(Path.GetRelativePath(project, source), package.Id, package.Version, files));
+        var baseline = await new GeneratedGameAdapter(package, Toolchain(), new ScriptedRunner(), Path.Combine(root, "baseline-run")).ExtractAsync(source);
+        await new ExtractionStore(project).StoreAsync(fingerprint, package.Id, package.Version, baseline);
+        return (package, project, source);
+    }
+
+    [Fact]
+    public async Task RegisteredReleaseSurvivesFailedVerificationReloadAndSourceEdits()
+    {
+        var workspace = Path.Combine(root, "workspace");
+        var state = new AdaptationSession();
+        var request = Request();
+        var store = new LocalAdapterPackageStore(Path.Combine(root, "store"));
+        var tools = new AdaptationTools(request, state, workspace,
+            Compiler(new ScriptedRunner { ValidationResponse = new(false, [new("fixture", "fixture failure")], "failed") }), store);
+        await tools.ExecuteAsync(new("source", "write_file", """{"path":"src/Program.cs","content":"// fixture"}"""), default);
+        await tools.ExecuteAsync(new("dependency", "write_file", """
+            {"path":"src/tools/parser.py","content":"# fixture","releaseRole":"runtime","purpose":"Parser"}
+            """), default);
+        await tools.ExecuteAsync(new("probe", "write_file", """{"path":"work/Probe.cs","content":"// analysis only"}"""), default);
+        await tools.ExecuteAsync(new("stage", "stage_resources", """{"files":["script.txt"]}"""), default);
+        const string verify = """{"kind":"template","key":"line-script","name":"Line script","resourcePatterns":["*.txt"]}""";
+        await tools.ExecuteAsync(new("test", "test_adapter", verify), default);
+        Assert.Null(state.VerifiedPackage);
+        Assert.Equal(2, state.ReleaseFiles!.Count);
+
+        // Checkpoint/restart must not depend on the original tool-call arguments surviving in history.
+        state.Messages.Clear();
+        state = JsonSerializer.Deserialize<AdaptationSession>(JsonSerializer.Serialize(state, Json), Json)!;
+        tools = new AdaptationTools(request, state, workspace, Compiler(new ScriptedRunner()), store);
+        await tools.ExecuteAsync(new("edit", "write_file", """{"path":"src/Program.cs","content":"// repaired"}"""), default);
+        await tools.ExecuteAsync(new("test", "test_adapter", verify), default);
+        Assert.NotNull(state.VerifiedPackage);
+        await tools.ExecuteAsync(new("edit", "write_file", """{"path":"src/Program.cs","content":"// repaired again"}"""), default);
+        Assert.Null(state.VerifiedPackage);
+        Assert.Equal(2, state.ReleaseFiles!.Count);
+        await tools.ExecuteAsync(new("test", "test_adapter", verify), default);
+        await tools.ExecuteAsync(new("finish", "finish", """{"summary":"Verified release."}"""), default);
+        Assert.Equal(store.LoadActive(request.GameId)!.DirectoryPath, state.VerifiedPackage!.DirectoryPath);
+    }
+
+    [Fact]
+    public async Task RenamedGameCopyCannotBePublishedAndExclusionDoesNotDeleteIt()
+    {
+        var workspace = Path.Combine(root, "workspace");
+        var state = new AdaptationSession();
+        var store = new LocalAdapterPackageStore(Path.Combine(root, "store"));
+        var tools = new AdaptationTools(Request(), state, workspace, Compiler(new ScriptedRunner()), store);
+        await tools.ExecuteAsync(new("source", "write_file", """{"path":"src/Program.cs","content":"// fixture"}"""), default);
+        await tools.ExecuteAsync(new("copy", "write_file", """
+            {"path":"src/tools/renamed.dat","content":"First line\nSecond line","releaseRole":"asset","purpose":"Mistaken game copy"}
+            """), default);
+        await tools.ExecuteAsync(new("stage", "stage_resources", """{"files":["script.txt"]}"""), default);
+        const string verify = """{"kind":"template","key":"line-script","name":"Line script","resourcePatterns":["*.txt"]}""";
+        var error = await Assert.ThrowsAsync<InvalidDataException>(() => tools.ExecuteAsync(new("test", "test_adapter", verify), default));
+        Assert.Contains("原文件副本", error.Message);
+        Assert.Null(state.VerifiedPackage);
+        Assert.Null(store.LoadActive("game"));
+        await tools.ExecuteAsync(new("exclude", "update_release_files", """{"remove":["tools/renamed.dat"]}"""), default);
+        Assert.True(File.Exists(Path.Combine(workspace, "src/tools/renamed.dat")));
+        await tools.ExecuteAsync(new("test", "test_adapter", verify), default);
+        Assert.NotNull(state.VerifiedPackage);
+        Assert.False(File.Exists(Path.Combine(state.VerifiedPackage!.DirectoryPath, "tools/renamed.dat")));
+    }
+
+    [Fact]
+    public async Task ReleaseSelectionExcludesUnselectedFilesAndKeepsTheirEditsOutOfPublication()
+    {
+        var workspace = Path.Combine(root, "workspace");
+        Directory.CreateDirectory(Path.Combine(workspace, "src/tools"));
+        await File.WriteAllTextAsync(Path.Combine(workspace, "src/Program.cs"), "// fixture");
+        await File.WriteAllTextAsync(Path.Combine(workspace, "src/Probe.cs"), "not compilable; analysis only");
+        await File.WriteAllTextAsync(Path.Combine(workspace, "src/tools/unused.zip"), "download");
+        await File.WriteAllTextAsync(Path.Combine(workspace, "src/tools/parser.py"), "# fixture dependency");
+        var state = new AdaptationSession();
+        var store = new LocalAdapterPackageStore(Path.Combine(root, "store"));
+        var tools = new AdaptationTools(Request(), state, workspace, Compiler(new ScriptedRunner()), store);
+        await tools.ExecuteAsync(new("stage", "stage_resources", """{"files":["script.txt"]}"""), default);
+        await tools.ExecuteAsync(new("verify", "test_adapter", """
+            {"kind":"template","key":"line-script","name":"Line script","resourcePatterns":["*.txt"],
+             "releaseFiles":[{"path":"src/Program.cs","role":"source","purpose":"Parser entry"},
+                             {"path":"tools/parser.py","role":"runtime","purpose":"Script parser"}]}
+            """), default);
+        var verified = state.VerifiedPackage!;
+        Assert.NotNull(verified);
+        Assert.Equal(3, verified.ManifestVersion);
+        Assert.Equal(4, verified.PackageFiles!.Count);
+        Assert.False(File.Exists(Path.Combine(verified.DirectoryPath, "src/Probe.cs")));
+        Assert.False(File.Exists(Path.Combine(verified.DirectoryPath, "tools/unused.zip")));
+        await tools.ExecuteAsync(new("edit", "write_file", """{"path":"src/Probe.cs","content":"new analysis probe"}"""), default);
+        Assert.Same(verified, state.VerifiedPackage);
+        await tools.ExecuteAsync(new("finish", "finish", """{"summary":"Selected release verified."}"""), default);
+        var published = store.LoadActive(Request().GameId)!;
+        Assert.Equal(verified.ReleaseFiles, published.ReleaseFiles);
+        Assert.Equal(verified.Version, published.Version);
+        Assert.False(File.Exists(Path.Combine(published.DirectoryPath, "tools/unused.zip")));
+    }
+
+    [Theory]
+    [InlineData("work/Probe.cs", "source")]
+    [InlineData("src/tools/parser.py", "runtime")]
+    [InlineData("tools/../parser.py", "runtime")]
+    [InlineData("tools/*", "runtime")]
+    [InlineData("src/Extra.cs", "analysis")]
+    public async Task InvalidReleaseSelectionIsRejectedBeforeCompilation(string path, string role)
+    {
+        var source = Directory.CreateDirectory(Path.Combine(root, "src")).FullName;
+        await File.WriteAllTextAsync(Path.Combine(source, "Program.cs"), "// fixture");
+        var compiler = Compiler(new ScriptedRunner());
+        var error = await Record.ExceptionAsync(() => compiler.CompileWorkspaceAsync(source, Path.Combine(root, "build"), ["*.txt"],
+            releaseFiles: [new("src/Program.cs", "source", "Entry"), new(path, role, "Invalid input")]));
+        Assert.True(error is GeneratedAdapterException or InvalidDataException, error?.ToString());
+        Assert.False(Directory.Exists(Path.Combine(root, "build")));
+    }
+
+    [Fact]
+    public async Task MissingReleaseSelectionIsRejectedAndLegacyPackagesRemainLoadable()
+    {
+        var source = Directory.CreateDirectory(Path.Combine(root, "src")).FullName;
+        await File.WriteAllTextAsync(Path.Combine(source, "Program.cs"), "// fixture");
+        var compiler = Compiler(new ScriptedRunner());
+        await Assert.ThrowsAsync<GeneratedAdapterException>(() => compiler.CompileWorkspaceAsync(source, Path.Combine(root, "build"), ["*.txt"], null!));
+        var package = await compiler.CompileWorkspaceAsync(source, Path.Combine(root, "build"), ["*.txt"],
+            [new("src/Program.cs", "source", "Entry")], family: new("template", "line-script", "Line script"));
+        var store = new LocalAdapterPackageStore(Path.Combine(root, "store"));
+        await store.PublishAndActivateAsync("legacy", package with { ManifestVersion = 2, ReleaseFiles = null }, []);
+        var loaded = store.LoadActive("legacy")!;
+        Assert.Equal(2, loaded.ManifestVersion);
+        Assert.Null(loaded.ReleaseFiles);
+    }
 
     [Fact]
     public async Task ExplicitSampleCorrectionSurvivesCheckpointAndRequiresFreshVerification()
@@ -208,6 +423,7 @@ public sealed class AutomaticAdaptationTests : IDisposable
         var testOutput = await tools.ExecuteAsync(new("test", "test_adapter", JsonSerializer.Serialize(new
         {
             kind = "template", key = "line-script", name = "Line script", resourcePatterns = new[] { "*.txt" },
+            releaseFiles = new[] { new AdapterReleaseFile("src/Program.cs", "source", "Fixture parser") },
             pendingCoverage = missingCoverage ? new[] { "Options menu is not extracted." } : [],
             runtimeChecks = new[] { "Confirm original font selection in game." }
         })), default);
@@ -275,6 +491,7 @@ public sealed class AutomaticAdaptationTests : IDisposable
         await tools.ExecuteAsync(new("test", "test_adapter", JsonSerializer.Serialize(new
         {
             kind = "template", key = "line-script", name = "Line script", resourcePatterns = new[] { "*.txt" },
+            releaseFiles = new[] { new AdapterReleaseFile("src/Program.cs", "source", "Fixture parser") },
             coverageSamples = new[] { new { resourcePath = "script.txt", locator = "line:0", sourceText = expected } },
             pendingCoverage = new[] { "Input labels need a display-only mapping." }
         })), default);
@@ -1215,7 +1432,7 @@ public sealed class AutomaticAdaptationTests : IDisposable
     [InlineData("source", false)]
     [InlineData("dependency", false)]
     [InlineData("resource", false)]
-    [InlineData("added-source", false)]
+    [InlineData("added-source", true)]
     [InlineData("removed-source", false)]
     public async Task PublicationRechecksActualInputsAfterLocalTools(string change, bool publishable)
     {
@@ -1244,7 +1461,7 @@ public sealed class AutomaticAdaptationTests : IDisposable
         var tools = new AdaptationTools(request, state, workspace, Compiler(runner), store);
         await tools.ExecuteAsync(new("stage", "stage_resources", """{"files":["script.txt"]}"""), default);
         await tools.ExecuteAsync(new("verify", "test_adapter",
-            """{"kind":"template","key":"line-script","name":"Line script","resourcePatterns":["*.txt"]}"""), default);
+            """{"kind":"template","key":"line-script","name":"Line script","resourcePatterns":["*.txt"],"releaseFiles":[{"path":"src/Program.cs","role":"source","purpose":"Fixture parser"},{"path":"tools/data.txt","role":"asset","purpose":"Fixture dependency"}]}"""), default);
         Assert.NotNull(state.VerifiedPackage);
         await tools.ExecuteAsync(new("run", "run_tool", """{"executable":"dotnet","arguments":["--probe"]}"""), default);
         var publish = new AgentToolCall("finish", "finish", """{"summary":"verified fixture"}""");
@@ -1781,6 +1998,7 @@ public sealed class AutomaticAdaptationTests : IDisposable
     private sealed class ScriptedRunner : IAdapterProcessRunner
     {
         public Action? LocalProbe { get; init; }
+        public Action<AdapterProcessRequest>? ObserveRequest { get; init; }
         public bool UndeclaredLaunchScript { get; init; }
         public bool DropTranslatedUnit { get; init; }
         public bool CorruptUntouchedTrialText { get; init; }
@@ -1790,6 +2008,7 @@ public sealed class AutomaticAdaptationTests : IDisposable
         public bool SawUnicodeTranslations { get; private set; }
         public Task<AdapterProcessResult> RunAsync(AdapterProcessRequest request, CancellationToken cancellationToken)
         {
+            ObserveRequest?.Invoke(request);
             if (request.Arguments.Contains("--probe"))
             {
                 LocalProbe?.Invoke();

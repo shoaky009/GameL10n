@@ -60,7 +60,7 @@ public sealed class BuiltinAdapterAssets(string? assetsDirectory = null)
         };
     }
 
-    public async Task<object> CopyAsync(string format, string workspace, bool editableSource, CancellationToken ct = default)
+    public async Task<object> CopyAsync(string format, string workspace, bool editableSource, CancellationToken ct = default, ICollection<AdapterReleaseFile>? releaseFiles = null)
     {
         ct.ThrowIfCancellationRequested();
         var selected = FindFormat(format);
@@ -109,6 +109,11 @@ public sealed class BuiltinAdapterAssets(string? assetsDirectory = null)
             await using var output = new FileStream(target, FileMode.CreateNew, FileAccess.Write, FileShare.None);
             await output.WriteAsync(content, ct);
         }
+        foreach (var path in files.Keys)
+            releaseFiles?.Add(new(AdapterReleaseFiles.PackagePath(path),
+                !path.StartsWith("src/tools/", StringComparison.Ordinal) ? "source"
+                    : path.EndsWith(AssemblyFile, StringComparison.Ordinal) ? "runtime" : "license",
+                "内置 " + selected.Key + " 解析器实现及依赖"));
         return new
         {
             format = selected.Key, editableSource, files = files.Keys.Order(StringComparer.Ordinal).ToArray(),
