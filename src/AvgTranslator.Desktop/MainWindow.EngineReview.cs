@@ -18,7 +18,7 @@ public sealed partial class MainWindow
         try
         {
             await SaveSettingsAsync();
-            var provider = CreateProvider(game, ResolveGameApi(game).Resolve(ApiPurpose.GameAnalysis));
+            var provider = CreateAnalysisProvider(game, ResolveGameApi(game).Resolve(ApiPurpose.GameAnalysis));
             var knowledgeStore = KnowledgeStore();
             await StartWorkAsync(game, GameTaskKind.Summary, "总结引擎经验", async token =>
             {

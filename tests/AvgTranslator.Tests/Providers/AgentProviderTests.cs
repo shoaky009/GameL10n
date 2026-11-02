@@ -243,8 +243,8 @@ public sealed class AgentProviderTests
     {
         using var client = new HttpClient(new Handler(_ => throw new InvalidOperationException()));
         var one = Provider(client, ProviderApiProtocol.Responses);
-        var changedKey = new OpenAiCompatibleProvider(client, new("https://example.invalid/v1", "another-key", "chosen-model", ProviderApiProtocol.Responses));
-        var changedModel = new OpenAiCompatibleProvider(client, new("https://example.invalid/v1", "private-key", "another-model", ProviderApiProtocol.Responses));
+        var changedKey = new OpenAiCompatibleAgentModel(client, new("https://example.invalid/v1", "another-key", "chosen-model", ProviderApiProtocol.Responses));
+        var changedModel = new OpenAiCompatibleAgentModel(client, new("https://example.invalid/v1", "private-key", "another-model", ProviderApiProtocol.Responses));
         Assert.Equal(one.Identity, changedKey.Identity);
         Assert.NotEqual(one.Identity, changedModel.Identity);
         Assert.NotEqual(one.Identity, Provider(client, ProviderApiProtocol.ChatCompletions).Identity);
@@ -268,7 +268,7 @@ public sealed class AgentProviderTests
                 Assert.Equal(effort, protocol == ProviderApiProtocol.Responses ? reasoning.GetProperty("effort").GetString() : chatEffort.GetString());
             return Response(TextEnvelope(protocol, "Continue investigation."));
         }));
-        var provider = new OpenAiCompatibleProvider(client, new("https://example.invalid/v1", "private-key", "chosen-model", protocol, effort));
+        var provider = new OpenAiCompatibleAgentModel(client, new("https://example.invalid/v1", "private-key", "chosen-model", protocol, effort));
         Assert.Equal(Provider(client, protocol).Identity, provider.Identity);
         await provider.NextAsync(Request, CancellationToken.None);
     }
@@ -299,7 +299,7 @@ public sealed class AgentProviderTests
     }
 
     private static readonly AgentRequest Request = new("Use workspace tools.", [new("user", "Inspect the sample.")], Tools, 2048);
-    private static OpenAiCompatibleProvider Provider(HttpClient client, ProviderApiProtocol protocol, string? directory = null) =>
+    private static OpenAiCompatibleAgentModel Provider(HttpClient client, ProviderApiProtocol protocol, string? directory = null) =>
         new(client, new("https://example.invalid/v1", "private-key", "chosen-model", protocol), directory);
 
     private static object ToolEnvelope(ProviderApiProtocol protocol, string? id = "call-0", string? name = "read_file", string? arguments = "{\"path\":\"sample.bin\"}") =>

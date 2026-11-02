@@ -17,13 +17,15 @@
 
 同目录的小型 `AvgTranslator.VnTextPatch.dll` 与 `sources.zip` 用于智能适配复用，发行脚本通过 `scripts/package-vntextpatch-assets.ps1` 生成。源码统一压缩保存，默认开发任务仅保存调用代码与固定版本依赖记录，解析库按内容哈希跨项目共享；需要修改时才展开所选引擎的源码。仅执行桌面项目的 `dotnet build` 不会生成这些发行资产，完整功能验证应使用发行目录。
 
-[编码与运行组件](adapters/components.md)的 C# 源码嵌入 Core；预编译 QLIE 启动器由 `scripts/package-adapter-components.ps1` 生成到 `tools/adapter-components`，发行脚本自动调用。该步骤使用固定 SDK 编译器及 Windows .NET Framework 4.x 程序集，启动器自身不依赖 .NET 10。组件打包集成测试使用 PowerShell 7。
+[编码与运行组件](adapters/components.md)的 C# 源码嵌入 Engines；预编译 QLIE 启动器由 `scripts/package-adapter-components.ps1` 生成到 `tools/adapter-components`，发行脚本自动调用。该步骤使用固定 SDK 编译器及 Windows .NET Framework 4.x 程序集，启动器自身不依赖 .NET 10。组件打包集成测试使用 PowerShell 7。
 
 ## 代码结构
 
 | 目录 | 内容 |
 | --- | --- |
-| `src/AvgTranslator.Core` | 适配器、翻译、任务恢复、模型接口、补丁安装 |
+| `src/AvgTranslator.Translation` | 文本模型、翻译执行、Provider、译文缓存、通用格式校验与文件持久化基础工具 |
+| `src/AvgTranslator.Engines` | 引擎适配器、资源探测、智能适配、扩展管理、资源与程序验证 |
+| `src/AvgTranslator.Core` | 项目管理、游戏流水线、任务调度、原文快照、补丁生成编排、安装与发布包项目验收 |
 | `src/AvgTranslator.Desktop` | WinUI 3 桌面界面 |
 | `tests/AvgTranslator.Tests` | 格式、缓存、恢复、安装及接口测试 |
 | `tools/AvgTranslator.Diagnostics` | 游戏资源验证与本地工具链诊断 |
@@ -31,6 +33,14 @@
 | `tools/AvgTranslator.VnTextPatch` | 内置 VNTextPatch 脚本解析与回填工具 |
 | `third_party/VNTextPatch` | 固定版本的上游脚本解析源码与许可证 |
 | `contracts` | 扩展通信协议 |
+
+依赖方向为 `Desktop → Core → Engines → Translation`，Core 同时直接使用 Translation。Translation 仅依赖 .NET 基础库，不引用 Core、Engines、WinUI 或引擎原生工具；引擎脚本、字形组件和分析运行库随 Engines 提供。现有类型命名空间保持不变，程序集归属由上述项目边界确定。
+
+`TranslationEngine.RunAsync` 接收文本列表、Provider 链和翻译策略，返回译文、缓存命中数与 Token 用量；它独立处理分批、去重、重试、拒绝切换、请求恢复和有效译文提交。调用方提供工作目录，并串行管理同一目录中的任务。通用校验在翻译核心中执行，资源专用校验通过可选回调传入；游戏原文哈希、Adapter、补丁构建和安装由 Core 编排。进度通过可等待的回调交给调用方保存和展示。
+
+全量翻译保留成功结果并继续处理失败文本之后的批次，返回成功与失败计数；`LoadFailuresAsync` 按原文和策略指纹查询当前失败原因。需要完整译文的调用方可设置 `RequireAllTranslations`，在所有批次尝试结束后报告失败，避免把未完成的全量翻译自动生成补丁。依赖项目原文快照和提取基线的 `PublishedPackageVerifier` 由 Core 提供，Engines 中的资源验收不依赖项目存储。
+
+翻译使用 `OpenAiCompatibleProvider`，智能适配使用 Engines 中的 `OpenAiCompatibleAgentModel`。两者复用 HTTP 协议处理，并通过各自调度包装共享同一 API 账户的并发限制。现有项目、缓存、校对记录和扩展协议的持久化格式不变。
 
 ## 资源验证
 

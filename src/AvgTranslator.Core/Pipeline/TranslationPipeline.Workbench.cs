@@ -9,17 +9,9 @@ public sealed record PatchTranslationSnapshot(int SchemaVersion, IReadOnlyDictio
 
 public sealed partial class TranslationPipeline
 {
-    public async Task<IReadOnlyDictionary<string, string>> LoadTranslationFailuresAsync(GameSession session,
-        TranslationPolicy policy, CancellationToken ct = default)
-    {
-        var issues = await ReadTranslationIssuesAsync(Path.Combine(session.ProjectDirectory, "translation-errors.json"), ct);
-        var units = session.Extraction.Units.ToDictionary(unit => unit.Id, StringComparer.Ordinal);
-        var memory = new TranslationMemory(Path.Combine(session.ProjectDirectory, "memory"));
-        return issues.Where(issue => issue.UnitId is { } id && units.TryGetValue(id, out var unit)
-                && (issue.MemoryKey is null || issue.MemoryKey == memory.Key(unit, policy)))
-            .GroupBy(issue => issue.UnitId!, StringComparer.Ordinal)
-            .ToDictionary(group => group.Key, group => string.Join("；", group.Select(issue => issue.Message).Distinct()), StringComparer.Ordinal);
-    }
+    public Task<IReadOnlyDictionary<string, string>> LoadTranslationFailuresAsync(GameSession session,
+        TranslationPolicy policy, CancellationToken ct = default) =>
+        new TranslationEngine(session.ProjectDirectory).LoadFailuresAsync(session.Extraction.Units, policy, ct);
 
     public async Task<PipelineResult> BuildFromSavedAsync(GameSession session, TranslationPolicy policy,
         IReadOnlyList<string>? unitIds = null, bool reviewedOnly = false,
@@ -51,7 +43,7 @@ public sealed partial class TranslationPipeline
         IProgress<PipelineProgress>? progress = null, CancellationToken ct = default)
     {
         string? candidate = null;
-        await RunCoreAsync(session, providers, policy, new(1, TrialUnitIds: [unit.Id])
+        await RunCoreAsync(session, providers, policy, new(1, UnitIds: [unit.Id])
         {
             CandidateOnly = true,
             TranslationUpdates = new InlineTranslations(values => { if (values.TryGetValue(unit.Id, out var text)) candidate = text; })

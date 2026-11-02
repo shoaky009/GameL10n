@@ -55,7 +55,7 @@ internal static class System4Repair
             var verification = await new GeneratedAdapterVerifier().VerifyAsync(adapter, session.SourceDirectory,
                 Path.Combine(workDirectory, "verification"), sourceIsSnapshot: true);
             if (!verification.Passed) throw new InvalidDataException(string.Join(Environment.NewLine, verification.Diagnostics));
-            var result = await pipeline.RunAsync(session, new CacheOnlyProvider(), policy, new RunOptions(TrialUnitIds: ids));
+            var result = await pipeline.RunAsync(session, new CacheOnlyProvider(), policy, new TranslationOptions(UnitIds: ids));
             if (result.TranslationUsage.TotalTokens != 0 || result.CacheHits != ids.Length)
                 throw new InvalidDataException("修复必须完全复用已有译文。");
             var store = new LocalAdapterPackageStore(Path.Combine(dataDirectory, "extensions"));

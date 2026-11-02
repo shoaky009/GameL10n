@@ -379,9 +379,9 @@ public sealed class PipelineTests : IDisposable
         await Assert.ThrowsAsync<TranslationRetriesExhaustedException>(() => CreatePipeline().RunAsync(session, failing, policy));
         Assert.Equal(6, failing.Calls);
         var provider = new FakeProvider();
-        await Assert.ThrowsAsync<UncertainRequestException>(() => CreatePipeline().RunAsync(session, provider, policy, new RunOptions(1, RetryUncertainRequests: false)));
+        await Assert.ThrowsAsync<UncertainRequestException>(() => CreatePipeline().RunAsync(session, provider, policy, new TranslationOptions(1, RetryUncertainRequests: false)));
         Assert.Equal(0, provider.Calls);
-        var result = await CreatePipeline().RunAsync(session, provider, policy, new RunOptions(1, true));
+        var result = await CreatePipeline().RunAsync(session, provider, policy, new TranslationOptions(1, true));
         Assert.True(result.Validation.Passed);
         Assert.Equal(2, provider.Calls);
     }
@@ -560,7 +560,7 @@ public sealed class PipelineTests : IDisposable
     {
         await WriteGame(("1", "hello"), ("2", "goodbye"));
         var session = await CreatePipeline().AnalyzeAsync(Game, new JsonGameAdapter());
-        await CreatePipeline().RunAsync(session, new FakeProvider(), policy, new RunOptions(TrialUnitIds: ["1"]));
+        await CreatePipeline().RunAsync(session, new FakeProvider(), policy, new TranslationOptions(UnitIds: ["1"]));
         var provider = new FakeProvider { Failure = new TranslationProviderException("Refused", usage: new TokenUsage(10, 5),
             diagnostic: new("model-refusal", ResponsePreview: "I cannot assist with this request.")) };
         var updates = new List<PipelineProgress>();
@@ -577,7 +577,7 @@ public sealed class PipelineTests : IDisposable
 
         var resumed = new FakeProvider { FailIfCalled = true };
         var error = await Assert.ThrowsAsync<TranslationRefusedException>(() => CreatePipeline().RunAsync(session, resumed, policy,
-            new RunOptions(RetryUncertainRequests: false), new ImmediateProgress(updates.Add)));
+            new TranslationOptions(RetryUncertainRequests: false), new ImmediateProgress(updates.Add)));
         Assert.Equal(0, resumed.Calls);
         Assert.Contains("未再次调用 API", error.Message);
         Assert.Equal(0, updates[^1].TranslationTokens);
@@ -648,7 +648,7 @@ public sealed class PipelineTests : IDisposable
         var first = new FakeProvider { Identity = "first", FailureFor = request => request.Units[0].Id == "1" ? Refusal() : null };
         var second = new FakeProvider { Identity = "second" };
         var unused = new FakeProvider { Identity = "unused", FailIfCalled = true };
-        var result = await CreatePipeline().RunAsync(session, new ITranslationProvider[] { first, second, unused }, policy, new RunOptions(1));
+        var result = await CreatePipeline().RunAsync(session, new ITranslationProvider[] { first, second, unused }, policy, new TranslationOptions(1));
         Assert.True(result.Validation.Passed);
         Assert.Equal(2, first.Calls);
         Assert.Equal("1", Assert.Single(Assert.Single(second.Batches)).Id);
@@ -674,11 +674,11 @@ public sealed class PipelineTests : IDisposable
             new FakeProvider { Identity = "second", FailIfCalled = true }
         };
         var error = await Assert.ThrowsAsync<TranslationRefusedException>(() => CreatePipeline().RunAsync(session,
-            recorded, policy, new RunOptions(RetryUncertainRequests: false), new ImmediateProgress(updates.Add)));
+            recorded, policy, new TranslationOptions(RetryUncertainRequests: false), new ImmediateProgress(updates.Add)));
         Assert.Contains("未再次调用 API", error.Message);
         Assert.Equal(0, updates[^1].TranslationTokens);
         var next = new FakeProvider { Identity = "third" };
-        var result = await CreatePipeline().RunAsync(session, recorded.Append(next).ToArray(), policy, new RunOptions(RetryUncertainRequests: false));
+        var result = await CreatePipeline().RunAsync(session, recorded.Append(next).ToArray(), policy, new TranslationOptions(RetryUncertainRequests: false));
         Assert.Equal(1, next.Calls);
         Assert.Equal(30, result.TranslationUsage.TotalTokens);
         Assert.True(result.Validation.Passed);
@@ -732,7 +732,7 @@ public sealed class PipelineTests : IDisposable
         var result = await CreatePipeline().RunAsync(session, new ITranslationProvider[]
         {
             new FakeProvider { Identity = "first", FailIfCalled = true }, second
-        }, policy, new RunOptions(RetryUncertainRequests: false));
+        }, policy, new TranslationOptions(RetryUncertainRequests: false));
         Assert.Equal(1, second.Calls);
         Assert.True(result.Validation.Passed);
     }
@@ -754,7 +754,7 @@ public sealed class PipelineTests : IDisposable
         {
             new FakeProvider { Identity = "first", FailIfCalled = true },
             new FakeProvider { Identity = "second", FailIfCalled = true }
-        }, policy, new RunOptions(RetryUncertainRequests: false));
+        }, policy, new TranslationOptions(RetryUncertainRequests: false));
         Assert.Equal(1, result.CacheHits);
         var entry = await ReadSingleMemoryEntryAsync(session);
         Assert.Equal("second", entry!.Provider);
@@ -889,7 +889,7 @@ public sealed class PipelineTests : IDisposable
             [first.Id] = new(TranslationEdits.Signature(first), policy.TargetLanguage, "旧校对", true, DateTimeOffset.UtcNow)
         }).SaveAsync(session.ProjectDirectory);
         var provider = new FakeProvider { Translate = _ => "新译文" };
-        var options = new RunOptions(50, TrialUnitIds: [first.Id]) { RetranslationId = Guid.NewGuid().ToString("N") };
+        var options = new TranslationOptions(50, UnitIds: [first.Id]) { RetranslationId = Guid.NewGuid().ToString("N") };
         await CreatePipeline().TranslateOnlyAsync(session, [provider], policy, options);
         Assert.Equal(first.Id, Assert.Single(Assert.Single(provider.Batches)).Id);
         var edit = (await TranslationEdits.LoadAsync(session.ProjectDirectory)).Find(first, policy.TargetLanguage)!;
@@ -910,7 +910,7 @@ public sealed class PipelineTests : IDisposable
         await WriteGame(("1", "hello {name}"), ("2", "goodbye {name}"));
         var session = await CreatePipeline().AnalyzeAsync(Game, new JsonGameAdapter());
         await CreatePipeline().TranslateOnlyAsync(session, [new FakeProvider()], policy);
-        var options = new RunOptions(50, TrialUnitIds: ["1", "2"]) { RetranslationId = Guid.NewGuid().ToString("N") };
+        var options = new TranslationOptions(50, UnitIds: ["1", "2"]) { RetranslationId = Guid.NewGuid().ToString("N") };
         var provider = new FakeProvider { Translate = unit => unit.Id == "1" ? "你好 {name}" : "再见" };
         await Assert.ThrowsAsync<InvalidDataException>(() => CreatePipeline().TranslateOnlyAsync(session, [provider], policy, options));
         var saved = await TranslationEdits.LoadAsync(session.ProjectDirectory);
@@ -949,7 +949,7 @@ public sealed class PipelineTests : IDisposable
         await CreatePipeline().TranslateOnlyAsync(session, [provider], policy);
         Assert.True(File.Exists(Path.Combine(responses, key + ".json")));
         await CreatePipeline().TranslateOnlyAsync(session, [provider], policy,
-            new(50, TrialUnitIds: [unit.Id]) { RetranslationId = operation });
+            new(50, UnitIds: [unit.Id]) { RetranslationId = operation });
         Assert.Equal("已返回新译文", (await TranslationEdits.LoadAsync(session.ProjectDirectory)).Entries[unit.Id].Text);
         Assert.Equal("翻译 hello", await memory.FindAsync(unit, policy));
         Assert.False(File.Exists(Path.Combine(responses, key + ".json")));

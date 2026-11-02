@@ -251,7 +251,7 @@ public sealed partial class MainWindow
                 await LocalFiles.WriteJsonAsync(Path.Combine(game.Directory, "translation-scope.json"), scope, token);
                 game.HasPendingTranslation = true;
                 var progress = TranslationProgress(game);
-                var options = new RunOptions(settings.BatchSize, TrialUnitIds: trialUnitIds)
+                var options = new TranslationOptions(settings.BatchSize, UnitIds: trialUnitIds)
                 { TranslationUpdates = TranslationUpdates(game, retranslationId), FailureUpdates = TranslationFailureUpdates(game), RetranslationId = retranslationId };
                 TranslationRunSummary summary;
                 try { summary = await Task.Run(() => pipeline.TranslateOnlyAsync(capturedSession, providers, policy, options, progress, token)); }
@@ -282,7 +282,7 @@ public sealed partial class MainWindow
         {
             await SaveSettingsAsync();
             var profile = ResolveGameApi(game).Resolve(ApiPurpose.GameAnalysis);
-            var provider = CreateProvider(game, profile);
+            var provider = CreateAnalysisProvider(game, profile);
             if (changingDataDirectory || closing || !games.Contains(game)) return;
             var continuing = File.Exists(Path.Combine(game.Directory, "adaptation", "current", "session.json"));
             var improving = game.Project.AdapterId is not null;
@@ -571,14 +571,30 @@ public sealed partial class MainWindow
 
     private ScheduledProvider CreateProvider(GameWorkspace game, ApiProfile profile)
     {
+        var settings = ReadProviderSettings(profile);
+        var provider = new OpenAiCompatibleProvider(httpClient, settings,
+            Path.Combine(game.Directory, "logs")) { DisplayName = profile.Name };
+        return new(provider, ProviderAccount(settings));
+    }
+
+    private ScheduledAgentModel CreateAnalysisProvider(GameWorkspace game, ApiProfile profile)
+    {
+        var settings = ReadProviderSettings(profile);
+        var provider = new OpenAiCompatibleAgentModel(httpClient, settings,
+            Path.Combine(game.Directory, "logs")) { DisplayName = profile.Name };
+        return new(provider, ProviderAccount(settings));
+    }
+
+    private ProviderSettings ReadProviderSettings(ApiProfile profile)
+    {
         if (string.IsNullOrWhiteSpace(profile.Endpoint) || string.IsNullOrWhiteSpace(profile.Model))
             throw new ArgumentException($"请补全“{profile.Name}”的 API 地址与模型名称。");
         var key = ReadProfileKey(profile);
-        var provider = new OpenAiCompatibleProvider(httpClient, new ProviderSettings(profile.Endpoint, key, profile.Model, profile.Protocol, profile.AnalysisReasoningEffort, profile.TranslationFormat),
-            Path.Combine(game.Directory, "logs")) { DisplayName = profile.Name };
-        var account = LocalFiles.HashText(new Uri(profile.Endpoint).GetLeftPart(UriPartial.Authority) + "\n" + key);
-        return new(provider, account);
+        return new(profile.Endpoint, key, profile.Model, profile.Protocol, profile.AnalysisReasoningEffort, profile.TranslationFormat);
     }
+
+    private static string ProviderAccount(ProviderSettings settings) =>
+        LocalFiles.HashText(settings.Endpoint.GetLeftPart(UriPartial.Authority) + "\n" + settings.ApiKey);
 
     private static TranslationPolicy ReadPolicy(GameTranslationSettings settings)
     {

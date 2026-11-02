@@ -171,7 +171,7 @@ public static class DataDirectoryTransfer
                 if (shard is not null)
                     foreach (var pair in shard.Entries) translations.Add(pair.Key, pair.Value);
             }
-            foreach (var file in await Pipeline.TranslationPipeline.FindCommittedResponseFilesAsync(
+            foreach (var file in await Translation.TranslationEngine.FindCommittedResponseFilesAsync(
                 Path.Combine(project, "responses"), translations, ct))
             {
                 var relative = Path.GetRelativePath(source, file).Replace('\\', '/');

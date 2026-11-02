@@ -71,7 +71,7 @@ public sealed partial class MainWindow
                         var package = store.LoadVersion(version.AdapterId, version.Version);
                         var verifier = new PublishedPackageVerifier(FindToolchain(), new AdapterProcessRunner(),
                             new EngineReferenceToolkit(Path.Combine(store.RootDirectory, "engine-tools"),
-                                reportProgress: (stage, message) => ((IProgress<(string, string)>)progress).Report((stage, message)));
+                                reportProgress: (stage, message) => ((IProgress<(string, string)>)progress).Report((stage, message))));
                         return await verifier.VerifyAsync(package, game.Directory,
                             Path.Combine(store.RootDirectory, "verification"), cancellation.Token,
                             (stage, message) => ((IProgress<(string, string)>)progress).Report((stage, message)));

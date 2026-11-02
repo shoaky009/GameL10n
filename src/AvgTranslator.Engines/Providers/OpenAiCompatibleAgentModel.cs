@@ -5,8 +5,14 @@ using AvgTranslator.Core.Translation;
 
 namespace AvgTranslator.Core.Providers;
 
-public sealed partial class OpenAiCompatibleProvider
+public sealed class OpenAiCompatibleAgentModel : OpenAiCompatibleClient, IAdaptationAgentModel
 {
+    public OpenAiCompatibleAgentModel(HttpClient httpClient, ProviderSettings settings, string? diagnosticDirectory = null)
+        : base(httpClient, settings, diagnosticDirectory) { }
+
+    public string? AnalysisReasoningEffort => _settings.AnalysisReasoningEffort;
+    public string? AnalysisModelName => _settings.Model;
+
     public async Task<AgentTurn> NextAsync(AgentRequest request, CancellationToken cancellationToken)
     {
         ValidateAgentRequest(request);
