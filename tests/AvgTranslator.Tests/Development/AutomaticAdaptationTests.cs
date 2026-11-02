@@ -840,6 +840,47 @@ public sealed class AutomaticAdaptationTests : IDisposable
     }
 
     [Fact]
+    public async Task ToolOnlyProgressCanAccompanyCheckpointAndSurvivesRestart()
+    {
+        var store = new LocalAdapterPackageStore(Path.Combine(root, "store"));
+        var updates = new ProgressRecorder();
+        var turn = 0;
+        var model = new FakeModel(_ => turn++ == 0
+            ? new(new("assistant", ToolCalls: [
+                new("progress", "report_progress", """{"kind":"breakthrough","message":"已确认索引结构，正在实现回填。"}"""),
+                new("save", "checkpoint", """{"summary":"Index understood; implement writer."}""")]), new(100, 20))
+            : new(new("assistant", ToolCalls: [new("list", "list_files", """{"root":"workspace"}""")]), new(100, 20)));
+        var result = await new AutomaticAdaptationService(model, Compiler(new ScriptedRunner()), store)
+            .AdaptAsync(Request() with { Limits = new(MaximumTurns: 2) }, progress: updates);
+        Assert.Equal("breakthrough", result.ProgressNote!.Kind);
+        Assert.Equal(result.ProgressNote, result.LastBreakthrough);
+        Assert.Contains(updates.Updates, update => update.ProgressNote == result.ProgressNote);
+        Assert.Equal(2, model.Calls);
+        var saved = await AvgTranslator.Core.Storage.LocalFiles.ReadJsonAsync<AdaptationSession>(Path.Combine(store.WorkDirectory, "current/session.json"));
+        Assert.Equal(result.ProgressNote, saved!.ProgressNote);
+        Assert.Contains("Index understood", saved.Notes);
+        Assert.Null(saved.VerifiedPackage);
+    }
+
+    [Fact]
+    public async Task ProgressDoesNotAllowMixedReadAndMutationOrClaimHostVerification()
+    {
+        var store = new LocalAdapterPackageStore(Path.Combine(root, "store"));
+        var turn = 0;
+        var model = new FakeModel(_ => turn++ == 0
+            ? new(new("assistant", ToolCalls: [
+                new("progress", "report_progress", """{"kind":"verified","message":"已通过所有检查。"}"""),
+                new("write", "write_file", """{"path":"src/unwanted.cs","content":"fixture"}"""),
+                new("list", "list_files", """{"root":"workspace"}""")]), new(100, 20))
+            : new(new("assistant", ToolCalls: [new("progress-alone", "report_progress", """{"kind":"verified","message":"已通过所有检查。"}""")]), new(100, 20)));
+        var result = await new AutomaticAdaptationService(model, Compiler(new ScriptedRunner()), store)
+            .AdaptAsync(Request() with { Limits = new(MaximumTurns: 2) });
+        Assert.Null(result.ProgressNote);
+        Assert.False(File.Exists(Path.Combine(store.WorkDirectory, "current/src/unwanted.cs")));
+        Assert.Null(result.Adapter);
+    }
+
+    [Fact]
     public async Task OptionalProgressSurvivesToolsCheckpointAndRestartWithoutExtraModelCalls()
     {
         const string breakthrough = "关键突破：代表性汉字的字体探针已通过，接下来整合资源回填。";
@@ -1788,11 +1829,60 @@ public sealed class AutomaticAdaptationTests : IDisposable
         var result = await new GeneratedAdapterVerifier().VerifyAsync(adapter, request.GameDirectory, Path.Combine(root, "verification"));
         Assert.False(result.Passed);
         var failure = Assert.Single(result.Diagnostics, diagnostic => diagnostic.Contains("missing=1", StringComparison.Ordinal));
+        Assert.True(result.OriginalRoundtripPassed);
         Assert.Contains("[full-translation-re-extraction]", failure);
         Assert.Contains("expected=2, actual=1", failure);
         Assert.Contains("line-1", failure);
         Assert.Contains("script.txt", failure);
         Assert.Equal(package.Version, store.LoadActive("game")!.Version);
+    }
+
+    [Fact]
+    public async Task HostVerificationKeepsNameSyntaxInsteadOfForcingTheParserToAcceptInvalidNames()
+    {
+        var request = Request();
+        await File.WriteAllTextAsync(Path.Combine(request.GameDirectory, "script.txt"), "【？？？】\n【Alice】\nHello");
+        var runner = new ScriptedRunner { RewriteExtraction = units => units.Select(unit => unit with
+        {
+            Kind = unit.SourceText.StartsWith('【') && unit.SourceText.EndsWith('】') ? "name" : "dialogue",
+            ProtectedTokens = unit.SourceText.StartsWith('【') ? ["【", "】"] : []
+        }).ToArray() };
+        var adapter = new GeneratedGameAdapter(CreatePackage(), Toolchain(), runner, Path.Combine(root, "runs"));
+        var result = await new GeneratedAdapterVerifier().VerifyAsync(adapter, request.GameDirectory, Path.Combine(root, "verification"));
+        Assert.True(result.Passed, string.Join("\n", result.Diagnostics));
+        Assert.True(result.OriginalRoundtripPassed);
+    }
+
+    [Fact]
+    public async Task HostVerificationRejectsAnExtractionWithNoMutableText()
+    {
+        var request = Request();
+        await File.WriteAllTextAsync(Path.Combine(request.GameDirectory, "script.txt"), "{player}\n[wait]");
+        var adapter = new GeneratedGameAdapter(CreatePackage(), Toolchain(), new ScriptedRunner(), Path.Combine(root, "runs"));
+        var result = await new GeneratedAdapterVerifier().VerifyAsync(adapter, request.GameDirectory, Path.Combine(root, "verification"));
+        Assert.False(result.Passed);
+        Assert.Contains(result.Diagnostics, item => item.Contains("无法生成有效测试译文"));
+        Assert.True(result.OriginalRoundtripPassed);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task HostMilestonesAreAvailableWithoutModelNotesEvenWhenChineseVerificationFails(bool fails)
+    {
+        var state = new AdaptationSession();
+        var store = new LocalAdapterPackageStore(Path.Combine(root, "store"));
+        var updates = new List<AdaptationProgressNote>();
+        var tools = new AdaptationTools(Request(), state, Path.Combine(root, "workspace"),
+            Compiler(new ScriptedRunner { DropTranslatedUnit = fails }), store,
+            reportProgress: (_, _) => { if (state.ProgressNote is { } note) updates.Add(note); });
+        await tools.ExecuteAsync(new("write", "write_file", """{"path":"src/Program.cs","content":"// fixture"}"""), default);
+        await tools.ExecuteAsync(new("stage", "stage_resources", """{"files":["script.txt"]}"""), default);
+        await tools.ExecuteAsync(new("test", "test_adapter", """{"kind":"template","key":"line-script","name":"Line script","resourcePatterns":["*.txt"]}"""), default);
+        Assert.Equal("verified", state.ProgressNote!.Kind);
+        Assert.Contains(state.ProgressNote, updates);
+        Assert.Contains(fails ? "尚未通过" : "仍需实际验证", state.ProgressNote.Message);
+        Assert.Equal(!fails, state.VerifiedPackage is not null);
     }
 
     [Fact]

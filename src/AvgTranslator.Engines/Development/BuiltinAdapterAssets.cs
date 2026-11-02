@@ -16,7 +16,14 @@ public sealed partial class BuiltinAdapterAssets(string? assetsDirectory = null)
     public object Describe(string format, object? engineInspection = null)
     {
         var selected = FindFormat(format);
-        using var archive = OpenSources();
+        var bundledSources = Array.Empty<(string Path, long Bytes)>();
+        BuiltinAdapterAssetException? sourceError = null;
+        try
+        {
+            using var archive = OpenSources();
+            bundledSources = SourceEntries(archive, selected).Select(entry => (entry.FullName, entry.Length)).ToArray();
+        }
+        catch (BuiltinAdapterAssetException error) { sourceError = error; }
         var generated = GeneratedSources(selected);
         return new
         {
@@ -25,7 +32,13 @@ public sealed partial class BuiltinAdapterAssets(string? assetsDirectory = null)
             companionFileNames = selected.CompanionFileNames,
             operations = new[] { "extract", "build", "validate" },
             binaryAvailable = File.Exists(Path.Combine(directory, AssemblyFile)),
-            sourceFiles = SourceEntries(archive, selected).Select(entry => new { path = entry.FullName, bytes = entry.Length })
+            sourceAvailable = sourceError is null,
+            sourceBundleIssue = sourceError is null ? null : new
+            {
+                code = sourceError.Code, asset = sourceError.AssetName, message = sourceError.Message,
+                recovery = "源码包故障不代表引擎不受支持。binaryAvailable=true 时，继续用 try_builtin_adapter 验证兼容性，并以 copy_adapter(editableSource=false) 复用二进制；需要修改源码时先恢复源码包。"
+            },
+            sourceFiles = bundledSources.Select(entry => new { path = entry.Path, bytes = entry.Bytes })
                 .Concat(generated.Select(pair => new { path = pair.Key, bytes = (long)Utf8.GetByteCount(pair.Value) }))
                 .Concat(References(selected).Select(pair => new { path = pair.Key, bytes = (long)Utf8.GetByteCount(pair.Value) }))
                 .OrderBy(item => item.path, StringComparer.Ordinal).ToArray(),
@@ -47,8 +60,13 @@ public sealed partial class BuiltinAdapterAssets(string? assetsDirectory = null)
             using var archive = OpenSources();
             var entry = SourceEntries(archive, selected).SingleOrDefault(item => item.FullName == normalized)
                 ?? throw new InvalidDataException("该路径不在所选解析器的源码索引中，请先读取 inspect_builtin_adapter 返回的 sourceFiles。");
-            using var reader = new StreamReader(entry.Open(), Utf8, detectEncodingFromByteOrderMarks: true);
-            content = reader.ReadToEnd();
+            try
+            {
+                using var reader = new StreamReader(entry.Open(), Utf8, detectEncodingFromByteOrderMarks: true);
+                content = reader.ReadToEnd();
+            }
+            catch (Exception error) when (error is IOException or InvalidDataException or UnauthorizedAccessException)
+            { throw SourceError(error); }
         }
         int start = Math.Min(offset, content.Length);
         int count = Math.Min(length, content.Length - start);
@@ -73,13 +91,18 @@ public sealed partial class BuiltinAdapterAssets(string? assetsDirectory = null)
             foreach (string name in new[] { "VNTextPatch.LICENSE", "VNTextPatch.NOTICE.md" })
                 files.Add("src/tools/vntextpatch/" + name, await File.ReadAllBytesAsync(Asset(name), ct));
             using var archive = OpenSources();
-            foreach (var entry in SourceEntries(archive, selected))
+            try
             {
-                await using var input = entry.Open();
-                using var contents = new MemoryStream();
-                await input.CopyToAsync(contents, ct);
-                files.Add("src/BuiltinVnTextPatch/" + entry.FullName, contents.ToArray());
+                foreach (var entry in SourceEntries(archive, selected))
+                {
+                    await using var input = entry.Open();
+                    using var contents = new MemoryStream();
+                    await input.CopyToAsync(contents, ct);
+                    files.Add("src/BuiltinVnTextPatch/" + entry.FullName, contents.ToArray());
+                }
             }
+            catch (Exception error) when (error is IOException or InvalidDataException or UnauthorizedAccessException)
+            { throw SourceError(error); }
             foreach (var (path, content) in GeneratedSources(selected).Where(pair => pair.Key != "generated/BuiltinScriptParser.cs"))
                 files.Add("src/BuiltinVnTextPatch/" + path, Utf8.GetBytes(content));
         }
@@ -130,10 +153,40 @@ public sealed partial class BuiltinAdapterAssets(string? assetsDirectory = null)
     private string Asset(string name)
     {
         string path = WorkspaceFiles.Resolve(directory, name);
-        if (!File.Exists(path)) throw new FileNotFoundException("内置解析器复用资产缺失，请使用包含 tools/vntextpatch 源码包和 DLL 的完整发行包。", path);
+        if (!File.Exists(path)) throw AssetError(name, "missing");
         return path;
     }
-    private ZipArchive OpenSources() => ZipFile.OpenRead(Asset("sources.zip"));
+    private ZipArchive OpenSources()
+    {
+        const string name = "sources.zip";
+        ZipArchive? archive = null;
+        try
+        {
+            archive = ZipFile.OpenRead(WorkspaceFiles.Resolve(directory, name));
+            // ZipArchive loads the directory lazily; classify invalid indexes before returning it.
+            _ = archive.Entries.Count;
+            return archive;
+        }
+        catch (Exception error) when (error is IOException or InvalidDataException or UnauthorizedAccessException)
+        {
+            archive?.Dispose();
+            throw SourceError(error);
+        }
+    }
+
+    private static BuiltinAdapterAssetException SourceError(Exception error) => AssetError("sources.zip", error switch
+    {
+        FileNotFoundException or DirectoryNotFoundException => "missing",
+        InvalidDataException => "corrupt",
+        _ => "unavailable"
+    }, error);
+
+    private static BuiltinAdapterAssetException AssetError(string name, string code, Exception? inner = null) => new(name, code, code switch
+    {
+        "missing" => $"内置解析器复用资产 {name} 缺失；请从完整发行包恢复 tools/vntextpatch。",
+        "corrupt" => $"内置解析器源码包 {name} 已损坏；请重新生成或从完整发行包恢复 tools/vntextpatch/{name}。",
+        _ => $"内置解析器源码包 {name} 暂时无法读取；请等待打包完成或解除文件占用、访问限制后重试。"
+    }, inner);
     private static VnTextPatchFormat FindFormat(string key) => VnTextPatchFormatCatalog.All.FirstOrDefault(format =>
         format.Key.Equals(key, StringComparison.OrdinalIgnoreCase)) ?? throw new ArgumentException("未知内置脚本格式：" + key, nameof(key));
 

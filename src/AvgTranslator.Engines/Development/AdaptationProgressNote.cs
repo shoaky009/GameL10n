@@ -2,7 +2,7 @@ using System.Text.Json.Serialization;
 
 namespace AvgTranslator.Core.Development;
 
-/// <summary>An optional user-facing observation, never an adapter verification or completion signal.</summary>
+/// <summary>A user-facing observation; model reports never establish adapter verification or completion.</summary>
 public sealed record AdaptationProgressNote(string Kind, string Message, DateTimeOffset UpdatedAt)
 {
     private static readonly (string Kind, string Title)[] Kinds =
@@ -12,7 +12,18 @@ public sealed record AdaptationProgressNote(string Kind, string Message, DateTim
     ];
 
     [JsonIgnore]
-    public string Title => Kinds.FirstOrDefault(item => item.Kind == Kind).Title ?? "适配进展";
+    public string Title => Kind == "verified" ? "资源验证进展"
+        : Kinds.FirstOrDefault(item => item.Kind == Kind).Title ?? "适配进展";
+
+    internal static AdaptationProgressNote FromTool(string kind, string message)
+    {
+        if (!Kinds.Any(item => item.Kind == kind))
+            throw new InvalidDataException("进展类型必须是 exploring、breakthrough、implementing 或 correction。");
+        message = message.Trim();
+        if (message.Length is < 1 or > 400)
+            throw new InvalidDataException("进展说明必须为 1 到 400 字符。");
+        return new(kind, message, DateTimeOffset.UtcNow);
+    }
 
     public static AdaptationProgressNote? FromAssistantText(string text)
     {

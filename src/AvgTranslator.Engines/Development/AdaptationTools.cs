@@ -26,6 +26,8 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
 
     public static IReadOnlyList<AgentToolDefinition> Definitions { get; } =
     [
+        Define("report_progress", "Brief Chinese progress for the user when evidence or direction changes. exploring: unresolved issue and next probe; breakthrough: observed evidence and what it enables; implementing: established route; correction: retract an earlier claim. <=400 characters, no private reasoning, percentages or ETA. Accompany normal tools in the same response; no extra model turn. This report never validates or publishes an adapter.",
+            """{"kind":{"type":"string","enum":["exploring","breakthrough","implementing","correction"]},"message":{"type":"string","minLength":1,"maxLength":400}}""", "kind", "message"),
         Define("inspect_engine_knowledge", "Search shared engine/format experience from previous projects. With id, read conditional guidance and helper index. Without id, query searches engine names/aliases; empty query lists this game's matched candidates. Verify conditions locally; no match is normal and does not mean unsupported.",
             """{"query":{"type":"string"},"id":{"type":"string"}}""", []),
         Define("copy_engine_knowledge_tools", "Copy one shared source helper into work/ without overwriting edits. Requires id and tool name from inspect_engine_knowledge. Inspect applicability and dependencies, then use run_csharp/run_engine_python on current samples. Does not execute, validate or publish an adapter. Call alone.",
@@ -112,6 +114,7 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
 
     public static string Stage(string tool) => tool switch
     {
+        "report_progress" => "更新适配进展",
         "inspect_engine_knowledge" or "copy_engine_knowledge_tools" => "复用同类引擎经验",
         "list_files" or "read_file" or "search_text" or "stage_resources" or "find_game_file" or "inspect_existing_text" => "分析游戏资源",
         "inspect_game_launch" => "检查游戏启动环境",
@@ -150,6 +153,7 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
         if (call.Name != "report_blocker") unresolvedStopReports = 0;
         object result = call.Name switch
         {
+            "report_progress" => ReportProgress(args),
             "inspect_engine_knowledge" => InspectEngineKnowledge(args),
             "copy_engine_knowledge_tools" => await CopyEngineKnowledgeToolsAsync(args, ct),
             "list_files" => ListFiles(args),
@@ -192,6 +196,19 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
             _ => throw new InvalidDataException("Unknown tool: " + call.Name)
         };
         return JsonSerializer.Serialize(new { success = true, result }, Json);
+    }
+
+    private object ReportProgress(JsonElement args)
+    {
+        var changed = session.UpdateProgress(AdaptationProgressNote.FromTool(Text(args, "kind"), Text(args, "message")));
+        if (changed) reportProgress?.Invoke("更新适配进展", session.ProgressNote!.Message);
+        return new { changed, note = session.ProgressNote, validation = false };
+    }
+
+    private void ReportVerifiedProgress(string message)
+    {
+        if (session.UpdateProgress(new("verified", message, DateTimeOffset.UtcNow)))
+            reportProgress?.Invoke("资源验证进展", message);
     }
 
     private async Task<GameLaunchInspection> InspectLaunchAsync(CancellationToken ct)
@@ -700,6 +717,7 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
         if (args.TryGetProperty("discoveryOnly", out var discoveryOnly) && discoveryOnly.GetBoolean())
         {
             session.VerificationDiagnostics = ["真实游戏与样本的探测结果一致；尚未执行提取及回填验收，不能发布。"];
+            ReportVerifiedProgress("已确认适配器能识别当前游戏资源；提取和中文回填尚未验收。");
             return new { passed = true, stage = "discovery", diagnostics = session.VerificationDiagnostics, runtimeTested = false,
                 nextAction = "继续实现并执行完整 test_adapter；仅资源发现通过还不能发布。", compileMs, discoveryMs };
         }
@@ -710,6 +728,10 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
             sourceIsSnapshot: true, coverage: session.TextCoverage,
             baselineUnits: session.Objective == AdaptationObjective.Repair ? request.BaselineUnits : null);
         session.VerificationDiagnostics = verification.Diagnostics.ToArray();
+        if (verification.Passed)
+            ReportVerifiedProgress("原文回填、中文回填和局部试译的资源验收已通过；游戏启动与显示仍需实际验证。");
+        else if (verification.OriginalRoundtripPassed)
+            ReportVerifiedProgress("原文回填已通过逐字节验证；中文或局部试译验收尚未通过，正在修复。");
         if (verification.Passed)
         {
             session.VerifiedPackage = package;

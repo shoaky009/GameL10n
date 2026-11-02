@@ -7,7 +7,7 @@ namespace AvgTranslator.Core.Development;
 
 public sealed class GeneratedAdapterVerifier
 {
-    public const int Revision = 3;
+    public const int Revision = 4;
     private static readonly JsonSerializerOptions DiagnosticJson = new() { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
 
     /// <summary>Checks host-observed bytes and extraction; an extension's validation claim is never sufficient.</summary>
@@ -20,6 +20,7 @@ public sealed class GeneratedAdapterVerifier
         Directory.CreateDirectory(verificationDirectory);
         var diagnostics = new List<string>();
         var phase = "probe";
+        var originalRoundtripPassed = false;
         try
         {
             var probe = await adapter.ProbeAsync(sampleDirectory, cancellationToken);
@@ -81,11 +82,16 @@ public sealed class GeneratedAdapterVerifier
                 if (before != after) throw new GeneratedAdapterException("Original-text roundtrip changed resource bytes: " + resource);
             }
             diagnostics.Add("Original-text build reproduced every approved sample byte for byte.");
+            originalRoundtripPassed = true;
 
-            // Change all units, including duplicate source strings, to distinct values. IDs and locations must survive resizing.
+            // Change visible text, including duplicate strings, without moving resource syntax.
             phase = "full-translation-build";
-            var translatedTexts = first.Units.Select((unit, index) => (unit.Id, Text: "AVG_TRANSLATION_" + index + "_翻译 " + unit.SourceText))
-                .ToDictionary(pair => pair.Id, pair => pair.Text, StringComparer.Ordinal);
+            var samples = first.Units.Select((unit, index) => (Unit: unit, Index: index,
+                Text: VerificationTranslationText.Create(unit, index))).ToArray();
+            var mutableSamples = samples.Where(sample => sample.Text != sample.Unit.SourceText).ToArray();
+            if (mutableSamples.Length == 0)
+                throw new GeneratedAdapterException("所有提取文本均为保护标记或空白，无法生成有效测试译文；请提取可翻译的可见文字。");
+            var translatedTexts = samples.ToDictionary(sample => sample.Unit.Id, sample => sample.Text, StringComparer.Ordinal);
             var translated = WorkspaceFiles.Resolve(verificationDirectory, "translated");
             Directory.CreateDirectory(translated);
             var translatedBuild = await adapter.BuildPatchAsync(source, translatedTexts, translated, cancellationToken);
@@ -102,17 +108,18 @@ public sealed class GeneratedAdapterVerifier
             var validation = await adapter.ValidatePatchAsync(source, translated, cancellationToken);
             if (!validation.Passed) throw new GeneratedAdapterException("The extension rejected the independently checked translated sample: "
                 + string.Join("; ", validation.Issues.Select(issue => issue.Message)));
-            diagnostics.Add("Distinct Unicode translations survived build and re-extraction with stable IDs, resource paths, and locators.");
+            diagnostics.Add($"{mutableSamples.Length} distinct Unicode translations survived build and re-extraction with stable IDs, resource paths, and locators."
+                + $" {samples.Length - mutableSamples.Length} units containing only protected syntax or spacing were checked unchanged.");
 
             // Trials supply only selected translations. Exercise that path and observe untouched units in the rebuilt resources.
             phase = "partial-translation-build";
             var partialTexts = new Dictionary<string, string>(StringComparer.Ordinal);
-            if (first.Units.Count > 0)
-                partialTexts[first.Units[0].Id] = "AVG_TRIAL_译文 " + first.Units[0].SourceText;
-            if (first.Units.Count > 3)
+            var firstSample = mutableSamples[0];
+            partialTexts[firstSample.Unit.Id] = VerificationTranslationText.Create(firstSample.Unit, firstSample.Index, trial: true);
+            if (mutableSamples.Length > 3)
             {
-                var middle = first.Units[first.Units.Count / 2];
-                partialTexts[middle.Id] = "AVG_TRIAL_中文回填长度验证 " + middle.SourceText;
+                var middle = mutableSamples[mutableSamples.Length / 2];
+                partialTexts[middle.Unit.Id] = VerificationTranslationText.Create(middle.Unit, middle.Index, trial: true);
             }
             var expectedPartial = new Dictionary<string, string>(originalTexts, StringComparer.Ordinal);
             foreach (var pair in partialTexts) expectedPartial[pair.Key] = pair.Value;
@@ -130,12 +137,12 @@ public sealed class GeneratedAdapterVerifier
                     + string.Join("; ", partialValidation.Issues.Select(issue => issue.Message)));
             diagnostics.Add("Partial trial edits survived re-extraction; every untouched translation unit retained its original text and identity.");
             diagnostics.Add("Resource checks passed. Game runtime compatibility has not been tested.");
-            return new GeneratedAdapterVerification(true, diagnostics);
+            return new GeneratedAdapterVerification(true, diagnostics, originalRoundtripPassed);
         }
         catch (Exception exception) when (exception is GeneratedAdapterException or InvalidDataException or IOException or System.Text.Json.JsonException)
         {
             diagnostics.Add(GeneratedAdapterCompiler.LimitDiagnostic($"[{phase}] {exception.Message}"));
-            return new GeneratedAdapterVerification(false, diagnostics);
+            return new GeneratedAdapterVerification(false, diagnostics, originalRoundtripPassed);
         }
         finally { GeneratedGameAdapter.DeleteStagedTree(verificationDirectory); }
     }
@@ -209,6 +216,7 @@ public sealed class GeneratedAdapterVerifier
         foreach (var (before, after) in changedSamples)
         {
             message.AppendLine("Changed " + DescribeUnit(before));
+            message.AppendLine($"  suppliedTranslation={Sample(expectedTexts[before.Id])}, extractedText={Sample(after.SourceText)}");
             foreach (var (field, expected, observed) in new[]
             {
                 ("sourceText", expectedTexts[before.Id], after.SourceText),
@@ -227,7 +235,11 @@ public sealed class GeneratedAdapterVerifier
                     + $"added=[{string.Join(", ", added.Take(4).Select(Sample))}] (up to 4 each)");
             }
         }
-        foreach (var unit in missing) message.AppendLine("Missing " + DescribeUnit(unit));
+        foreach (var unit in missing)
+        {
+            message.AppendLine("Missing " + DescribeUnit(unit));
+            message.AppendLine("  suppliedTranslation=" + Sample(expectedTexts[unit.Id]));
+        }
         foreach (var unit in byId.Values.Take(sampleLimit)) message.AppendLine("Added " + DescribeUnit(unit));
         throw new GeneratedAdapterException(GeneratedAdapterCompiler.LimitDiagnostic(message.ToString()));
     }

@@ -13,6 +13,43 @@ public sealed class BuiltinAdapterAssetsTests : IDisposable
     private readonly string root = Path.Combine(Path.GetTempPath(), "avg-builtin-assets-" + Guid.NewGuid().ToString("N"));
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
+    [Theory]
+    [InlineData("corrupt")]
+    [InlineData("missing")]
+    [InlineData("unavailable")]
+    public async Task UnreadableSourceBundlePreservesCapabilitiesAndBinaryReuse(string code)
+    {
+        var assets = CreateAssets();
+        string sourceBundle = Path.Combine(root, "assets", "sources.zip");
+        if (code == "corrupt") await File.WriteAllBytesAsync(sourceBundle, []);
+        else if (code == "missing") File.Delete(sourceBundle);
+        using var held = code == "unavailable" ? new FileStream(sourceBundle, FileMode.Open, FileAccess.Read, FileShare.None) : null;
+
+        var description = JsonSerializer.SerializeToElement(assets.Describe("Renpy"), Json);
+        Assert.Equal("Renpy", description.GetProperty("format").GetString());
+        Assert.True(description.GetProperty("binaryAvailable").GetBoolean());
+        Assert.False(description.GetProperty("sourceAvailable").GetBoolean());
+        var issue = description.GetProperty("sourceBundleIssue");
+        Assert.Equal(code, issue.GetProperty("code").GetString());
+        Assert.Equal("sources.zip", issue.GetProperty("asset").GetString());
+        Assert.Contains("二进制模式", description.GetProperty("usage").GetString());
+        Assert.Equal(new[] { "extract", "build", "validate" }, description.GetProperty("operations").EnumerateArray().Select(item => item.GetString()));
+        Assert.NotNull(assets.ReadSource("Renpy", "generated/BuiltinScriptParser.cs"));
+
+        var error = Assert.Throws<BuiltinAdapterAssetException>(() => assets.ReadSource("Renpy", "vendor/Scripts/RenpyScript.cs"));
+        Assert.Equal(code, error.Code);
+        Assert.Equal("sources.zip", error.AssetName);
+        Assert.Throws<ArgumentException>(() => assets.Describe("unknown-format"));
+        string editableWorkspace = Path.Combine(root, "editable");
+        Assert.Equal(code, (await Assert.ThrowsAsync<BuiltinAdapterAssetException>(() => assets.CopyAsync("Renpy", editableWorkspace, true))).Code);
+        Assert.False(Directory.Exists(editableWorkspace));
+
+        string workspace = Path.Combine(root, "binary");
+        await assets.CopyAsync("Renpy", workspace, false);
+        var toolkit = new EngineReferenceToolkit(Path.Combine(root, "shared"), parserAssets: assets);
+        Assert.True(File.Exists(await toolkit.ResolveVnTextPatchAsync(Path.Combine(workspace, "src"), default)));
+    }
+
     [Fact]
     public async Task BinaryAdaptersSharePinnedParserAndDoNotSilentlyUpgrade()
     {

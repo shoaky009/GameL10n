@@ -397,13 +397,13 @@ public sealed partial class MainWindow : Window
         AdaptationSummaryText.Text = game?.AdaptationSummary ?? "可以继续已有适配任务。";
         var progressNote = game?.AdaptationProgressNote;
         AdaptationProgressTitle.Text = progressNote is null ? "适配进展" : "适配进展 · " + progressNote.Title;
-        AdaptationProgressText.Text = progressNote?.Message ?? "暂无进展说明。有关键变化时，模型可在这里更新。";
+        AdaptationProgressText.Text = progressNote?.Message ?? "暂无进展说明。验证取得进展或分析有关键变化时，会在这里更新。";
         AdaptationProgressTimeText.Text = progressNote is null ? ""
-            : $"模型说明 · 最近更新 {progressNote.UpdatedAt.ToLocalTime():MM-dd HH:mm:ss}";
+            : $"{(progressNote.Kind == "verified" ? "主程序验证" : "模型说明")} · 最近更新 {progressNote.UpdatedAt.ToLocalTime():MM-dd HH:mm:ss}";
         var breakthrough = game?.AdaptationLastBreakthrough;
         AdaptationBreakthroughText.Visibility = breakthrough is not null && breakthrough != progressNote ? Visibility.Visible : Visibility.Collapsed;
         AdaptationBreakthroughText.Text = breakthrough is null ? ""
-            : $"最近突破（{breakthrough.UpdatedAt.ToLocalTime():MM-dd HH:mm}）：{breakthrough.Message}";
+            : $"{(breakthrough.Kind == "verified" ? "最近验证进展" : "最近突破")}（{breakthrough.UpdatedAt.ToLocalTime():MM-dd HH:mm}）：{breakthrough.Message}";
         AdaptationBlockerText.Visibility = !busy && game?.AdaptationBlocker is not null ? Visibility.Visible : Visibility.Collapsed;
         AdaptationBlockerText.Text = game?.AdaptationBlocker?.Reason ?? "";
         TaskProgress.IsIndeterminate = game?.Busy == true && (game.Progress is null || game.Kind != GameTaskKind.Translation);

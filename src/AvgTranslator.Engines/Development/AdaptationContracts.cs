@@ -40,6 +40,7 @@ public sealed record GeneratedAdapterPackage(string Id, string Version, string D
     int ProtocolVersion = 1, int ManifestVersion = 1,
     IReadOnlyList<AdapterReleaseFile>? ReleaseFiles = null, AdapterRecognition? Recognition = null);
 
-public sealed record GeneratedAdapterVerification(bool Passed, IReadOnlyList<string> Diagnostics);
+public sealed record GeneratedAdapterVerification(bool Passed, IReadOnlyList<string> Diagnostics,
+    bool OriginalRoundtripPassed = false);
 
 public sealed class GeneratedAdapterException(string message) : Exception(message);

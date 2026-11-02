@@ -291,9 +291,10 @@ public sealed class AutomaticAdaptationService(IAdaptationAgentModel model, Gene
                 cancellationToken.ThrowIfCancellationRequested();
                 // Known writes and one local run can share a turn. Each result is committed in order;
                 // a failed/uncertain prerequisite must never allow its dependent run to proceed.
-                if (state.PendingCalls.Count > 1 && AdaptationTools.IsWriteRunBatch(state.PendingCalls))
+                var operations = state.PendingCalls.Where(call => call.Name != "report_progress").ToArray();
+                if (operations.Length > 1 && AdaptationTools.IsWriteRunBatch(operations))
                     state.PendingCallsAreSequential = true;
-                else if (state.PendingCalls.Count > 1 && state.PendingCalls.Any(call => !AdaptationTools.CanBatch(call.Name)))
+                else if (operations.Length > 1 && operations.Any(call => !AdaptationTools.CanBatch(call.Name)))
                 {
                     await TraceAsync(new { operation = "tool-batch-rejected", tools = state.PendingCalls.Select(call => call.Name).ToArray() });
                     foreach (var call in state.PendingCalls)
@@ -319,6 +320,13 @@ public sealed class AutomaticAdaptationService(IAdaptationAgentModel model, Gene
                         await TraceAsync(new { operation = "tool", tool = call.Name, call = AdaptationTrace.Call(call), status = "cancelled", elapsedMs = toolTimer.ElapsedMilliseconds });
                         throw;
                     }
+                    catch (BuiltinAdapterAssetException error)
+                    {
+                        diagnostics.Add(call.Name + ": " + error.Message);
+                        output = JsonSerializer.Serialize(new { success = false, error = error.Message,
+                            code = "builtin-asset-" + error.Code, asset = error.AssetName,
+                            nextAction = "这是内置工具资产故障，不是游戏格式不兼容。可检查 inspect_builtin_adapter 的 binaryAvailable，验证可用的二进制解析能力；不要仅因源码包故障重写解析器。" }, ContextJson);
+                    }
                     catch (Exception error) when (error is not OperationCanceledException)
                     {
                         diagnostics.Add(call.Name + ": " + error.Message);
@@ -339,7 +347,7 @@ public sealed class AutomaticAdaptationService(IAdaptationAgentModel model, Gene
                     state.Messages.Add(new("tool", output, ToolCallId: call.Id));
                     state.PendingCalls.RemoveAt(0);
                     state.RunningToolId = null;
-                    if (state.PendingCallsAreSequential && outcome.Status == "failed")
+                    if (state.PendingCallsAreSequential && outcome.Status == "failed" && call.Name != "report_progress")
                     {
                         foreach (var pending in state.PendingCalls)
                             state.Messages.Add(new("tool", JsonSerializer.Serialize(new { success = false,
@@ -393,6 +401,7 @@ public sealed class AutomaticAdaptationService(IAdaptationAgentModel model, Gene
                         + "若仍需调查，选一个会决定实现方案的实验，将相关已知地址和边界放在同一脚本中批量检查，得到结果后接入 src。"
                         + "区分当前游戏已有证据的阻碍与假设的边界；不要用不断增加探针和笔记代替实现，也不要反复验证未修改的失败代码。"
                         + "确实需要更多研究时，简短说明待解决的问题和决定下一步的判据，然后继续工具操作；无需为回应本提示额外调用模型或写总结文件。"
+                        + "若已有关键突破或路线已明确，可在同一响应用 report_progress 简短说明，然后继续实际操作。"
                         + "保留真实限制，不降低原文、中文回填和发布验收要求。已通过完整验收时，根据本次目标直接 finish；长会话可先 checkpoint，勿重复调查或增加其他类别。\n"
                         + $"主程序记录：最近实现/验收在第 {state.LastImplementationTurn} 轮；当前{(state.VerifiedPackage is null ? "尚无通过完整验收的产物" : "已有通过完整验收的产物")}。"
                         + "已复制的解析组件用 copy_adapter 返回的完整 librarySourceFiles 编译探针，不要重新逐个拼接依赖。"
@@ -495,13 +504,7 @@ public sealed class AutomaticAdaptationService(IAdaptationAgentModel model, Gene
                 if (!string.IsNullOrWhiteSpace(turn.Message.Content))
                     state.Summary = GeneratedAdapterCompiler.LimitDiagnostic(turn.Message.Content);
                 var note = AdaptationProgressNote.FromAssistantText(turn.Message.Content);
-                var changedProgress = note is not null && (note.Kind != state.ProgressNote?.Kind || note.Message != state.ProgressNote?.Message);
-                if (changedProgress)
-                {
-                    state.ProgressNote = note;
-                    if (note!.Kind == "breakthrough") state.LastBreakthrough = note;
-                    else if (note.Kind == "correction") state.LastBreakthrough = null;
-                }
+                var changedProgress = note is not null && state.UpdateProgress(note);
                 await SaveAsync();
                 if (changedProgress) Report("智能分析", "正在分析资源或规划下一步操作。");
                 if (state.Usage.TotalTokens - initialUsage > limits.MaximumTokens)
@@ -763,6 +766,8 @@ public sealed class AutomaticAdaptationService(IAdaptationAgentModel model, Gene
         Do not rerun failed test_adapter on unchanged code or return to already rejected approaches without new evidence.
 
         Prefer published adapters, bundled parsers and existing engine tools. Initial host candidates are clues, not verified compatibility.
+        sourceAvailable=false/sourceBundleIssue denotes a host asset problem, not an unsupported game engine.
+        If binaryAvailable=true, try that parser on real samples; do not rewrite it solely because bundled source is unavailable.
         Use inspect_builtin_adapter / try_builtin_adapter on representative staged samples and required companions, then copy_adapter
         to reuse the parser; add only missing container, version or runtime glue. Don't fetch or rewrite bundled code first.
         For missing formats use search_engine_references, inspect_engine_reference, then run_engine_python to CALL pinned library APIs.
@@ -856,7 +861,10 @@ public sealed class AutomaticAdaptationService(IAdaptationAgentModel model, Gene
         useful local step remains; stopped=false means perform that step. Missing parser, unfinished runtime analysis or CP932 alone is not impossibility.
         Do not invent success or request gameplay without usable output. Preserve partial work and clearly state the failing layer and next action.
         Use concise Chinese for user-facing summaries and limitations; technical dumps belong in development output.
-        Optionally add a first-line progress note (1-2 sentences, <=400 characters) WITH the next tool call when meaningful:
+        When meaningful evidence or direction changes, prefer report_progress WITH the next operation in the same response.
+        It accepts exploring/breakthrough/implementing/correction and a short Chinese message. It can accompany a standalone
+        verification/checkpoint or a valid read/edit batch without requiring another model call. Do not report every turn.
+        Alternatively add a first-line progress note (1-2 sentences, <=400 characters) WITH the next tool call:
         仍在探索：key unresolved issue and decisive probe; 关键突破：new observed evidence and what it enables;
         方案已确定：established route and implementation underway; 进展更正：evidence overturning a previous claim.
         Don't repeat notes, invent percentages/ETA, disclose private reasoning, or spend separate model calls on progress. Notes cannot publish.
@@ -888,6 +896,14 @@ public sealed class AdaptationSession
     public string Summary { get; set; } = "";
     public AdaptationProgressNote? ProgressNote { get; set; }
     public AdaptationProgressNote? LastBreakthrough { get; set; }
+    internal bool UpdateProgress(AdaptationProgressNote note)
+    {
+        if (note.Kind == ProgressNote?.Kind && note.Message == ProgressNote?.Message) return false;
+        ProgressNote = note;
+        if (note.Kind is "breakthrough" or "verified") LastBreakthrough = note;
+        else if (note.Kind == "correction") LastBreakthrough = null;
+        return true;
+    }
     public AdaptationStatus? LastStatus { get; set; }
     public string NextAction { get; set; } = "";
     public AdaptationBlocker? Blocker { get; set; }
