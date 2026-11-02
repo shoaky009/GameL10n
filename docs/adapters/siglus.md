@@ -33,4 +33,4 @@ CG、背景图中的文字及未识别的自定义界面不包含在提取范围
 
 `argument` 从 0 开始。必须从源码或已验证的字节码语义确认参数；只增加提取规则不能解决新字体或新显示系统的问题。`inspect_builtin_adapter(format="Siglus")` 提供工具源码索引。修改后仍须通过 `test_adapter`，才能发布。
 
-共享工具为固定版本 SiglusSceneScriptUtility 0.5.7、Python 3.14.10 和 Windows x64 加速模块，保存在应用数据目录的 `extensions/engine-tools`。首次使用可能下载共享 Python；解析工具已随应用附带，不需要系统 Python、pip 或付费 API。游戏目录中不放工具、源码、缓存或开发记录。
+共享工具为固定版本 SiglusSceneScriptUtility 0.5.7、Python 3.14.10 和 Windows x64 加速模块，保存在应用数据目录的 `extensions/engine-tools`。Python 直接读取发行包的 `tools/engine-tools` 或已有共享运行时，不自动下载；解析工具已随应用附带，不需要系统 Python、pip 或付费 API。游戏目录中不放工具、源码、缓存或开发记录。

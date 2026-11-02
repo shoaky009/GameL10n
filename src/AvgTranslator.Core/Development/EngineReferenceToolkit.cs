@@ -11,10 +11,12 @@ namespace AvgTranslator.Core.Development;
 public sealed record EngineReferencePin(string Revision, string SourceSha256, string LibrarySha256, string Kind = "galtransl");
 public sealed record EnginePythonDependency(EngineReferencePin Reference, string PythonVersion, string PythonSha256);
 public sealed record EnginePythonPaths(string Python, string EngineLibrary);
+public sealed record AdapterToolPaths(string? Python, string? EngineLibrary, string? VnTextPatch);
 
 /// <summary>One shared source archive and portable interpreter, outside game/project directories.</summary>
 public sealed class EngineReferenceToolkit(string rootDirectory, HttpClient? httpClient = null,
-    Action<string, string>? reportProgress = null)
+    Action<string, string>? reportProgress = null, BuiltinAdapterAssets? parserAssets = null,
+    string? bundledDirectory = null, bool allowDownloads = false)
 {
     public const string PythonVersion = "3.14.10";
     public const string DependencyPath = "tools/engine-reference.json";
@@ -24,15 +26,22 @@ public sealed class EngineReferenceToolkit(string rootDirectory, HttpClient? htt
     private static readonly SemaphoreSlim Preparation = new(1, 1);
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
     private readonly string root = Path.GetFullPath(rootDirectory);
+    private readonly string bundle = Path.GetFullPath(bundledDirectory ?? Path.Combine(AppContext.BaseDirectory, "tools", "engine-tools"));
     private string Current => Path.Combine(root, "current.json");
 
-    public EngineReferencePin? CurrentReference() => File.Exists(Current)
-        ? JsonSerializer.Deserialize<EngineReferencePin>(File.ReadAllText(Current), Json) : null;
+    public EngineReferencePin? CurrentReference()
+    {
+        var path = File.Exists(Current) ? Current : Path.Combine(bundle, "current.json");
+        return File.Exists(path) ? JsonSerializer.Deserialize<EngineReferencePin>(File.ReadAllText(path), Json) : null;
+    }
 
     public string LibraryPath(EngineReferencePin pin)
     {
         ValidatePin(pin);
-        return WorkspaceFiles.Resolve(root, $"references/{pin.Revision}/library.zip");
+        var relative = $"references/{pin.Revision}/library.zip";
+        var local = WorkspaceFiles.Resolve(root, relative);
+        var bundled = WorkspaceFiles.Resolve(bundle, relative);
+        return !File.Exists(local) && pin.Kind != "siglus" && File.Exists(bundled) ? bundled : local;
     }
 
     public async Task<EngineReferencePin> EnsureReferenceAsync(EngineReferencePin? pin, CancellationToken ct)
@@ -64,7 +73,7 @@ public sealed class EngineReferenceToolkit(string rootDirectory, HttpClient? htt
         // A different project's first download must not block tasks using an already installed version.
         if (pin is not null && File.Exists(LibraryPath(pin)))
         {
-            reportProgress?.Invoke("检查共享工具", "正在校验已下载的引擎工具库。");
+            reportProgress?.Invoke("检查共享工具", "正在校验本地引擎工具库。");
             await RequireHashAsync(LibraryPath(pin), pin.LibrarySha256, ct);
             return pin;
         }
@@ -85,12 +94,12 @@ public sealed class EngineReferenceToolkit(string rootDirectory, HttpClient? htt
             var revision = pin?.Revision;
             if (revision is null)
             {
-                var json = await DownloadAsync($"https://api.github.com/repos/{Repository}/commits/main", 1024 * 1024, ct, "引擎工具版本");
+                var json = await DownloadAsync($"https://api.github.com/repos/{Repository}/commits/main", 1024 * 1024, ct, "GalTransl 引擎工具版本");
                 using var document = JsonDocument.Parse(json);
                 revision = document.RootElement.GetProperty("sha").GetString();
                 if (!IsHex(revision, 40)) throw new InvalidDataException("引擎工具库未返回有效的版本号。");
             }
-            var source = await DownloadAsync($"https://codeload.github.com/{Repository}/zip/{revision}", MaximumDownload, ct, "引擎工具库");
+            var source = await DownloadAsync($"https://codeload.github.com/{Repository}/zip/{revision}", MaximumDownload, ct, "GalTransl 引擎脚本与指南");
             var sourceHash = Hash(source);
             if (pin is not null && pin.SourceSha256 != sourceHash)
                 throw new InvalidDataException("下载的引擎工具源码与适配器固定版本不一致。");
@@ -130,7 +139,7 @@ public sealed class EngineReferenceToolkit(string rootDirectory, HttpClient? htt
         {
             var directory = WorkspaceFiles.Resolve(root, "python/" + PythonVersion);
             if (await InstalledPythonAsync(pin, dependency, ct) is { } reused) return reused;
-            var bytes = await DownloadAsync($"https://www.python.org/ftp/python/{PythonVersion}/python-{PythonVersion}-embed-amd64.zip", MaximumDownload, ct, "解析运行环境");
+            var bytes = await DownloadAsync($"https://www.python.org/ftp/python/{PythonVersion}/python-{PythonVersion}-embed-amd64.zip", MaximumDownload, ct, "Python " + PythonVersion + " Windows x64 嵌入式运行环境");
             var archiveHash = Hash(bytes);
             if (dependency is not null && dependency.PythonSha256 != archiveHash)
                 throw new InvalidDataException("下载的 Python 与适配器固定版本不一致。");
@@ -186,6 +195,7 @@ public sealed class EngineReferenceToolkit(string rootDirectory, HttpClient? htt
         EngineReferencePin pin, EnginePythonDependency? dependency, CancellationToken ct)
     {
         var directory = WorkspaceFiles.Resolve(root, "python/" + PythonVersion);
+        if (!File.Exists(Path.Combine(directory, "runtime.json"))) directory = WorkspaceFiles.Resolve(bundle, "python/" + PythonVersion);
         var receiptPath = Path.Combine(directory, "runtime.json");
         if (!File.Exists(receiptPath)) return null;
         var receipt = JsonSerializer.Deserialize<PythonReceipt>(await File.ReadAllTextAsync(receiptPath, ct), Json)
@@ -203,14 +213,26 @@ public sealed class EngineReferenceToolkit(string rootDirectory, HttpClient? htt
         return (new(pin, PythonVersion, receipt.ArchiveSha256), new(Path.Combine(directory, "python.exe"), LibraryPath(pin)));
     }
 
-    public async Task<EnginePythonPaths?> ResolvePackageAsync(string packageDirectory, CancellationToken ct)
+    public async Task<string?> ResolveVnTextPatchAsync(string packageDirectory, CancellationToken ct,
+        BuiltinAdapterAssets? assets = null)
     {
-        var path = WorkspaceFiles.Resolve(packageDirectory, DependencyPath);
+        var path = WorkspaceFiles.Resolve(packageDirectory, BuiltinAdapterAssets.SharedDependencyPath);
         if (!File.Exists(path)) return null;
+        var dependency = await LocalFiles.ReadJsonAsync<BuiltinParserDependency>(path, ct)
+            ?? throw new InvalidDataException("共享 VNTextPatch 依赖记录无效。");
+        return await (assets ?? parserAssets ?? new BuiltinAdapterAssets()).ResolveSharedAsync(root, dependency, ct);
+    }
+
+    public async Task<AdapterToolPaths?> ResolvePackageAsync(string packageDirectory, CancellationToken ct)
+    {
+        var parser = await ResolveVnTextPatchAsync(packageDirectory, ct);
+        var path = WorkspaceFiles.Resolve(packageDirectory, DependencyPath);
+        if (!File.Exists(path)) return parser is null ? null : new(null, null, parser);
         var dependency = await LocalFiles.ReadJsonAsync<EnginePythonDependency>(path, ct)
             ?? throw new InvalidDataException("引擎工具依赖记录无效。");
         await EnsureReferenceAsync(dependency.Reference, ct);
-        return (await EnsurePythonAsync(dependency.Reference, dependency, ct)).Paths;
+        var paths = (await EnsurePythonAsync(dependency.Reference, dependency, ct)).Paths;
+        return new(paths.Python, paths.EngineLibrary, parser);
     }
 
     public static IReadOnlyList<string> PythonArguments(EnginePythonPaths paths, string script, IReadOnlyList<string> arguments) =>
@@ -221,6 +243,8 @@ public sealed class EngineReferenceToolkit(string rootDirectory, HttpClient? htt
 
     private async Task<byte[]> DownloadAsync(string url, int maximum, CancellationToken ct, string name)
     {
+        if (!allowDownloads)
+            throw new InvalidDataException("发行包缺少所需的固定版本工具（" + name + "）。请使用包含 tools/engine-tools 的完整发行包；智能适配不会自动下载内置依赖。");
         using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(ct);
         lifetime.CancelAfter(TimeSpan.FromMinutes(3));
         try

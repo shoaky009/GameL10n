@@ -13,14 +13,44 @@ public sealed class EngineReferenceToolkitTests : IDisposable
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
     [Fact]
+    public async Task BundledToolsAreReusedOfflineWithoutProjectCopies()
+    {
+        var downloads = new List<string>();
+        using var client = Client(downloads);
+        var bundle = Path.Combine(root, "bundle");
+        var preparation = new EngineReferenceToolkit(bundle, client, allowDownloads: true);
+        var pin = await preparation.EnsureReferenceAsync(null, default);
+        var prepared = await preparation.EnsurePythonAsync(pin, null, default);
+        int count = downloads.Count;
+        var consumerRoot = Path.Combine(root, "consumer");
+        var consumer = new EngineReferenceToolkit(consumerRoot, client, bundledDirectory: bundle);
+        Assert.Equal(pin, await consumer.EnsureReferenceAsync(null, default));
+        Assert.Equal(prepared, await consumer.EnsurePythonAsync(pin, prepared.Dependency, default));
+        Assert.Equal(preparation.LibraryPath(pin), consumer.LibraryPath(pin));
+        Assert.False(Directory.Exists(consumerRoot));
+        Assert.Equal(count, downloads.Count);
+    }
+
+    [Fact]
+    public async Task MissingBundledToolsDoNotTriggerRuntimeDownloads()
+    {
+        var downloads = new List<string>();
+        using var client = Client(downloads);
+        var toolkit = new EngineReferenceToolkit(root, client, bundledDirectory: Path.Combine(root, "missing"));
+        var error = await Assert.ThrowsAsync<InvalidDataException>(() => toolkit.EnsureReferenceAsync(null, default));
+        Assert.Contains("完整发行包", error.Message);
+        Assert.Empty(downloads);
+    }
+
+    [Fact]
     public async Task BundledSiglusCoexistsWithReferenceLibraryAndRestoresOnlyMissingNativeModule()
     {
         var downloads = new List<string>();
         using var client = Client(downloads);
-        var toolkit = new EngineReferenceToolkit(root, client);
+        var toolkit = new EngineReferenceToolkit(root, client, allowDownloads: true);
         var reference = await toolkit.EnsureReferenceAsync(null, default);
         var pins = await Task.WhenAll(toolkit.EnsureReferenceAsync(SiglusAssets.Pin, default),
-            new EngineReferenceToolkit(root, client).EnsureReferenceAsync(SiglusAssets.Pin, default));
+            new EngineReferenceToolkit(root, client, allowDownloads: true).EnsureReferenceAsync(SiglusAssets.Pin, default));
         Assert.All(pins, pin => Assert.Equal(SiglusAssets.Pin, pin));
         Assert.Equal(reference, toolkit.CurrentReference());
         Assert.Equal(2, downloads.Count);
@@ -39,8 +69,8 @@ public sealed class EngineReferenceToolkitTests : IDisposable
     {
         var downloads = new List<string>();
         using var client = Client(downloads);
-        var first = new EngineReferenceToolkit(root, client);
-        var pins = await Task.WhenAll(first.EnsureReferenceAsync(null, default), new EngineReferenceToolkit(root, client).EnsureReferenceAsync(null, default));
+        var first = new EngineReferenceToolkit(root, client, allowDownloads: true);
+        var pins = await Task.WhenAll(first.EnsureReferenceAsync(null, default), new EngineReferenceToolkit(root, client, allowDownloads: true).EnsureReferenceAsync(null, default));
         Assert.Equal(pins[0], pins[1]);
         Assert.Equal(2, downloads.Count);
         Assert.Equal(Revision, pins[0].Revision);
@@ -72,7 +102,7 @@ public sealed class EngineReferenceToolkitTests : IDisposable
             if (failDownload) return new(HttpStatusCode.ServiceUnavailable);
             return Bytes(Library(changed ? "different" : "engine guide"));
         }));
-        var toolkit = new EngineReferenceToolkit(root, client);
+        var toolkit = new EngineReferenceToolkit(root, client, allowDownloads: true);
         await Assert.ThrowsAsync<HttpRequestException>(() => toolkit.EnsureReferenceAsync(null, default));
         Assert.Null(toolkit.CurrentReference());
         failDownload = false;
@@ -94,7 +124,7 @@ public sealed class EngineReferenceToolkitTests : IDisposable
         using var client = new HttpClient(new Handler(request => request.RequestUri!.Host == "api.github.com"
             ? Text("{\"sha\":\"" + Revision + "\"}")
             : Bytes(Zip(new Dictionary<string, string> { ["repo/../escape.py"] = "invalid" }))));
-        var toolkit = new EngineReferenceToolkit(root, client);
+        var toolkit = new EngineReferenceToolkit(root, client, allowDownloads: true);
         await Assert.ThrowsAsync<InvalidDataException>(() => toolkit.EnsureReferenceAsync(null, default));
         Assert.Null(toolkit.CurrentReference());
         Assert.False(File.Exists(Path.Combine(root, "escape.py")));
@@ -105,12 +135,12 @@ public sealed class EngineReferenceToolkitTests : IDisposable
     {
         var downloads = new List<string>();
         using var client = Client(downloads);
-        var toolkit = new EngineReferenceToolkit(root, client);
+        var toolkit = new EngineReferenceToolkit(root, client, allowDownloads: true);
         var pin = await toolkit.EnsureReferenceAsync(null, default);
         var prepared = await toolkit.EnsurePythonAsync(pin, null, default);
         Assert.True(File.Exists(prepared.Paths.Python));
         Assert.Equal(3, downloads.Count);
-        var reused = await new EngineReferenceToolkit(root, client).EnsurePythonAsync(pin, prepared.Dependency, default);
+        var reused = await new EngineReferenceToolkit(root, client, allowDownloads: true).EnsurePythonAsync(pin, prepared.Dependency, default);
         Assert.Equal(prepared, reused);
         Assert.Equal(3, downloads.Count);
         File.Delete(prepared.Paths.Python);
@@ -132,6 +162,9 @@ public sealed class EngineReferenceToolkitTests : IDisposable
         var store = new LocalAdapterPackageStore(Path.Combine(root, "extensions"));
         var runner = new CaptureRunner();
         var compiler = new GeneratedAdapterCompiler(new(root, "10.0.402", "10.0.13"), runner);
+        var preparation = new EngineReferenceToolkit(Path.Combine(store.RootDirectory, "engine-tools"), client, allowDownloads: true);
+        var preparedPin = await preparation.EnsureReferenceAsync(null, default);
+        await preparation.EnsurePythonAsync(preparedPin, null, default);
         var tools = new AdaptationTools(new("fixture", workspace, []), state, workspace, compiler, store, client);
         using var inspected = JsonDocument.Parse(await tools.ExecuteAsync(new("inspect", "inspect_engine_reference", """{"engine":"fixture"}"""), default));
         var guide = inspected.RootElement.GetProperty("result");

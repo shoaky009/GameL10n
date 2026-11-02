@@ -9,12 +9,15 @@ public sealed partial class AdaptationTools
     private EngineReferenceToolkit? engineToolkit;
     private EngineReferenceToolkit EngineToolkit => engineToolkit ??= new(Path.Combine(store.RootDirectory, "engine-tools"), researchClient, reportProgress);
     private string? toolkitFailure;
+    private Task<string?> AnalysisParserPathAsync(CancellationToken ct) => session.ReleaseFiles is not null
+        && !session.ReleaseFiles.Any(file => file.Path == BuiltinAdapterAssets.SharedDependencyPath)
+        ? Task.FromResult<string?>(null) : EngineToolkit.ResolveVnTextPatchAsync(SourceDirectory, ct, BuiltinAssets);
 
     private async Task<EngineReferencePin> ReferenceAsync(bool retry, CancellationToken ct)
     {
         if (toolkitFailure is not null && !retry)
-            throw new InvalidDataException("共享引擎工具准备失败，当前会话不自动重复下载：" + toolkitFailure
-                + "。可继续使用内置解析器或在线参考资料；网络恢复后 inspect_engine_reference(retryDownload=true)。");
+            throw new InvalidDataException("共享引擎工具准备失败，当前会话不自动重复准备：" + toolkitFailure
+                + "。可继续使用内置解析器或在线参考资料；恢复完整发行包的工具文件后 inspect_engine_reference(retryDownload=true)。");
         try
         {
             var dependency = await SourceDependencyAsync(ct);

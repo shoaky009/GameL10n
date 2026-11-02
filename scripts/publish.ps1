@@ -1,4 +1,4 @@
-param([switch]$SkipBuild, [switch]$WithoutToolchain, [string]$OutputDirectory = 'artifacts/AvgTranslator')
+param([switch]$SkipBuild, [switch]$WithoutToolchain, [string]$OutputDirectory = 'artifacts/AvgTranslator', [string]$EngineToolsCacheDirectory = '.tools/engine-tools')
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path $PSScriptRoot -Parent
 $output = [IO.Path]::GetFullPath([IO.Path]::Combine($repoRoot, $OutputDirectory))
@@ -16,6 +16,9 @@ if (-not $SkipBuild) {
 }
 & (Join-Path $PSScriptRoot 'package-vntextpatch-assets.ps1') -OutputDirectory (Join-Path $output 'tools/vntextpatch') -Configuration Release -SkipBuild:$SkipBuild
 & (Join-Path $PSScriptRoot 'package-adapter-components.ps1') -OutputDirectory (Join-Path $output 'tools/adapter-components')
+$engineToolsCache = [IO.Path]::GetFullPath([IO.Path]::Combine($repoRoot, $EngineToolsCacheDirectory))
+& (Join-Path $PSScriptRoot 'dotnet.ps1') run --project (Join-Path $repoRoot 'tools/AvgTranslator.Diagnostics/AvgTranslator.Diagnostics.csproj') -c Release -- prepare-engine-tools $engineToolsCache (Join-Path $output 'tools/engine-tools')
+if ($LASTEXITCODE -ne 0) { throw 'Shared engine tools are missing; publishing stopped instead of deferring downloads to game analysis.' }
 if (-not (Test-Path -LiteralPath (Join-Path $output 'AvgTranslator.Desktop.exe'))) { throw 'The desktop executable is missing.' }
 if (-not (Test-Path -LiteralPath (Join-Path $output 'tools/vntextpatch/AvgTranslator.VnTextPatch.exe'))) { throw 'The built-in script tool is missing.' }
 if (-not $WithoutToolchain) {

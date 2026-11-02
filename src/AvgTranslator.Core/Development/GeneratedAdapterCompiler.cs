@@ -100,7 +100,7 @@ public sealed partial class GeneratedAdapterCompiler(PinnedDotNetToolchain toolc
 
     public async Task<(bool Compiled, AdapterProcessResult Result)> RunCSharpAsync(string workspace,
         IReadOnlyList<string> sources, IReadOnlyList<string> references, IReadOnlyList<string> arguments,
-        string workingDirectory, string standardInput, TimeSpan timeout, CancellationToken cancellationToken = default)
+        string workingDirectory, string standardInput, TimeSpan timeout, CancellationToken cancellationToken = default, string? vnTextPatchAssemblyPath = null)
     {
         var build = WorkspaceFiles.Resolve(workspace, "work/.run-csharp-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(build);
@@ -139,7 +139,7 @@ public sealed partial class GeneratedAdapterCompiler(PinnedDotNetToolchain toolc
             if (compilation.ExitCode != 0) return (false, compilation);
             var result = await Runner.RunAsync(new(Toolchain.ExecutablePath,
                 new[] { Path.Combine(build, "analysis.dll") }.Concat(arguments).ToArray(), workingDirectory,
-                standardInput, timeout, 1024 * 1024), lifetime.Token);
+                standardInput, timeout, 1024 * 1024, VnTextPatchAssemblyPath: vnTextPatchAssemblyPath), lifetime.Token);
             return (true, result);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)

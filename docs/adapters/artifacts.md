@@ -104,9 +104,10 @@ C# 源码由宿主编译为 `adapter.dll`，通过应用附带的 .NET 工具链
 | `extensions/catalog/` | 按引擎或模板保存游戏版本、资源指纹与兼容记录 |
 | `extensions/games/` | 保存项目当前激活版本及上一版本的引用 |
 | `extensions/library-index.json` | 引擎库展示摘要，可重建，不替代运行校验 |
-| `extensions/engine-tools/` | 共享引擎源码库、便携 Python 与固定版本记录 |
+| `<应用目录>/tools/engine-tools/` | 发行包附带的固定版本引擎工具库与便携 Python，直接读取 |
+| `extensions/engine-tools/` | 已安装的共享工具版本、VNTextPatch 按内容哈希保存的 DLL 与许可，不逐项目复制 |
 
-使用共享 Python 引擎库的适配器，会在包内保存固定依赖记录和调用桥，实际工具位于 `extensions/engine-tools/`。这类正式适配器并非仅复制自己的包目录就能独立执行；共享工具也不能一概视为临时下载文件。完整依赖准备方式见[智能适配](automatic-adaptation.md)。
+使用共享 Python 引擎库或 VNTextPatch 的适配器，会在包内保存固定依赖记录和调用桥，实际工具位于发行包或 `extensions/engine-tools/`。这类正式适配器并非仅复制自己的包目录就能独立执行；共享工具也不能一概视为临时下载文件。完整依赖准备方式见[智能适配](automatic-adaptation.md)。
 
 ## 汉化运行文件与补丁记录
 

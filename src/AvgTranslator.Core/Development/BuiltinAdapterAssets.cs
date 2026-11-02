@@ -7,7 +7,7 @@ using AvgTranslator.Core.Isolation;
 namespace AvgTranslator.Core.Development;
 
 /// <summary>Exposes the shipped parser sources and copies dependencies into an adapter development workspace.</summary>
-public sealed class BuiltinAdapterAssets(string? assetsDirectory = null)
+public sealed partial class BuiltinAdapterAssets(string? assetsDirectory = null)
 {
     private const string AssemblyFile = "AvgTranslator.VnTextPatch.dll";
     private static readonly UTF8Encoding Utf8 = new(false);
@@ -68,10 +68,10 @@ public sealed class BuiltinAdapterAssets(string? assetsDirectory = null)
         {
             ["src/BuiltinScriptParser.cs"] = Utf8.GetBytes(Bridge(selected))
         };
-        foreach (string name in new[] { "VNTextPatch.LICENSE", "VNTextPatch.NOTICE.md" })
-            files.Add("src/tools/vntextpatch/" + name, await File.ReadAllBytesAsync(Asset(name), ct));
         if (editableSource)
         {
+            foreach (string name in new[] { "VNTextPatch.LICENSE", "VNTextPatch.NOTICE.md" })
+                files.Add("src/tools/vntextpatch/" + name, await File.ReadAllBytesAsync(Asset(name), ct));
             using var archive = OpenSources();
             foreach (var entry in SourceEntries(archive, selected))
             {
@@ -83,7 +83,7 @@ public sealed class BuiltinAdapterAssets(string? assetsDirectory = null)
             foreach (var (path, content) in GeneratedSources(selected).Where(pair => pair.Key != "generated/BuiltinScriptParser.cs"))
                 files.Add("src/BuiltinVnTextPatch/" + path, Utf8.GetBytes(content));
         }
-        else files.Add("src/tools/vntextpatch/" + AssemblyFile, await File.ReadAllBytesAsync(Asset(AssemblyFile), ct));
+        else files.Add("src/" + SharedDependencyPath, JsonSerializer.SerializeToUtf8Bytes(await SharedDependencyAsync(ct), new JsonSerializerOptions(JsonSerializerDefaults.Web)));
 
         // Check every destination before creating any files; a conflict must not leave a half-copied source tree.
         string root = Path.GetFullPath(workspace);
@@ -112,7 +112,7 @@ public sealed class BuiltinAdapterAssets(string? assetsDirectory = null)
         foreach (var path in files.Keys)
             releaseFiles?.Add(new(AdapterReleaseFiles.PackagePath(path),
                 !path.StartsWith("src/tools/", StringComparison.Ordinal) ? "source"
-                    : path.EndsWith(AssemblyFile, StringComparison.Ordinal) ? "runtime" : "license",
+                    : path == "src/" + SharedDependencyPath ? "runtime" : "license",
                 "内置 " + selected.Key + " 解析器实现及依赖"));
         return new
         {
@@ -172,7 +172,7 @@ public sealed class BuiltinAdapterAssets(string? assetsDirectory = null)
     private static string Usage(VnTextPatchFormat format) =>
         $"在 src/Program.cs 实现独立协议入口。使用 BuiltinScriptParser.ExecuteJson(requestJson) 调用 {format.Key}；调用桥固定 format，返回完整 JSON 字符串。" +
         "先解包到独立工作目录，再传入该目录及相对 resourceFiles；build 的 outputDirectory 必须与 sourceDirectory 分开，随后把结果重新封包并声明所有最终输出。" +
-        "复制的 DLL 使用宿主 .NET 10 框架，无需添加编译引用，也不要复制自包含 EXE。源码模式可直接编辑 src/BuiltinVnTextPatch；若二进制与源码同时存在，优先使用源码。" +
+        "二进制模式只登记固定版本的共享 DLL，由宿主提供路径，不复制到项目；无需添加编译引用，不要复制自包含 EXE。需要修改解析器时使用源码模式 src/BuiltinVnTextPatch；优先使用已编译进适配器的源码。" +
         "调用桥不写 responseFile；Program 应按协议把最终响应写到 responseFile，并把诊断写 stderr。";
 
     private static string Example(VnTextPatchFormat format) => $$"""
@@ -266,7 +266,12 @@ public sealed class BuiltinAdapterAssets(string? assetsDirectory = null)
             {
                 const string typeName = "AvgTranslator.VnTextPatch.Worker";
                 Type? worker = typeof(BuiltinScriptParser).Assembly.GetType(typeName);
-                worker ??= Assembly.LoadFrom(Path.Combine(AppContext.BaseDirectory, "tools", "vntextpatch", "AvgTranslator.VnTextPatch.dll")).GetType(typeName);
+                if (worker is null)
+                {
+                    string path = Environment.GetEnvironmentVariable("AVG_TRANSLATOR_VNTEXTPATCH")
+                        ?? Path.Combine(AppContext.BaseDirectory, "tools", "vntextpatch", "AvgTranslator.VnTextPatch.dll");
+                    worker = Assembly.LoadFrom(path).GetType(typeName);
+                }
                 return worker?.GetMethod("ExecuteJson", BindingFlags.Public | BindingFlags.Static, null, new[] { typeof(string) }, null)
                     ?? throw new InvalidOperationException("The built-in parser API is missing.");
             });

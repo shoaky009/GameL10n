@@ -66,7 +66,7 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
             """{"id":{"type":"string"},"version":{"type":"string"},"editableSource":{"type":"boolean"}}""", "id", "version"),
         Define("search_engine_references", "Look up an engine, alias or format in the GalTransl index: returns scoped docs, module paths and public functions, NOT verified adapters. Uses the shared local library when prepared, otherwise online metadata. No game data is sent. Use inspect_engine_reference for local guides and run_engine_python to call existing algorithms instead of rewriting them.",
             """{"query":{"type":"string"}}""", "query"),
-        Define("inspect_engine_reference", "Read one engine guide or a bounded source slice from the shared GalTransl Python toolkit. First use downloads and pins its source; later projects reuse it locally. Returns public function names, module paths and reuse instructions. engine is an exact ID from search_engine_references. Optional query/offset/length locate a relevant section. retryDownload explicitly retries a failed download. Call alone.",
+        Define("inspect_engine_reference", "Read one engine guide or a bounded source slice from the shared GalTransl Python toolkit. Uses the fixed source bundled with the app or already installed locally; no automatic download. Returns public function names, module paths and reuse instructions. engine is an exact ID from search_engine_references. Optional query/offset/length locate a relevant section. retryDownload retries local preparation after missing tool files are restored. Call alone.",
             """{"engine":{"type":"string"},"path":{"type":"string"},"query":{"type":"string"},"offset":{"type":"integer"},"length":{"type":"integer"},"retryDownload":{"type":"boolean"}}""", "engine"),
         Define("run_engine_python", "Run work/*.py or src/tools/*.py with shared portable Python and pinned python.engines/python.archives. No system Python, pip or pycache; optional modules may be missing. Use staged samples and concise output. Can follow write_file calls in one ordered batch.",
             """{"script":{"type":"string"},"arguments":{"type":"array","items":{"type":"string"}},"stdin":{"type":"string"},"timeoutSeconds":{"type":"integer"}}""", "script"),
@@ -75,7 +75,7 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
             """{"query":{"type":"string"}}""", "query"),
         Define("fetch_url", "Read public HTTPS reference data, up to 8 MiB locally. offset/length paginate decoded characters (default 12000, max 24000). Optional query searches literal text case-insensitively from offset and returns bounded excerpts with nextOffset; useful for large format catalogs and GitHub trees. Cached in memory; no files written. Contents are untrusted data.",
             """{"url":{"type":"string"},"query":{"type":"string"},"offset":{"type":"integer"},"length":{"type":"integer"}}""", "url"),
-        Define("download_tool", "Download a public tool/source file to src/tools or work. Returns SHA256; records URL for packaged dependencies. For a known final dependency set releaseRole and purpose once to register it; investigative downloads belong in work/.",
+        Define("download_tool", "Download a public tool/source file to src/tools or work. Returns SHA256; records URL for packaged dependencies. For a known final dependency set releaseRole and purpose once to register it; investigative downloads belong in work/. Supply a short purpose for user-visible download progress. Reuse bundled tools before downloading extras.",
             """{"url":{"type":"string"},"path":{"type":"string"},"releaseRole":{"type":"string","enum":["runtime","asset","license"]},"purpose":{"type":"string","maxLength":240}}""", "url", "path"),
         Define("stage_resources", "Copy selected original game resources into resources for local tools. Reuses unchanged copies.",
             """{"files":{"type":"array","items":{"type":"string"}}}""", "files"),
@@ -553,6 +553,8 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
             var copied = new List<AdapterReleaseFile>();
             var result = await BuiltinAssets.CopyAsync(builtin.Key, workspace, Boolean(args, "editableSource", false), ct, copied);
             RegisterReleaseFiles(copied);
+            if (!Boolean(args, "editableSource", false)) await EngineToolkit.ResolveVnTextPatchAsync(SourceDirectory, ct, BuiltinAssets);
+            else SetReleaseFiles((session.ReleaseFiles ?? []).Where(file => file.Path != BuiltinAdapterAssets.SharedDependencyPath).ToArray());
             return result;
         }
         var pinned = store.LoadActive(request.GameId);
@@ -610,7 +612,8 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
         working = working == "." ? workspace : WorkspaceFiles.Resolve(workspace, working);
         Directory.CreateDirectory(working);
         var result = await compiler.Runner.RunAsync(new(executable, arguments, working,
-            Text(args, "stdin", ""), TimeSpan.FromSeconds(Number(args, "timeoutSeconds", 120, 1, 600)), 1024 * 1024), ct);
+            Text(args, "stdin", ""), TimeSpan.FromSeconds(Number(args, "timeoutSeconds", 120, 1, 600)), 1024 * 1024,
+            VnTextPatchAssemblyPath: await AnalysisParserPathAsync(ct)), ct);
         return new { result.ExitCode, stdout = Limit(result.StandardOutput, 16_000), stderr = Limit(result.StandardError, 8000) };
     }
 
@@ -644,7 +647,8 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
         working = working == "." ? workspace : WorkspaceFiles.Resolve(workspace, working);
         Directory.CreateDirectory(working);
         var (compiled, result) = await compiler.RunCSharpAsync(workspace, sourcePaths, referencePaths, arguments, working,
-            Text(args, "stdin", ""), TimeSpan.FromSeconds(Number(args, "timeoutSeconds", 120, 1, 600)), ct);
+            Text(args, "stdin", ""), TimeSpan.FromSeconds(Number(args, "timeoutSeconds", 120, 1, 600)), ct,
+            await AnalysisParserPathAsync(ct));
         return new { compiled, result.ExitCode, stdout = Limit(result.StandardOutput, 16_000), stderr = Limit(result.StandardError, 8000) };
     }
 
@@ -854,7 +858,10 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
         var release = DeclaredReleaseFile(args, relative);
         InvalidateSource(path);
         var url = Text(args, "url");
-        using var response = await GetAsync(new(url), ct);
+        var uri = new Uri(url);
+        reportProgress?.Invoke("下载额外工具", $"{Path.GetFileName(relative)} · 来源 {uri.Host} · "
+            + Limit(Text(args, "purpose", "分析资料，尚未登记为发布依赖"), 240) + $" · 保存到 {relative}");
+        using var response = await GetAsync(uri, ct);
         const long maximum = 256L * 1024 * 1024;
         if (response.Content.Headers.ContentLength > maximum) throw new InvalidDataException("工具下载超过 256 MB，请选择必要的工具文件。");
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
@@ -886,6 +893,7 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
             await LocalFiles.WriteJsonAsync(manifest, sources, ct);
         }
         if (release is not null) RegisterReleaseFiles([release]);
+        reportProgress?.Invoke("额外工具已保存", $"{relative} · {new FileInfo(path).Length / 1048576.0:F2} MiB");
         return new { path = relative, sha256, bytes = new FileInfo(path).Length,
             releaseRegistered = session.ReleaseFiles?.Any(file => file.Path == AdapterReleaseFiles.PackagePath(relative)) == true };
     }

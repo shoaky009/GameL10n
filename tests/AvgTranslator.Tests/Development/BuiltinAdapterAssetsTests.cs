@@ -14,6 +14,29 @@ public sealed class BuiltinAdapterAssetsTests : IDisposable
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
     [Fact]
+    public async Task BinaryAdaptersSharePinnedParserAndDoNotSilentlyUpgrade()
+    {
+        var assets = CreateAssets();
+        var first = Path.Combine(root, "first");
+        var second = Path.Combine(root, "second");
+        await assets.CopyAsync("Renpy", first, false);
+        await assets.CopyAsync("KirikiriKs", second, false);
+        var shared = Path.Combine(root, "shared");
+        var toolkit = new EngineReferenceToolkit(shared, parserAssets: assets);
+        var parser = await toolkit.ResolveVnTextPatchAsync(Path.Combine(first, "src"), default);
+        Assert.Equal(parser, await toolkit.ResolveVnTextPatchAsync(Path.Combine(second, "src"), default));
+        Assert.Single(Directory.EnumerateFiles(shared, "*.dll", SearchOption.AllDirectories));
+        Assert.Empty(Directory.EnumerateFiles(first, "*.dll", SearchOption.AllDirectories));
+        Assert.Empty(Directory.EnumerateFiles(second, "*.dll", SearchOption.AllDirectories));
+        await File.AppendAllTextAsync(Path.Combine(root, "assets", "AvgTranslator.VnTextPatch.dll"), "changed app version");
+        Assert.Equal(parser, await toolkit.ResolveVnTextPatchAsync(Path.Combine(first, "src"), default));
+        var emptyCache = new EngineReferenceToolkit(Path.Combine(root, "new-shared"), parserAssets: assets);
+        await Assert.ThrowsAsync<InvalidDataException>(() => emptyCache.ResolveVnTextPatchAsync(Path.Combine(first, "src"), default));
+        await File.AppendAllTextAsync(parser!, "corrupted shared file");
+        await Assert.ThrowsAsync<InvalidDataException>(() => toolkit.ResolveVnTextPatchAsync(Path.Combine(first, "src"), default));
+    }
+
+    [Fact]
     public async Task KaguyaRuntimeResearchIsConditionalReadOnlyAndKeepsSourceResponseShape()
     {
         var assets = CreateAssets();
@@ -57,11 +80,12 @@ public sealed class BuiltinAdapterAssetsTests : IDisposable
         var release = new List<AdapterReleaseFile>();
         await assets.CopyAsync("Renpy", workspace, false, releaseFiles: release);
         Assert.Contains(release, file => file.Path == "src/BuiltinScriptParser.cs" && file.Role == "source");
-        Assert.Contains(release, file => file.Role == "runtime" && file.Path.EndsWith(".dll", StringComparison.Ordinal));
-        Assert.Contains(release, file => file.Role == "license" && file.Path.EndsWith("VNTextPatch.LICENSE", StringComparison.Ordinal));
+        Assert.Contains(release, file => file.Role == "runtime" && file.Path == BuiltinAdapterAssets.SharedDependencyPath);
+        Assert.Equal(2, release.Count);
         string bridge = Path.Combine(workspace, "src/BuiltinScriptParser.cs");
         byte[] original = await File.ReadAllBytesAsync(bridge);
-        Assert.True(File.Exists(Path.Combine(workspace, "src/tools/vntextpatch/AvgTranslator.VnTextPatch.dll")));
+        Assert.False(File.Exists(Path.Combine(workspace, "src/tools/vntextpatch/AvgTranslator.VnTextPatch.dll")));
+        Assert.True(File.Exists(Path.Combine(workspace, "src", BuiltinAdapterAssets.SharedDependencyPath)));
         Assert.False(Directory.Exists(Path.Combine(workspace, "src/BuiltinVnTextPatch")));
         var upgrade = JsonSerializer.SerializeToElement(await assets.CopyAsync("Renpy", workspace, true), Json);
         Assert.Contains("src/BuiltinScriptParser.cs", upgrade.GetProperty("reused").EnumerateArray().Select(item => item.GetString()));
@@ -117,8 +141,10 @@ public sealed class BuiltinAdapterAssetsTests : IDisposable
         string file = format == "Renpy" ? "scene.rpy" : "scene.ks";
         string script = format == "Renpy" ? "label start:\n    \"こんにちは。\"\n" : "*start\r\nこんにちは。[p]\r\n";
         await File.WriteAllTextAsync(Path.Combine(resources, file), script, format == "Renpy" ? new UTF8Encoding(false) : Encoding.Unicode);
+        var sharedParser = editableSource ? null : await new EngineReferenceToolkit(Path.Combine(root, "shared"), parserAssets: assets)
+            .ResolveVnTextPatchAsync(source, default);
         async Task<AdapterProcessResult> Invoke(object request) => await runner.RunAsync(new(toolchain.ExecutablePath,
-            [Path.Combine(package.DirectoryPath, "adapter.dll")], package.DirectoryPath, JsonSerializer.Serialize(request, Json)), default);
+            [Path.Combine(package.DirectoryPath, "adapter.dll")], package.DirectoryPath, JsonSerializer.Serialize(request, Json), VnTextPatchAssemblyPath: sharedParser), default);
         var extraction = await Invoke(new { protocolVersion = 1, operation = "extract", sourceDirectory = resources, resourceFiles = new[] { file } });
         Assert.Equal(0, extraction.ExitCode);
         using var parsed = JsonDocument.Parse(extraction.StandardOutput);

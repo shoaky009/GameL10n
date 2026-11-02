@@ -11,14 +11,16 @@ Applicable MIT notices follow. Windows App SDK and .NET runtime files retain the
 
 The intelligent adaptation tools can query documentation and source links from
 https://github.com/GalTransl/GalTransl-GalGameReverse-Skill.
-On demand, the application downloads a commit-pinned source archive and retains its
-Python implementations, catalog, engine guides, LICENSE and provenance notices in
-the data directory's shared `extensions/engine-tools` library. These materials retain
+Standard releases bundle a commit-pinned source archive containing Python
+implementations, catalog, engine guides, LICENSE and provenance notices in
+`tools/engine-tools`. Previously installed versions may remain in the data
+directory's shared `extensions/engine-tools` library. These materials retain
 their upstream licenses, including GPLv3 and file-specific third-party notices.
 Adapters referring to this library must meet the corresponding source and distribution
 obligations. UIF binaries, fonts and hook DLLs are not installed by this integration.
 
-The portable Windows x64 Python 3.14.10 interpreter is downloaded on demand from
+The portable Windows x64 Python 3.14.10 interpreter is bundled with standard releases.
+Packaging obtains its original distribution from
 https://www.python.org/ftp/python/3.14.10/python-3.14.10-embed-amd64.zip.
 Its original LICENSE.txt and distribution files remain in the shared runtime directory.
 Versions and content hashes are recorded with the adapter dependency; the interpreter

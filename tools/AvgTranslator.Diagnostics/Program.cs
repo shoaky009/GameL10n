@@ -8,6 +8,9 @@ using AvgTranslator.Core.Development;
 using AvgTranslator.Core.Isolation;
 using AvgTranslator.Core.Storage;
 
+if (args.Length == 3 && args[0] == "prepare-engine-tools")
+    return await EngineToolsPackage.RunAsync(args[1], args[2]);
+
 if (args.Length >= 3 && args[0] == "correct-translations")
     return await TranslationCorrections.RunAsync(args[1], args[2], args.Contains("--apply"));
 
