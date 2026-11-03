@@ -19,6 +19,7 @@ public sealed partial class MainWindow
         {
             await SaveSettingsAsync();
             var provider = CreateAnalysisProvider(game, ResolveGameApi(game).Resolve(ApiPurpose.GameAnalysis));
+            var limits = ResolveGameAdaptationLimits(game);
             var knowledgeStore = KnowledgeStore();
             await StartWorkAsync(game, GameTaskKind.Summary, "总结引擎经验", async token =>
             {
@@ -33,7 +34,7 @@ public sealed partial class MainWindow
                     lastStage = update.Stage;
                 });
                 var result = await Task.Run(() => new EngineReviewService(provider, knowledgeStore)
-                    .ReviewAsync(game.Directory, game.Id, game.Name, token, progress), token);
+                    .ReviewAsync(game.Directory, game.Id, game.Name, token, progress, limits), token);
                 game.EngineReview = result;
                 SetStage(game, result.Reused ? "已复用上次总结" : "总结完成");
                 Log(game, result.Reused ? "证据和全局经验未变化，本次未调用模型。" : result.EntryId is null

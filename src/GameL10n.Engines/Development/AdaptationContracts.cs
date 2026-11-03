@@ -5,7 +5,15 @@ using GameL10n.Core.Validation;
 namespace GameL10n.Core.Development;
 
 public sealed record AdaptationLimits(int MaximumTurns = 60, long MaximumTokens = 1_000_000,
-    int MaximumOutputTokens = 10_000);
+    int MaximumOutputTokens = 10_000)
+{
+    internal void Validate()
+    {
+        if (MaximumTurns is < 1 or > 400 || MaximumTokens is < 1000 or > 20_000_000
+            || MaximumOutputTokens is < 128 or > 32_000)
+            throw new ArgumentOutOfRangeException(nameof(AdaptationLimits), "无效的智能适配预算。");
+    }
+}
 
 public enum AdaptationObjective { Develop, Repair, ExpandCoverage }
 

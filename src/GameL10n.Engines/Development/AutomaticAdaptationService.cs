@@ -18,9 +18,7 @@ public sealed class AutomaticAdaptationService(IAdaptationAgentModel model, Gene
         IProgress<AdaptationProgress>? progress = null)
     {
         var limits = request.Limits ?? new();
-        if (limits.MaximumTurns is < 1 or > 400 || limits.MaximumTokens is < 1000 or > 20_000_000
-            || limits.MaximumOutputTokens is < 128 or > 32_000)
-            throw new ArgumentOutOfRangeException(nameof(request), "无效的智能适配预算。");
+        limits.Validate();
         if (string.IsNullOrWhiteSpace(request.GameId) || !Directory.Exists(request.GameDirectory))
             throw new DirectoryNotFoundException("游戏目录不存在。");
         if (request.UserInstruction?.Length > 6000) throw new ArgumentException("补充要求最多 6000 字符。", nameof(request));

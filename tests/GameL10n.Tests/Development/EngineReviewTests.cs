@@ -36,7 +36,7 @@ public sealed class EngineReviewTests : IDisposable
         Assert.Contains("work/probe.cs", Assert.Single(global.Tools).Files.Keys);
         Assert.Single(Directory.GetFiles(Store.DirectoryPath));
         Assert.False(Directory.Exists(Path.Combine(project, "engine-knowledge")));
-        Assert.True((await service.ReviewAsync(project, "one", "First game")).Reused);
+        Assert.True((await service.ReviewAsync(project, "one", "First game", limits: new(MaximumTokens: 20_000_000))).Reused);
         Assert.Equal(2, model.Calls);
 
         await File.AppendAllTextAsync(Path.Combine(project, "adaptation/current/work/probe.cs"), "\n// new observed result");
@@ -49,6 +49,49 @@ public sealed class EngineReviewTests : IDisposable
         Assert.True((await second.ReviewAsync(project, "one", "First game")).Reused);
         Assert.Equal(1, noImprovement.Calls);
         Assert.Equal(global.Revision, Assert.Single(Store.ReadAll()).Revision);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SummaryUsesAdaptationLimitsBeyondOldTokenAndTurnCaps(bool useOverrides)
+    {
+        var project = await ProjectAsync();
+        AdaptationLimits? limits = useOverrides ? new(18, 20_000_000, 24_000) : null;
+        var calls = 0;
+        var model = new Model(request =>
+        {
+            Assert.Equal(useOverrides ? 24_000 : 10_000, request.MaximumOutputTokens);
+            var reply = ++calls < 18
+                ? Call("read_evidence", new { path = "adaptation/current/work/probe.cs" })
+                : Call("finish_review", new { summary = "没有新增可靠结论。", improvement = (object?)null });
+            return reply with { Usage = new(6000, 1000) };
+        });
+
+        var result = await new EngineReviewService(model, Store).ReviewAsync(project, "one", "First game", limits: limits);
+
+        Assert.Equal(18, model.Calls);
+        Assert.Equal(126_000, result.Usage.TotalTokens);
+        Assert.False(result.Reused);
+    }
+
+    [Theory]
+    [InlineData(2, 1_000_000, 2, "2 轮模型调用上限")]
+    [InlineData(60, 20_000, 1, "Token 预算不足")]
+    public async Task SummaryStopsAtConfiguredLimitsWithoutPublishingPartialKnowledge(
+        int maximumTurns, long maximumTokens, int expectedCalls, string errorText)
+    {
+        var project = await ProjectAsync();
+        var model = new Model(_ => Call("read_evidence", new { path = "adaptation/current/work/probe.cs" })
+            with { Usage = new(10_000, 10_000) });
+
+        var error = await Assert.ThrowsAsync<InvalidDataException>(() => new EngineReviewService(model, Store)
+            .ReviewAsync(project, "one", "First game", limits: new(maximumTurns, maximumTokens)));
+
+        Assert.Contains(errorText, error.Message);
+        Assert.Equal(expectedCalls, model.Calls);
+        Assert.False(File.Exists(Path.Combine(project, "engine-review.json")));
+        Assert.Empty(Store.ReadAll());
     }
 
     [Fact]

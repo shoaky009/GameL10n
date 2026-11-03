@@ -15,12 +15,11 @@ public sealed record EngineReviewProgress(string Stage, string Message, TokenUsa
 public sealed class EngineReviewService(IAdaptationAgentModel model, EngineKnowledgeStore store)
 {
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web) { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
-    public const long DefaultTokenBudget = 100_000;
-
     public async Task<EngineReviewResult> ReviewAsync(string projectDirectory, string gameId, string title,
-        CancellationToken ct = default, IProgress<EngineReviewProgress>? progress = null, long maximumTokens = DefaultTokenBudget)
+        CancellationToken ct = default, IProgress<EngineReviewProgress>? progress = null, AdaptationLimits? limits = null)
     {
-        if (maximumTokens is < 2000 or > 1_000_000) throw new ArgumentOutOfRangeException(nameof(maximumTokens));
+        limits ??= new();
+        limits.Validate();
         var usage = new TokenUsage(0, 0);
         void Report(string stage, string message) => progress?.Report(new(stage, message, usage));
         Report("汇总项目证据", "正在统计分析耗时、失败记录和已有解析结果。");
@@ -51,14 +50,15 @@ public sealed class EngineReviewService(IAdaptationAgentModel model, EngineKnowl
                 previousReview = previous?.Summary
             }, Json))
         };
-        for (var turn = 0; turn < 16; turn++)
+        for (var turn = 0; turn < limits.MaximumTurns; turn++)
         {
             ct.ThrowIfCancellationRequested();
             var estimatedInput = Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(messages, Json) + Instructions + JsonSerializer.Serialize(Definitions)) / 3 + 1;
-            var remaining = maximumTokens - usage.TotalTokens;
-            if (remaining < estimatedInput + 512) throw new InvalidDataException("总结已达到预算，未保存新的全局经验；已有经验保留。");
+            var remaining = limits.MaximumTokens - usage.TotalTokens;
+            if (remaining < estimatedInput + 256) throw new InvalidDataException($"总结剩余 Token 预算不足以完成下一次请求（本次预算 {limits.MaximumTokens:N0} Token），未保存新的全局经验；已有经验保留。");
             Report("总结引擎经验", $"正在核对可复用结论与已有经验（第 {turn + 1} 轮）。");
-            var reply = await model.NextAsync(new(Instructions, messages, Definitions, (int)Math.Min(8000, remaining - estimatedInput)), ct);
+            var reply = await model.NextAsync(new(Instructions, messages, Definitions,
+                (int)Math.Min(limits.MaximumOutputTokens, remaining - estimatedInput)), ct);
             if (reply.Usage.InputTokens < 0 || reply.Usage.OutputTokens < 0) throw new InvalidDataException("总结 API 返回了无效的 Token 统计。");
             usage = new(usage.InputTokens + (reply.Usage.InputTokens > 0 ? reply.Usage.InputTokens : estimatedInput),
                 usage.OutputTokens + (reply.Usage.OutputTokens > 0 ? reply.Usage.OutputTokens : Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(reply.Message)) / 3 + 1),
@@ -158,7 +158,7 @@ public sealed class EngineReviewService(IAdaptationAgentModel model, EngineKnowl
                 }
             }
         }
-        throw new InvalidDataException("总结已达到 16 轮上限，未保存新的全局经验；已有经验保留。");
+        throw new InvalidDataException($"总结已达到本次 {limits.MaximumTurns} 轮模型调用上限，未保存新的全局经验；已有经验保留。");
     }
 
     private static string Required(JsonElement args, string name, int maximum)
