@@ -38,7 +38,7 @@ if (-not $WithoutToolchain) {
         }
     }
 }
-Copy-Item -LiteralPath (Join-Path $repoRoot 'README.md'), (Join-Path $repoRoot 'THIRD-PARTY-NOTICES.md') -Destination $output -Force
+Copy-Item -LiteralPath (Join-Path $repoRoot 'README.md'), (Join-Path $repoRoot 'THIRD-PARTY-NOTICES.md'), (Join-Path $repoRoot 'logo.png') -Destination $output -Force
 New-Item -ItemType Directory -Path (Join-Path $output 'docs') -Force | Out-Null
 Get-ChildItem -LiteralPath (Join-Path $repoRoot 'docs') -Force | Copy-Item -Destination (Join-Path $output 'docs') -Recurse -Force
 New-Item -ItemType Directory -Path (Join-Path $output 'contracts') -Force | Out-Null

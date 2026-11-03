@@ -39,6 +39,7 @@ public sealed partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        AppWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "Assets", "GameL10n.ico"));
         RootGrid.ActualThemeChanged += (_, _) => UpdateTitleBarTheme();
         UpdateTitleBarTheme();
         InitializeWorkbench();
