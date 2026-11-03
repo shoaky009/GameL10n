@@ -5,6 +5,29 @@ namespace AvgTranslator.Tests.Development;
 
 public sealed class AdaptationHistoryTests
 {
+    [Fact]
+    public void AutomaticCompactionKeepsWholeRecentBatchesAndOriginalProviderData()
+    {
+        var provider = JsonSerializer.SerializeToElement(new object[] {
+            new { type = "reasoning", encrypted_content = "opaque", summary = new[] { new { text = "known stride 8" } } },
+            new { type = "function_call", call_id = "first", name = "read_file", arguments = "{\"path\":\"src/A.cs\"}" },
+            new { type = "function_call", call_id = "second", name = "read_file", arguments = "{\"path\":\"src/B.cs\"}" }
+        });
+        var messages = new AgentMessage[] {
+            new("user", "task"), new("assistant", new string('x', 70_000)),
+            new("assistant", ProviderData: provider),
+            new("tool", "first result", ToolCallId: "first"), new("tool", "second result", ToolCallId: "second")
+        };
+        var recent = AdaptationHistory.RecentExchanges(messages, 64 * 1024);
+        Assert.Equal(3, recent.Length);
+        Assert.Equal(provider.GetRawText(), recent[0].ProviderData!.Value.GetRawText());
+        Assert.Equal(new[] { "first", "second" }, recent.Skip(1).Select(message => message.ToolCallId));
+        Assert.Empty(AdaptationHistory.RecentExchanges(messages, 10));
+        Assert.Contains("known stride 8", AdaptationHistory.ReadableMessage(messages[2]));
+        Assert.DoesNotContain("opaque", AdaptationHistory.ReadableMessage(messages[2]));
+        Assert.Equal(70_000, messages[1].Content.Length);
+    }
+
     [Theory]
     [InlineData(true)]
     [InlineData(false)]

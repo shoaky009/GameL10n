@@ -1291,6 +1291,78 @@ public sealed class AutomaticAdaptationTests : IDisposable
         Assert.Contains("font support pending", saved!.Notes);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task IgnoredCheckpointCompactsRequestsAndPreservesEvidenceAcrossCheckpointAndRestart(bool responses)
+    {
+        var store = new LocalAdapterPackageStore(Path.Combine(root, "store"));
+        var request = Request() with { Objective = AdaptationObjective.Repair };
+        var workspace = Path.Combine(store.WorkDirectory, "current");
+        var path = Path.Combine(workspace, "session.json");
+        var original = "Exact field order: flags,length,text; stride=12; rejected UTF16 hypothesis.";
+        var oldResult = JsonSerializer.Serialize(new { success = false, error = "Partial write mismatch at unit 7." });
+        await LocalFiles.WriteJsonAsync(path, new AdaptationSession
+        {
+            GameId = request.GameId, GameDirectory = request.GameDirectory, ModelIdentity = "fake",
+            Notes = "Confirmed byte roundtrip; implement partial writer in src/Parser.cs.",
+            VerificationDiagnostics = ["[partial-translation-re-extraction] Partial write mismatch at unit 7."],
+            Messages = [new("user", "repair"), new("assistant", original + new string('x', 210_000)),
+                new("assistant", ToolCalls: [new("old-failure", "test_adapter", "{}")]),
+                new("tool", oldResult, ToolCallId: "old-failure")]
+        });
+        AgentToolCall[] calls = [new("recent-a", "read_file", """{"root":"game","path":"script.txt","length":6,"encoding":"utf8"}"""),
+            new("recent-b", "list_files", """{"root":"game"}""")];
+        var provider = responses
+            ? JsonSerializer.SerializeToElement(calls.Select(call => new { type = "function_call", call_id = call.Id, name = call.Name, arguments = call.Arguments }))
+            : JsonSerializer.SerializeToElement(new { role = "assistant", content = "", tool_calls = calls.Select(call =>
+                new { id = call.Id, type = "function", function = new { name = call.Name, arguments = call.Arguments } }) });
+        var round = 0;
+        var model = new FakeModel(context =>
+        {
+            switch (round++)
+            {
+                case 0:
+                    Assert.Contains(context.Messages, message => message.Content.StartsWith("当前会话较长。下一步先调用 checkpoint"));
+                    return new(new("assistant", ToolCalls: calls, ProviderData: provider), new(100, 20));
+                case 1:
+                    Assert.True(AutomaticAdaptationService.VisibleHistoryBytes(context.Messages) < 100 * 1024);
+                    Assert.Contains(context.Messages, message => message.Content.Contains("主程序已自动缩短请求历史"));
+                    Assert.Contains(context.Messages, message => message.Content.Contains("Confirmed byte roundtrip")
+                        && message.Content.Contains("Partial write mismatch") && message.Content.Contains("修复现有支持（Repair）"));
+                    Assert.Equal(provider.GetRawText(), Assert.Single(context.Messages, message => message.ProviderData.HasValue).ProviderData!.Value.GetRawText());
+                    Assert.Single(context.Messages, message => message.ToolCallId == "recent-a");
+                    Assert.Single(context.Messages, message => message.ToolCallId == "recent-b");
+                    return new(new("assistant", ToolCalls: [new("recover", "read_session_history", """{"query":"Exact field order","length":256}""")]), new(100, 20));
+                case 2:
+                    Assert.Contains("stride=12", Assert.Single(context.Messages, message => message.ToolCallId == "recover").Content);
+                    return new(new("assistant", ToolCalls: [new("save", "checkpoint", """{"summary":"Repair partial writer using confirmed stride=12."}""")]), new(100, 20));
+                default:
+                    Assert.DoesNotContain(context.Messages, message => message.Content.Contains(new string('x', 1000)));
+                    return Blocked("needs_input", "需要实际显示反馈。", "提供反馈后继续。");
+            }
+        });
+        var result = await new AutomaticAdaptationService(model, Compiler(new ScriptedRunner()), store).AdaptAsync(request);
+        Assert.True(result.Status == AdaptationStatus.WaitingForUser, string.Join("\n", result.Diagnostics));
+        Assert.Equal(4, model.Calls);
+        var saved = (await LocalFiles.ReadJsonAsync<AdaptationSession>(path))!;
+        Assert.True(saved.HistoryStart > 0);
+        Assert.StartsWith(original, saved.Messages[1].Content);
+        Assert.Equal(oldResult, Assert.Single(saved.Messages, message => message.ToolCallId == "old-failure").Content);
+        var resumed = new FakeModel(context =>
+        {
+            Assert.True(AutomaticAdaptationService.VisibleHistoryBytes(context.Messages) < 100 * 1024);
+            var recovered = context.Messages.LastOrDefault(message => message.ToolCallId == "recover-old");
+            if (recovered is null)
+                return new(new("assistant", ToolCalls: [new("recover-old", "read_tool_result", """{"toolCallId":"old-failure"}""")]), new(100, 20));
+            Assert.Contains("Partial write mismatch at unit 7.", recovered.Content);
+            return Blocked("needs_input", "需要实际显示反馈。", "提供反馈后继续。");
+        });
+        Assert.Equal(AdaptationStatus.WaitingForUser,
+            (await new AutomaticAdaptationService(resumed, Compiler(new ScriptedRunner()), store).AdaptAsync(request)).Status);
+        Assert.Equal(2, resumed.Calls);
+    }
+
     [Fact]
     public async Task BatchedReadsCompleteTogetherAndSurviveCheckpoint()
     {

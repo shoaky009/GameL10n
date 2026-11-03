@@ -36,8 +36,10 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
             """{"root":{"type":"string","enum":["game","workspace"]},"path":{"type":"string"},"offset":{"type":"integer","minimum":0,"maximum":1000000},"limit":{"type":"integer","minimum":1,"maximum":200}}""", "root"),
         Define("read_file", "Read a bounded file slice. encoding: hex, utf8, cp932, cp936. Source/JSON and workspace work/*.txt/.log/.csv reports default to utf8; unknown game resources default to hex. Use search_text byteOffsets for targeted reads instead of rereading whole files. Returns the encoding used.",
             """{"root":{"type":"string","enum":["game","workspace"]},"path":{"type":"string"},"offset":{"type":"integer","minimum":0},"length":{"type":"integer","minimum":1,"maximum":32768},"encoding":{"type":"string","enum":["hex","utf8","cp932","cp936"]}}""", "root", "path"),
-        Define("read_tool_result", "Read a character slice of an earlier tool result omitted from replay. Uses the existing session, no rerun or external request. Optional query locates relevant text. Available until checkpoint discards that exchange; prefer existing evidence files across checkpoints.",
+        Define("read_tool_result", "Read a character slice of an earlier tool result omitted from replay. Uses the existing session, no rerun or external request. Optional query locates relevant text. Original results remain available across automatic compaction, checkpoint and restart.",
             """{"toolCallId":{"type":"string"},"offset":{"type":"integer","minimum":0},"length":{"type":"integer","minimum":1,"maximum":16384},"query":{"type":"string","maxLength":256}}""", "toolCallId"),
+        Define("read_session_history", "Retrieve an archived message's text and exact tool arguments without rerunning tools. messageIndex is the original zero-based session position; default 0. Optional query finds the next matching message from that position. offset/length page through its text. Returns nextMessageIndex for further searching. Provider encrypted reasoning is excluded.",
+            """{"messageIndex":{"type":"integer","minimum":0},"offset":{"type":"integer","minimum":0},"length":{"type":"integer","minimum":1,"maximum":16384},"query":{"type":"string","maxLength":256}}"""),
         Define("inspect_existing_text", "Read the existing extraction baseline without re-extracting resources. Returns a bounded page with original IDs, locators and cache fields. Use resourcePath to inspect relevant existing support before a repair; preserve these fields so committed translations remain reusable.",
             """{"resourcePath":{"type":"string"},"offset":{"type":"integer","minimum":0,"maximum":1000000},"limit":{"type":"integer","minimum":1,"maximum":20}}""", []),
         Define("search_text", "Search a file byte range or a directory of text/source files. Returns at most 20 excerpts with byte offsets. File offset is bytes; directory offset is a file cursor, with fileByteOffset for resuming inside that file. Pass returned nextOffset and nextFileByteOffset until more=false. Directory scans are bounded to 64 text files and 4 MiB per call; binary archives are excluded. Source defaults to utf8; unknown game files to cp932.",
@@ -103,7 +105,7 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
             """{"summary":{"type":"string"}}""", "summary")
     ];
 
-    public static bool CanBatch(string tool) => tool is "list_files" or "list_adapters" or "read_file" or "read_tool_result" or "search_text"
+    public static bool CanBatch(string tool) => tool is "list_files" or "list_adapters" or "read_file" or "read_tool_result" or "read_session_history" or "search_text"
         or "inspect_engine_knowledge" or "inspect_existing_text"
         or "find_game_file" or "inspect_pe_imports" or "inspect_pe_code" or "inspect_unity_schema" or "inspect_builtin_adapter" or "inspect_adapter_component" or "adapter_protocol" or "search_engine_references" or "search_repositories" or "fetch_url";
 
@@ -159,6 +161,7 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
             "list_files" => ListFiles(args),
             "read_file" => await ReadFileAsync(args, ct),
             "read_tool_result" => ReadToolResult(args),
+            "read_session_history" => ReadSessionHistory(args),
             "inspect_existing_text" => ReadBaselineUnits(args),
             "search_text" => await SearchTextAsync(args, ct),
             "inspect_game_launch" => await InspectLaunchAsync(ct),
@@ -348,7 +351,7 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
     {
         var id = Text(args, "toolCallId");
         var result = session.Messages.LastOrDefault(message => message.Role == "tool" && message.ToolCallId == id)?.Content
-            ?? throw new InvalidDataException("此结果已不在当前会话中，请根据进度摘要读取对应的证据文件。");
+                ?? throw new InvalidDataException("会话中没有此工具结果，请检查 toolCallId 或根据进度摘要读取对应的证据文件。");
         var offset = Number(args, "offset", 0, 0, result.Length);
         var length = Number(args, "length", 4096, 1, 16 * 1024);
         var query = Text(args, "query", "");
@@ -362,6 +365,26 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
         length = Math.Min(length, result.Length - offset);
         return new { toolCallId = id, offset, length, totalCharacters = result.Length,
             more = offset + length < result.Length, content = result.Substring(offset, length) };
+    }
+
+    private object ReadSessionHistory(JsonElement args)
+    {
+        var index = Number(args, "messageIndex", 0, 0, session.Messages.Count);
+        var query = Text(args, "query", "");
+        if (query.Length > 256) throw new InvalidDataException("查询内容过长。");
+        for (; index < session.Messages.Count; index++)
+        {
+            var message = session.Messages[index];
+            var content = AdaptationHistory.ReadableMessage(message);
+            var found = query.Length == 0 ? 0 : content.IndexOf(query, StringComparison.OrdinalIgnoreCase);
+            if (found < 0) continue;
+            var offset = Number(args, "offset", Math.Max(0, found - 160), 0, content.Length);
+            var length = Math.Min(Number(args, "length", 4096, 1, 16 * 1024), content.Length - offset);
+            return new { found = true, messageIndex = index, nextMessageIndex = index + 1,
+                message.Role, message.ToolCallId, offset, length, totalCharacters = content.Length,
+                more = offset + length < content.Length, content = content.Substring(offset, length) };
+        }
+        return new { found = false, nextMessageIndex = index, totalMessages = session.Messages.Count };
     }
 
     private async Task<object> ReadFileAsync(JsonElement args, CancellationToken ct)

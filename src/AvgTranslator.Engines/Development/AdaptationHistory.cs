@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 
 namespace AvgTranslator.Core.Development;
@@ -6,6 +7,66 @@ namespace AvgTranslator.Core.Development;
 /// <summary>Bounds replayed tool output without altering the persisted history or provider reasoning.</summary>
 internal static class AdaptationHistory
 {
+    private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web)
+        { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
+
+    internal static AgentMessage[] RecentExchanges(IReadOnlyList<AgentMessage> history, int byteBudget)
+    {
+        // Retain complete assistant/tool groups, including the newest one. Never split a batch
+        // or edit provider reasoning/call arguments to fit the budget.
+        var start = history.Count;
+        for (var i = history.Count - 1; i >= 0; i--)
+        {
+            if (history[i].Role == "user" && start < history.Count) break;
+            if (history[i].Role != "assistant") continue;
+            if (AutomaticAdaptationService.VisibleHistoryBytes(history.Skip(i)) > byteBudget) break;
+            start = i;
+        }
+        return history.Skip(start).ToArray();
+    }
+
+    internal static string ArchiveIndex(IReadOnlyList<AgentMessage> history, int start) => JsonSerializer.Serialize(
+        history.Select((message, index) => (message, index)).Skip(start)
+            .Where(item => item.message.Role != "user").TakeLast(16).Select(item => new
+            {
+                messageIndex = item.index, item.message.Role, item.message.ToolCallId,
+                preview = Preview(ReadableMessage(item.message))
+            }), Json);
+
+    internal static string ReadableMessage(AgentMessage message)
+    {
+        var text = new StringBuilder(message.Content);
+        if (message.ToolCalls is { Count: > 0 }) text.AppendLine().Append(JsonSerializer.Serialize(message.ToolCalls, Json));
+        if (message.ProviderData is { } data) Append(data);
+        return text.ToString();
+
+        void Append(JsonElement value)
+        {
+            switch (value.ValueKind)
+            {
+                case JsonValueKind.Object:
+                    foreach (var property in value.EnumerateObject())
+                    {
+                        if (property.Name == "encrypted_content") continue;
+                        text.AppendLine().Append(property.Name).Append(':');
+                        Append(property.Value);
+                    }
+                    break;
+                case JsonValueKind.Array:
+                    foreach (var item in value.EnumerateArray()) Append(item);
+                    break;
+                case JsonValueKind.String:
+                    text.AppendLine().Append(value.GetString());
+                    break;
+                default:
+                    text.Append(value.GetRawText());
+                    break;
+            }
+        }
+    }
+
+    private static string Preview(string text) => text[..Math.Min(512, text.Length)];
+
     public static (IReadOnlyList<AgentMessage> Messages, int OmittedResults) ForRequest(IReadOnlyList<AgentMessage> history)
     {
         // Keep the newest exchange intact. Older useful results compete for a byte budget,

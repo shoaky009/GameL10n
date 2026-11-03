@@ -186,6 +186,7 @@ public sealed class AutomaticAdaptationService(IAdaptationAgentModel model, Gene
             }
             state.ReleaseFiles ??= state.VerifiedPackage?.ReleaseFiles;
             state.ReuseFailures ??= [];
+            if (state.HistoryStart < 0 || state.HistoryStart > state.Messages.Count) state.HistoryStart = 0;
             // Recover before changing models, so an interrupted tool cannot retain a stale verification.
             var changedObjective = continuing && request.Objective.HasValue && request.Objective != state.Objective;
             state.Objective = ResolveObjective(request, state.Objective);
@@ -270,11 +271,11 @@ public sealed class AutomaticAdaptationService(IAdaptationAgentModel model, Gene
             }
             continuation += BuiltinContext(state, disabledFamilies) + ReuseFailureContext(state);
             var continuationPending = false;
-            if (state.ModelIdentity != model.Identity || state.Messages.Count == 0)
+            if (state.ModelIdentity != model.Identity || state.Messages.Count == state.HistoryStart)
             {
                 if (state.ModelIdentity != model.Identity) state.PreferredOutputTokens = null;
                 state.ModelIdentity = model.Identity;
-                state.Messages.Clear();
+                state.HistoryStart = state.Messages.Count;
                 state.PendingCalls.Clear();
                 state.PendingCallsAreSequential = false;
                 state.RunningToolId = null;
@@ -311,8 +312,17 @@ public sealed class AutomaticAdaptationService(IAdaptationAgentModel model, Gene
             var summariesWithoutTools = 0;
             var reviewLegacyProgress = continuing && state.LastImplementationTurn is null && state.TotalTurns >= 60;
             state.LastImplementationTurn ??= state.TotalTurns;
-            var checkpointRequested = state.Messages.Any(message => message.Role == "user"
+            var checkpointRequested = state.Messages.Skip(state.HistoryStart).Any(message => message.Role == "user"
                 && message.Content.StartsWith("当前会话较长。下一步先调用 checkpoint", StringComparison.Ordinal));
+            string CompactContext(string notes) => ObjectiveContext(state.Objective.Value)
+                + "\n继续当前任务。当前源码、资源副本和工作文件均保留。\n已确认进度：\n" + notes
+                + "\n直接执行已记录的下一项具体操作；只有依赖不清楚或文件已变化时才重新读取相关源码，不要重新浏览整个工程。"
+                + WorkspaceInventory(directory) + ProgressContext(state) + ProbeContext(state)
+                + LaunchContext(state) + BuiltinContext(state, disabledFamilies) + ProtocolContext(state)
+                + ReleaseContext(state) + ReuseFailureContext(state) + state.TextCoverage.Context()
+                + "\n旧消息完整保留在会话中。read_tool_result 按 toolCallId 查回原始结果；"
+                + "read_session_history 按 messageIndex 或 query 查回旧消息中的结构、调用参数和分析证据。"
+                + (string.IsNullOrWhiteSpace(state.UserInstruction) ? "" : "\n用户补充要求：" + state.UserInstruction);
             while (true)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -403,21 +413,9 @@ public sealed class AutomaticAdaptationService(IAdaptationAgentModel model, Gene
                 }
                 if (state.Checkpoint is { } checkpoint)
                 {
-                    var recent = RecentToolHistory(state.Messages);
-                    state.Messages.Clear();
-                    state.Messages.Add(new("user", ObjectiveContext(state.Objective.Value)
-                        + "\n继续当前任务。当前源码、资源副本和工作文件均保留。\n已确认进度：\n" + checkpoint
-                        + "\n直接执行摘要中的下一项具体操作；只有依赖不清楚或文件已变化时才重新读取相关源码，不要重新浏览整个工程。"
-                        + WorkspaceInventory(directory)
-                        + ProgressContext(state)
-                        + ProbeContext(state)
-                        + LaunchContext(state)
-                        + BuiltinContext(state, disabledFamilies)
-                        + ProtocolContext(state)
-                        + ReleaseContext(state)
-                        + ReuseFailureContext(state)
-                        + state.TextCoverage.Context()
-                        + (string.IsNullOrWhiteSpace(state.UserInstruction) ? "" : "\n用户补充要求：" + state.UserInstruction)));
+                    var recent = RecentToolHistory(state.Messages.Skip(state.HistoryStart).ToList());
+                    state.HistoryStart = state.Messages.Count;
+                    state.Messages.Add(new("user", CompactContext(checkpoint)));
                     state.Messages.AddRange(recent);
                     state.Checkpoint = null;
                     checkpointRequested = false;
@@ -443,18 +441,43 @@ public sealed class AutomaticAdaptationService(IAdaptationAgentModel model, Gene
                     await SaveAsync();
                 }
                 var remaining = limits.MaximumTokens - (state.Usage.TotalTokens - initialUsage);
-                var replay = AdaptationHistory.ForRequest(state.Messages);
-                var retainedHistoryBytes = VisibleHistoryBytes(state.Messages);
+                var activeHistory = state.Messages.Skip(state.HistoryStart).ToArray();
+                var replay = AdaptationHistory.ForRequest(activeHistory);
+                var retainedHistoryBytes = VisibleHistoryBytes(activeHistory);
                 var historyBytes = VisibleHistoryBytes(replay.Messages);
-                if (!checkpointRequested && (historyBytes > 192 * 1024 || retainedHistoryBytes > 768 * 1024))
+                if (historyBytes > 192 * 1024 || retainedHistoryBytes > 768 * 1024)
                 {
-                    state.Messages.Add(new("user", "当前会话较长。下一步先调用 checkpoint，保存已确认的引擎和版本、现有源码及资源路径、"
-                        + "已通过与失败的验证、排除的方案和下一项具体操作。摘要优先控制在 3000 字内，保留当前实现必需的字段顺序、数组步长、调用约定和证据位置；"
-                        + "明确已覆盖、已知遗漏和未调查的文字类别。详细反汇编和源码引用路径及范围，避免复制全文。"
-                        + "这是保存已有进度，不需要重新扫描游戏、查找同一资料或重跑已完成测试。\n" + ObjectiveContext(state.Objective.Value)));
-                    checkpointRequested = true;
-                    await TraceAsync(new { operation = "checkpoint-request", visibleHistoryBytes = historyBytes, retainedHistoryBytes, messages = state.Messages.Count });
-                    replay = AdaptationHistory.ForRequest(state.Messages);
+                    if (checkpointRequested)
+                    {
+                        // A model may ignore checkpoint. Start a bounded replay at a complete exchange boundary;
+                        // keep the originals (including provider data) available for targeted retrieval and restart.
+                        var recent = AdaptationHistory.RecentExchanges(activeHistory, 64 * 1024);
+                        var index = AdaptationHistory.ArchiveIndex(state.Messages, state.HistoryStart);
+                        var snapshot = JsonSerializer.Serialize(new
+                        {
+                            state.Summary, state.EngineReference, stagedResources = state.ResourceHashes.Keys.Take(256),
+                            lastVerification = state.VerificationDiagnostics, verifiedPackage = state.VerifiedPackage?.Id,
+                            state.VerificationRevision
+                        }, ContextJson);
+                        state.HistoryStart = state.Messages.Count;
+                        state.Messages.Add(new("user", CompactContext(state.Notes)
+                            + "\n主程序已自动缩短请求历史；这不是新的语义结论。沿用下方记录，仅在缺少具体事实时定向查回旧消息。\n"
+                            + snapshot + "\n近期证据索引（messageIndex 为会话中的原始位置）：\n" + index));
+                        state.Messages.AddRange(recent);
+                        checkpointRequested = false;
+                        await TraceAsync(new { operation = "history-compacted", visibleHistoryBytes = historyBytes,
+                            retainedHistoryBytes, state.HistoryStart, keptMessages = recent.Length });
+                    }
+                    else
+                    {
+                        state.Messages.Add(new("user", "当前会话较长。下一步先调用 checkpoint，保存已确认的引擎和版本、现有源码及资源路径、"
+                            + "已通过与失败的验证、排除的方案和下一项具体操作。摘要优先控制在 3000 字内，保留当前实现必需的字段顺序、数组步长、调用约定和证据位置；"
+                            + "明确已覆盖、已知遗漏和未调查的文字类别。详细反汇编和源码引用路径及范围，避免复制全文。"
+                            + "这是保存已有进度，不需要重新扫描游戏、查找同一资料或重跑已完成测试。\n" + ObjectiveContext(state.Objective.Value)));
+                        checkpointRequested = true;
+                        await TraceAsync(new { operation = "checkpoint-request", visibleHistoryBytes = historyBytes, retainedHistoryBytes, messages = state.Messages.Count });
+                    }
+                    replay = AdaptationHistory.ForRequest(state.Messages.Skip(state.HistoryStart).ToArray());
                     historyBytes = VisibleHistoryBytes(replay.Messages);
                     await SaveAsync();
                 }
@@ -595,7 +618,7 @@ public sealed class AutomaticAdaptationService(IAdaptationAgentModel model, Gene
 
     // Size the text used by the model, not its escaped transport envelope. Encrypted
     // reasoning remains in the replay history but is not source text to summarize.
-    private static long VisibleHistoryBytes(IEnumerable<AgentMessage> messages) => messages.Sum(message =>
+    internal static long VisibleHistoryBytes(IEnumerable<AgentMessage> messages) => messages.Sum(message =>
         32L + (message.ProviderData is { } data ? VisibleJsonBytes(data)
             : Encoding.UTF8.GetByteCount(message.Content)
                 + (message.ToolCalls?.Sum(call => (long)Encoding.UTF8.GetByteCount(call.Name)
@@ -947,6 +970,8 @@ public sealed class AdaptationSession
     public string? Checkpoint { get; set; }
     public bool ProtocolRead { get; set; }
     public List<AgentMessage> Messages { get; set; } = [];
+    /// <summary>First replayed message; earlier messages remain available for evidence retrieval.</summary>
+    public int HistoryStart { get; set; }
     public List<AgentToolCall> PendingCalls { get; set; } = [];
     public bool PendingCallsAreSequential { get; set; }
     public string? RunningToolId { get; set; }
