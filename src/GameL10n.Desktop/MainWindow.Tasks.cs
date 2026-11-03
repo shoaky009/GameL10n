@@ -96,7 +96,7 @@ public sealed partial class MainWindow
                     if (!verification.Passed) { foreach (var item in verification.Diagnostics) Log(game, item); continue; }
                     await store.RecordCompatibilityAsync(generated.Package.Family!, new GameCompatibility(analyzed.Id,
                         game.Name, "模板声明的资源集合", generated.Version,
-                        analyzed.Sources.ToDictionary(file => file.RelativePath, file => file.Sha256), "resource-roundtrip-passed"), token);
+                        "resource-roundtrip-passed"), token);
                     await store.PublishAndActivateAsync(analyzed.Id, generated.Package, verification.Diagnostics, token);
                 }
                 nextSession = analyzed;

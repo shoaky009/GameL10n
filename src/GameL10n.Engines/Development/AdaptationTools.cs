@@ -833,11 +833,10 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
         RequireLaunchResources();
         await CheckResourcesAsync(ct);
         var probe = await CheckDiscoveryAsync(new GeneratedGameAdapter(package, compiler.Toolchain, compiler.Runner, store.WorkDirectory, EngineToolkit, reportProgress), ct);
-        var hashes = probe.RequiredFiles.ToDictionary(file => file, file => session.ResourceHashes[file.Replace('\\', '/')]);
         var published = await store.PublishAndActivateAsync(request.GameId, package, session.VerificationDiagnostics, ct);
         session.VerifiedPackage = published;
         await store.RecordCompatibilityAsync(package.Family!, new(request.GameId,
-            Path.GetFileName(Path.TrimEndingDirectorySeparator(request.GameDirectory)), probe.Description, package.Version, hashes,
+            Path.GetFileName(Path.TrimEndingDirectorySeparator(request.GameDirectory)), probe.Description, package.Version,
             "resource-roundtrip-passed"), ct);
         session.Summary = (partial ? "已发布部分文字支持；仍有未覆盖内容。\n" : "") + Limit(summary, 2000)
             + (partial ? "\n已知未覆盖内容：" + string.Join("；", session.TextCoverage.Pending) : "")

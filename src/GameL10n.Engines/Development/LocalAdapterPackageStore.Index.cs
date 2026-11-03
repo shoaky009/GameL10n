@@ -31,8 +31,8 @@ public sealed partial class LocalAdapterPackageStore
                 var builtIn = builtInGroups.GetValueOrDefault(id) ?? [];
                 var family = builtIn.FirstOrDefault()?.Family ?? stored!.Family;
                 var enabled = stored?.Enabled ?? true;
-                var games = (stored?.Games.Select(game => game.ToCompatibility()) ?? [])
-                    .Concat(builtIn.SelectMany(entry => entry.Games)).DistinctBy(GameKey).ToArray();
+                var games = LatestGames((stored?.Games.Select(game => game.ToCompatibility()) ?? [])
+                    .Concat(builtIn.SelectMany(entry => entry.Games)));
                 var gamesByVersion = games.GroupBy(game => game.AdapterVersion)
                     .ToDictionary(group => group.Key, group => group.ToArray(), StringComparer.Ordinal);
                 var references = running.Where(reference => reference.AdapterId == id).Distinct().ToArray();
@@ -113,6 +113,16 @@ public sealed partial class LocalAdapterPackageStore
                 var index = JsonSerializer.Deserialize<LibraryIndex>(ReadDirectMetadata(RootDirectory, IndexFile, 64 * 1024 * 1024), IndexJson)
                     ?? throw new InvalidDataException("引擎索引为空。");
                 ValidateIndex(index);
+                var changed = false;
+                foreach (var stored in index.Families.Values)
+                {
+                    var games = LatestGames(stored.Games.Select(game => game.ToCompatibility()));
+                    if (games.Count == stored.Games.Count) continue;
+                    stored.Games.Clear();
+                    stored.Games.AddRange(games.Select(IndexGame.From));
+                    changed = true;
+                }
+                if (changed) await WriteLibraryIndexAsync(index, ct);
                 return index;
             }
             catch (Exception error) when (error is JsonException or InvalidDataException)
@@ -134,21 +144,9 @@ public sealed partial class LocalAdapterPackageStore
         // Registry metadata only: no game pins, project snapshots, payloads, source trees or content hashes.
         foreach (var directory in SafeDirectories(WorkspaceFiles.Resolve(RootDirectory, "catalog"), index.Diagnostics))
         {
-            foreach (var file in Directory.EnumerateFiles(directory, "*.json"))
-            {
-                ct.ThrowIfCancellationRequested();
-                try
-                {
-                    var record = JsonSerializer.Deserialize<IndexCompatibility>(ReadDirectMetadata(directory, Path.GetFileName(file), 128 * 1024), IndexJson)
-                        ?? throw new InvalidDataException("兼容记录为空。");
-                    if (record.Family is null || record.Game is null) throw new InvalidDataException("兼容记录缺少引擎或游戏信息。");
-                    record.Family.Validate();
-                    if (record.Family.AdapterId != Path.GetFileName(directory)) throw new InvalidDataException("兼容记录与目录不一致。");
-                    AddIndexGame(index, record.Family, record.Game);
-                }
-                catch (Exception error) when (IsLibraryReadError(error))
-                { index.Diagnostics.Add("无法读取兼容记录 " + Path.GetFileName(file) + "：" + error.Message); }
-            }
+            ct.ThrowIfCancellationRequested();
+            var records = ReadCompatibilityRecords(directory, index.Diagnostics);
+            if (records.Count > 0) ReplaceIndexGames(index, records[^1].Family, records.Select(record => record.Game));
         }
         var namedFamilies = index.Families.Keys.ToHashSet(StringComparer.Ordinal);
         ApplyIndexState(index, state);
@@ -210,17 +208,24 @@ public sealed partial class LocalAdapterPackageStore
         return stored;
     }
 
-    private static void AddIndexGame(LibraryIndex index, AdapterFamily family, IndexGame game)
+    private static void ReplaceIndexGames(LibraryIndex index, AdapterFamily family, IEnumerable<GameCompatibility> games)
+    {
+        var latest = LatestGames(games).Select(IndexGame.From).ToArray();
+        foreach (var game in latest) ValidateIndexGame(game);
+        var stored = GetIndexFamily(index, family);
+        stored.Family = family;
+        stored.Games.Clear();
+        stored.Games.AddRange(latest);
+        foreach (var game in latest)
+            stored.Versions.TryAdd(game.AdapterVersion, new(game.AdapterVersion, EngineLibrarySource.History, false));
+    }
+
+    private static void ValidateIndexGame(IndexGame game)
     {
         if (string.IsNullOrWhiteSpace(game.GameId) || string.IsNullOrWhiteSpace(game.Title)
             || string.IsNullOrWhiteSpace(game.AdapterVersion) || !PackagePart().IsMatch(game.AdapterVersion)
             || game.Variant is null || game.StructureStatus is null || game.RuntimeStatus is null)
             throw new InvalidDataException("兼容记录缺少游戏或版本信息。");
-        var stored = GetIndexFamily(index, family);
-        stored.Family = family;
-        stored.Games.RemoveAll(item => item.GameId == game.GameId && item.AdapterVersion == game.AdapterVersion && item.Variant == game.Variant);
-        stored.Games.Add(game);
-        stored.Versions.TryAdd(game.AdapterVersion, new(game.AdapterVersion, EngineLibrarySource.History, false));
     }
 
     private static void ApplyIndexState(LibraryIndex index, LibraryState state, GeneratedAdapterPackage? published = null)
@@ -277,16 +282,14 @@ public sealed partial class LocalAdapterPackageStore
         }
     }
 
-    private static (string, string, string) GameKey(GameCompatibility game) => (game.GameId, game.AdapterVersion, game.Variant);
     private sealed record IndexPackage(string Id, string Version, AdapterFamily? Family);
-    private sealed record IndexCompatibility(AdapterFamily Family, IndexGame Game);
     private sealed record IndexGame(string GameId, string Title, string Variant, string AdapterVersion,
-        string StructureStatus, string RuntimeStatus = "not-tested", string? PatchDirectory = null)
+        string StructureStatus, string RuntimeStatus = "not-tested", DateTimeOffset? UpdatedAt = null)
     {
         public GameCompatibility ToCompatibility() => new(GameId, Title, Variant, AdapterVersion,
-            new Dictionary<string, string>(), StructureStatus, RuntimeStatus, PatchDirectory);
+            StructureStatus, RuntimeStatus, UpdatedAt);
         public static IndexGame From(GameCompatibility game) => new(game.GameId, game.Title, game.Variant, game.AdapterVersion,
-            game.StructureStatus, game.RuntimeStatus, game.PatchDirectory);
+            game.StructureStatus, game.RuntimeStatus, game.UpdatedAt);
     }
     private sealed record IndexVersion(string Version, EngineLibrarySource Source, bool Exists, DateTimeOffset? PublishedAt = null,
         bool IsCandidate = false, AdapterDiscoveryDescriptor? Discovery = null, bool DiscoveryLoaded = false);

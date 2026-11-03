@@ -132,64 +132,6 @@ public sealed partial class LocalAdapterPackageStore(string rootDirectory, strin
         return found;
     }
 
-    public async Task RecordCompatibilityAsync(AdapterFamily family, GameCompatibility game, CancellationToken cancellationToken = default)
-    {
-        family.Validate();
-        var fingerprint = LocalFiles.HashText(JsonSerializer.Serialize(game.SourceHashes.OrderBy(pair => pair.Key), Json));
-        var key = LocalFiles.HashText(JsonSerializer.Serialize(new[] { game.GameId, game.AdapterVersion, game.Variant })) + "-" + fingerprint[..16];
-        var path = WorkspaceFiles.Resolve(RootDirectory, Path.Combine("catalog", family.AdapterId, key + ".json"));
-        await activationLock.WaitAsync(cancellationToken);
-        try
-        {
-            await LocalFiles.WriteJsonAsync(path, new CompatibilityRecord(family, game), cancellationToken);
-            await UpdateLibraryIndexAsync(index => AddIndexGame(index, family, IndexGame.From(game)), CancellationToken.None);
-        }
-        finally { activationLock.Release(); }
-    }
-
-    public IReadOnlyList<AdapterCatalogEntry> ReadCatalog(IEnumerable<AdapterCatalogEntry> builtIns, string query = "",
-        ICollection<string>? diagnostics = null)
-    {
-        var entries = builtIns.ToList();
-        var root = WorkspaceFiles.Resolve(RootDirectory, "catalog");
-        if (Directory.Exists(root))
-        {
-            foreach (var directory in SafeDirectories(root, diagnostics))
-            {
-                string[] files;
-                try { files = Directory.GetFiles(directory, "*.json"); }
-                catch (Exception error) when (IsLibraryReadError(error))
-                { diagnostics?.Add("Skipped an unreadable compatibility directory: " + error.Message); continue; }
-                foreach (var file in files)
-                {
-                    try
-                    {
-                        var record = JsonSerializer.Deserialize<CompatibilityRecord>(
-                            ReadDirectMetadata(directory, Path.GetFileName(file), 128 * 1024), Json)
-                            ?? throw new InvalidDataException("Invalid compatibility record.");
-                        if (record.Family is null || record.Game is null || record.Game.SourceHashes is null
-                            || string.IsNullOrWhiteSpace(record.Game.GameId) || string.IsNullOrWhiteSpace(record.Game.Title)
-                            || string.IsNullOrWhiteSpace(record.Game.AdapterVersion) || record.Game.Variant is null
-                            || record.Game.StructureStatus is null)
-                            throw new InvalidDataException("兼容记录缺少引擎或游戏信息。");
-                        record.Family.Validate();
-                        if (record.Family.AdapterId != Path.GetFileName(directory))
-                            throw new InvalidDataException("兼容记录与目录的引擎标识不一致。");
-                        entries.Add(new(record.Family, record.Game.AdapterVersion, [record.Game]));
-                    }
-                    catch (Exception error) when (error is IOException or InvalidDataException or UnauthorizedAccessException or JsonException)
-                    {
-                        diagnostics?.Add("Skipped an unreadable compatibility record: " + error.Message);
-                    }
-                }
-            }
-        }
-        return entries.GroupBy(entry => (entry.Family.AdapterId, entry.Version))
-            .Select(group => new AdapterCatalogEntry(group.First().Family, group.Key.Version,
-                group.SelectMany(entry => entry.Games).Distinct().ToArray()))
-            .Where(entry => entry.Matches(query)).OrderBy(entry => entry.Family.Name, StringComparer.OrdinalIgnoreCase).ToArray();
-    }
-
     public async Task<bool> RollbackAsync(string gameId, CancellationToken cancellationToken = default)
     {
         await activationLock.WaitAsync(cancellationToken);
@@ -251,5 +193,4 @@ public sealed partial class LocalAdapterPackageStore(string rootDirectory, strin
     [GeneratedRegex("^[a-zA-Z0-9][a-zA-Z0-9._-]{0,95}$")]
     private static partial Regex PackagePart();
     private sealed record Activation(string Id, string Version, DateTimeOffset ActivatedAt, string? GameId = null);
-    private sealed record CompatibilityRecord(AdapterFamily Family, GameCompatibility Game);
 }

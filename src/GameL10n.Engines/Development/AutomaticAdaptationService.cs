@@ -138,12 +138,9 @@ public sealed class AutomaticAdaptationService(IAdaptationAgentModel model, Gene
                                         sourceDirectory, verification.OriginalRoundtripPassed));
                                 continue;
                             }
-                            var hashes = new Dictionary<string, string>();
-                            foreach (var file in probe.RequiredFiles)
-                                hashes[file] = await LocalFiles.HashFileAsync(Isolation.WorkspaceFiles.Resolve(request.GameDirectory, file), cancellationToken);
                             await packageStore.RecordCompatibilityAsync(generated.Package.Family!,
                                 new(request.GameId, Path.GetFileName(request.GameDirectory), probe.Description, generated.Version,
-                                    hashes, "resource-roundtrip-passed"), cancellationToken);
+                                    "resource-roundtrip-passed"), cancellationToken);
                             await packageStore.PublishAndActivateAsync(request.GameId, generated.Package, verification.Diagnostics, cancellationToken);
                         }
                         else if ((await adapter.ExtractAsync(request.GameDirectory, cancellationToken)).Units.Count == 0) continue;

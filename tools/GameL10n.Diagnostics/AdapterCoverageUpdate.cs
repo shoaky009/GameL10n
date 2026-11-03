@@ -175,7 +175,7 @@ internal static class AdapterCoverageUpdate
             var store = new LocalAdapterPackageStore(Path.Combine(dataDirectory, "extensions"), Path.Combine(projectDirectory, "adaptation"));
             var published = await store.PublishAndActivateAsync(project.Id, package, verification.Diagnostics);
             await store.RecordCompatibilityAsync(published.Family!, new(project.Id, project.Name, probe.Description,
-                published.Version, updatedFiles.ToDictionary(f => f.RelativePath, f => f.Sha256), "resource-roundtrip-passed"));
+                published.Version, "resource-roundtrip-passed"));
             foreach (var relative in manifest.SourceFiles.Keys.Concat(addedSources).Where(r => File.Exists(LocalFiles.UnderRoot(updateDirectory, r))))
             {
                 var target = LocalFiles.UnderRoot(sourceDirectory, relative);

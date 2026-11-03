@@ -255,7 +255,7 @@ public sealed partial class MainWindow
             .Contains(query, StringComparison.OrdinalIgnoreCase)).OrderBy(game => game.Title, StringComparer.CurrentCultureIgnoreCase)
             .ThenBy(game => game.AdapterVersion, StringComparer.Ordinal).Select(game => new EngineGameRow(game)).ToArray();
         CatalogGamesList.ItemsSource = filtered;
-        CatalogGameCountText.Text = all.Count == 0 ? "暂无兼容游戏记录。" : $"{filtered.Length:N0} / {all.Count:N0} 条记录 · 样本与结构校验不代表游戏运行验证";
+        CatalogGameCountText.Text = all.Count == 0 ? "暂无兼容游戏记录。" : $"{filtered.Length:N0} / {all.Count:N0} 个游戏 · 每个游戏保留最近一次记录，结构校验不代表游戏运行验证";
     }
 
     private async void CatalogVersion_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -493,7 +493,7 @@ public sealed partial class MainWindow
         public bool CanSetEnabled => Data.Versions.Count > 0;
         public string EnabledLabel => CanSetEnabled ? Data.Enabled ? "已启用" : "已停用" : "仅经验";
         public string SourceLabel => string.Join(" / ", Data.Versions.Select(version => SourceName(version.Source)).Distinct());
-        public string Description => $"{(SourceLabel.Length == 0 ? "经验记录" : SourceLabel)} · {Data.Versions.Count:N0} 版本 · {Data.Games.Count:N0} 游戏记录";
+        public string Description => $"{(SourceLabel.Length == 0 ? "经验记录" : SourceLabel)} · {Data.Versions.Count:N0} 版本 · {Data.Games.Count:N0} 个游戏";
         public DateTimeOffset LatestPublication { get; } = data.Versions.Select(version => version.PublishedAt ?? DateTimeOffset.MinValue).DefaultIfEmpty().Max();
         public string SearchText { get; } = string.Join('\n', new[] { data.Family.AdapterId, data.Family.Name }.Concat(data.Games.SelectMany(game => new[] { game.Title, game.Variant })));
         public bool MatchesSource(string source) => source switch
@@ -509,14 +509,16 @@ public sealed partial class MainWindow
         public EngineLibraryVersion Data { get; } = data;
         public string Title => Data.Version + " · " + SourceName(Data.Source);
         public string Description => (Data.PublishedAt is { } published ? $"{published.ToLocalTime():yyyy-MM-dd HH:mm} · " : "")
-            + $"{Data.Games.Count:N0} 条游戏记录"
+            + $"{Data.Games.Count:N0} 个游戏"
             + (Data.IsCandidate ? " · 可供新识别" : Data.Source == EngineLibrarySource.External ? " · 当前非新识别候选" : "");
     }
 
     private sealed class EngineGameRow(GameCompatibility game)
     {
         public string Title => game.Title;
-        public string Description => (string.IsNullOrWhiteSpace(game.Variant) ? "" : game.Variant + " · ") + "适配版本 " + game.AdapterVersion;
+        public string Description => "最近使用版本 " + game.AdapterVersion
+            + (game.UpdatedAt is { } updated ? $" · {updated.ToLocalTime():yyyy-MM-dd HH:mm}" : "")
+            + (string.IsNullOrWhiteSpace(game.Variant) ? "" : "\n" + game.Variant);
         public string Validation => StructureLabel(game.StructureStatus) + "；游戏运行：" + (game.RuntimeStatus == "passed" ? "已验证" : game.RuntimeStatus == "failed" ? "验证失败" : "未验证");
     }
 

@@ -85,7 +85,7 @@ C# 源码由宿主编译为 `adapter.dll`，通过应用附带的 .NET 工具链
 
 | 位置 | 用途 |
 | --- | --- |
-| `extensions/catalog/` | 按引擎或模板保存游戏版本、资源指纹与兼容记录 |
+| `extensions/catalog/<引擎或模板 ID>/games.json` | 每个游戏一条简要记录：最近使用版本、说明、结构与运行状态、更新时间；不保存资源哈希或补丁路径 |
 | `extensions/games/` | 保存项目当前激活版本及上一版本的引用 |
 | `extensions/library-index.json` | 引擎库展示摘要，可重建，不替代运行校验 |
 | `<应用目录>/tools/engine-tools/` | 发行包附带的固定版本引擎工具库与便携 Python，直接读取 |

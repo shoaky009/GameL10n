@@ -327,8 +327,8 @@ public sealed partial class TranslationPipeline(string dataDirectory, string? di
         if (session.Adapter.CatalogEntry is not { } entry) return Task.CompletedTask;
         return new LocalAdapterPackageStore(Path.Combine(DataDirectory, "extensions")).RecordCompatibilityAsync(entry.Family,
             new GameCompatibility(session.Id, Path.GetFileName(Path.TrimEndingDirectorySeparator(session.GameDirectory)),
-                result.IsTrial ? "已生成试译产物" : "已生成汉化产物", session.Adapter.Version, session.Sources.ToDictionary(file => file.RelativePath, file => file.Sha256),
-                "patch-validated", result.Validation.RuntimeStatus, result.PatchDirectory), ct);
+                result.IsTrial ? "已生成试译产物" : "已生成汉化产物", session.Adapter.Version,
+                "patch-validated", result.Validation.RuntimeStatus), ct);
     }
 
     private static IReadOnlyList<ValidationIssue> ValidateTranslation(IGameAdapter adapter, TranslationUnit unit, string text) =>

@@ -19,8 +19,7 @@ public sealed partial record AdapterFamily(string Kind, string Key, string Name)
 }
 
 public sealed record GameCompatibility(string GameId, string Title, string Variant, string AdapterVersion,
-    IReadOnlyDictionary<string, string> SourceHashes, string StructureStatus, string RuntimeStatus = "not-tested",
-    string? PatchDirectory = null);
+    string StructureStatus, string RuntimeStatus = "not-tested", DateTimeOffset? UpdatedAt = null);
 
 public sealed record AdapterCatalogEntry(AdapterFamily Family, string Version, IReadOnlyList<GameCompatibility> Games)
 {

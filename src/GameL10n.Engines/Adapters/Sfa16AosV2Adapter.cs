@@ -10,7 +10,7 @@ public sealed class Sfa16AosV2Adapter : IGameAdapter
     public string Version => "2.0.4";
     public AdapterCatalogEntry CatalogEntry => new(Family, Version, Sfa16ExecutableProfiles.Known.Select(profile =>
         new GameCompatibility(profile.GameId, profile.GameTitle, profile.Variant, Version,
-            new Dictionary<string, string> { ["sfa16.exe"] = profile.OriginalHash }, "resource-roundtrip-passed")).ToArray());
+            "resource-roundtrip-passed")).ToArray());
     private const string ArchiveName = "scr.aos";
     private static readonly string[] Warnings =
     [

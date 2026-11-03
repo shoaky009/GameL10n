@@ -485,10 +485,10 @@
                   <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
                   <TextBox x:Name="CatalogGameSearchBox" PlaceholderText="筛选游戏名称或版本" TextChanged="CatalogGameSearch_TextChanged" AutomationProperties.Name="筛选所选引擎的兼容游戏" />
                   <TextBlock x:Name="CatalogGameCountText" Grid.Row="1" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
-                  <ListView x:Name="CatalogGamesList" Grid.Row="2" SelectionMode="None" HorizontalContentAlignment="Stretch" AutomationProperties.Name="兼容游戏验证记录">
+                  <ListView x:Name="CatalogGamesList" Grid.Row="2" SelectionMode="None" HorizontalContentAlignment="Stretch" AutomationProperties.Name="引擎兼容游戏">
                     <ListView.ItemTemplate><DataTemplate><StackPanel Padding="0,8" Spacing="4">
                       <TextBlock Text="{Binding Title}" FontWeight="SemiBold" TextWrapping="Wrap" />
-                      <TextBlock Text="{Binding Description}" FontSize="12" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                      <TextBlock Text="{Binding Description}" FontSize="12" MaxLines="3" TextTrimming="CharacterEllipsis" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                       <TextBlock Text="{Binding Validation}" FontSize="12" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                     </StackPanel></DataTemplate></ListView.ItemTemplate>
                   </ListView>

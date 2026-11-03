@@ -2334,7 +2334,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         var compatible = Assert.Single(catalog.Games);
         Assert.Equal("resource-roundtrip-passed", compatible.StructureStatus);
         Assert.Equal("not-tested", compatible.RuntimeStatus);
-        Assert.Single(compatible.SourceHashes);
+        Assert.NotNull(compatible.UpdatedAt);
         Assert.Single(reloaded.ReadCatalog([], "Line script"));
     }
 

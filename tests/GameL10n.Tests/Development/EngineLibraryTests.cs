@@ -72,7 +72,7 @@ public sealed class EngineLibraryTests : IDisposable
         Directory.CreateDirectory(Path.Combine(project, "patches", "final"));
         await File.WriteAllTextAsync(Path.Combine(project, "patches", "final", "script.dat"), "finished patch");
         await store.RecordCompatibilityAsync(Family, new(GameId, "Old game", "fixture", "one",
-            new Dictionary<string, string>(), "passed"));
+            "passed"));
         var retainedFiles = new[] { project, Path.Combine(store.RootDirectory, "games"), Path.Combine(store.RootDirectory, "catalog") }
             .SelectMany(directory => Directory.GetFiles(directory, "*", SearchOption.AllDirectories))
             .ToDictionary(file => file, File.ReadAllBytes);
@@ -188,7 +188,7 @@ public sealed class EngineLibraryTests : IDisposable
         var store = Store;
         var package = await PublishAsync("one");
         await store.RecordCompatibilityAsync(Family, new(GameId, "Indexed game", "fixture", "one",
-            new Dictionary<string, string> { ["script.dat"] = "original-resource-hash" }, "passed"));
+            "passed"));
         var indexPath = Path.Combine(store.RootDirectory, "library-index.json");
         var contents = await File.ReadAllTextAsync(indexPath);
         Assert.DoesNotContain("original-resource-hash", contents);
@@ -228,7 +228,7 @@ public sealed class EngineLibraryTests : IDisposable
         var store = Store;
         var package = await PublishAsync("one");
         await store.RecordCompatibilityAsync(Family, new(GameId, "Recovered game", "fixture", "one",
-            new Dictionary<string, string>(), "passed"));
+            "passed"));
         await store.SetFamilyEnabledAsync(Family.AdapterId, false);
         var indexPath = Path.Combine(store.RootDirectory, "library-index.json");
         if (damagedContents is not null) await File.WriteAllTextAsync(indexPath, damagedContents);
@@ -266,17 +266,181 @@ public sealed class EngineLibraryTests : IDisposable
     }
 
     [Fact]
-    public async Task CompatibilityVersionsSurviveIndexRebuildForIdenticalGameResources()
+    public async Task CompatibilityUpdatesKeepOnlyTheLatestEntryPerGameAcrossIndexRebuilds()
     {
         var store = Store;
-        var hashes = new Dictionary<string, string> { ["script.dat"] = "same-original-resource" };
-        await store.RecordCompatibilityAsync(Family, new(GameId, "Game", "fixture", "one", hashes, "passed"));
-        await store.RecordCompatibilityAsync(Family, new(GameId, "Game", "fixture", "two", hashes, "passed"));
+        await store.RecordCompatibilityAsync(Family, new(GameId, "Game", "识别", "one", "not-tested"));
+        await store.RecordCompatibilityAsync(Family, new(GameId, "Game", "试译", "one", "passed"));
+        await store.RecordCompatibilityAsync(Family, new(GameId, "Game", "识别", "two", "not-tested"));
+        await store.RecordCompatibilityAsync(Family, new(GameId, "Game", "试译", "two", "passed"));
+        var before = DateTimeOffset.UtcNow;
+        await store.RecordCompatibilityAsync(Family, new(GameId, "Game", "最新说明", "two", "failed", "not-tested",
+            DateTimeOffset.MinValue));
+        await store.RecordCompatibilityAsync(Family, new("different-game", "Game", "同名游戏", "one", "passed"));
+        var catalogDirectory = Path.Combine(store.RootDirectory, "catalog", Family.AdapterId);
+        Assert.Equal("games.json", Path.GetFileName(Assert.Single(Directory.GetFiles(catalogDirectory))));
+        var catalog = store.ReadCatalog([]).SelectMany(entry => entry.Games).ToArray();
+        Assert.Equal(2, catalog.Length);
+        var latest = Assert.Single(catalog, game => game.GameId == GameId);
+        Assert.Equal("two", latest.AdapterVersion);
+        Assert.Equal("最新说明", latest.Variant);
+        Assert.Equal("failed", latest.StructureStatus);
+        Assert.True(latest.UpdatedAt >= before);
         var indexed = Assert.Single((await store.ReadEngineLibraryAsync([], Data)).Families);
         Assert.Equal(2, indexed.Games.Count);
+        Assert.Equal(latest, Assert.Single(indexed.Games, game => game.GameId == GameId));
         File.Delete(Path.Combine(store.RootDirectory, "library-index.json"));
         var rebuilt = Assert.Single((await store.ReadEngineLibraryAsync([], Data)).Families);
-        Assert.Equal(indexed.Games.Select(game => game.AdapterVersion).Order(), rebuilt.Games.Select(game => game.AdapterVersion).Order());
+        Assert.Equal(indexed.Games.OrderBy(game => game.GameId), rebuilt.Games.OrderBy(game => game.GameId));
+    }
+
+    [Fact]
+    public async Task LegacyCompatibilityUsesFileTimestampsAndMergesIntoOneCatalogOnUpdate()
+    {
+        var store = Store;
+        var epoch = DateTimeOffset.UtcNow.AddDays(-10);
+        var legacy = new[]
+        {
+            await WriteLegacyCompatibilityAsync("ffff-recognition.json", new(GameId, "Game", "识别", "one", "not-tested"), epoch),
+            await WriteLegacyCompatibilityAsync("eeee-trial.json", new(GameId, "Game", "试译", "one", "passed"), epoch.AddHours(1)),
+            await WriteLegacyCompatibilityAsync("dddd-recognition.json", new(GameId, "Game", "识别", "two", "not-tested"), epoch.AddHours(3)),
+            await WriteLegacyCompatibilityAsync("aaaa-trial.json", new(GameId, "Game", "试译", "two", "passed"), epoch.AddHours(2)),
+            await WriteLegacyCompatibilityAsync("bbbb-same-title.json", new("another-id", "Game", "独立游戏", "one", "passed"), epoch)
+        };
+        var diagnostics = new List<string>();
+        var read = store.ReadCatalog([], diagnostics: diagnostics).SelectMany(entry => entry.Games).ToArray();
+        Assert.Empty(diagnostics);
+        Assert.Equal(2, read.Length);
+        var latest = Assert.Single(read, game => game.GameId == GameId);
+        Assert.Equal("two", latest.AdapterVersion);
+        Assert.Equal("识别", latest.Variant); // The newest observation can precede trial translation.
+        Assert.Equal("not-tested", latest.StructureStatus);
+        Assert.Equal(epoch.AddHours(3), latest.UpdatedAt);
+        Assert.All(legacy, file => Assert.True(File.Exists(file)));
+        var rebuiltLegacy = Assert.Single((await store.ReadEngineLibraryAsync([], Data)).Families);
+        Assert.Equal(2, rebuiltLegacy.Games.Count);
+        Assert.Equal(latest, Assert.Single(rebuiltLegacy.Games, game => game.GameId == GameId));
+
+        await store.RecordCompatibilityAsync(Family, new("third-id", "Third game", "新记录", "three", "passed"));
+        var directory = Path.GetDirectoryName(legacy[0])!;
+        var catalogPath = Assert.Single(Directory.GetFiles(directory));
+        Assert.Equal("games.json", Path.GetFileName(catalogPath));
+        var contents = await File.ReadAllTextAsync(catalogPath);
+        Assert.DoesNotContain("sourceHashes", contents);
+        Assert.DoesNotContain("original-resource-hash", contents);
+        Assert.DoesNotContain("patchDirectory", contents);
+        Assert.DoesNotContain("old-patch-path", contents);
+        Assert.DoesNotContain("\"game\":", contents);
+        Assert.Equal(3, store.ReadCatalog([]).SelectMany(entry => entry.Games).Count());
+        Assert.Equal(latest, Assert.Single(store.ReadCatalog([]).SelectMany(entry => entry.Games), game => game.GameId == GameId));
+        Assert.Equal(3, Assert.Single((await store.ReadEngineLibraryAsync([], Data)).Families).Games.Count);
+        File.Delete(Path.Combine(store.RootDirectory, "library-index.json"));
+        var rebuilt = await store.ReadEngineLibraryAsync([], Data);
+        Assert.Empty(rebuilt.Diagnostics);
+        Assert.Equal(3, Assert.Single(rebuilt.Families).Games.Count);
+    }
+
+    [Fact]
+    public async Task LegacyExplicitTimestampTakesPrecedenceOverFileTimestamp()
+    {
+        var store = Store;
+        var epoch = DateTimeOffset.UtcNow.AddDays(-10);
+        await WriteLegacyCompatibilityAsync("older-file.json", new(GameId, "Game", "explicit", "one", "failed",
+            UpdatedAt: epoch.AddDays(2)), epoch);
+        await WriteLegacyCompatibilityAsync("newer-file.json", new(GameId, "Game", "implicit", "two", "passed"), epoch.AddDays(1));
+        var latest = Assert.Single(Assert.Single(store.ReadCatalog([])).Games);
+        Assert.Equal("explicit", latest.Variant);
+        await store.RecordCompatibilityAsync(Family, new("other", "Other", "", "one", "passed"));
+        Assert.Equal(latest, Assert.Single(store.ReadCatalog([]).SelectMany(entry => entry.Games), game => game.GameId == GameId));
+    }
+
+    [Fact]
+    public async Task CatalogAndOldIndexPreferTheLatestTimestampThenTheLastEqualTimestamp()
+    {
+        var store = Store;
+        var epoch = DateTimeOffset.UtcNow.AddDays(-1);
+        var first = new GameCompatibility(GameId, "Game", "first", "one", "passed", UpdatedAt: epoch);
+        var older = first with { Variant = "older", AdapterVersion = "two", UpdatedAt = epoch.AddHours(-1) };
+        var last = first with { Variant = "last", AdapterVersion = "three", StructureStatus = "failed" };
+        await LocalFiles.WriteJsonAsync(Path.Combine(store.RootDirectory, "catalog", Family.AdapterId, "games.json"),
+            new { family = Family, games = new[] { first, older, last } });
+        Assert.Equal(last, Assert.Single(Assert.Single(store.ReadCatalog([])).Games));
+        var family = Assert.Single((await store.ReadEngineLibraryAsync([], Data)).Families);
+        Assert.Equal(last, Assert.Single(family.Games));
+
+        var indexPath = Path.Combine(store.RootDirectory, "library-index.json");
+        var index = System.Text.Json.Nodes.JsonNode.Parse(await File.ReadAllTextAsync(indexPath))!;
+        var games = index["families"]![Family.AdapterId]!["games"]!.AsArray();
+        games.Insert(0, System.Text.Json.JsonSerializer.SerializeToNode(older, LocalFiles.JsonOptions));
+        var final = last with { Variant = "last-in-old-index" };
+        games.Add(System.Text.Json.JsonSerializer.SerializeToNode(final, LocalFiles.JsonOptions));
+        await File.WriteAllTextAsync(indexPath, index.ToJsonString());
+        var normalized = Assert.Single((await store.ReadEngineLibraryAsync([], Data)).Families);
+        Assert.Equal(final, Assert.Single(normalized.Games));
+    }
+
+    [Theory]
+    [InlineData("{damaged")]
+    [InlineData("{}")]
+    [InlineData("{\"family\":null,\"games\":[]}")]
+    [InlineData("{\"family\":{\"kind\":\"engine\",\"key\":\"other\",\"name\":\"Other\"},\"games\":[]}")]
+    [InlineData("{\"family\":{\"kind\":\"engine\",\"key\":\"library-fixture\",\"name\":\"Fixture\"},\"games\":[{}]}")]
+    public async Task DamagedCatalogIsReportedAndNeverOverwritten(string contents)
+    {
+        var store = Store;
+        var legacyPath = await WriteLegacyCompatibilityAsync("legacy.json", new(GameId, "Game", "", "one", "passed"), DateTimeOffset.UtcNow);
+        var catalogPath = Path.Combine(Path.GetDirectoryName(legacyPath)!, "games.json");
+        await File.WriteAllTextAsync(catalogPath, contents);
+        var diagnostics = new List<string>();
+        Assert.Empty(store.ReadCatalog([], diagnostics: diagnostics));
+        Assert.Contains("games.json", Assert.Single(diagnostics));
+        var error = await Assert.ThrowsAsync<InvalidDataException>(() =>
+            store.RecordCompatibilityAsync(Family, new(GameId, "Game", "new", "two", "passed")));
+        Assert.Contains("games.json", error.Message);
+        Assert.Equal(contents, await File.ReadAllTextAsync(catalogPath));
+        Assert.True(File.Exists(legacyPath));
+    }
+
+    [Theory]
+    [InlineData("json")]
+    [InlineData("family")]
+    [InlineData("game")]
+    public async Task InvalidLegacyRecordStopsMigrationAndRetainsAllOriginalFiles(string damage)
+    {
+        var store = Store;
+        var valid = await WriteLegacyCompatibilityAsync("valid.json", new(GameId, "Game", "", "one", "passed"), DateTimeOffset.UtcNow);
+        var invalid = await WriteLegacyCompatibilityAsync("invalid.json", new("other", "Other", "", "one", "passed"), DateTimeOffset.UtcNow);
+        var contents = System.Text.Json.Nodes.JsonNode.Parse(await File.ReadAllTextAsync(invalid))!;
+        if (damage == "family") contents["family"]!["key"] = "different";
+        else if (damage == "game") contents["game"]!.AsObject().Remove("title");
+        await File.WriteAllTextAsync(invalid, damage == "json" ? "{damaged" : contents.ToJsonString());
+        var originals = new[] { valid, invalid }.ToDictionary(file => file, File.ReadAllBytes);
+        var diagnostics = new List<string>();
+        Assert.Single(store.ReadCatalog([], diagnostics: diagnostics));
+        Assert.Contains("invalid.json", Assert.Single(diagnostics));
+        var error = await Assert.ThrowsAsync<InvalidDataException>(() =>
+            store.RecordCompatibilityAsync(Family, new(GameId, "Game", "new", "two", "passed")));
+        Assert.Contains("invalid.json", error.Message);
+        Assert.False(File.Exists(Path.Combine(Path.GetDirectoryName(valid)!, "games.json")));
+        foreach (var (file, original) in originals) Assert.Equal(original, await File.ReadAllBytesAsync(file));
+    }
+
+    [Fact]
+    public async Task ExistingCatalogUpdatesAndReadsDoNotOpenLeftoverLegacyFiles()
+    {
+        var store = Store;
+        await store.RecordCompatibilityAsync(Family, new(GameId, "Game", "", "one", "passed"));
+        var leftover = Path.Combine(store.RootDirectory, "catalog", Family.AdapterId, "leftover.json");
+        await File.WriteAllTextAsync(leftover, "{damaged");
+        await store.RecordCompatibilityAsync(Family, new(GameId, "Game", "updated", "two", "failed"));
+        var diagnostics = new List<string>();
+        Assert.Equal("updated", Assert.Single(Assert.Single(store.ReadCatalog([], diagnostics: diagnostics)).Games).Variant);
+        Assert.Empty(diagnostics);
+        Assert.Equal("{damaged", await File.ReadAllTextAsync(leftover));
+        File.Delete(Path.Combine(store.RootDirectory, "library-index.json"));
+        var rebuilt = await store.ReadEngineLibraryAsync([], Data);
+        Assert.Empty(rebuilt.Diagnostics);
+        Assert.Single(Assert.Single(rebuilt.Families).Games);
     }
 
     [Fact]
@@ -329,6 +493,23 @@ public sealed class EngineLibraryTests : IDisposable
             await LocalFiles.HashFileAsync(Path.Combine(directory, "Program.cs")),
             await LocalFiles.HashFileAsync(Path.Combine(directory, "adapter.dll")), Family);
         return await Store.PublishAndActivateAsync(GameId, package, []);
+    }
+
+    private async Task<string> WriteLegacyCompatibilityAsync(string fileName, GameCompatibility game, DateTimeOffset modifiedAt)
+    {
+        var path = Path.Combine(Store.RootDirectory, "catalog", Family.AdapterId, fileName);
+        await LocalFiles.WriteJsonAsync(path, new
+        {
+            family = Family,
+            game = new
+            {
+                game.GameId, game.Title, game.Variant, game.AdapterVersion, game.StructureStatus, game.RuntimeStatus, game.UpdatedAt,
+                sourceHashes = new Dictionary<string, string> { ["script.dat"] = "original-resource-hash" },
+                patchDirectory = "old-patch-path"
+            }
+        });
+        File.SetLastWriteTimeUtc(path, modifiedAt.UtcDateTime);
+        return path;
     }
 
     public void Dispose()
