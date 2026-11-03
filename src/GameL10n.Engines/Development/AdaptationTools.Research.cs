@@ -9,16 +9,24 @@ namespace GameL10n.Core.Development;
 public sealed partial class AdaptationTools
 {
     private const string ReferenceRoot = "https://raw.githubusercontent.com/GalTransl/GalTransl-GalGameReverse-Skill/main/";
-    // At most four documents / 12M characters for this tools instance, with no project-side download cache.
+    // Keep only bounded decoded documents in memory; raw downloads are shared outside project workspaces.
     private readonly Dictionary<string, ResearchDocument> researchDocuments = new(StringComparer.Ordinal);
-    private sealed record ResearchDocument(string Content, string ContentSha256, DateTimeOffset RetrievedAt, bool UpstreamTruncated);
+    private sealed record ResearchDocument(string Content, string ContentSha256, DateTimeOffset RetrievedAt, bool UpstreamTruncated,
+        bool Reused = false, bool Stale = false, long Bytes = 0);
 
-    private async Task<ResearchDocument> ReadResearchAsync(string url, CancellationToken ct)
+    private async Task<ResearchDocument> ReadResearchAsync(string url, CancellationToken ct, bool refresh = false,
+        int maximumBytes = 8 * 1024 * 1024)
     {
-        if (researchDocuments.TryGetValue(url, out var cached)) return cached;
-        using var response = await GetAsync(new(url), ct);
-        var content = await ReadResponseAsync(response, 8 * 1024 * 1024, ct);
-        if (response.Content.Headers.ContentType?.MediaType == "text/html")
+        ct.ThrowIfCancellationRequested();
+        if (!refresh && researchDocuments.TryGetValue(url, out var cached)
+            && (cached.Stale || DateTimeOffset.UtcNow - cached.RetrievedAt <= ReferenceCacheLifetime))
+        {
+            if (cached.Bytes > maximumBytes) throw DownloadTooLarge(maximumBytes);
+            return cached with { Reused = true };
+        }
+        var download = await ReadPublicDownloadAsync(url, maximumBytes, refresh, ReferenceCacheLifetime, ct);
+        var content = Encoding.UTF8.GetString(await File.ReadAllBytesAsync(download.Path, ct));
+        if (download.Source.MediaType == "text/html")
         {
             content = Regex.Replace(content, @"<(script|style)\b[^>]*>[\s\S]*?</\1>", "", RegexOptions.IgnoreCase, TimeSpan.FromSeconds(1));
             content = WebUtility.HtmlDecode(Regex.Replace(content, "<[^>]+>", " ", RegexOptions.None, TimeSpan.FromSeconds(1)));
@@ -32,7 +40,7 @@ public sealed partial class AdaptationTools
                 && json.RootElement.TryGetProperty("truncated", out var flag) && flag.ValueKind == JsonValueKind.True;
         }
         var document = new ResearchDocument(content, Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(content))),
-            DateTimeOffset.UtcNow, upstreamTruncated);
+            download.Source.RetrievedAt, upstreamTruncated, download.Reused, download.Stale, download.Source.Bytes);
         while (researchDocuments.Count > 0 && (researchDocuments.Count >= 4
             || researchDocuments.Values.Sum(item => item.Content.Length) + content.Length > 12 * 1024 * 1024))
             researchDocuments.Remove(researchDocuments.Keys.First());
@@ -45,7 +53,7 @@ public sealed partial class AdaptationTools
         var url = Text(args, "url");
         var query = Text(args, "query", "");
         if (query.Length > 256) throw new InvalidDataException("检索条件不能超过 256 字符。");
-        var document = await ReadResearchAsync(url, ct);
+        var document = await ReadResearchAsync(url, ct, Boolean(args, "refresh", false));
         var content = document.Content;
         var offset = Number(args, "offset", 0, 0, content.Length);
         var length = Number(args, "length", 12000, 1, 24000);
@@ -53,7 +61,7 @@ public sealed partial class AdaptationTools
         if (query.Length == 0)
         {
             var nextOffset = Math.Min(content.Length, offset + length);
-            return new { url, document.ContentSha256, document.RetrievedAt, document.UpstreamTruncated,
+            return new { url, document.ContentSha256, document.RetrievedAt, document.UpstreamTruncated, document.Reused, document.Stale,
                 totalCharacters = content.Length, offset, nextOffset, more = nextOffset < content.Length,
                 content = content[offset..nextOffset] };
         }
@@ -70,7 +78,7 @@ public sealed partial class AdaptationTools
             remaining -= count;
             position = found + query.Length;
         }
-        return new { url, document.ContentSha256, document.RetrievedAt, document.UpstreamTruncated,
+        return new { url, document.ContentSha256, document.RetrievedAt, document.UpstreamTruncated, document.Reused, document.Stale,
             totalCharacters = content.Length, query, matches, nextOffset = position,
             more = position < content.Length && content.IndexOf(query, position, StringComparison.OrdinalIgnoreCase) >= 0 };
     }
@@ -96,7 +104,7 @@ public sealed partial class AdaptationTools
             if (pin is not null && File.Exists(EngineToolkit.LibraryPath(pin)))
             {
                 var content = EngineToolkit.Read(pin, "catalog/engines.json");
-                document = new(content, Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(content))), DateTimeOffset.UtcNow, false);
+                document = new(content, Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(content))), DateTimeOffset.UtcNow, false, Reused: true);
                 selectedRoot = ReferenceRoot.Replace("/main/", "/" + pin.Revision + "/", StringComparison.Ordinal);
                 url = selectedRoot + "catalog/engines.json";
             }
@@ -127,7 +135,7 @@ public sealed partial class AdaptationTools
         return new
         {
             query, status = error is null ? "queried" : "unavailable", error,
-            indexUrl = url, document?.ContentSha256, document?.RetrievedAt, totalMatches, matches,
+            indexUrl = url, document?.ContentSha256, document?.RetrievedAt, document?.Reused, document?.Stale, totalMatches, matches,
             more = totalMatches > matches.Length,
             guidance = ReferenceGuidance(key),
             furtherResearch = new
@@ -136,7 +144,7 @@ public sealed partial class AdaptationTools
                 formatNotes = ReferenceRoot + "catalog/format-research.md", provenance = ReferenceRoot + "provenance/NOTICE.md",
                 sources = ReferenceRoot + "provenance/sources.json"
             },
-            usage = "资料命中不代表已验证支持。优先 inspect_engine_reference(engine=id) 读取当前引擎指南与 API；首次下载版本固定的共享源码库，之后所有项目本地复用。"
+            usage = "资料命中不代表已验证支持。优先 inspect_engine_reference(engine=id) 读取当前引擎指南与 API；固定版本共享源码库随完整发行包提供，所有项目本地复用，不在分析时补下载。"
                 + "用 run_engine_python 调用现成 Python 模块验证样本，避免阅读/改写整套算法；use_engine_reference 可供正式适配器复用。"
                 + "共享库不可用时可按 documentUrl 在线调查。未命中不代表不支持；可按 formats/registrations 继续查实际魔数。"
                 + "按文件核对许可并保留来源；不自动部署 UIF、字体或 hook DLL。"

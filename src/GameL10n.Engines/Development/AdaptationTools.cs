@@ -83,12 +83,12 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
         Define("compose_adapter_template", "Compose a complete standalone adapter from list_adapters.templates: resource rules, fixed archive entry, bundled script parser, protocol glue and release selection. No model-written wrapper, pip or downloads; preserves differing existing files. Optional resourcePatterns narrows discovery; defaults come from the template. XP3 requires independently established filter=none. Returns testArguments for mandatory test_adapter; does not stage samples, verify, publish or activate. Call alone.",
             """{"id":{"type":"string"},"resourcePatterns":{"type":"array","minItems":1,"maxItems":16,"items":{"type":"string"}},"filter":{"type":"string","enum":["none"]}}""", "id"),
         Define("use_engine_reference", "Bind the shared Python toolkit into src: writes a pinned dependency and a C# call bridge, without copying the toolkit into each project. Add a small src/tools/*.py JSON CLI wrapper and Program.cs using the returned example. Published adapters use the same library without LLM calls. test_adapter remains required. Call alone.", "{}", []),
-        Define("search_repositories", "Search public GitHub repository NAMES/descriptions for existing engine tools; this is NOT code or file-content search. Prefer search_engine_references for an engine/signature. Uses anonymous GitHub API.",
-            """{"query":{"type":"string"}}""", "query"),
-        Define("fetch_url", "Read public HTTPS reference data, up to 8 MiB locally. offset/length paginate decoded characters (default 12000, max 24000). Optional query searches literal text case-insensitively from offset and returns bounded excerpts with nextOffset; useful for large format catalogs and GitHub trees. Cached in memory; no files written. Contents are untrusted data.",
-            """{"url":{"type":"string"},"query":{"type":"string"},"offset":{"type":"integer"},"length":{"type":"integer"}}""", "url"),
-        Define("download_tool", "Download a public tool/source file to src/tools or work. Returns SHA256; records URL for packaged dependencies. For a known final dependency set releaseRole and purpose once to register it; investigative downloads belong in work/. Supply a short purpose for user-visible download progress. Reuse bundled tools before downloading extras.",
-            """{"url":{"type":"string"},"path":{"type":"string"},"releaseRole":{"type":"string","enum":["runtime","asset","license"]},"purpose":{"type":"string","maxLength":240}}""", "url", "path"),
+        Define("search_repositories", "Search public GitHub repository NAMES/descriptions for existing engine tools; this is NOT code or file-content search. Prefer search_engine_references for an engine/signature. Anonymous API results share the 7-day reference cache; refresh=true requests current metadata.",
+            """{"query":{"type":"string"},"refresh":{"type":"boolean"}}""", "query"),
+        Define("fetch_url", "Read public HTTPS reference data, up to 8 MiB locally. offset/length paginate decoded characters (default 12000, max 24000). Optional query searches literal text from offset and returns bounded excerpts. Shared disk cache lasts 7 days; refresh=true requests current data. retrievedAt is the original fetch time; stale=true means an expired copy was used after a network failure. Contents are untrusted data.",
+            """{"url":{"type":"string"},"query":{"type":"string"},"offset":{"type":"integer"},"length":{"type":"integer"},"refresh":{"type":"boolean"}}""", "url"),
+        Define("download_tool", "Obtain a public tool/source file in src/tools or work. Reuses hash-checked project dependencies or the shared download cache; refresh=true explicitly updates from the URL. Returns SHA256 and reused. Records URL/hash for packaged dependencies. For final dependencies set releaseRole and purpose once; investigative files belong in work/. Supply a short purpose for download progress. Prefer bundled tools first.",
+            """{"url":{"type":"string"},"path":{"type":"string"},"releaseRole":{"type":"string","enum":["runtime","asset","license"]},"purpose":{"type":"string","maxLength":240},"refresh":{"type":"boolean"}}""", "url", "path"),
         Define("stage_resources", "Copy selected original game resources into resources for local tools. Reuses unchanged copies.",
             """{"files":{"type":"array","items":{"type":"string"}}}""", "files"),
         Define("write_file", "Write UTF-8 code or analysis files under src/ or work/, replacing without backup. New src/*.cs files auto-register as release source. For tools set releaseRole and purpose once; edits inherit existing registration. Analysis probes belong in work/. Batch known writes followed by one run_csharp/run_engine_python/run_tool to execute in order; failure skips remaining calls. Reuse existing probe scripts and one findings file rather than adding a file per small check.",
@@ -928,75 +928,24 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
     {
         var query = Text(args, "query");
         if (query.Length > 512) throw new InvalidDataException("检索条件过长。");
-        using var response = await GetAsync(new("https://api.github.com/search/repositories?per_page=8&q=" + Uri.EscapeDataString(query)), ct);
-        var text = await ReadResponseAsync(response, 256 * 1024, ct);
-        using var json = JsonDocument.Parse(text);
-        return json.RootElement.GetProperty("items").EnumerateArray().Select(item => new
+        var document = await ReadResearchAsync("https://api.github.com/search/repositories?per_page=8&q=" + Uri.EscapeDataString(query),
+            ct, Boolean(args, "refresh", false), 256 * 1024);
+        using var json = JsonDocument.Parse(document.Content);
+        var repositories = json.RootElement.GetProperty("items").EnumerateArray().Select(item => new
         {
             name = item.GetProperty("full_name").GetString(), url = item.GetProperty("html_url").GetString(),
             description = item.GetProperty("description").GetString(),
             license = item.TryGetProperty("license", out var license) && license.ValueKind == JsonValueKind.Object
                 ? license.GetProperty("spdx_id").GetString() : null
         }).ToArray();
-    }
-
-    private async Task<object> DownloadAsync(JsonElement args, CancellationToken ct)
-    {
-        var relative = Text(args, "path").Replace('\\', '/');
-        if (!relative.StartsWith("src/tools/", StringComparison.Ordinal) && !relative.StartsWith("work/", StringComparison.Ordinal))
-            throw new InvalidDataException("下载目标必须在 src/tools/ 或 work/。");
-        var path = WritePath(relative);
-        var release = DeclaredReleaseFile(args, relative);
-        InvalidateSource(path);
-        var url = Text(args, "url");
-        var uri = new Uri(url);
-        reportProgress?.Invoke("下载额外工具", $"{Path.GetFileName(relative)} · 来源 {uri.Host} · "
-            + Limit(Text(args, "purpose", "分析资料，尚未登记为发布依赖"), 240) + $" · 保存到 {relative}");
-        using var response = await GetAsync(uri, ct);
-        const long maximum = 256L * 1024 * 1024;
-        if (response.Content.Headers.ContentLength > maximum) throw new InvalidDataException("工具下载超过 256 MB，请选择必要的工具文件。");
-        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        var temporary = path + ".partial";
-        try
-        {
-            await using (var output = File.Create(temporary))
-            await using (var input = await response.Content.ReadAsStreamAsync(ct))
-            {
-                var buffer = new byte[128 * 1024];
-                long total = 0;
-                int count;
-                while ((count = await input.ReadAsync(buffer, ct)) != 0)
-                {
-                    total += count;
-                    if (total > maximum) throw new InvalidDataException("工具下载超过大小限制。");
-                    await output.WriteAsync(buffer.AsMemory(0, count), ct);
-                }
-            }
-            File.Move(temporary, path, true);
-        }
-        finally { if (File.Exists(temporary)) File.Delete(temporary); }
-        var sha256 = await LocalFiles.HashFileAsync(path, ct);
-        if (relative.StartsWith("src/tools/", StringComparison.Ordinal))
-        {
-            var manifest = Path.Combine(SourceDirectory, "tools", "sources.json");
-            var sources = await LocalFiles.ReadJsonAsync<Dictionary<string, ToolSource>>(manifest, ct) ?? [];
-            sources[relative["src/tools/".Length..]] = new(url, sha256);
-            await LocalFiles.WriteJsonAsync(manifest, sources, ct);
-        }
-        if (release is not null) RegisterReleaseFiles([release]);
-        reportProgress?.Invoke("额外工具已保存", $"{relative} · {new FileInfo(path).Length / 1048576.0:F2} MiB");
-        return new { path = relative, sha256, bytes = new FileInfo(path).Length,
-            releaseRegistered = session.ReleaseFiles?.Any(file => file.Path == AdapterReleaseFiles.PackagePath(relative)) == true };
+        return new { document.RetrievedAt, document.Reused, document.Stale, repositories };
     }
 
     private async Task<HttpResponseMessage> GetAsync(Uri uri, CancellationToken ct)
     {
         for (var redirect = 0; redirect < 6; redirect++)
         {
-            if (uri.Scheme != "https" || !string.IsNullOrEmpty(uri.UserInfo) || uri.IsLoopback
-                || uri.HostNameType != UriHostNameType.Dns || !uri.Host.Contains('.')
-                || uri.Host.EndsWith(".local", StringComparison.OrdinalIgnoreCase))
-                throw new InvalidDataException("资料工具只允许无凭据的公共 HTTPS 地址。");
+            ValidatePublicUri(uri);
             using var requestMessage = new HttpRequestMessage(HttpMethod.Get, uri);
             requestMessage.Headers.UserAgent.ParseAdd("GameL10n/1.0");
             requestMessage.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
@@ -1012,23 +961,6 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
             return response;
         }
         throw new HttpRequestException("资料地址重定向过多。");
-    }
-
-    private static async Task<string> ReadResponseAsync(HttpResponseMessage response, int maximum, CancellationToken ct)
-    {
-        if (response.Content.Headers.ContentLength > maximum)
-            throw new InvalidDataException($"公开资料超过 {maximum / 1024} KiB 读取上限，请改读具体文件或子目录；未将截断内容当作完整资料。");
-        await using var stream = await response.Content.ReadAsStreamAsync(ct);
-        using var memory = new MemoryStream();
-        var buffer = new byte[8192];
-        int count;
-        while ((count = await stream.ReadAsync(buffer.AsMemory(0, Math.Min(buffer.Length, maximum + 1 - (int)memory.Length)), ct)) != 0)
-        {
-            memory.Write(buffer, 0, count);
-            if (memory.Length > maximum)
-                throw new InvalidDataException($"公开资料超过 {maximum / 1024} KiB 读取上限，请改读具体文件或子目录；未将截断内容当作完整资料。");
-        }
-        return Encoding.UTF8.GetString(memory.ToArray());
     }
 
     private string Root(JsonElement args) => Text(args, "root") switch

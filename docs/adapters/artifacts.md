@@ -106,6 +106,9 @@ C# 源码由宿主编译为 `adapter.dll`，通过应用附带的 .NET 工具链
 | `extensions/library-index.json` | 引擎库展示摘要，可重建，不替代运行校验 |
 | `<应用目录>/tools/engine-tools/` | 发行包附带的固定版本引擎工具库与便携 Python，直接读取 |
 | `extensions/engine-tools/` | 已安装的共享工具版本、VNTextPatch 按内容哈希保存的 DLL 与许可，不逐项目复制 |
+| `extensions/downloads/` | 额外工具与公开资料的共享缓存，保存 URL、内容哈希与获取时间；工作区和正式包使用独立工具副本 |
+
+`extensions/downloads/` 可单独清理，不影响已经复制到工作区或正式包的额外工具；之后再次需要相应内容时须重新获取。它不替代适配器的发布依赖清单，也不参与适配器运行。
 
 使用共享 Python 引擎库或 VNTextPatch 的适配器，会在包内保存固定依赖记录和调用桥，实际工具位于发行包或 `extensions/engine-tools/`。这类正式适配器并非仅复制自己的包目录就能独立执行；共享工具也不能一概视为临时下载文件。完整依赖准备方式见[智能适配](automatic-adaptation.md)。
 

@@ -22,7 +22,7 @@ internal static class AdaptationTrace
         foreach (var name in new[] { "root", "path", "script", "directory", "format", "engine", "id", "version", "key", "kind", "executable", "toolCallId", "addressKind", "encoding", "releaseRole", "purpose" })
             if (args.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String)
                 fields[name] = Limit(value.GetString()!, 240);
-        foreach (var name in new[] { "offset", "length", "limit", "instructionLimit", "timeoutSeconds", "discoveryOnly", "checkRoundtrip", "refreshCandidates", "canContinueLocally" })
+        foreach (var name in new[] { "offset", "length", "limit", "instructionLimit", "timeoutSeconds", "discoveryOnly", "checkRoundtrip", "refreshCandidates", "refresh", "canContinueLocally" })
             if (args.TryGetProperty(name, out var value) && value.ValueKind is JsonValueKind.Number or JsonValueKind.True or JsonValueKind.False)
                 fields[name] = value.Clone();
         if (args.TryGetProperty("url", out var url) && url.ValueKind == JsonValueKind.String
@@ -53,7 +53,7 @@ internal static class AdaptationTrace
         using var document = JsonDocument.Parse(output);
         if (document.RootElement.TryGetProperty("result", out var result) && result.ValueKind == JsonValueKind.Object)
         {
-            foreach (var name in new[] { "passed", "stage", "compiled", "changed", "unitCount", "status", "stopped", "more", "nextOffset", "totalCharacters", "queryFound", "totalMatches", "failedRanges", "compileMs", "discoveryMs", "verificationMs", "encoding", "bytes", "sha256", "releaseRegistered" })
+            foreach (var name in new[] { "passed", "stage", "compiled", "changed", "reused", "stale", "unitCount", "status", "stopped", "more", "nextOffset", "totalCharacters", "queryFound", "totalMatches", "failedRanges", "compileMs", "discoveryMs", "verificationMs", "encoding", "bytes", "sha256", "releaseRegistered" })
                 if (result.TryGetProperty(name, out var value) && value.ValueKind is JsonValueKind.True or JsonValueKind.False or JsonValueKind.Number or JsonValueKind.String)
                     fields[name] = value.ValueKind == JsonValueKind.String ? Limit(value.GetString()!, 160) : value.Clone();
             if (result.TryGetProperty("matches", out var matches) && matches.ValueKind == JsonValueKind.Array)

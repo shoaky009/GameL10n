@@ -591,7 +591,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
     }
 
     [Fact]
-    public async Task EngineReferenceLookupSeparatesRelatedFormatsAndReusesIndexWithoutFiles()
+    public async Task EngineReferenceLookupSeparatesRelatedFormatsAndReusesIndexWithoutWorkspaceFiles()
     {
         var requests = 0;
         using var client = new HttpClient(new ResearchHandler(_ =>
@@ -651,13 +651,16 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
     {
         var content = new string('x', 600_000) + " BSScript Rev.6 first " + new string('y', 30_000) + " BSScript Rev.6 second ";
         var requests = 0;
+        var unavailable = false;
         using var client = new HttpClient(new ResearchHandler(_ =>
         {
             requests++;
-            return new(System.Net.HttpStatusCode.OK) { Content = new StringContent(content) };
+            return unavailable ? new(System.Net.HttpStatusCode.ServiceUnavailable)
+                : new(System.Net.HttpStatusCode.OK) { Content = new StringContent(content) };
         }));
+        var store = new LocalAdapterPackageStore(Path.Combine(root, "store"));
         var tools = new AdaptationTools(Request(), new(), Path.Combine(root, "workspace"), Compiler(new ScriptedRunner()),
-            new LocalAdapterPackageStore(Path.Combine(root, "store")), client);
+            store, client);
         using var first = JsonDocument.Parse(await tools.ExecuteAsync(new("read", "fetch_url",
             """{"url":"https://example.com/formats.json","query":"BSScript Rev.6","length":100}"""), default));
         var result = first.RootElement.GetProperty("result");
@@ -673,6 +676,119 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
             { url = "https://example.com/formats.json", offset = 600_000, length = 21 })), default));
         Assert.Equal(content.Substring(600_000, 21), slice.RootElement.GetProperty("result").GetProperty("content").GetString());
         Assert.Equal(1, requests);
+
+        // A different project/tool instance reuses the persisted document and its actual fetch time.
+        var resumed = new AdaptationTools(Request(), new(), Path.Combine(root, "other-workspace"), Compiler(new ScriptedRunner()), store, client);
+        using var persisted = JsonDocument.Parse(await resumed.ExecuteAsync(new("persisted", "fetch_url",
+            """{"url":"https://example.com/formats.json","length":21}"""), default));
+        Assert.True(persisted.RootElement.GetProperty("result").GetProperty("reused").GetBoolean());
+        Assert.Equal(result.GetProperty("retrievedAt").GetString(), persisted.RootElement.GetProperty("result").GetProperty("retrievedAt").GetString());
+        Assert.Equal(1, requests);
+
+        var receiptPath = Assert.Single(Directory.GetFiles(Path.Combine(store.RootDirectory, "downloads"), "source.json", SearchOption.AllDirectories));
+        var receipt = System.Text.Json.Nodes.JsonNode.Parse(await File.ReadAllTextAsync(receiptPath))!;
+        var expiredAt = DateTimeOffset.UtcNow.AddDays(-8);
+        receipt["retrievedAt"] = expiredAt;
+        await File.WriteAllTextAsync(receiptPath, receipt.ToJsonString());
+        unavailable = true;
+        resumed = new(Request(), new(), Path.Combine(root, "other-workspace"), Compiler(new ScriptedRunner()), store, client);
+        using var stale = JsonDocument.Parse(await resumed.ExecuteAsync(new("offline", "fetch_url",
+            """{"url":"https://example.com/formats.json","length":21}"""), default));
+        Assert.True(stale.RootElement.GetProperty("result").GetProperty("stale").GetBoolean());
+        Assert.Equal(expiredAt, stale.RootElement.GetProperty("result").GetProperty("retrievedAt").GetDateTimeOffset());
+        Assert.Equal(2, requests);
+        await Assert.ThrowsAsync<HttpRequestException>(() => resumed.ExecuteAsync(new("refresh-failed", "fetch_url",
+            """{"url":"https://example.com/formats.json","refresh":true}"""), default));
+        Assert.Equal(3, requests);
+        unavailable = false;
+        content = "updated source";
+        using var fresh = JsonDocument.Parse(await resumed.ExecuteAsync(new("refresh", "fetch_url",
+            """{"url":"https://example.com/formats.json","refresh":true}"""), default));
+        Assert.Equal("updated source", fresh.RootElement.GetProperty("result").GetProperty("content").GetString());
+        Assert.False(fresh.RootElement.GetProperty("result").GetProperty("reused").GetBoolean());
+        Assert.False(fresh.RootElement.GetProperty("result").GetProperty("stale").GetBoolean());
+        Assert.Equal(4, requests);
+        Assert.False(Directory.Exists(Path.Combine(root, "workspace")));
+        Assert.False(Directory.Exists(Path.Combine(root, "other-workspace")));
+    }
+
+    [Fact]
+    public async Task ToolDownloadsShareVerifiedCopiesWithoutChangingExistingProjectPins()
+    {
+        var requests = 0;
+        var body = "tool version one";
+        var unavailable = false;
+        using var client = new HttpClient(new ResearchHandler(_ =>
+        {
+            requests++;
+            return unavailable ? new(System.Net.HttpStatusCode.ServiceUnavailable)
+                : new(System.Net.HttpStatusCode.OK) { Content = new StringContent(body) };
+        }));
+        var store = new LocalAdapterPackageStore(Path.Combine(root, "store"));
+        var firstWorkspace = Path.Combine(root, "first-workspace");
+        var secondWorkspace = Path.Combine(root, "second-workspace");
+        var firstState = new AdaptationSession();
+        var first = new AdaptationTools(Request(), firstState, firstWorkspace, Compiler(new ScriptedRunner()), store, client);
+        var second = new AdaptationTools(Request(), new(), secondWorkspace, Compiler(new ScriptedRunner()), store, client);
+        var download = new AgentToolCall("download", "download_tool", """
+            {"url":"https://example.com/tool.bin","path":"src/tools/tool.bin","releaseRole":"runtime","purpose":"Fixture parser"}
+            """);
+        var copies = await Task.WhenAll(first.ExecuteAsync(download, default), second.ExecuteAsync(download, default));
+        Assert.Equal(1, requests);
+        using var firstCopy = JsonDocument.Parse(copies[0]);
+        using var secondCopy = JsonDocument.Parse(copies[1]);
+        Assert.NotEqual(firstCopy.RootElement.GetProperty("result").GetProperty("reused").GetBoolean(),
+            secondCopy.RootElement.GetProperty("result").GetProperty("reused").GetBoolean());
+        var originalHash = LocalFiles.HashText(body);
+        var firstPath = Path.Combine(firstWorkspace, "src", "tools", "tool.bin");
+        var secondPath = Path.Combine(secondWorkspace, "src", "tools", "tool.bin");
+        Assert.Equal(body, await File.ReadAllTextAsync(firstPath));
+        Assert.Contains(firstState.ReleaseFiles!, file => file.Path == "tools/tool.bin" && file.Role == "runtime");
+        using var provenance = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(firstWorkspace, "src", "tools", "sources.json")));
+        Assert.Equal(originalHash, provenance.RootElement.GetProperty("tool.bin").GetProperty("sha256").GetString());
+
+        // Updating another project does not update an existing project's fixed tool.
+        body = "tool version two";
+        var refresh = download with { Arguments = """{"url":"https://example.com/tool.bin","path":"src/tools/tool.bin","refresh":true}""" };
+        await second.ExecuteAsync(refresh, default);
+        await first.ExecuteAsync(download, default);
+        Assert.Equal(2, requests);
+        Assert.Equal("tool version one", await File.ReadAllTextAsync(firstPath));
+        Assert.Equal("tool version two", await File.ReadAllTextAsync(secondPath));
+        File.Delete(firstPath);
+        await first.ExecuteAsync(download, default);
+        Assert.Equal("tool version one", await File.ReadAllTextAsync(firstPath));
+        Assert.Equal(2, requests);
+
+        // Failed refreshes leave the usable file and the last completed cache receipt intact.
+        unavailable = true;
+        await Assert.ThrowsAsync<HttpRequestException>(() => second.ExecuteAsync(refresh, default));
+        await second.ExecuteAsync(download, default);
+        Assert.Equal(3, requests);
+        Assert.Equal("tool version two", await File.ReadAllTextAsync(secondPath));
+        unavailable = false;
+
+        // Cache corruption is repaired from upstream, never copied to a new project.
+        var cacheRoot = Path.Combine(store.RootDirectory, "downloads");
+        var currentBlob = Assert.Single(Directory.GetFiles(cacheRoot, LocalFiles.HashText(body) + ".bin", SearchOption.AllDirectories));
+        await File.WriteAllTextAsync(currentBlob, new string('x', body.Length));
+        var thirdWorkspace = Path.Combine(root, "third-workspace");
+        var third = new AdaptationTools(Request(), new(), thirdWorkspace, Compiler(new ScriptedRunner()), store, client);
+        await third.ExecuteAsync(download, default);
+        Assert.Equal(4, requests);
+        Assert.Equal(body, await File.ReadAllTextAsync(Path.Combine(thirdWorkspace, "src", "tools", "tool.bin")));
+        await third.ExecuteAsync(new("analysis-copy", "download_tool", """{"url":"https://example.com/tool.bin","path":"work/a"}"""), default);
+        Assert.Equal(body, await File.ReadAllTextAsync(Path.Combine(thirdWorkspace, "work", "a")));
+        Assert.Equal(4, requests);
+
+        await File.WriteAllTextAsync(firstPath, "local edit");
+        await Assert.ThrowsAsync<InvalidDataException>(() => first.ExecuteAsync(download, default));
+        Assert.Equal("local edit", await File.ReadAllTextAsync(firstPath));
+        Assert.Equal(4, requests);
+        await first.ExecuteAsync(refresh, default);
+        Assert.Equal(body, await File.ReadAllTextAsync(firstPath));
+        Assert.Equal(5, requests);
+        Assert.Empty(Directory.GetFiles(cacheRoot, "*.partial", SearchOption.AllDirectories));
     }
 
     [Fact]
