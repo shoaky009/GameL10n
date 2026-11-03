@@ -2,14 +2,16 @@
 
 适配能力按引擎或资源结构组织。下表说明格式级支持范围；同名引擎可能有不同封包、脚本、字体和运行时版本，实际使用仍需探测与验证。
 
+具体引擎和内置脚本解析器的说明集中在 `engines/`；通用的识别、智能适配、组件及产物文档保留在本级目录。
+
 | 引擎／模板 | 标识 | 支持范围与条件 |
 | --- | --- | --- |
-| [LiLiM SFA16 / AOS v2 / SCR](sfa16-aos-v2.md) | `engine.sfa16.aos-v2` | AOS v2 中的剧情脚本；中文运行补丁仅用于已登记的 EXE 指纹 |
-| [System4 AIN v14 MSG1 + FNL](system4-ain14-msg1-fnl.md) | `engine.system4-ain14-msg1-fnl` | MSG1 剧情消息、FNL 补字及匹配已登记代码的运行时修补 |
-| [QLIE FilePackVer3.0 + system_fix](qlie-filepack3-systemfont.md) | `engine.qlie-filepack3-systemfont` | 匹配主封包、外置密钥、EXE 密钥资源及字体布局的版本 |
-| [VNTextPatch：22 个引擎系列／29 个脚本格式](vntextpatch.md) | `engine.vntextpatch-*` | 已解包脚本的提取与回填；封包和中文运行条件见格式表 |
-| [Siglus / Scene.pck](siglus.md) | `engine.siglus` | 指定场景布局、已确认显示调用及 FKDS 48/441 字库模板 |
-| [Unity SerializedFile 已确认文本布局](unity-serialized-text.md) | `engine.unity-textasset-dialogue-json` | 已确认的对话 JSON、静态字段与部分动态说明模板，不是通用 Unity 文本解析器 |
+| [LiLiM SFA16 / AOS v2 / SCR](engines/sfa16-aos-v2.md) | `engine.sfa16.aos-v2` | AOS v2 中的剧情脚本；中文运行补丁仅用于已登记的 EXE 指纹 |
+| [System4 AIN v14 MSG1 + FNL](engines/system4-ain14-msg1-fnl.md) | `engine.system4-ain14-msg1-fnl` | MSG1 剧情消息、FNL 补字及匹配已登记代码的运行时修补 |
+| [QLIE FilePackVer3.0 + system_fix](engines/qlie-filepack3-systemfont.md) | `engine.qlie-filepack3-systemfont` | 匹配主封包、外置密钥、EXE 密钥资源及字体布局的版本 |
+| [VNTextPatch：22 个引擎系列／29 个脚本格式](engines/vntextpatch.md) | `engine.vntextpatch-*` | 已解包脚本的提取与回填；封包和中文运行条件见格式表 |
+| [Siglus / Scene.pck](engines/siglus.md) | `engine.siglus` | 指定场景布局、已确认显示调用及 FKDS 48/441 字库模板 |
+| [Unity SerializedFile 已确认文本布局](engines/unity-serialized-text.md) | `engine.unity-textasset-dialogue-json` | 已确认的对话 JSON、静态字段与部分动态说明模板，不是通用 Unity 文本解析器 |
 
 各适配器的结构检查不能证明游戏实际启动、中文显示、分支或存档兼容；安装试译补丁后仍需分别确认。
 

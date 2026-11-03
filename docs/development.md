@@ -17,7 +17,7 @@
 
 工具链打包来源为 `.tools/dotnet`，使用 SDK 10.0.402 与运行时 10.0.13。使用 `-WithoutToolchain` 可省略自动适配工具链；已支持游戏的翻译不需要它。
 
-内置 VNTextPatch 脚本工具随发行包保存在 `tools/vntextpatch`，包含独立 EXE 和必要运行库，不需要安装 SDK。原生运行库直接随包提供，避免每次处理脚本都解压运行时。其上游源码固定版本并随仓库保存，构建时不从 GitHub 动态下载；具体脚本格式与运行限制见[内置脚本适配说明](adapters/vntextpatch.md)。
+内置 VNTextPatch 脚本工具随发行包保存在 `tools/vntextpatch`，包含独立 EXE 和必要运行库，不需要安装 SDK。原生运行库直接随包提供，避免每次处理脚本都解压运行时。其上游源码固定版本并随仓库保存，构建时不从 GitHub 动态下载；具体脚本格式与运行限制见[内置脚本适配说明](adapters/engines/vntextpatch.md)。
 
 同目录的小型 `GameL10n.VnTextPatch.dll` 与 `sources.zip` 用于智能适配复用，发行脚本通过 `scripts/package-vntextpatch-assets.ps1` 生成。源码统一压缩保存，默认开发任务仅保存调用代码与固定版本依赖记录，解析库按内容哈希跨项目共享；需要修改时才展开所选引擎的源码。仅执行桌面项目的 `dotnet build` 不会生成这些发行资产，完整功能验证应使用发行目录。
 
