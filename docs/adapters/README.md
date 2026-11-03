@@ -1,15 +1,19 @@
-# 引擎、资源模板与兼容游戏
+# 引擎与资源模板
 
-适配能力按引擎或资源结构组织，游戏名称仅用于其下的兼容记录。
+适配能力按引擎或资源结构组织。下表说明格式级支持范围；同名引擎可能有不同封包、脚本、字体和运行时版本，实际使用仍需探测与验证。
 
-| 引擎／模板 | 标识 | 已登记游戏 | 验证范围 |
-| --- | --- | --- | --- |
-| [LiLiM SFA16 / AOS v2 / SCR](sfa16-aos-v2.md) | `engine.sfa16.aos-v2` | DARK BLUE：指定 BOX 版本 | 资源回填与结构校验；游戏运行未验证 |
-| [System4 AIN v14 MSG1 + FNL](system4-ain14-msg1-fnl.md) | `engine.system4-ain14-msg1-fnl` | 母爛漫：匹配已登记运行时代码的版本 | 消息回填、中文字形及新 EXE 结构校验；游戏运行未验证 |
-| [QLIE FilePackVer3.0 + system_fix](qlie-filepack3-systemfont.md) | `engine.qlie-filepack3-systemfont` | 美少女万華鏡 -呪われし伝説の少女-：匹配主封包、密钥及字体布局的版本 | 资源回填、中文写入及启动程序结构校验；游戏运行未验证 |
-| [VNTextPatch：22 个引擎系列／29 个脚本格式](vntextpatch.md) | `engine.vntextpatch-*` | 按实际游戏探测及运行验证登记 | 已解包脚本的提取与回填；封包和中文运行条件见格式表，游戏运行未验证 |
-| [Siglus / Scene.pck](siglus.md) | `engine.siglus` | 円交少女２：SiglusEngine 1.1.131.0，FKDS 48/441 字库模板 | 剧情提取、UTF-16 回填、图片字库补字与启动程序结构检查；游戏运行未验证 |
-| [Unity SerializedFile 已确认文本布局](unity-serialized-text.md) | `engine.unity-textasset-dialogue-json` | Tiny Rogues：Unity 2022.3.62f2 指定资源版本 | 对白、静态字段与部分动态说明模板；原文样本及资源回填验证，界面覆盖和实机显示未完成 |
+| 引擎／模板 | 标识 | 支持范围与条件 |
+| --- | --- | --- |
+| [LiLiM SFA16 / AOS v2 / SCR](sfa16-aos-v2.md) | `engine.sfa16.aos-v2` | AOS v2 中的剧情脚本；中文运行补丁仅用于已登记的 EXE 指纹 |
+| [System4 AIN v14 MSG1 + FNL](system4-ain14-msg1-fnl.md) | `engine.system4-ain14-msg1-fnl` | MSG1 剧情消息、FNL 补字及匹配已登记代码的运行时修补 |
+| [QLIE FilePackVer3.0 + system_fix](qlie-filepack3-systemfont.md) | `engine.qlie-filepack3-systemfont` | 匹配主封包、外置密钥、EXE 密钥资源及字体布局的版本 |
+| [VNTextPatch：22 个引擎系列／29 个脚本格式](vntextpatch.md) | `engine.vntextpatch-*` | 已解包脚本的提取与回填；封包和中文运行条件见格式表 |
+| [Siglus / Scene.pck](siglus.md) | `engine.siglus` | 指定场景布局、已确认显示调用及 FKDS 48/441 字库模板 |
+| [Unity SerializedFile 已确认文本布局](unity-serialized-text.md) | `engine.unity-textasset-dialogue-json` | 已确认的对话 JSON、静态字段与部分动态说明模板，不是通用 Unity 文本解析器 |
+
+各适配器的结构检查不能证明游戏实际启动、中文显示、分支或存档兼容；安装试译补丁后仍需分别确认。
+
+## 引擎库管理
 
 应用的“全局引擎库”按引擎或资源模板聚合展示内置能力、外置扩展和兼容记录，支持按引擎、模板或游戏名称搜索，以及来源、启停状态筛选。选择一个条目后可查看具体版本、兼容游戏和相关引擎经验。
 
@@ -23,7 +27,7 @@
 
 索引缺失或损坏时，从引擎注册元数据重建；重建不读取游戏资源、项目文本或扩展源码。索引用于展示与候选筛选，不替代运行时的适配器验证。
 
-## 归档规则
+## 开发资料
 
 - 已知引擎使用 `engine.<引擎和格式>`。
 - 未知引擎使用具体资源结构命名，如 `template.json-dialogue-array-v1`。
@@ -33,5 +37,5 @@
 自动扩展的复用、发布及限制见[自动适配](automatic-adaptation.md)。
 正式适配器、汉化文件、分析脚本及其保留方式见[引擎分析产物与目录约定](artifacts.md)。
 可组合的字符映射、字体和启动实现见[编码与运行组件](components.md)。
-
-目录扫描、分层筛选和可选声明协议见[引擎识别声明](recognition.md)。
+封包读写能力与支持的脚本组合见[封包组件](engine-components.md)和[组件组合模板](templates.md)。
+目录扫描、分层筛选和可选声明协议见[引擎识别声明](recognition.md)；智能适配的请求、缓存及恢复逻辑见[执行与恢复机制](adaptation-internals.md)。

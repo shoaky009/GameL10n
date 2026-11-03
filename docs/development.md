@@ -2,6 +2,8 @@
 
 项目使用 C# / .NET 10 和 WinUI 3。构建需要 .NET SDK 10.0.402、Windows SDK 和 WinUI 构建依赖。
 
+本文说明构建与代码结构。智能适配的工具分组、会话恢复、缓存及耗时排查见[执行与恢复机制](adapters/adaptation-internals.md)，适配器协议和组件资料可从[文档索引](README.md)查阅。
+
 ```powershell
 ./scripts/dotnet.ps1 restore GameL10n.sln
 ./scripts/dotnet.ps1 build GameL10n.sln --no-restore

@@ -21,16 +21,8 @@ CG、背景图中的文字及未识别的自定义界面不包含在提取范围
 
 结构校验包含字符串回读、非文本数据完整性、中文字形和 EXE 检查。它不等同于实际启动、显示、换行或存档兼容验证。
 
-## 智能适配复用
+## 扩展与依赖
 
-`inspect_siglus_game` 返回场景数量、文本覆盖、显示调用及内嵌源码目录；`source`、`query`、`offset`、`length` 可以读取有界源码片段。查询不解包出大量临时文件。
-
-`copy_adapter` 使用 `engine.siglus` 和版本号可生成现成的 JSON 调用桥及固定版本依赖。新的文本显示规则写入 `tools/siglus-rules.json`：
-
-```json
-{"commandRules":[{"command":"$display_text","argument":1,"kind":"dialogue"}]}
-```
-
-`argument` 从 0 开始。必须从源码或已验证的字节码语义确认参数；只增加提取规则不能解决新字体或新显示系统的问题。`inspect_builtin_adapter(format="Siglus")` 提供工具源码索引。修改后仍须通过 `test_adapter`，才能发布。
+新增显示规则由固定版本的 Siglus 解析器和 `tools/siglus-rules.json` 配置共同处理。配置记录显示命令、从 0 开始的文字参数位置和文本类型；参数含义需要从内嵌源码或已验证的字节码语义确认。新增提取规则不等于支持新的字体或显示系统，修改后仍需完整验收。
 
 共享工具为固定版本 SiglusSceneScriptUtility 0.5.7、Python 3.14.10 和 Windows x64 加速模块，保存在应用数据目录的 `extensions/engine-tools`。Python 直接读取发行包的 `tools/engine-tools` 或已有共享运行时，不自动下载；解析工具已随应用附带，不需要系统 Python、pip 或付费 API。游戏目录中不放工具、源码、缓存或开发记录。
