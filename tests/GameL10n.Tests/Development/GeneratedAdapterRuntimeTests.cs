@@ -116,16 +116,99 @@ public sealed class GeneratedAdapterRuntimeTests : IDisposable
         Assert.Equal(new[] { Path.Combine(work, "bounds.cs") }, Directory.GetFiles(work, "*", SearchOption.AllDirectories));
     }
 
-    [Fact]
-    public async Task CSharpAnalysisStopsOnTimeoutAndCleansTemporaryOutput()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task CSharpAnalysisStopsOnTimeoutAndRetainsBoundedOutputWhileCleaningTemporaryOutput(bool processDeadline)
     {
         var work = Path.Combine(root, "work");
         Directory.CreateDirectory(work);
-        await File.WriteAllTextAsync(Path.Combine(work, "wait.cs"), "using System.Threading; Thread.Sleep(Timeout.Infinite);");
-        var tools = AnalysisTools(new(FindToolchain(), new AdapterProcessRunner()));
-        await Assert.ThrowsAsync<AdapterProcessLimitException>(() => tools.ExecuteAsync(new("analysis", "run_csharp",
-            """{"sourceFiles":["work/wait.cs"],"timeoutSeconds":2}"""), CancellationToken.None));
-        Assert.True(File.Exists(Path.Combine(work, "wait.cs")));
+        var source = Path.Combine(work, "wait.cs");
+        await File.WriteAllTextAsync(source, """
+            using System;
+            using System.Threading;
+            Console.Write("读取样本：");
+            Console.Write(new string('x', 12000));
+            Console.Out.Flush();
+            Console.Error.Write("marker=7，游标未前进");
+            Console.Error.Flush();
+            Thread.Sleep(Timeout.Infinite);
+            """);
+        var runner = new AnalysisRequestRunner(request => processDeadline
+            ? request with { Timeout = TimeSpan.FromMilliseconds(500) } : request);
+        var tools = AnalysisTools(new(FindToolchain(), runner));
+        var error = await Assert.ThrowsAsync<AdapterProcessLimitException>(() => tools.ExecuteAsync(new("analysis", "run_csharp",
+            """{"sourceFiles":["work/wait.cs"],"timeoutSeconds":3}"""), CancellationToken.None));
+        Assert.True(error.TimedOut);
+        Assert.Equal("run", error.Phase);
+        Assert.Contains("小样", error.Message);
+        Assert.Contains("无进展循环", error.Message);
+        Assert.StartsWith("读取样本：", error.StandardOutput);
+        Assert.Contains("[diagnostic truncated]", error.StandardOutput);
+        Assert.InRange(error.StandardOutput.Length, 1, 8192);
+        Assert.Equal("marker=7，游标未前进", error.StandardError);
+        Assert.Equal(new[] { source }, Directory.GetFiles(work, "*", SearchOption.AllDirectories));
+        Assert.Empty(Directory.EnumerateDirectories(work, ".run-csharp-*"));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task CSharpAnalysisDistinguishesCompilerDeadlinesAndDoesNotRun(bool processDeadline)
+    {
+        var work = Directory.CreateDirectory(Path.Combine(root, "work")).FullName;
+        var source = Path.Combine(work, "probe.cs");
+        await File.WriteAllTextAsync(source, "System.Console.WriteLine(1);");
+        var runner = new CompilerTimeoutRunner(processDeadline);
+        var compiler = new GeneratedAdapterCompiler(FindToolchain(), runner);
+        var error = await Assert.ThrowsAsync<AdapterProcessLimitException>(() => compiler.RunCSharpAsync(root,
+            [source], [], [], root, "", TimeSpan.FromMilliseconds(500)));
+        Assert.True(error.TimedOut);
+        Assert.Equal("compile", error.Phase);
+        Assert.Contains("编译阶段", error.Message);
+        Assert.DoesNotContain("无进展循环", error.Message);
+        Assert.Equal(processDeadline ? "编译进行中" : "", error.StandardOutput);
+        Assert.Equal(processDeadline ? "编译警告" : "", error.StandardError);
+        Assert.Equal(1, runner.Calls);
+        Assert.Equal(new[] { source }, Directory.GetFiles(work, "*", SearchOption.AllDirectories));
+        Assert.Empty(Directory.EnumerateDirectories(work, ".run-csharp-*"));
+    }
+
+    [Fact]
+    public async Task CSharpAnalysisExplicitCancellationRemainsCancellationAndCleansTemporaryOutput()
+    {
+        var work = Directory.CreateDirectory(Path.Combine(root, "work")).FullName;
+        var source = Path.Combine(work, "wait.cs");
+        await File.WriteAllTextAsync(source, "using System.Threading; Thread.Sleep(Timeout.Infinite);");
+        using var cancellation = new CancellationTokenSource();
+        var runner = new AnalysisRequestRunner(request =>
+        {
+            cancellation.CancelAfter(TimeSpan.FromMilliseconds(200));
+            return request;
+        });
+        var compiler = new GeneratedAdapterCompiler(FindToolchain(), runner);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => compiler.RunCSharpAsync(root,
+            [source], [], [], root, "", TimeSpan.FromSeconds(10), cancellation.Token));
+        Assert.True(cancellation.IsCancellationRequested);
+        Assert.Equal(new[] { source }, Directory.GetFiles(work, "*", SearchOption.AllDirectories));
+        Assert.Empty(Directory.EnumerateDirectories(work, ".run-csharp-*"));
+    }
+
+    [Fact]
+    public async Task CSharpAnalysisOutputLimitRemainsDistinctFromTimeout()
+    {
+        var work = Directory.CreateDirectory(Path.Combine(root, "work")).FullName;
+        var source = Path.Combine(work, "output.cs");
+        await File.WriteAllTextAsync(source, "System.Console.Error.Write(new string('x', 20000));");
+        var compiler = new GeneratedAdapterCompiler(FindToolchain(),
+            new AnalysisRequestRunner(request => request with { MaximumOutputBytes = 8192 }));
+        var error = await Assert.ThrowsAsync<AdapterProcessLimitException>(() => compiler.RunCSharpAsync(root,
+            [source], [], [], root, "", TimeSpan.FromSeconds(10)));
+        Assert.False(error.TimedOut);
+        Assert.Equal("run", error.Phase);
+        Assert.Contains("输出超过", error.Message);
+        Assert.Equal("", error.StandardOutput);
+        Assert.InRange(error.StandardError.Length, 1, 8192);
         Assert.Empty(Directory.EnumerateDirectories(work, ".run-csharp-*"));
     }
 
@@ -514,6 +597,35 @@ public sealed class GeneratedAdapterRuntimeTests : IDisposable
         var toolchain = Path.Combine(directory!.FullName, ".tools", "dotnet");
         Assert.True(File.Exists(Path.Combine(toolchain, "dotnet.exe")), "The fixture requires the repository's pinned .NET toolchain.");
         return new(toolchain, "10.0.402", "10.0.13");
+    }
+
+    private sealed class AnalysisRequestRunner(Func<AdapterProcessRequest, AdapterProcessRequest> configure) : IAdapterProcessRunner
+    {
+        private readonly AdapterProcessRunner inner = new();
+
+        public Task<AdapterProcessResult> RunAsync(AdapterProcessRequest request, CancellationToken cancellationToken)
+        {
+            if (request.Arguments[0].EndsWith("analysis.dll", StringComparison.Ordinal)) request = configure(request);
+            else Assert.Equal(TimeSpan.FromSeconds(120), request.Timeout);
+            return inner.RunAsync(request, cancellationToken);
+        }
+    }
+
+    private sealed class CompilerTimeoutRunner(bool processDeadline) : IAdapterProcessRunner
+    {
+        public int Calls { get; private set; }
+
+        public async Task<AdapterProcessResult> RunAsync(AdapterProcessRequest request, CancellationToken cancellationToken)
+        {
+            Calls++;
+            Assert.EndsWith("csc.dll", request.Arguments[0]);
+            Assert.Equal(TimeSpan.FromSeconds(120), request.Timeout);
+            if (processDeadline)
+                throw new AdapterProcessLimitException("fixture compiler timeout", timedOut: true,
+                    standardOutput: "编译进行中", standardError: "编译警告");
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            throw new InvalidOperationException("The compiler deadline did not cancel its process.");
+        }
     }
 
     private sealed class RecordingRunner : IAdapterProcessRunner

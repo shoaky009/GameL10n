@@ -375,6 +375,14 @@ public sealed class AutomaticAdaptationService(IAdaptationAgentModel model, Gene
                             code = "builtin-asset-" + error.Code, asset = error.AssetName,
                             nextAction = "这是内置工具资产故障，不是游戏格式不兼容。可检查 inspect_builtin_adapter 的 binaryAvailable，验证可用的二进制解析能力；不要仅因源码包故障重写解析器。" }, ContextJson);
                     }
+                    catch (AdapterProcessLimitException error)
+                    {
+                        diagnostics.Add(call.Name + ": " + error.Message);
+                        output = JsonSerializer.Serialize(new { success = false,
+                            error = GeneratedAdapterCompiler.LimitDiagnostic(error.Message),
+                            phase = error.Phase, timedOut = error.TimedOut,
+                            stdout = error.StandardOutput, stderr = error.StandardError }, ContextJson);
+                    }
                     catch (Exception error) when (error is not OperationCanceledException)
                     {
                         diagnostics.Add(call.Name + ": " + error.Message);
@@ -810,7 +818,9 @@ public sealed class AutomaticAdaptationService(IAdaptationAgentModel model, Gene
         + (state.BuiltinTrials.Any(trial => trial.Status == "passed")
             ? "\n记录中有解析器样本通过，仅适用于条目列出的文件及哈希。自动试用样本已暂存到 resources，可复用证据组合模板或补齐缺口；已有源码则沿用。仍需完整 test_adapter 验证中文写入，不要重复起步调查。"
             : "\n尚无通过的解析样本时，用 inspect_builtin_adapter 查看相关能力，stage_resources 准备样本，try_builtin_adapter 验证；已有调查按当前进度继续。解析可用时 copy_adapter 复用解析库，只补缺失环节。")
-        + "记录的试验只覆盖列出的文件及哈希，不替代当前资源的最终 test_adapter；样本未变时沿用结论，勿重复调查。";
+        + "记录的试验只覆盖列出的文件及哈希，不替代当前资源的最终 test_adapter；样本未变时沿用结论，勿重复调查。"
+        + (state.BuiltinDiscovery.Candidates.Any(candidate => !disabledFamilies.Contains(candidate.AdapterId)
+            && KirikiriTextGuidance.AppliesTo(candidate.Format)) ? "\n" + KirikiriTextGuidance.Summary : "");
 
     internal const string Instructions = """
         Complete the supplied localization adapter task using the tools and actual game evidence.

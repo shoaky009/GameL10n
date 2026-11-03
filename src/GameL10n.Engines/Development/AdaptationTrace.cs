@@ -51,6 +51,9 @@ internal static class AdaptationTrace
     {
         var fields = new Dictionary<string, object?>();
         using var document = JsonDocument.Parse(output);
+        foreach (var name in new[] { "phase", "timedOut" })
+            if (document.RootElement.TryGetProperty(name, out var value) && value.ValueKind is JsonValueKind.String or JsonValueKind.True or JsonValueKind.False)
+                fields[name] = value.ValueKind == JsonValueKind.String ? Limit(value.GetString()!, 160) : value.Clone();
         if (document.RootElement.TryGetProperty("result", out var result) && result.ValueKind == JsonValueKind.Object)
         {
             foreach (var name in new[] { "passed", "stage", "compiled", "changed", "reused", "stale", "unitCount", "status", "stopped", "more", "nextOffset", "totalCharacters", "queryFound", "totalMatches", "failedRanges", "compileMs", "discoveryMs", "verificationMs", "encoding", "bytes", "sha256", "releaseRegistered" })

@@ -104,12 +104,14 @@ public sealed partial class GeneratedAdapterCompiler(PinnedDotNetToolchain toolc
         IReadOnlyList<string> sources, IReadOnlyList<string> references, IReadOnlyList<string> arguments,
         string workingDirectory, string standardInput, TimeSpan timeout, CancellationToken cancellationToken = default, string? vnTextPatchAssemblyPath = null)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var build = WorkspaceFiles.Resolve(workspace, "work/.run-csharp-" + Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(build);
         using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         lifetime.CancelAfter(timeout);
+        var phase = "prepare";
         try
         {
+            Directory.CreateDirectory(build);
             // Put explicitly supplied dependencies beside the executable so runtime resolution matches compilation.
             var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "analysis.dll" };
             var localReferences = new List<string>();
@@ -137,16 +139,37 @@ public sealed partial class GeneratedAdapterCompiler(PinnedDotNetToolchain toolc
                     }
                 }
                 """, new UTF8Encoding(false), lifetime.Token);
+            lifetime.Token.ThrowIfCancellationRequested();
+            phase = "compile";
             var compilation = await CompileSourcesAsync([.. sources, consoleSetup], build, workingDirectory, lifetime.Token, localReferences, "analysis");
             if (compilation.ExitCode != 0) return (false, compilation);
+            lifetime.Token.ThrowIfCancellationRequested();
+            phase = "run";
             var result = await Runner.RunAsync(new(Toolchain.ExecutablePath,
                 new[] { Path.Combine(build, "analysis.dll") }.Concat(arguments).ToArray(), workingDirectory,
                 standardInput, timeout, 1024 * 1024, VnTextPatchAssemblyPath: vnTextPatchAssemblyPath), lifetime.Token);
             return (true, result);
         }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-        { throw new AdapterProcessLimitException("C# 编译或运行超时，进程已停止。"); }
+        catch (OperationCanceledException error) when (!cancellationToken.IsCancellationRequested && lifetime.IsCancellationRequested)
+        {
+            var canceled = error as AdapterProcessCanceledException;
+            throw new AdapterProcessLimitException(TimeoutMessage(), phase, timedOut: true,
+                standardOutput: canceled?.StandardOutput ?? "", standardError: canceled?.StandardError ?? "", inner: error);
+        }
+        catch (AdapterProcessLimitException error)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            throw new AdapterProcessLimitException(error.TimedOut ? TimeoutMessage() : error.Message,
+                phase, error.TimedOut, error.StandardOutput, error.StandardError, error);
+        }
         finally { GeneratedGameAdapter.DeleteStagedTree(build); }
+
+        string TimeoutMessage() => phase switch
+        {
+            "prepare" => "C# 准备阶段超时，尚未运行分析程序。",
+            "compile" => "C# 编译阶段超时，进程已停止。",
+            _ => "C# 运行阶段超时，进程已停止。请先用小样定位游标不前进等无进展循环，不要仅延长 timeout 原样重试。"
+        };
     }
 
     private async Task<AdapterProcessResult> CompileSourcesAsync(IReadOnlyList<string> sources, string build, string workingDirectory,

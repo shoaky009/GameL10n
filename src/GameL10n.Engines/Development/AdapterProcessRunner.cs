@@ -15,7 +15,28 @@ public interface IAdapterProcessRunner
 }
 
 public sealed class AdapterProcessUnavailableException(string message, Exception? inner = null) : Exception(message, inner);
-public sealed class AdapterProcessLimitException(string message) : Exception(message);
+public sealed class AdapterProcessLimitException(string message, string? phase = null, bool timedOut = false,
+    string standardOutput = "", string standardError = "", Exception? inner = null) : Exception(message, inner)
+{
+    public string? Phase { get; } = phase;
+    public bool TimedOut { get; } = timedOut;
+    public string StandardOutput { get; } = LimitOutput(standardOutput);
+    public string StandardError { get; } = LimitOutput(standardError);
+
+    internal static string LimitOutput(string value)
+    {
+        const string suffix = "\n[diagnostic truncated]";
+        return value.Length > 8192 ? value[..(8192 - suffix.Length)] + suffix : value;
+    }
+}
+
+// A caller may own the overall deadline; preserve collected output without turning cancellation into a limit failure here.
+internal sealed class AdapterProcessCanceledException(Exception inner, CancellationToken cancellationToken,
+    string standardOutput, string standardError) : OperationCanceledException(inner.Message, inner, cancellationToken)
+{
+    public string StandardOutput { get; } = AdapterProcessLimitException.LimitOutput(standardOutput);
+    public string StandardError { get; } = AdapterProcessLimitException.LimitOutput(standardError);
+}
 
 /// <summary>Runs local tools with bounded time and output. Uses the current user's permissions.</summary>
 public sealed class AdapterProcessRunner : IAdapterProcessRunner
@@ -57,20 +78,40 @@ public sealed class AdapterProcessRunner : IAdapterProcessRunner
         }
         catch (Win32Exception error)
         { throw new AdapterProcessUnavailableException($"本地适配工具未能启动（Windows {error.NativeErrorCode}）：{error.Message}", error); }
-        using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        lifetime.CancelAfter(request.Timeout ?? TimeSpan.FromSeconds(30));
+        using var timeout = new CancellationTokenSource(request.Timeout ?? TimeSpan.FromSeconds(30));
+        using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeout.Token);
         using var registration = lifetime.Token.Register(StopProcess);
+        var standardOutput = new StringBuilder();
+        var standardError = new StringBuilder();
+        AdapterProcessLimitException? outputLimit = null;
         try
         {
-            var output = ReadAsync(process.StandardOutput);
-            var error = ReadAsync(process.StandardError);
+            var output = ReadAsync(process.StandardOutput, standardOutput);
+            var error = ReadAsync(process.StandardError, standardError);
             await Task.WhenAll(output, error, WriteInputAsync(), process.WaitForExitAsync(lifetime.Token));
             if (request.MaximumOutputBytes is { } maximum && (long)Encoding.UTF8.GetByteCount(output.Result) + Encoding.UTF8.GetByteCount(error.Result) > maximum)
                 throw new AdapterProcessLimitException("适配工具输出超过大小限制。");
             return new(process.ExitCode, output.Result, error.Result);
         }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-        { throw new AdapterProcessLimitException("适配工具运行超时，进程已停止。"); }
+        catch (Exception error) when (cancellationToken.IsCancellationRequested)
+        {
+            throw new AdapterProcessCanceledException(error, cancellationToken, standardOutput.ToString(), standardError.ToString());
+        }
+        catch (Exception error) when (outputLimit is not null)
+        {
+            throw new AdapterProcessLimitException(outputLimit.Message, standardOutput: standardOutput.ToString(),
+                standardError: standardError.ToString(), inner: error);
+        }
+        catch (Exception error) when (timeout.IsCancellationRequested)
+        {
+            throw new AdapterProcessLimitException("适配工具运行超时，进程已停止。", timedOut: true,
+                standardOutput: standardOutput.ToString(), standardError: standardError.ToString(), inner: error);
+        }
+        catch (AdapterProcessLimitException error)
+        {
+            throw new AdapterProcessLimitException(error.Message, standardOutput: standardOutput.ToString(),
+                standardError: standardError.ToString(), inner: error);
+        }
         finally
         {
             StopProcess();
@@ -95,18 +136,18 @@ public sealed class AdapterProcessRunner : IAdapterProcessRunner
             catch { lifetime.Cancel(); throw; }
         }
 
-        async Task<string> ReadAsync(StreamReader reader)
+        async Task<string> ReadAsync(StreamReader reader, StringBuilder text)
         {
             try
             {
-                var text = new StringBuilder();
                 var buffer = new char[4096];
                 long bytes = 0;
                 int count;
                 while ((count = await reader.ReadAsync(buffer, lifetime.Token)) != 0)
                 {
                     bytes += Encoding.UTF8.GetByteCount(buffer.AsSpan(0, count));
-                    if (request.MaximumOutputBytes is { } maximum && bytes > maximum) throw new AdapterProcessLimitException("适配工具输出超过大小限制。");
+                    if (request.MaximumOutputBytes is { } maximum && bytes > maximum)
+                        throw outputLimit = new AdapterProcessLimitException("适配工具输出超过大小限制。");
                     text.Append(buffer, 0, count);
                 }
                 return text.ToString();

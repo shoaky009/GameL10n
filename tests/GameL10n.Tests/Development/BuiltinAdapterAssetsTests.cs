@@ -111,6 +111,25 @@ public sealed class BuiltinAdapterAssetsTests : IDisposable
     }
 
     [Fact]
+    public async Task KirikiriEncodingGuidanceIsScopedAndExcludedFromAdapterSources()
+    {
+        var assets = CreateAssets();
+        var description = JsonSerializer.SerializeToElement(assets.Describe("KirikiriKs"), Json);
+        var guidance = description.GetProperty("engineGuidance");
+        Assert.Contains("UTF-16", guidance.GetProperty("parserReuse").GetString());
+        var reference = guidance.GetProperty("referenceSource").GetString()!;
+        var details = JsonSerializer.SerializeToElement(assets.ReadSource("KirikiriKs", reference), Json);
+        Assert.Contains("同一文件混写", details.GetProperty("content").GetString());
+        Assert.DoesNotContain(description.GetProperty("limitations").EnumerateArray(),
+            item => item.GetString()!.StartsWith("保留内置解析器的原编码约束"));
+        Assert.Equal(JsonValueKind.Null, JsonSerializer.SerializeToElement(assets.Describe("Renpy"), Json)
+            .GetProperty("engineGuidance").ValueKind);
+        var workspace = Path.Combine(root, "workspace");
+        await assets.CopyAsync("KirikiriKs", workspace, true);
+        Assert.False(Directory.Exists(Path.Combine(workspace, "src/BuiltinVnTextPatch/reference")));
+    }
+
+    [Fact]
     public async Task SourceIndexIsBoundedAndBinaryCopyCanUpgradeWithoutReplacingExistingSource()
     {
         var assets = CreateAssets();
@@ -188,8 +207,11 @@ public sealed class BuiltinAdapterAssetsTests : IDisposable
         var package = await compiler.CompileWorkspaceAsync(source, Path.Combine(root, "compiled"), ["**/*"], releaseFiles: releaseFiles);
         string resources = Directory.CreateDirectory(Path.Combine(root, "resources")).FullName;
         string file = format == "Renpy" ? "scene.rpy" : "scene.ks";
-        string script = format == "Renpy" ? "label start:\n    \"こんにちは。\"\n" : "*start\r\nこんにちは。[p]\r\n";
-        await File.WriteAllTextAsync(Path.Combine(resources, file), script, format == "Renpy" ? new UTF8Encoding(false) : Encoding.Unicode);
+        string sourceText = format == "Renpy" ? "こんにちは。" : "こんにちは♪・。";
+        string targetText = format == "Renpy" ? "你好，中文。" : "你好，中文♪・。";
+        string script = format == "Renpy" ? $"label start:\n    \"{sourceText}\"\n" : $"*start\r\n{sourceText}[p]\r\n";
+        Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+        await File.WriteAllTextAsync(Path.Combine(resources, file), script, format == "Renpy" ? new UTF8Encoding(false) : Encoding.GetEncoding(932));
         var sharedParser = editableSource ? null : await new EngineReferenceToolkit(Path.Combine(root, "shared"), parserAssets: assets)
             .ResolveVnTextPatchAsync(source, default);
         async Task<AdapterProcessResult> Invoke(object request) => await runner.RunAsync(new(toolchain.ExecutablePath,
@@ -201,10 +223,11 @@ public sealed class BuiltinAdapterAssetsTests : IDisposable
         string id = Assert.Single(parsed.RootElement.GetProperty("extraction").GetProperty("units").EnumerateArray()).GetProperty("id").GetString()!;
         string output = Path.Combine(root, "patched");
         var build = await Invoke(new { protocolVersion = 1, operation = "build", sourceDirectory = resources, outputDirectory = output,
-            resourceFiles = new[] { file }, translations = new Dictionary<string, string> { [id] = "你好，中文。" } });
+            resourceFiles = new[] { file }, translations = new Dictionary<string, string> { [id] = targetText } });
         using var built = JsonDocument.Parse(build.StandardOutput);
         Assert.True(built.RootElement.GetProperty("success").GetBoolean(), build.StandardOutput);
-        Assert.Equal(script.Replace("こんにちは。", "你好，中文。"), await File.ReadAllTextAsync(Path.Combine(output, file)));
+        Assert.Equal(script.Replace(sourceText, targetText), await File.ReadAllTextAsync(Path.Combine(output, file)));
+        if (format == "KirikiriKs") Assert.True(File.ReadAllBytes(Path.Combine(output, file)).AsSpan().StartsWith(Encoding.Unicode.GetPreamble()));
         var probe = await Invoke(new { protocolVersion = 1, operation = "probe", sourceDirectory = resources });
         Assert.Equal(3, probe.ExitCode);
         Assert.Contains("65536", probe.StandardError);

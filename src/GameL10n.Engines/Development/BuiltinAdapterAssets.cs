@@ -43,7 +43,8 @@ public sealed partial class BuiltinAdapterAssets(string? assetsDirectory = null)
                 .Concat(References(selected).Select(pair => new { path = pair.Key, bytes = (long)Utf8.GetByteCount(pair.Value) }))
                 .OrderBy(item => item.path, StringComparer.Ordinal).ToArray(),
             limitations = Limitations(selected), usage = Usage(selected), example = Example(selected),
-            engineGuidance = selected.Key == "Kaguya" ? KaguyaMessage40Guidance.Describe(engineInspection) : null
+            engineGuidance = selected.Key == "Kaguya" ? KaguyaMessage40Guidance.Describe(engineInspection)
+                : KirikiriTextGuidance.AppliesTo(selected.Key) ? KirikiriTextGuidance.Describe() : null
         };
     }
 
@@ -213,7 +214,9 @@ public sealed partial class BuiltinAdapterAssets(string? assetsDirectory = null)
     private static string[] Limitations(VnTextPatchFormat format) =>
     [
         "仅提供已解包脚本的提取、回填和复提校验；资源包的解包/重打包、运行时编码补丁、启动代理及字体支持需要由适配器实现并验证。",
-        "保留内置解析器的原编码约束；Shift-JIS 无法表示的中文会明确报错，不生成未验证的 sjis_ext.bin。",
+        KirikiriTextGuidance.AppliesTo(format.Key)
+            ? "KS/SOC 支持读取 CP932、带 BOM 的 UTF-8/UTF-16，修改后写 UTF-16；须验证游戏实际脚本加载路径接受该编码，原文无修改仍保留原字节。"
+            : "保留内置解析器的原编码约束；Shift-JIS 无法表示的中文会明确报错，不生成未验证的 sjis_ext.bin。",
         "生成适配器的 probe 只获得最多 65536 字节文件头，必须由 Program 按签名、长度和版本识别；调用桥禁止直接使用整文件解析器执行 probe。",
         "源码模式仅复制目标引擎组和公共工具，支持框架引用及 /unsafe- 编译；没有 Main，必须自行实现协议入口和资源包处理。",
         format.Key switch
@@ -258,7 +261,9 @@ public sealed partial class BuiltinAdapterAssets(string? assetsDirectory = null)
     // Research notes are visible through inspect_builtin_adapter, but never copied into adapter packages.
     private static Dictionary<string, string> References(VnTextPatchFormat format) => format.Key == "Kaguya"
         ? new(StringComparer.Ordinal) { [KaguyaMessage40Guidance.ReferencePath] = KaguyaMessage40Guidance.Reference }
-        : new(StringComparer.Ordinal);
+        : KirikiriTextGuidance.AppliesTo(format.Key)
+            ? new(StringComparer.Ordinal) { [KirikiriTextGuidance.ReferencePath] = KirikiriTextGuidance.Reference }
+            : new(StringComparer.Ordinal);
 
     private static Dictionary<string, string> GeneratedSources(VnTextPatchFormat format) => new(StringComparer.Ordinal)
     {

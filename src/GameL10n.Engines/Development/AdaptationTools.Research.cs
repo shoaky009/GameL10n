@@ -92,6 +92,7 @@ public sealed partial class AdaptationTools
             return new { query, status = "bundled", capability = SiglusAssets.Describe() };
         if (key.Length < 2) throw new InvalidDataException("查询必须包含引擎名称或格式标识。");
         if (key is "system4" or "system40") key = "alicesoft";
+        var terms = ReferenceSearchTerms(query).Select(term => term is "system4" or "system40" ? "alicesoft" : term).ToArray();
         var url = ReferenceRoot + "catalog/engines.json";
         var selectedRoot = ReferenceRoot;
         ResearchDocument? document = null;
@@ -114,7 +115,11 @@ public sealed partial class AdaptationTools
                 || !json.RootElement.TryGetProperty("engines", out var engines) || engines.ValueKind != JsonValueKind.Array
                 || engines.EnumerateArray().Any(engine => engine.ValueKind != JsonValueKind.Object))
                 throw new InvalidDataException("引擎参考索引结构已变化。");
-            var found = engines.EnumerateArray().Where(engine => ReferenceMatches(engine, key)).ToArray();
+            var found = engines.EnumerateArray().Select(engine => (Engine: engine, Rank: RankReference(engine, key, terms)))
+                .Where(item => item.Rank.Exact > 0 || item.Rank.MatchedTerms > 0)
+                .OrderByDescending(item => item.Rank.Exact).ThenByDescending(item => item.Rank.MatchedTerms)
+                .ThenByDescending(item => item.Rank.Score).ThenBy(item => Text(item.Engine, "id"), StringComparer.Ordinal)
+                .Select(item => item.Engine).ToArray();
             totalMatches = found.Length;
             matches = found.Take(6).Select(engine => (object)new
             {
@@ -137,6 +142,7 @@ public sealed partial class AdaptationTools
             query, status = error is null ? "queried" : "unavailable", error,
             indexUrl = url, document?.ContentSha256, document?.RetrievedAt, document?.Reused, document?.Stale, totalMatches, matches,
             more = totalMatches > matches.Length,
+            hint = error is null && totalMatches == 0 ? "请改用具体引擎名、别名或格式标识；archive、engine 等泛词不作为检索依据。未命中不代表不支持。" : null,
             guidance = ReferenceGuidance(key),
             furtherResearch = new
             {
@@ -156,10 +162,37 @@ public sealed partial class AdaptationTools
         item.TryGetProperty(property, out var values) && values.ValueKind == JsonValueKind.Array
             ? values.EnumerateArray().Where(value => value.ValueKind == JsonValueKind.String).Select(value => value.GetString()!) : [];
 
-    private static bool ReferenceMatches(JsonElement item, string query) =>
-        new[] { Text(item, "id", ""), Text(item, "title", "") }
-            .Concat(ReferenceStrings(item, "aliases")).Concat(ReferenceStrings(item, "python_references"))
-            .Any(value => NormalizeReferenceQuery(value).Contains(query, StringComparison.Ordinal));
+    private static string[] ReferenceSearchTerms(string text) =>
+        Regex.Split(text.ToLowerInvariant(), @"[^\p{L}\p{Nd}]+", RegexOptions.None, TimeSpan.FromSeconds(1))
+            .Where(term => term.Length >= 2 && term is not ("archive" or "archives" or "engine" or "engines"
+                or "python" or "py" or "format" or "formats" or "script" or "scripts" or "file" or "files"
+                or "reference" or "references" or "tool" or "tools"))
+            .Distinct(StringComparer.Ordinal).ToArray();
+
+    private static (int Exact, int MatchedTerms, int Score) RankReference(JsonElement item, string query, string[] terms)
+    {
+        var id = Text(item, "id", "");
+        var title = Text(item, "title", "");
+        var aliases = ReferenceStrings(item, "aliases").ToArray();
+        var exact = NormalizeReferenceQuery(id) == query ? 3
+            : aliases.Any(alias => NormalizeReferenceQuery(alias) == query) ? 2
+            : terms.Length > 0 && NormalizeReferenceQuery(title) == query ? 1 : 0;
+        var fields = new[] { (Value: id, Weight: 12), (Value: title, Weight: 6) }
+            .Concat(aliases.Select(alias => (Value: alias, Weight: 10)))
+            .Concat(ReferenceStrings(item, "python_references").Select(path => (Value: path, Weight: 8)))
+            .Select(field => (Terms: ReferenceSearchTerms(field.Value), field.Weight)).ToArray();
+        var matchedTerms = 0;
+        var score = 0;
+        foreach (var term in terms)
+        {
+            var weight = fields.Max(field => field.Terms.Contains(term, StringComparer.Ordinal) ? field.Weight
+                : term.Length >= 3 && field.Terms.Any(value => value.StartsWith(term, StringComparison.Ordinal)) ? field.Weight / 2 : 0);
+            if (weight == 0) continue;
+            matchedTerms++;
+            score += weight;
+        }
+        return (exact, matchedTerms, score);
+    }
 
     private static string ReferenceUrl(string path, string root = ReferenceRoot)
     {
@@ -176,6 +209,9 @@ public sealed partial class AdaptationTools
             new { topic = "缺口定位", url = ReferenceRoot + "guides/extending-engines.md",
                 note = "分别确认容器、解码、文本语义、回填、打包、运行显示。缺 writer 或已知算法尚未实现时继续补齐当前层；没有搜索结果不是不支持的证据。" }
         };
+        if (query == "kag" || new[] { "kirikiri", "krkr", "xp3", "吉里吉里" }.Any(query.Contains))
+            guidance.Add(new { topic = "Kirikiri 脚本编码", url = ReferenceRoot + "engines/kirikiri.md",
+                note = KirikiriTextGuidance.Summary });
         if (query.Contains("qlie", StringComparison.Ordinal) || query.Contains("imos", StringComparison.Ordinal))
             guidance.Add(new { topic = "QLIE 方言", url = ReferenceRoot + "engines/qlie.md",
                 note = "先确认 PACK/Hash 版本与脚本方言。核对内部姓名和显示姓名（＠）、多行对白、^select 与跳转命令、^savetext；[pc,...] 可能是布局命令或显示文本，按实际语法判断，不能一律翻译或冻结。" });
