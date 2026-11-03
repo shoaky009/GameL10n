@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using GameL10n.Core.Adapters;
 using GameL10n.Core.Development;
+using GameL10n.Core.Pipeline;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
@@ -208,7 +209,7 @@ public sealed partial class MainWindow
         CatalogDetailTitle.Text = row.Name;
         CatalogDetailSubtitle.Text = row.Id + " · " + row.EnabledLabel;
         CatalogDetailTabs.Visibility = Visibility.Visible;
-        CatalogOverviewText.Text = $"分类：{(row.Data.Family.Kind == "engine" ? "引擎" : "资源模板")}\n来源：{(row.SourceLabel.Length == 0 ? "经验记录" : row.SourceLabel)}\n版本：{row.Data.Versions.Count:N0} 个\n兼容游戏记录：{row.Data.Games.Count:N0} 条\n项目引用：删除外置版本时检查\n\n新识别候选：{(row.CanSetEnabled ? row.EnabledLabel : "暂无适配版本，经验启停在“相关经验”中设置")}";
+        CatalogOverviewText.Text = $"分类：{(row.Data.Family.Kind == "engine" ? "引擎" : "资源模板")}\n来源：{(row.SourceLabel.Length == 0 ? "经验记录" : row.SourceLabel)}\n版本：{row.Data.Versions.Count:N0} 个\n兼容游戏记录：{row.Data.Games.Count:N0} 条\n\n新识别候选：{(row.CanSetEnabled ? row.EnabledLabel : "暂无适配版本，经验启停在“相关经验”中设置")}";
         var selectedVersion = (CatalogVersionsList.SelectedItem as EngineVersionRow)?.Data;
         ResetLibraryVersionInspection();
         engineLibraryVersionUpdating = true;
@@ -332,8 +333,7 @@ public sealed partial class MainWindow
         var version = SelectedInspectedLibraryVersion;
         CatalogOpenVersionButton.IsEnabled = !SavingEngineLibrary && version is { Source: EngineLibrarySource.External, Exists: true, DirectoryPath: not null };
         CatalogVerifyVersionButton.IsEnabled = !SavingEngineLibrary && version is { Source: EngineLibrarySource.External, Exists: true };
-        CatalogDeleteVersionButton.IsEnabled = !SavingEngineLibrary && version is { Source: EngineLibrarySource.External, Exists: true }
-            && (!version.ReferencesKnown || version.References.Count == 0);
+        CatalogDeleteVersionButton.IsEnabled = !SavingEngineLibrary && version is { Source: EngineLibrarySource.External };
         if (selected is null)
             CatalogVersionReferenceText.Text = "选择版本以检查文件和查看可用操作。";
         else if (selected.Source == EngineLibrarySource.BuiltIn)
@@ -341,18 +341,15 @@ public sealed partial class MainWindow
         else if (selected.Source == EngineLibrarySource.History)
             CatalogVersionReferenceText.Text = "仅保留兼容历史记录，没有可删除的扩展文件。";
         else if (engineLibraryVersionInspecting)
-            CatalogVersionReferenceText.Text = "正在检查此版本的文件…\n项目引用将在删除时检查。";
+            CatalogVersionReferenceText.Text = "正在检查此版本的文件…";
         else if (engineLibraryVersionInspectionError is { } error)
             CatalogVersionReferenceText.Text = "检查版本文件失败：" + error + "\n可重新选择此版本重试。";
         else if (version is null)
-            CatalogVersionReferenceText.Text = "文件尚未检查。选择此版本检查文件是否存在；项目引用将在删除时检查。";
+            CatalogVersionReferenceText.Text = "文件尚未检查。选择此版本检查文件是否存在。";
         else if (!version.Exists)
-            CatalogVersionReferenceText.Text = "文件丢失：此版本的文件夹或必要文件已不存在。\n索引与兼容历史记录仍保留。";
-        else if (!version.ReferencesKnown)
-            CatalogVersionReferenceText.Text = "版本文件存在。删除时将检查项目引用，无引用时才会删除外置文件。兼容历史记录会保留。";
-        else if (version.References.Count == 0)
-            CatalogVersionReferenceText.Text = "版本文件存在，没有项目引用此版本。删除时会再次检查，兼容历史记录会保留。";
-        else CatalogVersionReferenceText.Text = "当前不能删除：\n" + FormatLibraryReferences(version.References);
+            CatalogVersionReferenceText.Text = "版本文件已删除或不完整。可删除此版本以停止后续复用，兼容历史记录仍保留。";
+        else
+            CatalogVersionReferenceText.Text = "删除后不再复用此版本。已有文本、译文和补丁保留；重新提取或生成新补丁需要可用的适配器。";
     }
 
     private async void CatalogEnable_Click(object sender, RoutedEventArgs e) => await SetLibraryFamiliesEnabledAsync(true);
@@ -399,20 +396,18 @@ public sealed partial class MainWindow
 
     private async void CatalogDeleteVersion_Click(object sender, RoutedEventArgs e)
     {
-        if (SavingEngineLibrary || changingDataDirectory || closing || SelectedInspectedLibraryVersion is not { Source: EngineLibrarySource.External, Exists: true } version) return;
+        if (SavingEngineLibrary || changingDataDirectory || closing || SelectedInspectedLibraryVersion is not { Source: EngineLibrarySource.External } version) return;
         var directory = dataDirectory;
-        var references = version.References;
-        var blocked = version.ReferencesKnown && references.Count > 0;
         var dialog = new ContentDialog
         {
-            XamlRoot = RootGrid.XamlRoot, Title = blocked ? "此版本正在被引用" : "删除外置引擎版本？",
+            XamlRoot = RootGrid.XamlRoot, Title = "删除外置引擎版本？",
             Content = new TextBlock { Text = $"{selectedEngineFamily?.Name}\n{version.AdapterId}\n版本：{version.Version}\n位置：{version.DirectoryPath}\n\n"
-                + (blocked ? "无法删除：\n" + FormatLibraryReferences(references) : "将先检查当前项目引用，仅在没有引用时删除此版本的外置文件。兼容历史记录会保留。此操作无法撤销。"), TextWrapping = TextWrapping.Wrap },
-            PrimaryButtonText = blocked ? "" : "删除此版本", CloseButtonText = blocked ? "关闭" : "取消", DefaultButton = ContentDialogButton.Close
+                + "将删除此版本的扩展文件并停止后续复用。已有文本、译文、补丁及兼容历史记录保留，已安装的游戏不受影响。\n\n使用此版本的项目仍可翻译和校对；重新提取或生成新补丁前需要重新识别或智能适配。此操作无法撤销。", TextWrapping = TextWrapping.Wrap },
+            PrimaryButtonText = "删除此版本", CloseButtonText = "取消", DefaultButton = ContentDialogButton.Close
         };
         if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
-        if (games.Any(game => game.Busy))
-        { ShowLibraryStatus("请先等待当前任务完成或暂停，再删除扩展版本。", InfoBarSeverity.Warning); return; }
+        if (games.Any(game => game.Busy && (game.Kind is GameTaskKind.Analysis or GameTaskKind.Adaptation)))
+        { ShowLibraryStatus("正在识别或智能适配，任务可能正在使用此版本。请先等待任务完成或暂停，再删除扩展版本。", InfoBarSeverity.Warning); return; }
         if (directory != dataDirectory || changingDataDirectory || changingAdapterLibrary) return;
         changingAdapterLibrary = true;
         engineLibrarySaving = true;
@@ -421,11 +416,14 @@ public sealed partial class MainWindow
         try
         {
             var store = LibraryStore();
+            // Finish in-flight text loads before replacing their adapter; no new loads can start during removal.
+            await Task.WhenAll(games.Select(game => game.ContentLoad).OfType<Task>());
             var runtimeReferences = GetRunningEngineReferences();
-            var result = await Task.Run(() => store.DeleteVersionAsync(version.AdapterId, version.Version, directory, runtimeReferences));
+            var result = await Task.Run(() => store.DeleteVersionAsync(version.AdapterId, version.Version, runtimeReferences));
+            if (result.Deleted) DetachDeletedEngineVersion(version.AdapterId, version.Version);
             InvalidateEngineLibrary();
             await EnsureEngineLibraryAsync();
-            ShowLibraryStatus(result.Deleted ? $"已删除外置版本 {version.AdapterId} · {version.Version}。" : "未删除此版本：\n"
+            ShowLibraryStatus(result.Deleted ? $"已删除外置版本 {version.AdapterId} · {version.Version}，后续不再复用。项目文本、译文和补丁已保留。" : "未删除此版本：\n"
                 + string.Join("\n", result.Diagnostics) + (result.References.Count > 0 ? "\n" + FormatLibraryReferences(result.References) : ""),
                 result.Deleted ? InfoBarSeverity.Success : InfoBarSeverity.Warning);
         }
@@ -439,7 +437,7 @@ public sealed partial class MainWindow
     private static string ReferenceLabel(EngineLibraryReferenceKind kind) => kind switch
     {
         EngineLibraryReferenceKind.Active => "当前固定版本", EngineLibraryReferenceKind.Previous => "回滚版本",
-        EngineLibraryReferenceKind.Running => "已加载会话", EngineLibraryReferenceKind.Source => "原始文本快照",
+        EngineLibraryReferenceKind.Running => "正在执行任务", EngineLibraryReferenceKind.Source => "原始文本快照",
         EngineLibraryReferenceKind.Extraction => "提取记录", EngineLibraryReferenceKind.Job => "翻译任务", _ => "项目记录"
     };
 
@@ -511,7 +509,7 @@ public sealed partial class MainWindow
         public EngineLibraryVersion Data { get; } = data;
         public string Title => Data.Version + " · " + SourceName(Data.Source);
         public string Description => (Data.PublishedAt is { } published ? $"{published.ToLocalTime():yyyy-MM-dd HH:mm} · " : "")
-            + $"{Data.Games.Count:N0} 条游戏记录 · " + (Data.ReferencesKnown ? $"{Data.References.Count:N0} 条引用" : "删除时检查项目引用")
+            + $"{Data.Games.Count:N0} 条游戏记录"
             + (Data.IsCandidate ? " · 可供新识别" : Data.Source == EngineLibrarySource.External ? " · 当前非新识别候选" : "");
     }
 

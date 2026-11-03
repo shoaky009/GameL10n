@@ -1,6 +1,7 @@
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 using GameL10n.Core;
+using GameL10n.Core.Development;
 using GameL10n.Core.Pipeline;
 using GameL10n.Core.Storage;
 using GameL10n.Core.Translation;
@@ -334,9 +335,11 @@ public sealed partial class MainWindow
         MarkUnreviewedButton.IsEnabled = canEdit;
         ModelDraftExpander.IsEnabled = editingRow?.ModelText is not null;
         ShowPatchTextsButton.IsEnabled = canUse && game?.PatchTextHashes is not null;
-        GeneratePatchButton.IsEnabled = BuildSavedPatchButton.IsEnabled = canUse && session is not null && !busy;
+        var canBuild = session is not null && session.Adapter is not UnavailableGameAdapter;
+        GeneratePatchButton.IsEnabled = BuildSavedPatchButton.IsEnabled = canUse && canBuild && !busy;
         RecordRuntimePassedButton.IsEnabled = RecordRuntimeFailedButton.IsEnabled = canUse && game?.Result is not null && !busy;
-        TrialButton.IsEnabled = TrialPatchButton.IsEnabled = ready && !busy && game!.SelectedTexts.Count > 0;
+        TrialButton.IsEnabled = ready && !busy && game!.SelectedTexts.Count > 0;
+        TrialPatchButton.IsEnabled = TrialButton.IsEnabled && canBuild;
         RetranslateSelectedButton.IsEnabled = TrialButton.IsEnabled;
         OpenWorkbenchButton.IsEnabled = canUse && session is not null;
         TranslateButton.Content = game?.HasPendingTranslation == true ? "继续上次翻译" : "开始全量翻译";

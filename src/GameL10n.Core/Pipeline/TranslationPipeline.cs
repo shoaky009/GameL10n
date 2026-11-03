@@ -233,6 +233,8 @@ public sealed partial class TranslationPipeline(string dataDirectory, string? di
         TranslationPolicy policy, TranslationOptions? options, IProgress<PipelineProgress>? progress, bool buildPatch,
         CancellationToken ct)
     {
+        if (buildPatch && session.Adapter is UnavailableGameAdapter unavailable)
+            throw new GeneratedAdapterException(unavailable.Message);
         options = (options ?? new()) with { RequireAllTranslations = buildPatch || options?.RequireAllTranslations == true };
         if (buildPatch && options.RetranslationId is not null)
             throw new ArgumentException("重新翻译只更新所选译文，请另行生成补丁。", nameof(options));

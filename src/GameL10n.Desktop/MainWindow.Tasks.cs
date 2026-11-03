@@ -165,8 +165,13 @@ public sealed partial class MainWindow
             .FirstOrDefault(item => item.Id == snapshot.AdapterId && item.Version == snapshot.AdapterVersion);
         if (adapter is null)
         {
-            var package = store.LoadVersion(snapshot.AdapterId, snapshot.AdapterVersion);
-            adapter = new GeneratedGameAdapter(package, FindToolchain(), new AdapterProcessRunner(), store.WorkDirectory, toolkit, report);
+            if (!Directory.Exists(store.GetVersionDirectory(snapshot.AdapterId, snapshot.AdapterVersion)))
+                adapter = new UnavailableGameAdapter(snapshot.AdapterId, snapshot.AdapterVersion);
+            else
+            {
+                var package = store.LoadVersion(snapshot.AdapterId, snapshot.AdapterVersion);
+                adapter = new GeneratedGameAdapter(package, FindToolchain(), new AdapterProcessRunner(), store.WorkDirectory, toolkit, report);
+            }
         }
         return await storagePipeline.LoadSessionAsync(game.GameDirectory, adapter, token, game.Id, report);
     }
@@ -205,21 +210,27 @@ public sealed partial class MainWindow
         try
         {
             var scope = await LocalFiles.ReadJsonAsync<TranslationScope>(Path.Combine(game.Directory, "translation-scope.json"));
+            var resumeWithoutPatch = scope is { Completed: false, BuildPatchAfter: true }
+                && game.Session?.Adapter is UnavailableGameAdapter;
             if (scope is { Completed: false, UnitIds: { } ids })
             {
                 var choice = await new ContentDialog
                 {
                     XamlRoot = RootGrid.XamlRoot, Title = "继续上次翻译",
-                    Content = scope.RetranslationId is not null
+                    Content = (scope.RetranslationId is not null
                         ? $"上次重新翻译选择了 {ids.Count:N0} 条文本。仅继续本次尚未成功的文本，已完成结果不会重复请求。"
-                        : $"上次任务选择了 {ids.Count:N0} 条文本。已保存译文会继续复用。",
+                        : $"上次任务选择了 {ids.Count:N0} 条文本。已保存译文会继续复用。")
+                        + (resumeWithoutPatch ? "\n引擎适配器版本不可用，本次继续翻译原选区，暂不生成补丁。" : ""),
                     PrimaryButtonText = "继续原选区", SecondaryButtonText = "改为全量翻译", CloseButtonText = "取消"
                 }.ShowAsync();
                 if (choice == ContentDialogResult.None || selectedGame != game) return;
                 if (choice == ContentDialogResult.Secondary) scope = null;
             }
+            if (resumeWithoutPatch && scope is not null)
+                Log(game, "引擎适配器版本不可用，将继续原选区的翻译并保留进度，本次不生成补丁。");
             await TranslateAsync(scope is { Completed: false } ? scope.UnitIds : null,
-                scope is { Completed: false, BuildPatchAfter: true }, scope is { Completed: false } ? scope.RetranslationId : null);
+                scope is { Completed: false, BuildPatchAfter: true } && !resumeWithoutPatch,
+                scope is { Completed: false } ? scope.RetranslationId : null);
         }
         catch (Exception error) { ShowError(error); }
     }
@@ -231,6 +242,8 @@ public sealed partial class MainWindow
         var ownsRetranslation = false;
         try
         {
+            if (buildPatchAfter && capturedSession.Adapter is UnavailableGameAdapter unavailable)
+                throw new GeneratedAdapterException(unavailable.Message);
             await FlushEditsAsync(game);
             await SaveSettingsAsync();
             await EnsureWorkbenchAsync(game);

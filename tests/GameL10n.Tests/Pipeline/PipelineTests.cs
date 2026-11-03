@@ -1,5 +1,6 @@
 using System.Text.Json;
 using GameL10n.Core;
+using GameL10n.Core.Development;
 using GameL10n.Core.Patching;
 using GameL10n.Core.Pipeline;
 using GameL10n.Core.Providers;
@@ -143,6 +144,34 @@ public sealed class PipelineTests : IDisposable
         Assert.Equal(analyzed.Probe.Description, restored.Probe.Description);
         Assert.Equal(0, adapter.Probes);
         Assert.Equal(0, adapter.Extractions);
+    }
+
+    [Fact]
+    public async Task MissingAdapterKeepsSavedTextsAndTranslationsUsableAndRejectsNewBuildBeforeApiOrStaging()
+    {
+        await WriteGame(("1", "hello {name}"));
+        var original = await CreatePipeline().AnalyzeAsync(Game, new JsonGameAdapter());
+        var patch = await CreatePipeline().RunAsync(original, new FakeProvider(), policy);
+        var manifestPath = Path.Combine(patch.PatchDirectory, PatchInstaller.ManifestFilename);
+        var manifest = await File.ReadAllBytesAsync(manifestPath);
+        var memory = await ReadSingleMemoryEntryAsync(original);
+
+        var restored = await CreatePipeline().LoadSessionAsync(Game,
+            new UnavailableGameAdapter(original.Adapter.Id, original.Adapter.Version));
+
+        Assert.NotNull(restored);
+        Assert.Equal(original.Extraction.Units, restored.Extraction.Units);
+        var provider = new FakeProvider { FailIfCalled = true };
+        var summary = await CreatePipeline().TranslateOnlyAsync(restored, [provider], policy);
+        Assert.Equal(new TranslationRunSummary(1, 1, 0), summary);
+        Assert.Equal(memory, await ReadSingleMemoryEntryAsync(restored));
+
+        var error = await Assert.ThrowsAsync<GeneratedAdapterException>(() => CreatePipeline().BuildFromSavedAsync(restored, policy));
+        Assert.Contains("重新识别或智能适配", error.Message);
+        await Assert.ThrowsAsync<GeneratedAdapterException>(() => CreatePipeline().RunAsync(restored, provider, policy));
+        Assert.Equal(0, provider.Calls);
+        Assert.Equal(manifest, await File.ReadAllBytesAsync(manifestPath));
+        Assert.Single(Directory.GetDirectories(Path.Combine(restored.ProjectDirectory, "patches")));
     }
 
     [Fact]

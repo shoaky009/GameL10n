@@ -52,38 +52,42 @@ public sealed class EngineLibraryTests : IDisposable
         Assert.Equal("one", Assert.Single(new LocalAdapterPackageStore(store.RootDirectory).ListReusablePackages()).Version);
     }
 
-    [Theory]
-    [InlineData("game.json", EngineLibraryReferenceKind.Project)]
-    [InlineData("game.json.bak", EngineLibraryReferenceKind.Project)]
-    [InlineData("source.json", EngineLibraryReferenceKind.Source)]
-    [InlineData("source.json.bak", EngineLibraryReferenceKind.Source)]
-    [InlineData("job.json", EngineLibraryReferenceKind.Job)]
-    [InlineData("tasks/saved/job.json", EngineLibraryReferenceKind.Job)]
-    [InlineData("extraction/cache/manifest.json", EngineLibraryReferenceKind.Extraction)]
-    public async Task DeletionChecksEveryPersistedReference(string relativePath, EngineLibraryReferenceKind kind)
+    [Fact]
+    public async Task DeletionRetainsProjectDataAndCompatibilityDespitePersistedOrDamagedReferences()
     {
         var store = Store;
-        var unused = await PublishAsync("one");
+        var package = await PublishAsync("one");
         await PublishAsync("two");
         await PublishAsync("three");
-        var file = Path.Combine(Data, "games", GameId, relativePath.Replace('/', Path.DirectorySeparatorChar));
-        await LocalFiles.WriteJsonAsync(file, new { id = GameId, adapterId = Family.AdapterId, adapterVersion = "one" });
-        var blocked = await store.DeleteVersionAsync(Family.AdapterId, "one", Data);
-        Assert.False(blocked.Deleted);
-        Assert.Equal(kind, Assert.Single(blocked.References).Kind);
-        Assert.True(Directory.Exists(unused.DirectoryPath));
-        File.Delete(file);
+        var project = Path.Combine(Data, "games", GameId);
+        foreach (var relativePath in new[] { "game.json", "game.json.bak", "source.json", "source.json.bak",
+            "job.json", "job.json.bak", "tasks/saved/job.json", "extraction/cache/manifest.json" })
+        {
+            var file = Path.Combine(project, relativePath.Replace('/', Path.DirectorySeparatorChar));
+            await LocalFiles.WriteJsonAsync(file, new { id = GameId, adapterId = Family.AdapterId, adapterVersion = "one" });
+        }
+        await File.WriteAllTextAsync(Path.Combine(project, "source.json.bak"), "{damaged");
+        await File.WriteAllTextAsync(Path.Combine(project, "extraction", "cache", "units.jsonl"), "original text");
+        await File.WriteAllTextAsync(Path.Combine(project, "translations.json"), "translated text");
+        Directory.CreateDirectory(Path.Combine(project, "patches", "final"));
+        await File.WriteAllTextAsync(Path.Combine(project, "patches", "final", "script.dat"), "finished patch");
         await store.RecordCompatibilityAsync(Family, new(GameId, "Old game", "fixture", "one",
             new Dictionary<string, string>(), "passed"));
-        var deleted = await store.DeleteVersionAsync(Family.AdapterId, "one", Data);
+        var retainedFiles = new[] { project, Path.Combine(store.RootDirectory, "games"), Path.Combine(store.RootDirectory, "catalog") }
+            .SelectMany(directory => Directory.GetFiles(directory, "*", SearchOption.AllDirectories))
+            .ToDictionary(file => file, File.ReadAllBytes);
+
+        var deleted = await store.DeleteVersionAsync(Family.AdapterId, "one");
         Assert.True(deleted.Deleted, string.Join('\n', deleted.Diagnostics));
-        Assert.False(Directory.Exists(unused.DirectoryPath));
+        Assert.Empty(deleted.References);
+        Assert.Empty(deleted.Diagnostics);
+        Assert.False(Directory.Exists(package.DirectoryPath));
+        foreach (var (file, contents) in retainedFiles) Assert.Equal(contents, await File.ReadAllBytesAsync(file));
         var retained = Assert.Single((await store.ReadEngineLibraryAsync([], Data)).Families).Versions.Single(item => item.Version == "one");
         Assert.False(retained.Exists);
         Assert.False(retained.IsCandidate);
         Assert.Single(retained.Games);
         Assert.Single(store.ReadCatalog([]));
-        Assert.True(Directory.Exists(Path.Combine(Data, "games", GameId)));
     }
 
     [Fact]
@@ -96,30 +100,86 @@ public sealed class EngineLibraryTests : IDisposable
         await store.ForgetGameAsync(GameId);
         Assert.Null(store.LoadActive(GameId));
         Assert.Equal("two", Assert.Single(new LocalAdapterPackageStore(store.RootDirectory).ListReusablePackages()).Version);
-        var deleted = await store.DeleteVersionAsync(Family.AdapterId, "one", Data);
+        var deleted = await store.DeleteVersionAsync(Family.AdapterId, "one");
         Assert.True(deleted.Deleted, string.Join('\n', deleted.Diagnostics));
         Assert.Equal("two", Assert.Single(store.ListReusablePackages()).Version);
     }
 
     [Fact]
-    public async Task DamagedReferenceAndRunningSessionPreventDeletion()
+    public async Task OnlyRunningTasksUsingTheSelectedVersionPreventDeletion()
     {
         var store = Store;
-        var unused = await PublishAsync("one");
+        var package = await PublishAsync("one");
         await PublishAsync("two");
-        await PublishAsync("three");
-        var file = Path.Combine(Data, "games", GameId, "source.json");
-        Directory.CreateDirectory(Path.GetDirectoryName(file)!);
-        await File.WriteAllTextAsync(file, "{\"adapterId\":");
-        var damaged = await store.DeleteVersionAsync(Family.AdapterId, "one", Data);
-        Assert.False(damaged.Deleted);
-        Assert.NotEmpty(damaged.Diagnostics);
-        File.Delete(file);
         var running = new EngineLibraryReference(Family.AdapterId, "one", GameId, "Running game", EngineLibraryReferenceKind.Running, null);
-        var busy = await store.DeleteVersionAsync(Family.AdapterId, "one", Data, [running]);
+        var otherReferences = Enum.GetValues<EngineLibraryReferenceKind>()
+            .Where(kind => kind != EngineLibraryReferenceKind.Running)
+            .Select(kind => running with { Kind = kind })
+            .Append(running with { Version = "two" })
+            .Append(running with { AdapterId = "engine.other" }).ToArray();
+        var busy = await store.DeleteVersionAsync(Family.AdapterId, "one", [running, .. otherReferences]);
         Assert.False(busy.Deleted);
         Assert.Equal(running, Assert.Single(busy.References));
-        Assert.True(Directory.Exists(unused.DirectoryPath));
+        Assert.True(Directory.Exists(package.DirectoryPath));
+        var deleted = await store.DeleteVersionAsync(Family.AdapterId, "one", otherReferences);
+        Assert.True(deleted.Deleted, string.Join('\n', deleted.Diagnostics));
+        Assert.False(Directory.Exists(package.DirectoryPath));
+    }
+
+    [Fact]
+    public async Task ActiveAndPreviousVersionsCanBeDeletedWithoutRevivingDiscoveryCandidates()
+    {
+        var store = Store;
+        await PublishAsync("one");
+        await PublishAsync("two");
+        var pins = Directory.GetFiles(Path.Combine(store.RootDirectory, "games"), "*.json", SearchOption.AllDirectories)
+            .ToDictionary(file => file, File.ReadAllBytes);
+        Assert.Equal(2, (await store.ReadDiscoveryCandidatesAsync()).Count);
+
+        Assert.True((await store.DeleteVersionAsync(Family.AdapterId, "one")).Deleted);
+        Assert.Equal("two", store.LoadActive(GameId)!.Version);
+        Assert.Equal("two", Assert.Single(await store.ReadDiscoveryCandidatesAsync()).Version);
+        Assert.Equal("two", Assert.Single(store.ListReusablePackages()).Version);
+        Assert.True((await store.DeleteVersionAsync(Family.AdapterId, "two")).Deleted);
+        Assert.Null(store.LoadActive(GameId));
+        Assert.Contains("包目录不存在", Assert.Throws<GeneratedAdapterException>(() => store.LoadVersion(Family.AdapterId, "two")).Message);
+        foreach (var (file, contents) in pins) Assert.Equal(contents, await File.ReadAllBytesAsync(file));
+        Assert.Empty(await store.ReadDiscoveryCandidatesAsync());
+        Assert.Empty(store.ListReusablePackages());
+
+        File.Delete(Path.Combine(store.RootDirectory, "library-index.json"));
+        var reopened = new LocalAdapterPackageStore(store.RootDirectory);
+        Assert.Empty(await reopened.ReadDiscoveryCandidatesAsync());
+        Assert.Empty(reopened.ListReusablePackages());
+        Assert.Null(reopened.LoadActive(GameId));
+    }
+
+    [Theory]
+    [InlineData(null, null)]
+    [InlineData("adapter.dll", null)]
+    [InlineData("package.json", null)]
+    [InlineData("adapter.runtimeconfig.json", null)]
+    [InlineData("package.json", "{damaged")]
+    public async Task MissingPackagesOrDamagedFilesCanBeRemovedIdempotently(string? fileName, string? damagedContents)
+    {
+        var store = Store;
+        var package = await PublishAsync("one");
+        if (fileName is null) Directory.Delete(package.DirectoryPath, recursive: true);
+        else if (damagedContents is null) File.Delete(Path.Combine(package.DirectoryPath, fileName));
+        else await File.WriteAllTextAsync(Path.Combine(package.DirectoryPath, fileName), damagedContents);
+        if (fileName is null) Assert.Null(store.LoadActive(GameId));
+
+        for (var attempt = 0; attempt < 2; attempt++)
+        {
+            var deleted = await store.DeleteVersionAsync(Family.AdapterId, "one");
+            Assert.True(deleted.Deleted, string.Join('\n', deleted.Diagnostics));
+            Assert.Empty(deleted.Diagnostics);
+            Assert.False(Directory.Exists(package.DirectoryPath));
+            var retained = Assert.Single(Assert.Single((await store.ReadEngineLibraryAsync([], Data)).Families).Versions);
+            Assert.False(retained.Exists);
+            Assert.False(retained.IsCandidate);
+        }
+        Assert.Null(store.LoadActive(GameId));
     }
 
     [Fact]

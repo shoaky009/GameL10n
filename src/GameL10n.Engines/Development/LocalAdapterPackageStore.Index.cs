@@ -58,7 +58,7 @@ public sealed partial class LocalAdapterPackageStore
         }, cancellationToken);
     }
 
-    /// <summary>Inspect only this version's required files. Integrity and project references are checked on use/deletion.</summary>
+    /// <summary>Inspect only this version's required files. Integrity is checked when loaded for use.</summary>
     public Task<EngineLibraryVersion> InspectLibraryVersionAsync(EngineLibraryVersion version, CancellationToken cancellationToken = default) =>
         Task.Run(() =>
         {
@@ -93,7 +93,7 @@ public sealed partial class LocalAdapterPackageStore
             return true;
         }, ct);
 
-    // This lock is independent of publication. A list read cannot queue behind a package copy or reference scan.
+    // This lock is independent of publication. A list read cannot queue behind a package copy or removal.
     // Writers may hold activationLock before taking this lock; index rebuilds never take activationLock.
     private Task<T> WithLibraryIndexAsync<T>(Func<Task<T>> action, CancellationToken ct) => Task.Run(async () =>
     {

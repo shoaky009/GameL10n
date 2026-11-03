@@ -1,5 +1,6 @@
 using System.Text.Json;
 using GameL10n.Core.Patching;
+using GameL10n.Core.Development;
 using GameL10n.Core.Storage;
 using GameL10n.Core.Translation;
 
@@ -17,6 +18,8 @@ public sealed partial class TranslationPipeline
         IReadOnlyList<string>? unitIds = null, bool reviewedOnly = false,
         IProgress<PipelineProgress>? progress = null, CancellationToken ct = default)
     {
+        if (session.Adapter is UnavailableGameAdapter unavailable)
+            throw new GeneratedAdapterException(unavailable.Message);
         await using var projectLock = AcquireProjectLock(session.ProjectDirectory);
         var memory = new TranslationMemory(Path.Combine(session.ProjectDirectory, "memory"), Path.Combine(DataDirectory, "memory", session.Id));
         await memory.InitializeAsync(ct);

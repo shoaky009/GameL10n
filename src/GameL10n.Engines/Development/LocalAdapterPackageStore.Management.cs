@@ -67,8 +67,8 @@ public sealed partial class LocalAdapterPackageStore
         finally { activationLock.Release(); }
     }
 
-    /// <summary>Only deletes an unreferenced external package; compatibility and project data are retained.</summary>
-    public Task<EngineLibraryDeleteResult> DeleteVersionAsync(string adapterId, string version, string dataDirectory,
+    /// <summary>Deletes an external package unless a running task uses it; compatibility and project data are retained.</summary>
+    public Task<EngineLibraryDeleteResult> DeleteVersionAsync(string adapterId, string version,
         IReadOnlyList<EngineLibraryReference>? runtimeReferences = null, CancellationToken cancellationToken = default)
     {
         var running = runtimeReferences?.ToArray() ?? [];
@@ -77,15 +77,13 @@ public sealed partial class LocalAdapterPackageStore
             await activationLock.WaitAsync(cancellationToken);
             try
             {
-                var diagnostics = new List<string>();
                 var path = PackagePath(adapterId, version);
-                var references = await ReadReferencesAsync(dataDirectory, diagnostics, cancellationToken);
-                references.AddRange(running);
-                var used = references.Where(item => item.AdapterId == adapterId && item.Version == version).Distinct().ToArray();
-                if (used.Length != 0 || diagnostics.Count != 0) return new EngineLibraryDeleteResult(false, used, diagnostics);
-                if (!Directory.Exists(path)) return new EngineLibraryDeleteResult(false, [], ["外置引擎版本目录不存在。"]);
+                if (!TryFamily(adapterId, out var identity)) throw new InvalidDataException("无效的引擎或模板标识。");
+                var used = running.Where(item => item.Kind == EngineLibraryReferenceKind.Running
+                    && item.AdapterId == adapterId && item.Version == version).Distinct().ToArray();
+                if (used.Length != 0) return new EngineLibraryDeleteResult(false, used, []);
                 // Validate every descendant before recursive deletion so a junction cannot redirect traversal.
-                ValidatePackageTree(path, cancellationToken);
+                if (Directory.Exists(path)) ValidatePackageTree(path, cancellationToken);
                 var state = ReadLibraryState();
                 var family = state.Families.GetValueOrDefault(adapterId) ?? new FamilyState();
                 state.Families[adapterId] = family with
@@ -95,11 +93,12 @@ public sealed partial class LocalAdapterPackageStore
                 };
                 await WriteLibraryStateAsync(state, cancellationToken);
                 cancellationToken.ThrowIfCancellationRequested();
-                Directory.Delete(path, recursive: true);
+                if (Directory.Exists(path)) Directory.Delete(path, recursive: true);
                 await UpdateLibraryIndexAsync(index =>
                 {
-                    if (index.Families.GetValueOrDefault(adapterId)?.Versions.GetValueOrDefault(version) is { } deleted)
-                        index.Families[adapterId].Versions[version] = deleted with { Exists = false, IsCandidate = false };
+                    var indexedFamily = GetIndexFamily(index, identity);
+                    var deleted = indexedFamily.Versions.GetValueOrDefault(version) ?? new(version, EngineLibrarySource.External, false);
+                    indexedFamily.Versions[version] = deleted with { Exists = false, IsCandidate = false };
                 }, CancellationToken.None);
                 return new EngineLibraryDeleteResult(true, [], []);
             }
@@ -245,6 +244,13 @@ public sealed partial class LocalAdapterPackageStore
     private static void ValidateFamilyId(string adapterId)
     {
         if (!TryFamily(adapterId, out _)) throw new InvalidDataException("无效的引擎或模板标识。");
+    }
+
+    private void ValidateReferenceIdentity(string? id, string? version)
+    {
+        if (string.IsNullOrWhiteSpace(id) || string.IsNullOrWhiteSpace(version))
+            throw new InvalidDataException("持久化记录缺少引擎或版本标识。");
+        _ = PackagePath(id, version);
     }
 
     private static bool IsLibraryReadError(Exception error) => error is IOException or InvalidDataException

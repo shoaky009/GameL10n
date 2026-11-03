@@ -87,6 +87,7 @@ public sealed partial class LocalAdapterPackageStore(string rootDirectory, strin
         if (!File.Exists(active)) return null;
         var activation = JsonSerializer.Deserialize<Activation>(WorkspaceFiles.ReadBounded(directory, "active.json", 4096), Json)
             ?? throw new GeneratedAdapterException("The local activation manifest is invalid.");
+        if (!Directory.Exists(PackagePath(activation.Id, activation.Version))) return null;
         return LoadPackage(activation);
     }
 
@@ -96,6 +97,8 @@ public sealed partial class LocalAdapterPackageStore(string rootDirectory, strin
     private GeneratedAdapterPackage LoadPackage(Activation activation)
     {
         var packagePath = PackagePath(activation.Id, activation.Version);
+        if (!Directory.Exists(packagePath))
+            throw new GeneratedAdapterException($"外置引擎版本 {activation.Id}/{activation.Version} 的包目录不存在，请重新识别游戏。");
         var package = ReadPackage(packagePath)
             ?? throw new GeneratedAdapterException("The local package manifest is invalid.");
         if (package.Id != activation.Id || package.Version != activation.Version)
