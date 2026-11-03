@@ -4,13 +4,13 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path $PSScriptRoot -Parent
-if ($Apply -and (Get-Process -Name AvgTranslator.Desktop -ErrorAction SilentlyContinue)) {
-    throw '请先关闭 AvgTranslator，避免覆盖应用正在保存的项目状态。'
+if ($Apply -and (Get-Process -Name GameL10n.Desktop, AvgTranslator.Desktop -ErrorAction SilentlyContinue)) {
+    throw '请先关闭 GameL10n，避免覆盖应用正在保存的项目状态。'
 }
-& (Join-Path $PSScriptRoot 'dotnet.ps1') build (Join-Path $repoRoot 'tools/AvgTranslator.Diagnostics/AvgTranslator.Diagnostics.csproj') --no-restore
+& (Join-Path $PSScriptRoot 'dotnet.ps1') build (Join-Path $repoRoot 'tools/GameL10n.Diagnostics/GameL10n.Diagnostics.csproj') --no-restore
 if ($LASTEXITCODE -ne 0) { throw '更新工具编译失败。' }
 $updateArguments = @(
-    (Join-Path $repoRoot 'tools/AvgTranslator.Diagnostics/bin/Debug/net10.0/AvgTranslator.Diagnostics.dll'),
+    (Join-Path $repoRoot 'tools/GameL10n.Diagnostics/bin/Debug/net10.0/GameL10n.Diagnostics.dll'),
     'update-adapter-coverage', $ProjectDirectory,
     (Join-Path $repoRoot 'target/unity-coverage-update'),
     (Join-Path $repoRoot 'adapters/unity-serialized-text/coverage-update'),

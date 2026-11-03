@@ -1,12 +1,14 @@
 # 数据目录与迁移
 
-默认数据目录是 `%LOCALAPPDATA%\AvgTranslator`。在“全局 → 程序设置 → 更换保存位置”中选择目录后，可选择“迁移并切换”或“仅切换”，完成后立即生效，无需重启。
+默认数据目录是 `%LOCALAPPDATA%\GameL10n`。在“全局 → 程序设置 → 更换保存位置”中选择目录后，可选择“迁移并切换”或“仅切换”，完成后立即生效，无需重启。
+
+从 AvgTranslator 升级时，如果新目录尚无位置设置或游戏数据，程序继续读取 `%LOCALAPPDATA%\AvgTranslator` 及其中的 `location.json`，原有游戏、译文、API 配置和扩展仍可使用，不自动搬动数据。更换位置后，启动位置设置保存在 `%LOCALAPPDATA%\GameL10n\location.json`。迁移与校验脚本和桌面程序使用同一套位置规则。
 
 “迁移并切换”将当前项目、译文、原文快照、补丁、日志、共享适配器和 API 配置直接复制到新目录，校验后立即加载。原目录保留，不额外创建整份备份或归档。已经完整导入分片的旧版逐条缓存，以及已有有效项目对应的旧整份 `.bak` 目录，留在原目录，不重复迁移。确认译文已提交的成功请求和响应也不重复迁移；异常诊断与未完成请求保留。
 
 首次迁移需要空目录。失败时继续使用原目录，目标保留已经复制的文件；再次选择相同目标会核对并复用一致文件，继续完成复制。“仅切换”直接加载目标目录已有的数据，空目录显示为空游戏库，不复制当前数据。切换前会暂停运行中的任务并等待状态保存，切换后可在项目中继续翻译。
 
-`AVG_TRANSLATOR_DATA` 环境变量优先；否则程序读取默认目录下 `location.json` 的 `dataDirectory`。通过环境变量启动时，界面切换仅影响当前运行，不修改默认位置设置；下次启动仍以环境变量为准。
+`GAMEL10N_DATA` 环境变量优先，也兼容旧变量 `AVG_TRANSLATOR_DATA`；两者均设置时使用新变量。否则程序读取上述目录下 `location.json` 的 `dataDirectory`。通过环境变量启动时，界面切换仅影响当前运行，不修改默认位置设置；下次启动仍以环境变量为准。
 
 ```text
 <数据目录>/
@@ -41,7 +43,7 @@
 
 正常请求和响应只在译文提交前临时落盘，用于中断恢复；译文及本批进度、Token 汇总保存后删除。重新识别或继续翻译时，也会清理能够与已提交译文核对一致的历史成功记录。异常、拒绝、结果未知和无法确认已提交的记录保留；清理失败不会使已保存译文失效。
 
-关闭所有 AVG Translator 窗口后，在发行包根目录运行：
+关闭所有 GameL10n 窗口后，在发行包根目录运行：
 
 ```powershell
 # 原目录升级；旧游戏目录保存为 games/<ID>.bak，旧 memory/<ID> 保留
@@ -49,16 +51,16 @@
 
 # 复制到新位置，验证成功后设置下次启动的数据目录
 ./scripts/migrate-data.ps1 -AllGames `
-  -DestinationRoot 'D:\AVG Translator Data' -Activate `
+  -DestinationRoot 'D:\GameL10n Data' -Activate `
   -ReportPath './migration-report.json'
 
 # 指定来源；不加 -Activate 时只迁移，不改变程序使用的数据位置
 ./scripts/migrate-data.ps1 -GameDirectory 'I:\LiLiM\DARK BLUE' `
-  -SourceRoot 'D:\Old AVG Data' -DestinationRoot 'D:\New AVG Data'
+  -SourceRoot 'D:\AvgTranslator Data' -DestinationRoot 'D:\GameL10n Data'
 
 # 重新校验源文件、读取提取缓存并统计当前设置下的译文缓存命中
 ./scripts/migrate-data.ps1 -GameDirectory 'I:\LiLiM\DARK BLUE' `
-  -SourceRoot 'D:\New AVG Data' -VerifyOnly
+  -SourceRoot 'D:\GameL10n Data' -VerifyOnly
 ```
 
 发行包自带数据工具和运行时，不需要安装 SDK。源码工作目录使用 `scripts/dotnet.ps1` 构建并运行该工具。

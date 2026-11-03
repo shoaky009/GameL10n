@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../GameL10n.Translation/GameL10n.Translation.csproj" />
+    <Content Include="../../third_party/Capstone/capstone.dll" Link="tools/analysis/capstone.dll" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="../../third_party/Capstone/LICENSE.TXT" Link="tools/analysis/Capstone-LICENSE.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <EmbeddedResource Include="../../third_party/SiglusSSU/siglus_ssu-0.5.7-cp314-cp314-win_amd64.whl" LogicalName="GameL10n.Siglus.upstream.whl" />
+    <EmbeddedResource Include="../../adapters/siglus/*.py" LogicalName="GameL10n.Siglus.%(Filename)%(Extension)" />
+    <EmbeddedResource Include="../../adapters/siglus/*.json" LogicalName="GameL10n.Siglus.%(Filename)%(Extension)" />
+    <EmbeddedResource Include="../../adapters/components/Cp932GlyphEncoding.cs" LogicalName="GameL10n.Components.Cp932GlyphEncoding.cs" />
+    <EmbeddedResource Include="../../adapters/components/engine_archive.py" LogicalName="GameL10n.Components.engine_archive.py" />
+    <EmbeddedResource Include="../../adapters/templates/ScriptComponentAdapter.cs" LogicalName="GameL10n.Templates.ScriptComponentAdapter.cs" />
+    <EmbeddedResource Include="../../adapters/qlie-filepack3-systemfont/QlieFont.cs" LogicalName="GameL10n.Components.QlieFont.cs" />
+    <EmbeddedResource Include="../../adapters/system4-ain14-msg1-fnl/GlyphRasterizer.cs" LogicalName="GameL10n.Components.GlyphRasterizer.cs" />
+    <EmbeddedResource Include="../../adapters/qlie-filepack3-systemfont/tools/QlieLauncher.cs" LogicalName="GameL10n.Components.QlieLauncher.cs" />
+  </ItemGroup>
+</Project>

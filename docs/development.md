@@ -3,19 +3,19 @@
 项目使用 C# / .NET 10 和 WinUI 3。构建需要 .NET SDK 10.0.402、Windows SDK 和 WinUI 构建依赖。
 
 ```powershell
-./scripts/dotnet.ps1 restore AvgTranslator.sln
-./scripts/dotnet.ps1 build AvgTranslator.sln --no-restore
-./scripts/dotnet.ps1 test tests/AvgTranslator.Tests --no-restore
+./scripts/dotnet.ps1 restore GameL10n.sln
+./scripts/dotnet.ps1 build GameL10n.sln --no-restore
+./scripts/dotnet.ps1 test tests/GameL10n.Tests --no-restore
 ./scripts/publish.ps1
 ```
 
-`scripts/dotnet.ps1` 支持系统 SDK，也支持项目下 `.tools/dotnet` 中的独立 SDK。`scripts/publish.ps1` 输出 `artifacts/AvgTranslator`，包含桌面应用、运行时、文档和自动适配所需的工具链。发行时保留完整目录，单独复制 EXE 不足以运行桌面工具。
+`scripts/dotnet.ps1` 支持系统 SDK，也支持项目下 `.tools/dotnet` 中的独立 SDK。`scripts/publish.ps1` 输出 `artifacts/GameL10n`，包含桌面应用、运行时、文档和自动适配所需的工具链。发行时保留完整目录，单独复制 EXE 不足以运行桌面工具。
 
 工具链打包来源为 `.tools/dotnet`，使用 SDK 10.0.402 与运行时 10.0.13。使用 `-WithoutToolchain` 可省略自动适配工具链；已支持游戏的翻译不需要它。
 
 内置 VNTextPatch 脚本工具随发行包保存在 `tools/vntextpatch`，包含独立 EXE 和必要运行库，不需要安装 SDK。原生运行库直接随包提供，避免每次处理脚本都解压运行时。其上游源码固定版本并随仓库保存，构建时不从 GitHub 动态下载；具体脚本格式与运行限制见[内置脚本适配说明](adapters/vntextpatch.md)。
 
-同目录的小型 `AvgTranslator.VnTextPatch.dll` 与 `sources.zip` 用于智能适配复用，发行脚本通过 `scripts/package-vntextpatch-assets.ps1` 生成。源码统一压缩保存，默认开发任务仅保存调用代码与固定版本依赖记录，解析库按内容哈希跨项目共享；需要修改时才展开所选引擎的源码。仅执行桌面项目的 `dotnet build` 不会生成这些发行资产，完整功能验证应使用发行目录。
+同目录的小型 `GameL10n.VnTextPatch.dll` 与 `sources.zip` 用于智能适配复用，发行脚本通过 `scripts/package-vntextpatch-assets.ps1` 生成。源码统一压缩保存，默认开发任务仅保存调用代码与固定版本依赖记录，解析库按内容哈希跨项目共享；需要修改时才展开所选引擎的源码。仅执行桌面项目的 `dotnet build` 不会生成这些发行资产，完整功能验证应使用发行目录。
 
 [编码与运行组件](adapters/components.md)的 C# 源码嵌入 Engines；预编译 QLIE 启动器由 `scripts/package-adapter-components.ps1` 生成到 `tools/adapter-components`，发行脚本自动调用。该步骤使用固定 SDK 编译器及 Windows .NET Framework 4.x 程序集，启动器自身不依赖 .NET 10。组件打包集成测试使用 PowerShell 7。
 
@@ -23,18 +23,18 @@
 
 | 目录 | 内容 |
 | --- | --- |
-| `src/AvgTranslator.Translation` | 文本模型、翻译执行、Provider、译文缓存、通用格式校验与文件持久化基础工具 |
-| `src/AvgTranslator.Engines` | 引擎适配器、资源探测、智能适配、扩展管理、资源与程序验证 |
-| `src/AvgTranslator.Core` | 项目管理、游戏流水线、任务调度、原文快照、补丁生成编排、安装与发布包项目验收 |
-| `src/AvgTranslator.Desktop` | WinUI 3 桌面界面 |
-| `tests/AvgTranslator.Tests` | 格式、缓存、恢复、安装及接口测试 |
-| `tools/AvgTranslator.Diagnostics` | 游戏资源验证与本地工具链诊断 |
-| `tools/AvgTranslator.DataTool` | 游戏数据迁移、校验与缓存加载统计 |
-| `tools/AvgTranslator.VnTextPatch` | 内置 VNTextPatch 脚本解析与回填工具 |
+| `src/GameL10n.Translation` | 文本模型、翻译执行、Provider、译文缓存、通用格式校验与文件持久化基础工具 |
+| `src/GameL10n.Engines` | 引擎适配器、资源探测、智能适配、扩展管理、资源与程序验证 |
+| `src/GameL10n.Core` | 项目管理、游戏流水线、任务调度、原文快照、补丁生成编排、安装与发布包项目验收 |
+| `src/GameL10n.Desktop` | WinUI 3 桌面界面 |
+| `tests/GameL10n.Tests` | 格式、缓存、恢复、安装及接口测试 |
+| `tools/GameL10n.Diagnostics` | 游戏资源验证与本地工具链诊断 |
+| `tools/GameL10n.DataTool` | 游戏数据迁移、校验与缓存加载统计 |
+| `tools/GameL10n.VnTextPatch` | 内置 VNTextPatch 脚本解析与回填工具 |
 | `third_party/VNTextPatch` | 固定版本的上游脚本解析源码与许可证 |
 | `contracts` | 扩展通信协议 |
 
-依赖方向为 `Desktop → Core → Engines → Translation`，Core 同时直接使用 Translation。Translation 仅依赖 .NET 基础库，不引用 Core、Engines、WinUI 或引擎原生工具；引擎脚本、字形组件和分析运行库随 Engines 提供。现有类型命名空间保持不变，程序集归属由上述项目边界确定。
+依赖方向为 `Desktop → Core → Engines → Translation`，Core 同时直接使用 Translation。Translation 仅依赖 .NET 基础库，不引用 Core、Engines、WinUI 或引擎原生工具；引擎脚本、字形组件和分析运行库随 Engines 提供。类型使用 `GameL10n.*` 命名空间，程序集归属由上述项目边界确定。
 
 `TranslationEngine.RunAsync` 接收文本列表、Provider 链和翻译策略，返回译文、缓存命中数与 Token 用量；它独立处理分批、去重、重试、拒绝切换、请求恢复和有效译文提交。调用方提供工作目录，并串行管理同一目录中的任务。通用校验在翻译核心中执行，资源专用校验通过可选回调传入；游戏原文哈希、Adapter、补丁构建和安装由 Core 编排。进度通过可等待的回调交给调用方保存和展示。
 
@@ -45,8 +45,8 @@
 ## 资源验证
 
 ```powershell
-./scripts/dotnet.ps1 run --project tools/AvgTranslator.Diagnostics -- verify-darkblue '<游戏目录>' target/verification
-./scripts/dotnet.ps1 run --project tools/AvgTranslator.Diagnostics -- toolchain .tools/dotnet target/toolchain-verification
+./scripts/dotnet.ps1 run --project tools/GameL10n.Diagnostics -- verify-darkblue '<游戏目录>' target/verification
+./scripts/dotnet.ps1 run --project tools/GameL10n.Diagnostics -- toolchain .tools/dotnet target/toolchain-verification
 ```
 
 诊断产物用于结构、编码和本地编译执行验证，不是完整汉化。

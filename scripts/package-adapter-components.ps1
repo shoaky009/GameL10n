@@ -1,4 +1,4 @@
-param([string]$OutputDirectory = 'artifacts/AvgTranslator/tools/adapter-components')
+param([string]$OutputDirectory = 'artifacts/GameL10n/tools/adapter-components')
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path $PSScriptRoot -Parent
 $output = [IO.Path]::GetFullPath([IO.Path]::Combine($repoRoot, $OutputDirectory))

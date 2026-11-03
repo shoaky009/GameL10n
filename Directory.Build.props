@@ -4,6 +4,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>latest</LangVersion>
     <Deterministic>true</Deterministic>
+    <Product>GameL10n</Product>
     <DefaultItemExcludes>$(DefaultItemExcludes);**/obj/**;**/bin/**</DefaultItemExcludes>
   </PropertyGroup>
 </Project>

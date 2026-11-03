@@ -5,7 +5,7 @@ commit `e68e174f3db6181e03fc7fabfa7570e1b293d148` (MIT; see LICENSE).
 Original project: [VNTranslationTools](https://github.com/arcusmaximus/VNTranslationTools).
 
 The 29 registered game script parsers and their required helpers are built directly
-into `tools/AvgTranslator.VnTextPatch`. No checkout under `target` is required.
+into `tools/GameL10n.VnTextPatch`. No checkout under `target` is required.
 Spreadsheet/cloud integrations, translation interchange formats, font measurement,
 application settings, command-line orchestration and disabled Kirikiri SCN support
 are omitted. No upstream NuGet dependency is required.

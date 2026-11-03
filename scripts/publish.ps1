@@ -1,26 +1,26 @@
-param([switch]$SkipBuild, [switch]$WithoutToolchain, [string]$OutputDirectory = 'artifacts/AvgTranslator', [string]$EngineToolsCacheDirectory = '.tools/engine-tools')
+param([switch]$SkipBuild, [switch]$WithoutToolchain, [string]$OutputDirectory = 'artifacts/GameL10n', [string]$EngineToolsCacheDirectory = '.tools/engine-tools')
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path $PSScriptRoot -Parent
 $output = [IO.Path]::GetFullPath([IO.Path]::Combine($repoRoot, $OutputDirectory))
-$desktopExecutable = Join-Path $output 'AvgTranslator.Desktop.exe'
-if (Get-Process -Name AvgTranslator.Desktop -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $desktopExecutable }) {
+$desktopExecutable = Join-Path $output 'GameL10n.Desktop.exe'
+if (Get-Process -Name GameL10n.Desktop -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $desktopExecutable }) {
     throw 'The desktop app is using this output directory. Close it before publishing, or select another -OutputDirectory.'
 }
 if (-not $SkipBuild) {
-    & (Join-Path $PSScriptRoot 'dotnet.ps1') publish (Join-Path $repoRoot 'src/AvgTranslator.Desktop/AvgTranslator.Desktop.csproj') -c Release -o $output --self-contained true
+    & (Join-Path $PSScriptRoot 'dotnet.ps1') publish (Join-Path $repoRoot 'src/GameL10n.Desktop/GameL10n.Desktop.csproj') -c Release -o $output --self-contained true
     if ($LASTEXITCODE -ne 0) { throw 'Desktop publish failed.' }
-    & (Join-Path $PSScriptRoot 'dotnet.ps1') publish (Join-Path $repoRoot 'tools/AvgTranslator.DataTool/AvgTranslator.DataTool.csproj') -c Release -r win-x64 --self-contained true -o (Join-Path $output 'tools/data')
+    & (Join-Path $PSScriptRoot 'dotnet.ps1') publish (Join-Path $repoRoot 'tools/GameL10n.DataTool/GameL10n.DataTool.csproj') -c Release -r win-x64 --self-contained true -o (Join-Path $output 'tools/data')
     if ($LASTEXITCODE -ne 0) { throw 'Data tool publish failed.' }
-    & (Join-Path $PSScriptRoot 'dotnet.ps1') publish (Join-Path $repoRoot 'tools/AvgTranslator.VnTextPatch/AvgTranslator.VnTextPatch.csproj') -c Release -r win-x64 --self-contained true '-p:PublishSingleFile=true' '-p:IncludeNativeLibrariesForSelfExtract=false' '-p:DebugType=None' '-p:DebugSymbols=false' -o (Join-Path $output 'tools/vntextpatch')
+    & (Join-Path $PSScriptRoot 'dotnet.ps1') publish (Join-Path $repoRoot 'tools/GameL10n.VnTextPatch/GameL10n.VnTextPatch.csproj') -c Release -r win-x64 --self-contained true '-p:PublishSingleFile=true' '-p:IncludeNativeLibrariesForSelfExtract=false' '-p:DebugType=None' '-p:DebugSymbols=false' -o (Join-Path $output 'tools/vntextpatch')
     if ($LASTEXITCODE -ne 0) { throw 'Built-in script tool publish failed.' }
 }
 & (Join-Path $PSScriptRoot 'package-vntextpatch-assets.ps1') -OutputDirectory (Join-Path $output 'tools/vntextpatch') -Configuration Release -SkipBuild:$SkipBuild
 & (Join-Path $PSScriptRoot 'package-adapter-components.ps1') -OutputDirectory (Join-Path $output 'tools/adapter-components')
 $engineToolsCache = [IO.Path]::GetFullPath([IO.Path]::Combine($repoRoot, $EngineToolsCacheDirectory))
-& (Join-Path $PSScriptRoot 'dotnet.ps1') run --project (Join-Path $repoRoot 'tools/AvgTranslator.Diagnostics/AvgTranslator.Diagnostics.csproj') -c Release -- prepare-engine-tools $engineToolsCache (Join-Path $output 'tools/engine-tools')
+& (Join-Path $PSScriptRoot 'dotnet.ps1') run --project (Join-Path $repoRoot 'tools/GameL10n.Diagnostics/GameL10n.Diagnostics.csproj') -c Release -- prepare-engine-tools $engineToolsCache (Join-Path $output 'tools/engine-tools')
 if ($LASTEXITCODE -ne 0) { throw 'Shared engine tools are missing; publishing stopped instead of deferring downloads to game analysis.' }
-if (-not (Test-Path -LiteralPath (Join-Path $output 'AvgTranslator.Desktop.exe'))) { throw 'The desktop executable is missing.' }
-if (-not (Test-Path -LiteralPath (Join-Path $output 'tools/vntextpatch/AvgTranslator.VnTextPatch.exe'))) { throw 'The built-in script tool is missing.' }
+if (-not (Test-Path -LiteralPath (Join-Path $output 'GameL10n.Desktop.exe'))) { throw 'The desktop executable is missing.' }
+if (-not (Test-Path -LiteralPath (Join-Path $output 'tools/vntextpatch/GameL10n.VnTextPatch.exe'))) { throw 'The built-in script tool is missing.' }
 if (-not $WithoutToolchain) {
     $toolchainSource = Join-Path $repoRoot '.tools/dotnet'
     $toolchainTarget = Join-Path $output 'toolchain'

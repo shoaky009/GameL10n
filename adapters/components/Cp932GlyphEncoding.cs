@@ -5,7 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Text;
 
-namespace AvgTranslator.AdapterComponents;
+namespace GameL10n.AdapterComponents;
 
 /// <summary>CP932 glyph aliases for complete text units. The caller must prove runtime/font support for every allowed slot.</summary>
 public sealed class Cp932GlyphEncoding : Encoding

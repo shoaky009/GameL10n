@@ -10,7 +10,7 @@
 # 只检查，不写入项目
 .\scripts\update-unity-text-coverage.ps1 -ProjectDirectory 'F:\Projects\games\defd4630872ba47920e71e42'
 
-# 关闭 AvgTranslator 后应用
+# 关闭 GameL10n 后应用
 .\scripts\update-unity-text-coverage.ps1 -ProjectDirectory 'F:\Projects\games\defd4630872ba47920e71e42' -Apply
 ```
 
@@ -22,4 +22,4 @@
 
 武器属性标签、精通教程、输入设置、部分状态效果和运行时更新的界面仍未完整覆盖；这些内容保存在项目的覆盖待办中。不能直接翻译整个 IL2CPP 字符串表或输入动作名，其中包含程序查找键。截图中的中文字号问题也尚未完成运行验证。
 
-`scripts/repair-translation-fragments.ps1 -ProjectDirectory <项目目录>` 可更新翻译格式保护，并应用已核对的属性说明片段校正。需先关闭程序。校正按原文、上下文、语言和旧译文精确匹配，保留人工编辑及后续译文，不调用 API、不重新提取、不安装游戏补丁。程序默认更新到 `artifacts/AvgTranslator-projects`，其他已有发行目录可通过 `-ApplicationDirectory` 指定。
+`scripts/repair-translation-fragments.ps1 -ProjectDirectory <项目目录>` 可更新翻译格式保护，并应用已核对的属性说明片段校正。需先关闭程序。校正按原文、上下文、语言和旧译文精确匹配，保留人工编辑及后续译文，不调用 API、不重新提取、不安装游戏补丁。程序默认更新到 `artifacts/GameL10n-projects`，其他已有发行目录可通过 `-ApplicationDirectory` 指定。

@@ -1,9 +1,0 @@
-<Project Sdk="Microsoft.NET.Sdk">
-  <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
-  </PropertyGroup>
-  <ItemGroup>
-    <ProjectReference Include="../AvgTranslator.Translation/AvgTranslator.Translation.csproj" />
-    <ProjectReference Include="../AvgTranslator.Engines/AvgTranslator.Engines.csproj" />
-  </ItemGroup>
-</Project>
