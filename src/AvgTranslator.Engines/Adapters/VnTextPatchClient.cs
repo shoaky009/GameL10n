@@ -1,6 +1,7 @@
 using System.Text.Json;
 using AvgTranslator.Core.Development;
 using AvgTranslator.Core.Isolation;
+using AvgTranslator.Core.Storage;
 
 namespace AvgTranslator.Core.Adapters;
 
@@ -18,6 +19,17 @@ internal sealed class VnTextPatchClient(IAdapterProcessRunner runner, string? wo
     private readonly string executable = Path.GetFullPath(workerExecutablePath
         ?? Path.Combine(AppContext.BaseDirectory, "tools", "vntextpatch", "AvgTranslator.VnTextPatch.exe"));
     private readonly IReadOnlyList<string> arguments = workerAssemblyPath is null ? [] : [Path.GetFullPath(workerAssemblyPath)];
+
+    internal async Task<string> FingerprintAsync(CancellationToken ct)
+    {
+        var assembly = arguments.Count == 0 ? Path.ChangeExtension(executable, ".dll") : arguments[0];
+        var files = new List<string> { executable, assembly };
+        var runtime = Path.ChangeExtension(assembly, ".runtimeconfig.json");
+        if (File.Exists(runtime)) files.Add(runtime);
+        var hashes = new List<string>();
+        foreach (var file in files) hashes.Add(await LocalFiles.HashFileAsync(file, ct));
+        return LocalFiles.HashText(JsonSerializer.Serialize(hashes));
+    }
 
     internal async Task<Response> InvokeAsync(string operation, string format, string sourceDirectory,
         IReadOnlyList<string> resources, string? outputDirectory, IReadOnlyDictionary<string, string>? translations,

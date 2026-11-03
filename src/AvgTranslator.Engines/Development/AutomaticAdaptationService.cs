@@ -9,7 +9,7 @@ namespace AvgTranslator.Core.Development;
 
 /// <summary>A single, resumable tool conversation. Published adapters execute without a model.</summary>
 public sealed class AutomaticAdaptationService(IAdaptationAgentModel model, GeneratedAdapterCompiler compiler,
-    LocalAdapterPackageStore packageStore, HttpClient? researchClient = null)
+    LocalAdapterPackageStore packageStore, HttpClient? researchClient = null, BuiltinAdapterTrial? builtinTrial = null)
 {
     private static readonly JsonSerializerOptions ContextJson = new(JsonSerializerDefaults.Web)
         { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
@@ -258,6 +258,8 @@ public sealed class AutomaticAdaptationService(IAdaptationAgentModel model, Gene
             state.BuiltinTrials ??= [];
             state.BuiltinProbes ??= [];
             state.SuccessfulProbes ??= [];
+            var tools = new AdaptationTools(request, state, directory, compiler, packageStore, researchClient,
+                builtinTrial: builtinTrial, reportProgress: Report);
             if (request.BuiltinProbes is { Count: > 0 }) state.BuiltinProbes = request.BuiltinProbes.TakeLast(6).ToArray();
             if (state.BuiltinDiscovery is null || state.BuiltinDiscovery.Revision != BuiltinAdapterDiscovery.Revision)
             {
@@ -269,6 +271,12 @@ public sealed class AutomaticAdaptationService(IAdaptationAgentModel model, Gene
                     state.BuiltinDiscovery.FilesScanned, state.BuiltinDiscovery.Partial,
                     candidates = state.BuiltinDiscovery.Candidates.Select(candidate => candidate.Format).ToArray() });
             }
+            Directory.CreateDirectory(directory);
+            sessionStarted = true;
+            await tools.RunAutomaticBuiltinTrialsAsync(disabledFamilies, SaveAsync, cancellationToken);
+            if (state.AutomaticTrials is { } automatic)
+                await TraceAsync(new { operation = "automatic-builtin-trials", automatic.Status, automatic.Reused,
+                    formats = state.BuiltinTrials.Where(trial => trial.Fingerprint is not null).Select(trial => trial.Format).ToArray() });
             continuation += BuiltinContext(state, disabledFamilies) + ReuseFailureContext(state);
             var continuationPending = false;
             if (state.ModelIdentity != model.Identity || state.Messages.Count == state.HistoryStart)
@@ -295,9 +303,6 @@ public sealed class AutomaticAdaptationService(IAdaptationAgentModel model, Gene
             state.LastStatus = null;
             state.NextAction = "";
 
-            Directory.CreateDirectory(directory);
-            sessionStarted = true;
-            var tools = new AdaptationTools(request, state, directory, compiler, packageStore, researchClient, reportProgress: Report);
             var instructions = Instructions + "\n" + ObjectiveContext(state.Objective.Value) + tools.KnowledgeContext;
             var matchedKnowledge = tools.MatchedKnowledge.Take(6).Select(entry => new { entry.Id, entry.Revision }).ToArray();
             if (matchedKnowledge.Length > 0)
@@ -770,10 +775,15 @@ public sealed class AutomaticAdaptationService(IAdaptationAgentModel model, Gene
             observedAt = state.BuiltinDiscoveryObservedAt,
             report = state.BuiltinDiscovery with { Candidates = state.BuiltinDiscovery.Candidates.Where(candidate => !disabledFamilies.Contains(candidate.AdapterId)).ToArray() },
             regularProbes = state.BuiltinProbes,
-            recentTrials = state.BuiltinTrials.TakeLast(3)
+            automaticTrials = state.AutomaticTrials,
+            recentTrials = state.BuiltinTrials.TakeLast(3).Select(trial => new
+            {
+                trial.Format, trial.Directory, trial.Files, trial.Status, trial.RoundtripStatus, trial.UnitCount,
+                trial.Error, trial.Diagnostic, trial.SourceHashes, trial.ObservedAt, trial.Samples
+            })
         }, ContextJson)
         + (state.BuiltinTrials.Any(trial => trial.Status == "passed")
-            ? "\n已有解析器样本验证通过，继续现有源码和记录的未完成步骤。不要重新执行起步调查或重复复制解析器；资源或解析代码变化后再核对受影响的测试。"
+            ? "\n记录中有解析器样本通过，仅适用于条目列出的文件及哈希。自动试用样本已暂存到 resources，可复用证据组合模板或补齐缺口；已有源码则沿用。仍需完整 test_adapter 验证中文写入，不要重复起步调查。"
             : "\n尚无通过的解析样本时，用 inspect_builtin_adapter 查看相关能力，stage_resources 准备样本，try_builtin_adapter 验证；已有调查按当前进度继续。解析可用时 copy_adapter 复用解析库，只补缺失环节。")
         + "记录的试验只覆盖列出的文件及哈希，不替代当前资源的最终 test_adapter；样本未变时沿用结论，勿重复调查。";
 
@@ -949,6 +959,7 @@ public sealed class AdaptationSession
     public DateTimeOffset? BuiltinDiscoveryObservedAt { get; set; }
     public IReadOnlyList<BuiltinAdapterProbeObservation> BuiltinProbes { get; set; } = [];
     public List<BuiltinAdapterTrialObservation> BuiltinTrials { get; set; } = [];
+    public AutomaticBuiltinTrialReport? AutomaticTrials { get; set; }
     public List<SuccessfulAnalysisProbe> SuccessfulProbes { get; set; } = [];
     public List<GeneratedAdapterReuseFailure> ReuseFailures { get; set; } = [];
     public string GameId { get; set; } = "";

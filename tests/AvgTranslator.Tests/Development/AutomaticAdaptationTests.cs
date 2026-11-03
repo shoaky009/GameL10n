@@ -698,6 +698,17 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         };
         await File.WriteAllTextAsync(Path.Combine(request.GameDirectory, "script.rpy"), "label start:\n    \"こんにちは。\"\n");
         var store = new LocalAdapterPackageStore(Path.Combine(root, "store"));
+        var trialCalls = 0;
+        var runner = new ScriptedRunner { ObserveRequest = call =>
+        {
+            if (call.StandardInput.Contains("\"format\":\"Renpy\"", StringComparison.Ordinal)) trialCalls++;
+        } };
+        // Protocol fixtures keep parser behavior real while avoiding a Windows apphost dependency.
+        var executable = Path.Combine(root, "worker.exe");
+        var assembly = Path.Combine(root, "worker.dll");
+        await File.WriteAllTextAsync(executable, "fixture apphost");
+        await File.WriteAllTextAsync(assembly, "fixture parser version");
+        var trial = new BuiltinAdapterTrial(runner, executable, assembly);
         var turn = 0;
         var model = new FakeModel(context =>
         {
@@ -705,22 +716,36 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
                 && message.Content.Contains("script-probe-passed", StringComparison.Ordinal));
             Assert.Contains(context.Tools, tool => tool.Name == "try_builtin_adapter");
             Assert.Contains(context.Tools, tool => tool.Name == "inspect_builtin_adapter");
+            Assert.Equal(2, trialCalls); // Extraction and original-byte build precede the first model request.
+            Assert.Contains(context.Messages, message => message.Content.Contains("こんにちは。", StringComparison.Ordinal));
             return turn++ == 0
                 ? new(new("assistant", ToolCalls: [new("save", "checkpoint", """{"summary":"Reuse the Renpy parser; verify the font next."}""")]), new(100, 20))
                 : Blocked("needs_input", "需要启动反馈。", "提供游戏运行报错。");
         });
-        await new AutomaticAdaptationService(model, Compiler(new ScriptedRunner()), store).AdaptAsync(request);
+        await new AutomaticAdaptationService(model, Compiler(runner), store, builtinTrial: trial).AdaptAsync(request);
         Assert.Equal(2, model.Calls);
         var statePath = Path.Combine(store.WorkDirectory, "current", "session.json");
         var first = JsonSerializer.Deserialize<AdaptationSession>(await File.ReadAllTextAsync(statePath), Json)!;
         Assert.Contains(first.BuiltinDiscovery!.Candidates, candidate => candidate.Format == "Renpy");
+        var observation = Assert.Single(first.BuiltinTrials);
+        Assert.Equal("passed", observation.Status);
+        Assert.Equal("passed", observation.RoundtripStatus);
+        Assert.NotNull(observation.Fingerprint);
+        Assert.NotEmpty(observation.Samples!);
+        Assert.Equal("completed", first.AutomaticTrials!.Status);
+        Assert.Equal(await File.ReadAllBytesAsync(Path.Combine(request.GameDirectory, "script.rpy")),
+            await File.ReadAllBytesAsync(Path.Combine(store.WorkDirectory, "current", "resources", "script.rpy")));
+        Assert.False(Directory.Exists(Path.Combine(store.WorkDirectory, "current", "src")));
+        Assert.Null(store.LoadActive(request.GameId));
 
-        await new AutomaticAdaptationService(model, Compiler(new ScriptedRunner()), store)
+        await new AutomaticAdaptationService(model, Compiler(runner), store, builtinTrial: trial)
             .AdaptAsync(request with { BuiltinProbes = null });
         Assert.Equal(3, model.Calls);
         var resumed = JsonSerializer.Deserialize<AdaptationSession>(await File.ReadAllTextAsync(statePath), Json)!;
         Assert.Equal(first.BuiltinDiscoveryObservedAt, resumed.BuiltinDiscoveryObservedAt);
         Assert.Equal("script-probe-passed", Assert.Single(resumed.BuiltinProbes).Status);
+        Assert.Equal(observation.Fingerprint, Assert.Single(resumed.BuiltinTrials).Fingerprint);
+        Assert.Equal(2, trialCalls);
     }
 
     [Fact]
@@ -2304,6 +2329,12 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
             }
             using var document = JsonDocument.Parse(request.StandardInput);
             var input = document.RootElement;
+            if (input.TryGetProperty("format", out _))
+            {
+                var parsed = AvgTranslator.VnTextPatch.Worker.ExecuteJson(request.StandardInput);
+                File.WriteAllText(input.GetProperty("responseFile").GetString()!, parsed);
+                return Task.FromResult(new AdapterProcessResult(0, "", ""));
+            }
             var source = input.GetProperty("sourceDirectory").GetString()!;
             var output = input.GetProperty("outputDirectory").GetString()!;
             var lines = File.ReadAllText(Path.Combine(source, "script.txt")).Split('\n');

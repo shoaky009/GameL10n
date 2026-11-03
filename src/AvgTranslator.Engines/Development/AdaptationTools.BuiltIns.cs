@@ -94,6 +94,13 @@ public sealed partial class AdaptationTools
         var files = Strings(args, "files");
         var result = await (builtinTrial ?? new BuiltinAdapterTrial(compiler.Runner)).RunAsync(Text(args, "format"),
             workspace, directory, files, Boolean(args, "checkRoundtrip", true), ct);
+        RecordBuiltinTrial(result, directory, files);
+        return result;
+    }
+
+    private void RecordBuiltinTrial(BuiltinAdapterTrialResult result, string directory, IReadOnlyList<string> files,
+        string? fingerprint = null, IReadOnlyList<BuiltinAdapterTrialSample>? samples = null)
+    {
         var cause = result.Diagnostic;
         while (cause?.Inner is { } inner) cause = inner;
         var diagnostic = cause is null ? null : Limit(
@@ -102,9 +109,8 @@ public sealed partial class AdaptationTools
         session.BuiltinTrials.RemoveAll(item => item.Format == result.Format);
         session.BuiltinTrials.Add(new(result.Format, directory, files, result.Status, result.RoundtripStatus,
             result.UnitCount, result.Error, diagnostic,
-            result.SourceHashes, DateTimeOffset.UtcNow));
+            result.SourceHashes, DateTimeOffset.UtcNow, fingerprint, samples));
         if (session.BuiltinTrials.Count > 6) session.BuiltinTrials.RemoveAt(0);
-        return result;
     }
 
     private static bool Boolean(JsonElement args, string name, bool defaultValue)
@@ -118,7 +124,8 @@ public sealed partial class AdaptationTools
 
 public sealed record BuiltinAdapterTrialObservation(string Format, string Directory, IReadOnlyList<string> Files,
     string Status, string RoundtripStatus, int UnitCount, string? Error, string? Diagnostic,
-    IReadOnlyDictionary<string, string> SourceHashes, DateTimeOffset ObservedAt);
+    IReadOnlyDictionary<string, string> SourceHashes, DateTimeOffset ObservedAt, string? Fingerprint = null,
+    IReadOnlyList<BuiltinAdapterTrialSample>? Samples = null);
 
 public sealed record BuiltinAdapterProbeObservation(string Format, string Status, IReadOnlyList<string> Resources,
     string? Diagnostic, DateTimeOffset ObservedAt);

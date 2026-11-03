@@ -17,9 +17,11 @@ public sealed record BuiltinAdapterTrialResult(string Format, string Status, str
 public sealed class BuiltinAdapterTrial(IAdapterProcessRunner runner, string? workerExecutablePath = null,
     string? workerAssemblyPath = null)
 {
+    internal const int Revision = 1;
     private const int MaximumFiles = 12;
     private const long MaximumBytes = 64L * 1024 * 1024;
     private readonly VnTextPatchClient client = new(runner, workerExecutablePath, workerAssemblyPath);
+    internal Task<string> FingerprintAsync(CancellationToken ct) => client.FingerprintAsync(ct);
 
     public async Task<BuiltinAdapterTrialResult> RunAsync(string format, string workspace, string directory,
         IReadOnlyList<string> files, bool checkRoundtrip = true, CancellationToken ct = default)
