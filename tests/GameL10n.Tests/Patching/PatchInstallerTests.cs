@@ -79,8 +79,76 @@ public sealed class PatchInstallerTests : IDisposable
         Assert.Equal(1, restored.RestoredFiles);
         Assert.Empty(restored.Conflicts);
         Assert.Equal("original", await ReadGameAsync("game.exe"));
-        Assert.Equal("original", await ReadGameAsync(backup));
+        Assert.False(File.Exists(GamePath(backup)));
         Assert.Equal("older manual backup", await ReadGameAsync("game.exe.bak"));
+    }
+
+    [Fact]
+    public async Task RestoreMovesVerifiedBackupAndPreservesOriginalFileTimes()
+    {
+        await WriteGameAsync("script.dat", "original");
+        string target = GamePath("script.dat");
+        File.SetCreationTimeUtc(target, new DateTime(2011, 2, 3, 4, 5, 6, DateTimeKind.Utc));
+        File.SetLastWriteTimeUtc(target, new DateTime(2014, 3, 4, 5, 6, 7, DateTimeKind.Utc));
+        var created = File.GetCreationTimeUtc(target);
+        var modified = File.GetLastWriteTimeUtc(target);
+        await WritePatchAsync(("script.dat", "translated"));
+        string backup = GamePath(Assert.Single((await _installer.InstallAsync(_game, _patch)).BackupFiles));
+        Assert.Equal(modified, File.GetLastWriteTimeUtc(backup));
+        if (OperatingSystem.IsWindows()) Assert.Equal(created, File.GetCreationTimeUtc(backup));
+
+        var result = await _installer.RestoreAsync(_game);
+        Assert.Empty(result.Conflicts);
+        Assert.Equal(1, result.RestoredFiles);
+        Assert.Equal(Hash("original"), Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(target))));
+        Assert.Equal(modified, File.GetLastWriteTimeUtc(target));
+        if (OperatingSystem.IsWindows()) Assert.Equal(created, File.GetCreationTimeUtc(target));
+        Assert.False(File.Exists(backup));
+        Assert.Empty(ReadJournal()["entries"]!.AsArray());
+    }
+
+    [Fact]
+    public async Task RestoreKeepsUnverifiedBackupAndJournalEvenWhenTargetIsAlreadyOriginal()
+    {
+        await WriteGameAsync("script.dat", "original");
+        await WritePatchAsync(("script.dat", "translated"));
+        string backup = Assert.Single((await _installer.InstallAsync(_game, _patch)).BackupFiles);
+        await WriteGameAsync(backup, "another version");
+        await WriteGameAsync("script.dat", "original");
+
+        Assert.Equal("script.dat", Assert.Single((await _installer.RestoreAsync(_game)).Conflicts));
+        Assert.Equal("original", await ReadGameAsync("script.dat"));
+        Assert.Equal("another version", await ReadGameAsync(backup));
+        Assert.Single(ReadJournal()["entries"]!.AsArray());
+        File.Delete(GamePath(backup));
+        Assert.Empty((await _installer.RestoreAsync(_game)).Conflicts);
+        Assert.Empty(ReadJournal()["entries"]!.AsArray());
+    }
+
+    [Fact]
+    public async Task FailedRestoreMoveKeepsBackupAndReadOnlyTargetUntilRetry()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        await WriteGameAsync("script.dat", "original");
+        await WritePatchAsync(("script.dat", "translated"));
+        string backup = Assert.Single((await _installer.InstallAsync(_game, _patch)).BackupFiles);
+        string target = GamePath("script.dat");
+        File.SetAttributes(target, File.GetAttributes(target) | FileAttributes.ReadOnly);
+        try
+        {
+            using (var locked = new FileStream(target, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                await Assert.ThrowsAnyAsync<IOException>(() => _installer.RestoreAsync(_game));
+                Assert.Equal("translated", await ReadGameAsync("script.dat"));
+                Assert.Equal("original", await ReadGameAsync(backup));
+                Assert.True((File.GetAttributes(target) & FileAttributes.ReadOnly) != 0);
+                Assert.True(ReadJournal()["entries"]![0]!["restoring"]!.GetValue<bool>());
+            }
+            Assert.Empty((await _installer.RestoreAsync(_game)).Conflicts);
+            Assert.Equal("original", await ReadGameAsync("script.dat"));
+            Assert.False(File.Exists(GamePath(backup)));
+        }
+        finally { File.SetAttributes(target, File.GetAttributes(target) & ~FileAttributes.ReadOnly); }
     }
 
     [Fact]
@@ -250,7 +318,8 @@ public sealed class PatchInstallerTests : IDisposable
             Assert.Equal("data/story.txt.bak", ReadJournal()["entries"]![0]!["backupRelativePath"]!.GetValue<string>());
             Assert.Equal("patch two", await ReadGameAsync("data/story.txt"));
         }
-        Assert.Equal("original", await ReadGameAsync("data/story.txt.bak"));
+        if (restore) Assert.False(File.Exists(GamePath("data/story.txt.bak")));
+        else Assert.Equal("original", await ReadGameAsync("data/story.txt.bak"));
     }
 
     [Theory]
@@ -261,6 +330,8 @@ public sealed class PatchInstallerTests : IDisposable
     public async Task SnapshotRecoversDeletedOrModifiedBackup(bool corrupt, bool restore)
     {
         await WriteGameAsync("scr.aos", "original");
+        var modified = new DateTime(2014, 3, 4, 5, 6, 7, DateTimeKind.Utc);
+        File.SetLastWriteTimeUtc(GamePath("scr.aos"), modified);
         await WritePatchAsync(("scr.aos", "patch"));
         string recorded = Assert.Single((await _installer.InstallAsync(_game, _patch)).BackupFiles);
         string snapshots = Path.Combine(_root, "sources");
@@ -288,7 +359,9 @@ public sealed class PatchInstallerTests : IDisposable
             Assert.Equal("original", await ReadGameAsync("scr.aos"));
         }
         if (corrupt) Assert.Equal("modified backup", await ReadGameAsync(recorded));
+        else Assert.False(File.Exists(GamePath(recorded)));
         Assert.Equal("original", await File.ReadAllTextAsync(snapshot));
+        Assert.Equal(modified, File.GetLastWriteTimeUtc(GamePath("scr.aos")));
     }
 
     [Fact]
@@ -442,6 +515,21 @@ public sealed class PatchInstallerTests : IDisposable
     }
 
     [Fact]
+    public async Task RecoveryKeepsAValidPendingRecordWhenAnUncommittedBackupHasChanged()
+    {
+        await WriteGameAsync("game.exe", "original");
+        await WriteGameAsync("game.exe.bak", "another version");
+        await WritePendingJournalAsync("game.exe", "original", "patch");
+
+        Assert.Equal("game.exe", Assert.Single((await _installer.RestoreAsync(_game)).Conflicts));
+        // A second load must still recognize the pending record and preserve both files.
+        Assert.Equal("game.exe", Assert.Single((await _installer.RestoreAsync(_game)).Conflicts));
+        Assert.Equal(Hash("patch"), ReadJournal()["entries"]![0]!["pendingSha256"]!.GetValue<string>());
+        Assert.Equal("original", await ReadGameAsync("game.exe"));
+        Assert.Equal("another version", await ReadGameAsync("game.exe.bak"));
+    }
+
+    [Fact]
     public async Task RecoveryRemovesNewFileWrittenBeforeTheJournalCommit()
     {
         await WritePendingJournalAsync("extra.dll", null, "patch");
@@ -453,8 +541,10 @@ public sealed class PatchInstallerTests : IDisposable
         Assert.False(File.Exists(GamePath("extra.dll")));
     }
 
-    [Fact]
-    public async Task RecoveryRecognizesRestoreThatFinishedBeforeJournalCommit()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RecoveryRecognizesRestoreThatFinishedBeforeJournalCommit(bool movedBackup)
     {
         await WriteGameAsync("game.exe", "original");
         await WritePatchAsync(("game.exe", "patch"));
@@ -462,12 +552,14 @@ public sealed class PatchInstallerTests : IDisposable
         JsonObject journal = ReadJournal();
         journal["entries"]![0]!["restoring"] = true;
         await WriteJournalAsync(journal);
-        await WriteGameAsync("game.exe", "original");
+        if (movedBackup) File.Move(GamePath("game.exe.bak"), GamePath("game.exe"), overwrite: true);
+        else await WriteGameAsync("game.exe", "original");
 
         PatchRestoreResult restored = await _installer.RestoreAsync(_game);
         Assert.Empty(restored.Conflicts);
         Assert.Equal("original", await ReadGameAsync("game.exe"));
         Assert.Empty(ReadJournal()["entries"]!.AsArray());
+        Assert.False(File.Exists(GamePath("game.exe.bak")));
     }
 
     [Fact]

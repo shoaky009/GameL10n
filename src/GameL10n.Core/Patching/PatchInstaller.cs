@@ -178,6 +178,8 @@ public sealed class PatchInstaller
                     RelativePath = file.RelativePath,
                     OriginalSha256 = currentHash,
                     OriginalReadOnly = currentHash is not null && (File.GetAttributes(target) & FileAttributes.ReadOnly) != 0,
+                    OriginalCreationTimeUtc = currentHash is null ? null : File.GetCreationTimeUtc(target),
+                    OriginalLastWriteTimeUtc = currentHash is null ? null : File.GetLastWriteTimeUtc(target),
                     BackupRelativePath = currentHash is null ? null : ChooseBackupPath(gameRoot, file.RelativePath, reservedPaths)
                 };
                 if (entry.BackupRelativePath is not null)
@@ -194,7 +196,7 @@ public sealed class PatchInstaller
                 {
                     if (!SameHash(currentHash, entry.OriginalSha256))
                         throw new IOException($"The original backup is missing: {entry.BackupRelativePath}");
-                    await AtomicCopyAsync(target, backup, entry.OriginalSha256, overwrite: false, cancellationToken);
+                    await AtomicCopyAsync(target, backup, entry.OriginalSha256, overwrite: false, cancellationToken, preserveFileTimes: true);
                     backups.Add(entry.BackupRelativePath!);
                 }
                 if (!SameHash(await HashFileAsync(backup, cancellationToken), entry.OriginalSha256))
@@ -232,9 +234,8 @@ public sealed class PatchInstaller
             string? currentHash = await HashIfPresentAsync(target, cancellationToken);
             if (SameHash(currentHash, entry.OriginalSha256))
             {
-                RestoreReadOnly(target, entry);
-                journal.Entries.Remove(entry);
-                await SaveJournalAsync(gameRoot, journal);
+                if (!await CompleteRestoreAsync(gameRoot, journal, entry, cancellationToken))
+                    conflicts.Add(entry.RelativePath);
                 continue;
             }
             if (!SameHash(currentHash, entry.InstalledSha256))
@@ -253,21 +254,20 @@ public sealed class PatchInstaller
 
             entry.Restoring = true;
             await SaveJournalAsync(gameRoot, journal);
-            await EnsureCurrentHashAsync(target, entry.InstalledSha256, cancellationToken);
             if (entry.OriginalSha256 is null)
             {
+                await EnsureCurrentHashAsync(target, entry.InstalledSha256, cancellationToken);
                 PatchFileSafety.CheckPath(target);
                 File.Delete(target);
                 removed++;
             }
             else
             {
-                await AtomicCopyAsync(backup!.Path, target, entry.OriginalSha256, overwrite: true, cancellationToken, entry.InstalledSha256);
-                RestoreReadOnly(target, entry);
+                await MoveOriginalBackupAsync(backup!.Path, target, entry, cancellationToken);
                 restored++;
             }
-            journal.Entries.Remove(entry);
-            await SaveJournalAsync(gameRoot, journal);
+            if (!await CompleteRestoreAsync(gameRoot, journal, entry, cancellationToken))
+                conflicts.Add(entry.RelativePath);
         }
         return new PatchRestoreResult(restored, removed, conflicts);
     }
@@ -342,8 +342,80 @@ public sealed class PatchInstaller
             await SaveJournalAsync(gameRoot, journal);
             recorded = PatchFileSafety.UnderRoot(gameRoot, entry.BackupRelativePath);
         }
-        await AtomicCopyAsync(source, recorded, entry.OriginalSha256!, overwrite: false, cancellationToken);
+        await AtomicCopyAsync(source, recorded, entry.OriginalSha256!, overwrite: false, cancellationToken, preserveFileTimes: true);
         return new(recorded, true);
+    }
+
+    private async Task<bool> CompleteRestoreAsync(string gameRoot, Journal journal, Entry entry, CancellationToken cancellationToken)
+    {
+        string target = PatchFileSafety.UnderRoot(gameRoot, entry.RelativePath);
+        await EnsureCurrentHashAsync(target, entry.OriginalSha256, cancellationToken);
+        if (entry.BackupRelativePath is { } relative)
+        {
+            string backup = PatchFileSafety.UnderRoot(gameRoot, relative);
+            if (File.Exists(backup))
+            {
+                // A completed old-style copy or interrupted restore may still have its backup.
+                // Never remove an unrelated/modified backup just because the target is original.
+                await using var verifiedBackup = new FileStream(backup, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete,
+                    81920, FileOptions.Asynchronous | FileOptions.SequentialScan);
+                if (!SameHash(Convert.ToHexStringLower(await SHA256.HashDataAsync(verifiedBackup, cancellationToken)), entry.OriginalSha256)) return false;
+                await EnsureCurrentHashAsync(target, entry.OriginalSha256, cancellationToken);
+                var attributes = File.GetAttributes(backup);
+                try
+                {
+                    if ((attributes & FileAttributes.ReadOnly) != 0) File.SetAttributes(backup, attributes & ~FileAttributes.ReadOnly);
+                    File.Delete(backup);
+                }
+                catch
+                {
+                    if (File.Exists(backup)) File.SetAttributes(backup, attributes);
+                    throw;
+                }
+            }
+        }
+        RestoreOriginalMetadata(target, entry);
+        journal.Entries.Remove(entry);
+        await SaveJournalAsync(gameRoot, journal);
+        return true;
+    }
+
+    private static async Task MoveOriginalBackupAsync(string backup, string target, Entry entry, CancellationToken cancellationToken)
+    {
+        PatchFileSafety.CheckPath(backup);
+        // Allow rename while preventing writes to the verified original until the move finishes.
+        await using var original = new FileStream(backup, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete,
+            81920, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        string hash = Convert.ToHexStringLower(await SHA256.HashDataAsync(original, cancellationToken));
+        if (!SameHash(hash, entry.OriginalSha256)) throw new IOException($"Original backup checksum mismatch: {backup}");
+        await EnsureCurrentHashAsync(target, entry.InstalledSha256, cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        PatchFileSafety.CheckPath(backup);
+        PatchFileSafety.CheckPath(target);
+        FileAttributes? restoreAttributesOnFailure = null;
+        try
+        {
+            if (File.Exists(target))
+            {
+                var attributes = File.GetAttributes(target);
+                if ((attributes & FileAttributes.ReadOnly) != 0)
+                {
+                    File.SetAttributes(target, attributes & ~FileAttributes.ReadOnly);
+                    restoreAttributesOnFailure = attributes;
+                }
+            }
+            File.Move(backup, target, overwrite: true);
+            restoreAttributesOnFailure = null;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            throw new IOException($"无法恢复文件：{target}。请解除文件占用或确认目录写入权限后重试。{error.Message}", error);
+        }
+        finally
+        {
+            if (restoreAttributesOnFailure is { } attributes && File.Exists(target)) File.SetAttributes(target, attributes);
+        }
+        // CompleteRestoreAsync verifies the final path before committing the journal.
     }
 
     private async Task<List<string>> RecoverAsync(string gameRoot, Journal journal, CancellationToken cancellationToken)
@@ -360,8 +432,9 @@ public sealed class PatchInstaller
             {
                 if (SameHash(actual, entry.OriginalSha256))
                 {
-                    RestoreReadOnly(target, entry);
-                    journal.Entries.Remove(entry);
+                    if (!await CompleteRestoreAsync(gameRoot, journal, entry, cancellationToken))
+                        conflicts.Add(entry.RelativePath);
+                    continue;
                 }
                 else if (SameHash(actual, entry.InstalledSha256))
                     entry.Restoring = false;
@@ -379,12 +452,13 @@ public sealed class PatchInstaller
             else if ((entry.InstalledSha256 is not null && SameHash(actual, entry.InstalledSha256)) ||
                      (entry.InstalledSha256 is null && SameHash(actual, entry.OriginalSha256)))
             {
-                entry.PendingSha256 = null;
                 if (entry.InstalledSha256 is null)
                 {
-                    RestoreReadOnly(target, entry);
-                    journal.Entries.Remove(entry);
+                    if (!await CompleteRestoreAsync(gameRoot, journal, entry, cancellationToken))
+                        conflicts.Add(entry.RelativePath);
+                    continue;
                 }
+                entry.PendingSha256 = null;
             }
             else
             {
@@ -518,7 +592,7 @@ public sealed class PatchInstaller
     }
 
     private static async Task AtomicCopyAsync(string source, string target, string expectedHash, bool overwrite,
-        CancellationToken cancellationToken, string? expectedCurrentHash = null)
+        CancellationToken cancellationToken, string? expectedCurrentHash = null, bool preserveFileTimes = false)
     {
         PatchFileSafety.CheckPath(source);
         PatchFileSafety.CheckPath(target);
@@ -529,15 +603,23 @@ public sealed class PatchInstaller
         FileAttributes? restoreAttributesOnFailure = null;
         try
         {
+            DateTime? creationTime = null, lastWriteTime = null;
             await using (var input = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.Read, 81920, FileOptions.Asynchronous | FileOptions.SequentialScan))
             await using (var output = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None, 81920, FileOptions.Asynchronous))
             {
+                if (preserveFileTimes)
+                {
+                    creationTime = File.GetCreationTimeUtc(source);
+                    lastWriteTime = File.GetLastWriteTimeUtc(source);
+                }
                 await input.CopyToAsync(output, cancellationToken);
                 await output.FlushAsync(cancellationToken);
                 output.Flush(flushToDisk: true);
             }
             if (!SameHash(await HashFileAsync(temporary, cancellationToken), expectedHash))
                 throw new InvalidDataException($"File checksum changed while copying: {source}");
+            if (creationTime is { } created) File.SetCreationTimeUtc(temporary, created);
+            if (lastWriteTime is { } modified) File.SetLastWriteTimeUtc(temporary, modified);
             cancellationToken.ThrowIfCancellationRequested();
             PatchFileSafety.CheckPath(target);
             if (overwrite)
@@ -572,10 +654,17 @@ public sealed class PatchInstaller
         }
     }
 
-    private static void RestoreReadOnly(string target, Entry entry)
+    private static void RestoreOriginalMetadata(string target, Entry entry)
     {
-        if (entry.OriginalSha256 is not null && entry.OriginalReadOnly && File.Exists(target))
-            File.SetAttributes(target, File.GetAttributes(target) | FileAttributes.ReadOnly);
+        if (entry.OriginalSha256 is null || !File.Exists(target)) return;
+        var attributes = File.GetAttributes(target) & ~FileAttributes.ReadOnly;
+        File.SetAttributes(target, attributes);
+        try
+        {
+            if (entry.OriginalCreationTimeUtc is { } created) File.SetCreationTimeUtc(target, created);
+            if (entry.OriginalLastWriteTimeUtc is { } modified) File.SetLastWriteTimeUtc(target, modified);
+        }
+        finally { File.SetAttributes(target, entry.OriginalReadOnly ? attributes | FileAttributes.ReadOnly : attributes); }
     }
 
     private async Task SaveJournalAsync(string gameRoot, Journal journal)
@@ -657,6 +746,8 @@ public sealed class PatchInstaller
         public string RelativePath { get; set; } = "";
         public string? OriginalSha256 { get; set; }
         public bool OriginalReadOnly { get; set; }
+        public DateTime? OriginalCreationTimeUtc { get; set; }
+        public DateTime? OriginalLastWriteTimeUtc { get; set; }
         public string? BackupRelativePath { get; set; }
         public string? InstalledSha256 { get; set; }
         public string? PendingSha256 { get; set; }
