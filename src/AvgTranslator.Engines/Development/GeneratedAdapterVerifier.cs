@@ -142,7 +142,8 @@ public sealed class GeneratedAdapterVerifier
         catch (Exception exception) when (exception is GeneratedAdapterException or InvalidDataException or IOException or System.Text.Json.JsonException)
         {
             diagnostics.Add(GeneratedAdapterCompiler.LimitDiagnostic($"[{phase}] {exception.Message}"));
-            return new GeneratedAdapterVerification(false, diagnostics, originalRoundtripPassed);
+            return new GeneratedAdapterVerification(false, diagnostics, originalRoundtripPassed,
+                Cacheable: exception is not IOException || exception is InvalidDataException);
         }
         finally { GeneratedGameAdapter.DeleteStagedTree(verificationDirectory); }
     }

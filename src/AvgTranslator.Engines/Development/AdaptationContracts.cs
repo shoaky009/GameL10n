@@ -41,6 +41,6 @@ public sealed record GeneratedAdapterPackage(string Id, string Version, string D
     IReadOnlyList<AdapterReleaseFile>? ReleaseFiles = null, AdapterRecognition? Recognition = null);
 
 public sealed record GeneratedAdapterVerification(bool Passed, IReadOnlyList<string> Diagnostics,
-    bool OriginalRoundtripPassed = false);
+    bool OriginalRoundtripPassed = false, bool Cacheable = true);
 
 public sealed class GeneratedAdapterException(string message) : Exception(message);

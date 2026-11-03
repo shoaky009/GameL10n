@@ -93,7 +93,7 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
             """{"executable":{"type":"string"},"arguments":{"type":"array","items":{"type":"string"}},"workingDirectory":{"type":"string"},"stdin":{"type":"string"},"timeoutSeconds":{"type":"integer"}}""", "executable", "arguments"),
         Define("run_csharp", "Compile and run explicitly selected UTF-8 .cs files under work/ or src/ with pinned .NET 10. Use a work/ test entry point plus existing src/ parser helpers; do not copy helpers or include an unrelated Program.cs. No directory-wide compilation. Main or top-level statements, explicit using directives. Optional references lists local managed DLLs under work/ or src/tools/ (include dependencies). No project/restore/NuGet. Default workingDirectory is workspace root; arguments/stdin/stdout/stderr use UTF-8. Register CodePagesEncodingProvider for cp932/cp936. Timeout defaults to 120s (1-600); compiler capped at 120s. Returns compiled, exitCode, stdout, stderr; temporary build files are deleted, sources retained. Use staged resources; never modify originals.",
             """{"sourceFiles":{"type":"array","items":{"type":"string"}},"references":{"type":"array","items":{"type":"string"}},"arguments":{"type":"array","items":{"type":"string"}},"workingDirectory":{"type":"string"},"stdin":{"type":"string"},"timeoutSeconds":{"type":"integer"}}""", "sourceFiles"),
-        Define("test_adapter", "Compile and verify the saved release selection. Omit releaseFiles to reuse it; supplying releaseFiles replaces the entire selection. New src C# files and copied built-in dependencies are registered automatically. Use update_release_files only for dependency changes or exclusions. Paths are FINAL PACKAGE paths: src/Program.cs maps to workspace src/Program.cs; tools/parser.py maps to workspace src/tools/parser.py. No globs or automatic directory inclusion. Exclude probes, samples, logs, unused tools and old implementations. Test this exact release before finish. Check discovery against real game/staged samples and independently verify extraction/roundtrip; repair also checks the existing baseline. discoveryOnly=true cannot publish. Optional recognition declares proven required file/signature facts and nonblocking hints; omit to retain the saved declaration. It is independent of resourcePatterns. Do not invent game-specific filenames or do extra research solely to fill it.",
+        Define("test_adapter", "Compile and verify the saved release selection. Identical inputs reuse the last completed result (reused=true), including deterministic failures; change the relevant implementation or evidence before retesting. Omit releaseFiles to reuse it; supplying releaseFiles replaces the entire selection. New src C# files and copied built-in dependencies are registered automatically. Use update_release_files only for dependency changes or exclusions. Paths are FINAL PACKAGE paths: src/Program.cs maps to workspace src/Program.cs; tools/parser.py maps to workspace src/tools/parser.py. No globs or automatic directory inclusion. Exclude probes, samples, logs, unused tools and old implementations. Test this exact release before finish. Check discovery against real game/staged samples and independently verify extraction/roundtrip; repair also checks the existing baseline. discoveryOnly=true cannot publish. Optional recognition declares proven required file/signature facts and nonblocking hints; omit to retain the saved declaration. It is independent of resourcePatterns. Do not invent game-specific filenames or do extra research solely to fill it.",
             """{"kind":{"type":"string","enum":["engine","template"]},"key":{"type":"string"},"name":{"type":"string"},"resourcePatterns":{"type":"array","items":{"type":"string"}},"releaseFiles":{"type":"array","minItems":1,"maxItems":512,"items":{"type":"object","properties":{"path":{"type":"string","maxLength":512},"role":{"type":"string","enum":["source","runtime","asset","license"]},"purpose":{"type":"string","minLength":1,"maxLength":240}},"required":["path","role","purpose"],"additionalProperties":false}},"discoveryOnly":{"type":"boolean"},"recognition":""" + AdapterRecognition.JsonSchema + "}", "kind", "key", "name", "resourcePatterns"),
         Define("update_release_files", "Inspect or incrementally update the saved release selection. files upserts exact PACKAGE paths with source/runtime/asset/license roles and purposes; remove excludes paths without deleting files. No arguments lists selection and unregistered files. Use only for changed dependencies or exclusions; test_adapter reuses this state across failures/restarts/checkpoints. Game originals belong to resources, modified game files to patch output, never release assets.",
             """{"files":{"type":"array","maxItems":512,"items":{"type":"object","properties":{"path":{"type":"string"},"role":{"type":"string","enum":["source","runtime","asset","license"]},"purpose":{"type":"string","maxLength":240}},"required":["path","role","purpose"],"additionalProperties":false}},"remove":{"type":"array","maxItems":512,"items":{"type":"string"}}}"""),
@@ -709,19 +709,37 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
             ? AdapterReleaseFiles.Validate(declared.Deserialize<AdapterReleaseFile[]>(Json))
             : session.ReleaseFiles;
         session.ReleaseFiles = releaseFiles;
-        session.VerifiedPackage = null;
-        session.VerifiedCoverageFingerprint = null;
-        session.VerifiedObjective = null;
-        session.VerifiedBaselineFingerprint = null;
+        ClearVerification();
         if (session.ResourceHashes.Count == 0) throw new InvalidDataException("请先 stage_resources 选择用于验证的真实资源。");
         RequireLaunchResources();
-        await CheckResourcesAsync(ct);
         var family = new AdapterFamily(Text(args, "kind"), Text(args, "key"), Text(args, "name"));
         family.Validate();
         var patterns = Strings(args, "resourcePatterns");
+        GeneratedAdapterResources.ValidatePatterns(patterns);
         releaseFiles = AdapterReleaseFiles.Validate(releaseFiles);
+        var discoveryOnly = Boolean(args, "discoveryOnly", false);
+        var fingerprint = await VerificationFingerprintAsync(family, patterns, releaseFiles, discoveryOnly, ct);
+        if (await ReuseVerificationAsync(fingerprint, ct) is { } reused) return reused;
+        session.VerificationCache = null;
+        async Task<object> CompleteTestAsync(object result, GeneratedAdapterPackage? package = null, string? compilationError = null, bool cacheable = true)
+        {
+            // Tools and external edits may change inputs during a check. Such a result is never reusable.
+            if (cacheable && fingerprint is not null && fingerprint == await VerificationFingerprintAsync(family, patterns, releaseFiles, discoveryOnly, ct))
+                session.VerificationCache = new(fingerprint, GeneratedAdapterVerifier.Revision, package,
+                    compilationError is null ? JsonSerializer.SerializeToElement(result, Json) : null, compilationError);
+            return result;
+        }
         var timer = System.Diagnostics.Stopwatch.StartNew();
-        var package = await compiler.CompileWorkspaceAsync(SourceDirectory, Path.Combine(workspace, "build"), patterns, releaseFiles, ct, family, session.Recognition);
+        GeneratedAdapterPackage package;
+        try
+        {
+            package = await compiler.CompileWorkspaceAsync(SourceDirectory, Path.Combine(workspace, "build"), patterns, releaseFiles, ct, family, session.Recognition);
+        }
+        catch (GeneratedAdapterException error)
+        {
+            await CompleteTestAsync(new { passed = false }, compilationError: error.Message);
+            throw;
+        }
         CheckReleaseGameInputs(package);
         var compileMs = timer.ElapsedMilliseconds;
         timer.Restart();
@@ -733,16 +751,17 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
         catch (Exception error) when (error is GeneratedAdapterException or InvalidDataException or IOException)
         {
             session.VerificationDiagnostics = [error.Message];
-            return new { passed = false, stage = "discovery", diagnostics = session.VerificationDiagnostics, runtimeTested = false,
-                nextAction = "修复实际资源发现失败后重新 test_adapter；不要绕过失败发布。", compileMs, discoveryMs = timer.ElapsedMilliseconds };
+            return await CompleteTestAsync(new { passed = false, stage = "discovery", diagnostics = session.VerificationDiagnostics, runtimeTested = false,
+                nextAction = "修复实际资源发现失败后重新 test_adapter；不要绕过失败发布。", compileMs, discoveryMs = timer.ElapsedMilliseconds }, package,
+                cacheable: (error is not IOException || error is InvalidDataException) && error.InnerException is not IOException);
         }
         var discoveryMs = timer.ElapsedMilliseconds;
-        if (args.TryGetProperty("discoveryOnly", out var discoveryOnly) && discoveryOnly.GetBoolean())
+        if (discoveryOnly)
         {
             session.VerificationDiagnostics = ["真实游戏与样本的探测结果一致；尚未执行提取及回填验收，不能发布。"];
             ReportVerifiedProgress("已确认适配器能识别当前游戏资源；提取和中文回填尚未验收。");
-            return new { passed = true, stage = "discovery", diagnostics = session.VerificationDiagnostics, runtimeTested = false,
-                nextAction = "继续实现并执行完整 test_adapter；仅资源发现通过还不能发布。", compileMs, discoveryMs };
+            return await CompleteTestAsync(new { passed = true, stage = "discovery", diagnostics = session.VerificationDiagnostics, runtimeTested = false,
+                nextAction = "继续实现并执行完整 test_adapter；仅资源发现通过还不能发布。", compileMs, discoveryMs }, package);
         }
         var verificationDirectory = WorkspaceFiles.Resolve(workspace, "verification");
         GeneratedGameAdapter.DeleteStagedTree(verificationDirectory);
@@ -756,22 +775,16 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
         else if (verification.OriginalRoundtripPassed)
             ReportVerifiedProgress("原文回填已通过逐字节验证；中文或局部试译验收尚未通过，正在修复。");
         if (verification.Passed)
-        {
-            session.VerifiedPackage = package;
-            session.VerificationRevision = GeneratedAdapterVerifier.Revision;
-            session.VerifiedCoverageFingerprint = session.TextCoverage.Fingerprint();
-            session.VerifiedObjective = session.Objective;
-            session.VerifiedBaselineFingerprint = session.Objective == AdaptationObjective.Repair ? BaselineFingerprint() : null;
-        }
+            AcceptVerification(package);
         var nextAction = !verification.Passed
             ? "修复 diagnostics 中的真实失败后重新 test_adapter；未通过验收必须继续修复。"
             : session.Objective == AdaptationObjective.Repair
                 ? "本次资源与已有文本验收已通过。若反馈已解决，直接 finish；不要自动开始补全其他文字类别。已知其他覆盖遗漏用 allowPartial=true 并在 summary 披露，运行效果待验证单列 runtimeChecks。长会话可先 checkpoint 保存本阶段。"
                 : "完整资源验收已通过。当前目标完成后直接 finish，披露已知遗漏和 runtimeChecks；长会话可先 checkpoint。不要重复通过的测试或为未调查类别自动增加研究。";
-        return new { verification.Passed, stage = verification.Passed ? "finish-ready" : "verification", nextAction,
+        return await CompleteTestAsync(new { verification.Passed, stage = verification.Passed ? "finish-ready" : "verification", nextAction,
             verification.Diagnostics, package.Id, package.Version, runtimeTested = false,
             pendingCoverage = session.TextCoverage.Pending, runtimeChecks = session.TextCoverage.RuntimeChecks,
-            compileMs, discoveryMs, verificationMs = timer.ElapsedMilliseconds };
+            compileMs, discoveryMs, verificationMs = timer.ElapsedMilliseconds }, package, cacheable: verification.Cacheable);
     }
 
     private string? BaselineFingerprint() => request.BaselineUnits is null ? null

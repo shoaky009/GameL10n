@@ -10,7 +10,7 @@ using AvgTranslator.Core.Storage;
 
 namespace AvgTranslator.Tests.Development;
 
-public sealed class AutomaticAdaptationTests : IDisposable
+public sealed partial class AutomaticAdaptationTests : IDisposable
 {
     private readonly string root = Path.Combine(Path.GetTempPath(), "avg-adaptation-test-" + Guid.NewGuid().ToString("N"));
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
@@ -2276,6 +2276,7 @@ public sealed class AutomaticAdaptationTests : IDisposable
         public bool DropTranslatedUnit { get; init; }
         public bool CorruptUntouchedTrialText { get; init; }
         public bool EscapeOutput { get; init; }
+        public string? CompilationError { get; init; }
         public Func<TranslationUnit[], TranslationUnit[]>? RewriteExtraction { get; init; }
         public ValidationResult ValidationResponse { get; init; } = new(true, [], "passed");
         public bool SawUnicodeTranslations { get; private set; }
@@ -2295,6 +2296,7 @@ public sealed class AutomaticAdaptationTests : IDisposable
             }
             if (request.Arguments[0].EndsWith("csc.dll", StringComparison.OrdinalIgnoreCase))
             {
+                if (CompilationError is not null) return Task.FromResult(new AdapterProcessResult(1, "", CompilationError));
                 var compilerArguments = File.ReadAllLines(request.Arguments.Last(argument => argument.StartsWith('@'))[1..]);
                 var outputPath = compilerArguments.Single(line => line.StartsWith("/out:", StringComparison.Ordinal))[5..].Trim('"');
                 File.WriteAllBytes(outputPath, [1, 2, 3]);

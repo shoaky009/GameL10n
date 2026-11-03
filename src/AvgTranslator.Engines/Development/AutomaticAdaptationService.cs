@@ -984,6 +984,7 @@ public sealed class AdaptationSession
     public IReadOnlyList<AdapterReleaseFile>? ReleaseFiles { get; set; }
     public int VerificationRevision { get; set; }
     public string[] VerificationDiagnostics { get; set; } = [];
+    public AdapterVerificationCache? VerificationCache { get; set; }
 }
 
 public sealed record SuccessfulAnalysisProbe(string Tool, string Arguments, int Turn);
