@@ -186,6 +186,7 @@ public sealed class AutomaticAdaptationService(IAdaptationAgentModel model, Gene
             }
             state.ReleaseFiles ??= state.VerifiedPackage?.ReleaseFiles;
             state.ReuseFailures ??= [];
+            AdaptationToolGroups.Restore(state);
             if (state.HistoryStart < 0 || state.HistoryStart > state.Messages.Count) state.HistoryStart = 0;
             // Recover before changing models, so an interrupted tool cannot retain a stale verification.
             var changedObjective = continuing && request.Objective.HasValue && request.Objective != state.Objective;
@@ -197,8 +198,8 @@ public sealed class AutomaticAdaptationService(IAdaptationAgentModel model, Gene
                 coreBuild = typeof(AutomaticAdaptationService).Module.ModuleVersionId.ToString("N"),
                 model = model.AnalysisModelName ?? model.DisplayName, modelIdentity = model.Identity,
                 startingTokens, state.TotalTurns, objective = state.Objective.ToString(), limits.MaximumTokens, limits.MaximumTurns,
-                instructionBytes = Encoding.UTF8.GetByteCount(Instructions),
-                toolDefinitionBytes = Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(AdaptationTools.Definitions)) });
+                fixedInstructionBytes = Encoding.UTF8.GetByteCount(Instructions),
+                registeredToolCount = AdaptationTools.Definitions.Count });
             if (state.RunningToolId is { } interrupted)
             {
                 const string interruption = "上次执行被中断，结果未确认。请先检查现有文件，再决定是否重试。";
@@ -303,8 +304,11 @@ public sealed class AutomaticAdaptationService(IAdaptationAgentModel model, Gene
             state.LastStatus = null;
             state.NextAction = "";
 
-            var instructions = Instructions + "\n" + ObjectiveContext(state.Objective.Value) + tools.KnowledgeContext;
+            var instructions = Instructions + "\n" + AdaptationToolGroups.Context + "\n"
+                + ObjectiveContext(state.Objective.Value) + tools.KnowledgeContext;
             var matchedKnowledge = tools.MatchedKnowledge.Take(6).Select(entry => new { entry.Id, entry.Revision }).ToArray();
+            var knownToolNames = AdaptationTools.Definitions.Select(tool => tool.Name).ToHashSet(StringComparer.Ordinal);
+            var instructionBytes = Encoding.UTF8.GetByteCount(instructions);
             if (matchedKnowledge.Length > 0)
                 Report("匹配全局引擎经验", $"找到 {matchedKnowledge.Length} 项相关经验，将结合当前资源核对适用条件。");
             await TraceAsync(new { operation = "engine-knowledge", entries = matchedKnowledge,
@@ -486,8 +490,19 @@ public sealed class AutomaticAdaptationService(IAdaptationAgentModel model, Gene
                     historyBytes = VisibleHistoryBytes(replay.Messages);
                     await SaveAsync();
                 }
-                var estimatedInput = (historyBytes
-                    + Encoding.UTF8.GetByteCount(instructions) + Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(AdaptationTools.Definitions))) / 3 + 1;
+                // Preload from concrete current evidence; these hints only add tools and never gate access.
+                if (state.BuiltinDiscovery?.Candidates.Count > 0 || state.ReuseFailures.Count > 0 || matchedKnowledge.Length > 0
+                    || state.Objective != AdaptationObjective.Develop)
+                    AdaptationToolGroups.Enable(state, ["reuse"]);
+                if (state.ProtocolRead || state.ReleaseFiles is { Count: > 0 } || state.VerifiedPackage is not null
+                    || Directory.Exists(Path.Combine(directory, "src")) || state.Objective != AdaptationObjective.Develop)
+                    AdaptationToolGroups.Enable(state, ["development"]);
+                if (state.EngineReference is not null) AdaptationToolGroups.Enable(state, ["research"]);
+                if (state.BuiltinDiscovery?.Candidates.Any(candidate => candidate.Format == "Siglus") == true)
+                    AdaptationToolGroups.Enable(state, ["siglus"]);
+                var requestTools = AdaptationToolGroups.ForRequest(state);
+                var toolDefinitionBytes = Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(requestTools));
+                var estimatedInput = (historyBytes + instructionBytes + toolDefinitionBytes) / 3 + 1;
                 if (turns >= limits.MaximumTurns || remaining < estimatedInput + 256)
                 {
                     var reason = turns >= limits.MaximumTurns
@@ -503,15 +518,16 @@ public sealed class AutomaticAdaptationService(IAdaptationAgentModel model, Gene
                 var requestedOutputTokens = (int)Math.Min(outputTokenLimit, remaining - estimatedInput);
                 try
                 {
-                    turn = await model.NextAsync(new(instructions, replay.Messages, AdaptationTools.Definitions,
-                        requestedOutputTokens), cancellationToken);
+                    turn = await model.NextAsync(new(instructions, replay.Messages, requestTools,
+                        requestedOutputTokens, knownToolNames), cancellationToken);
                 }
                 catch (Exception error)
                 {
                     await TraceAsync(new { operation = "model", model = model.AnalysisModelName ?? model.DisplayName ?? model.Identity,
                         reasoningEffort = model.AnalysisReasoningEffort ?? "provider-default",
                         status = error is OperationCanceledException ? "cancelled" : "failed", elapsedMs = modelTimer.ElapsedMilliseconds,
-                        maximumOutputTokens = requestedOutputTokens,
+                        maximumOutputTokens = requestedOutputTokens, availableToolCount = requestTools.Count,
+                        toolDefinitionBytes, instructionBytes, enabledToolGroups = state.EnabledToolGroups.ToArray(),
                         errorType = error.GetType().Name, failureCode = (error as Providers.TranslationProviderException)?.Diagnostic?.Code });
                     var increasedLimit = Math.Min(32_000, outputTokenLimit * 2);
                     if (error is Providers.TranslationProviderException { Diagnostic.Code: "output-token-limit", Usage: { } failedUsage }
@@ -540,7 +556,8 @@ public sealed class AutomaticAdaptationService(IAdaptationAgentModel model, Gene
                 await TraceAsync(new { operation = "model", model = model.AnalysisModelName ?? model.DisplayName ?? model.Identity,
                     reasoningEffort = model.AnalysisReasoningEffort ?? "provider-default", status = "completed",
                     elapsedMs = modelTimer.ElapsedMilliseconds, queueMs = Math.Round(turn.QueueMilliseconds),
-                    maximumOutputTokens = requestedOutputTokens,
+                    maximumOutputTokens = requestedOutputTokens, availableToolCount = requestTools.Count,
+                    toolDefinitionBytes, instructionBytes, enabledToolGroups = state.EnabledToolGroups.ToArray(),
                     apiMs = Math.Round(Math.Max(0, modelTimer.Elapsed.TotalMilliseconds - turn.QueueMilliseconds)),
                     visibleHistoryBytes = historyBytes, retainedHistoryBytes, omittedToolResults = replay.OmittedResults,
                     messages = state.Messages.Count,
@@ -555,6 +572,7 @@ public sealed class AutomaticAdaptationService(IAdaptationAgentModel model, Gene
                 state.Messages.Add(turn.Message.ProviderData.HasValue
                     ? turn.Message with { Content = "", ToolCalls = null } : turn.Message);
                 state.PendingCalls.AddRange(turn.Message.ToolCalls ?? []);
+                AdaptationToolGroups.EnableForTools(state, state.PendingCalls.Select(call => call.Name));
                 state.TotalTurns++;
                 turns++;
                 if (!string.IsNullOrWhiteSpace(turn.Message.Content))
@@ -569,7 +587,12 @@ public sealed class AutomaticAdaptationService(IAdaptationAgentModel model, Gene
                 {
                     if (++summariesWithoutTools >= 2)
                         return await CompleteAsync(AdaptationStatus.Incomplete, "模型连续返回总结，未继续执行适配操作。已有源码和调查结果已保存。\n\n" + state.Summary);
+                    var expandedTools = requestTools.Count < AdaptationTools.Definitions.Count
+                        && AdaptationToolGroups.Enable(state, ["all"]);
+                    if (expandedTools)
+                        await TraceAsync(new { operation = "tool-groups-fallback", reason = "no-tool-progress" });
                     state.Messages.Add(new("user", ObjectiveContext(state.Objective.Value)
+                        + (expandedTools ? "\n主程序已补齐全部工具定义，可直接选择下一项操作。" : "")
                         + (state.VerifiedPackage is not null
                             ? "\n完整资源验收已通过。若当前目标已完成，请直接 finish；在 summary 披露已知覆盖遗漏和仍需用户验证的运行效果。不要因未进游戏验证而重新开始研究或扩展其他类别。"
                             : "\n适配尚未发布。请执行下一项工具操作，继续解决真实验证失败，包括中文编码和字体支持；不要仅返回阶段总结。")
@@ -986,6 +1009,8 @@ public sealed class AdaptationSession
     public string? Checkpoint { get; set; }
     public bool ProtocolRead { get; set; }
     public List<AgentMessage> Messages { get; set; } = [];
+    /// <summary>Tool groups remain enabled for the whole session, including archived exchanges.</summary>
+    public List<string> EnabledToolGroups { get; set; } = [];
     /// <summary>First replayed message; earlier messages remain available for evidence retrieval.</summary>
     public int HistoryStart { get; set; }
     public List<AgentToolCall> PendingCalls { get; set; } = [];

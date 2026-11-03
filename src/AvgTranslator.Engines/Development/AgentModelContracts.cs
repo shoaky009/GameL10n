@@ -9,8 +9,10 @@ public sealed record AgentToolCall(string Id, string Name, string Arguments);
 public sealed record AgentMessage(string Role, string Content = "", IReadOnlyList<AgentToolCall>? ToolCalls = null,
     string? ToolCallId = null, JsonElement? ProviderData = null);
 
+/// <param name="KnownToolNames">Optional host registry for accepting known calls whose schemas are omitted from Tools.
+/// These names are local validation data and are not sent as tool definitions.</param>
 public sealed record AgentRequest(string Instructions, IReadOnlyList<AgentMessage> Messages,
-    IReadOnlyList<AgentToolDefinition> Tools, int MaximumOutputTokens);
+    IReadOnlyList<AgentToolDefinition> Tools, int MaximumOutputTokens, IReadOnlySet<string>? KnownToolNames = null);
 public sealed record AgentTurn(AgentMessage Message, TokenUsage Usage, double QueueMilliseconds = 0);
 
 public interface IAdaptationAgentModel

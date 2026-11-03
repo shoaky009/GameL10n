@@ -18,6 +18,7 @@ public sealed class OpenAiCompatibleAgentModel : OpenAiCompatibleClient, IAdapta
         ValidateAgentRequest(request);
         byte[] payload = BuildAgentPayload(request);
         var toolNames = request.Tools.Select(tool => tool.Name).ToHashSet(StringComparer.Ordinal);
+        if (request.KnownToolNames is not null) toolNames.UnionWith(request.KnownToolNames);
         object? responseDetails = null;
         try
         {
@@ -92,6 +93,12 @@ public sealed class OpenAiCompatibleAgentModel : OpenAiCompatibleClient, IAdapta
             if (tool is null || !ValidToolName(tool.Name) || !names.Add(tool.Name) || tool.Description is null ||
                 tool.Parameters.ValueKind != JsonValueKind.Object)
                 throw new ArgumentException("Function tools require unique valid names and JSON object parameter schemas.", nameof(request));
+        if (request.KnownToolNames is { } known)
+        {
+            if (known.Any(name => !ValidToolName(name)))
+                throw new ArgumentException("Known function names must be valid tool names.", nameof(request));
+            names.UnionWith(known);
+        }
         foreach (var message in request.Messages)
         {
             if (message is null || message.Role is not ("user" or "assistant" or "tool") || message.Content is null ||

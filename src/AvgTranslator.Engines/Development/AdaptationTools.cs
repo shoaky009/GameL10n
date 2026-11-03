@@ -26,6 +26,8 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
 
     public static IReadOnlyList<AgentToolDefinition> Definitions { get; } =
     [
+        Define("load_tool_groups", "Append tool schemas from the capability directory for the next request. Supply one or more group IDs, or all when unsure. Groups remain loaded for this session. Local only; does not run tools or download anything. Call alone.",
+            AdaptationToolGroups.Parameters, "groups"),
         Define("report_progress", "Brief Chinese progress for the user when evidence or direction changes. exploring: unresolved issue and next probe; breakthrough: observed evidence and what it enables; implementing: established route; correction: retract an earlier claim. <=400 characters, no private reasoning, percentages or ETA. Accompany normal tools in the same response; no extra model turn. This report never validates or publishes an adapter.",
             """{"kind":{"type":"string","enum":["exploring","breakthrough","implementing","correction"]},"message":{"type":"string","minLength":1,"maxLength":400}}""", "kind", "message"),
         Define("inspect_engine_knowledge", "Search shared engine/format experience from previous projects. With id, read conditional guidance and helper index. Without id, query searches engine names/aliases; empty query lists this game's matched candidates. Verify conditions locally; no match is normal and does not mean unsupported.",
@@ -122,6 +124,7 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
 
     public static string Stage(string tool) => tool switch
     {
+        "load_tool_groups" => "准备分析工具",
         "report_progress" => "更新适配进展",
         "inspect_engine_knowledge" or "copy_engine_knowledge_tools" => "复用同类引擎经验",
         "list_files" or "read_file" or "search_text" or "stage_resources" or "find_game_file" or "inspect_existing_text" => "分析游戏资源",
@@ -163,6 +166,7 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
         if (call.Name != "report_blocker") unresolvedStopReports = 0;
         object result = call.Name switch
         {
+            "load_tool_groups" => AdaptationToolGroups.Load(session, args),
             "report_progress" => ReportProgress(args),
             "inspect_engine_knowledge" => InspectEngineKnowledge(args),
             "copy_engine_knowledge_tools" => await CopyEngineKnowledgeToolsAsync(args, ct),

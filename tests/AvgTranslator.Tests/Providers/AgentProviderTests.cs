@@ -38,6 +38,7 @@ public sealed class AgentProviderTests
             var root = body.RootElement;
             Assert.Equal("chosen-model", root.GetProperty("model").GetString());
             Assert.True(root.GetProperty("parallel_tool_calls").GetBoolean());
+            Assert.Equal(round < 2 ? 1 : 2, root.GetProperty("tools").GetArrayLength());
             Assert.Equal("function", root.GetProperty("tools")[0].GetProperty("type").GetString());
             var definition = protocol == ProviderApiProtocol.Responses
                 ? root.GetProperty("tools")[0] : root.GetProperty("tools")[0].GetProperty("function");
@@ -85,9 +86,11 @@ public sealed class AgentProviderTests
         });
         using var client = new HttpClient(handler);
         var provider = Provider(client, protocol);
+        var knownTools = Tools.Select(tool => tool.Name).ToHashSet(StringComparer.Ordinal);
         for (int round = 0; round < 2; round++)
         {
-            var turn = await provider.NextAsync(new("Use workspace tools.", history, Tools, 2048), CancellationToken.None);
+            // The second response names a registered tool whose schema is omitted from this request.
+            var turn = await provider.NextAsync(new("Use workspace tools.", history, [Tools[0]], 2048, knownTools), CancellationToken.None);
             var tool = Assert.Single(turn.Message.ToolCalls!);
             Assert.Equal("call-" + round, tool.Id);
             Assert.Equal(new TokenUsage(11, 7), turn.Usage);

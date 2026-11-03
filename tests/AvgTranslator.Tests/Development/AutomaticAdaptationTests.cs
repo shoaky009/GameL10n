@@ -328,14 +328,30 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         var runs = 0;
         var runner = new ScriptedRunner { LocalProbe = () => runs++ };
         var round = 0;
-        var model = new FakeModel(context => round++ switch
+        var model = new FakeModel(context =>
         {
-            0 => new(new("assistant", ToolCalls: [new("probe", "run_csharp", arguments)]), new(100, 20)),
-            1 => new(new("assistant", ToolCalls: [new("checkpoint", "checkpoint", """{"summary":"已确认布局，下一步接入适配入口。"}""")]), new(100, 20)),
-            _ => CheckContext(context)
+            switch (round++)
+            {
+                case 0:
+                    Assert.Contains(context.Tools, tool => tool.Name == "load_tool_groups");
+                    Assert.DoesNotContain(context.Tools, tool => tool.Name == "run_csharp");
+                    Assert.Contains("run_csharp", context.KnownToolNames!);
+                    Assert.Contains("development:", context.Instructions);
+                    return new(new("assistant", ToolCalls: [new("load", "load_tool_groups", """{"groups":["development"]}""")]), new(100, 20));
+                case 1:
+                    Assert.Contains(context.Tools, tool => tool.Name == "run_csharp");
+                    Assert.DoesNotContain(context.Tools, tool => tool.Name == "inspect_pe_code");
+                    Assert.Contains("\"success\":true", Assert.Single(context.Messages, message => message.ToolCallId == "load").Content);
+                    return new(new("assistant", ToolCalls: [new("probe", "run_csharp", arguments)]), new(100, 20));
+                case 2:
+                    return new(new("assistant", ToolCalls: [new("checkpoint", "checkpoint", """{"summary":"已确认布局，下一步接入适配入口。"}""")]), new(100, 20));
+                default: return CheckContext(context);
+            }
         });
         AgentTurn CheckContext(AgentRequest context)
         {
+            Assert.Contains(context.Tools, tool => tool.Name == "run_csharp");
+            Assert.DoesNotContain(context.Tools, tool => tool.Name == "inspect_pe_code");
             var user = context.Messages.Last(message => message.Role == "user").Content;
             Assert.Contains("work/Probe.cs", user);
             Assert.Contains("--known-boundary", user);
@@ -347,6 +363,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         Assert.Equal(1, runs);
         var state = await AvgTranslator.Core.Storage.LocalFiles.ReadJsonAsync<AdaptationSession>(Path.Combine(workspace, "session.json"));
         Assert.Equal(arguments, Assert.Single(state!.SuccessfulProbes).Arguments);
+        Assert.Contains("development", state.EnabledToolGroups);
         await new AutomaticAdaptationService(new FakeModel(CheckContext), Compiler(runner), store).AdaptAsync(request);
         Assert.Equal(1, runs);
     }
@@ -1064,8 +1081,12 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         {
             switch (turn++)
             {
-                case 0: return new(new("assistant", "CP932 无法写入中文，还需要调查字体。"), new(100, 20));
+                case 0:
+                    Assert.True(context.Tools.Count < AdaptationTools.Definitions.Count);
+                    return new(new("assistant", "CP932 无法写入中文，还需要调查字体。"), new(100, 20));
                 case 1:
+                    Assert.Equal(AdaptationTools.Definitions.Select(tool => tool.Name), context.Tools.Select(tool => tool.Name));
+                    Assert.Contains(context.Messages, item => item.Content.Contains("主程序已补齐全部工具定义", StringComparison.Ordinal));
                     Assert.Contains(context.Messages, item => item.Role == "user" && item.Content.Contains("请执行下一项工具操作", StringComparison.Ordinal));
                     return new(new("assistant", ToolCalls: [new("note", "write_file", """{"path":"work/next.txt","content":"继续调查字体入口"}""")]), new(100, 20));
                 default:
@@ -1266,13 +1287,19 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         await AvgTranslator.Core.Storage.LocalFiles.WriteJsonAsync(Path.Combine(workspace, "session.json"), new AdaptationSession
         {
             GameId = request.GameId, GameDirectory = request.GameDirectory, ModelIdentity = previousModel,
-            Messages = [new("user", "initial task"), new("assistant", "Parsing complete; fonts unresolved.")],
+            Messages = [new("user", "initial task"), new("assistant", ProviderData: JsonSerializer.SerializeToElement(new[]
+                { new { type = "function_call", call_id = "legacy-code", name = "inspect_pe_code", arguments = "{}" } })),
+                new("tool", "Legacy code evidence.", ToolCallId: "legacy-code")],
+            HistoryStart = 3,
             Summary = "Parsing complete; fonts unresolved.", ResourceHashes = new() { ["script.txt"] = "existing-hash" },
             VerificationDiagnostics = ["Byte roundtrip passed", "CP932 cannot encode Chinese"]
         });
         var model = new FakeModel(context =>
         {
             var restored = Assert.Single(context.Messages, item => item.Role == "user" && item.Content.Contains("恢复快照", StringComparison.Ordinal));
+            Assert.Contains(context.Tools, tool => tool.Name == "inspect_pe_code");
+            Assert.Contains(context.Tools, tool => tool.Name == "test_adapter");
+            Assert.DoesNotContain(context.Tools, tool => tool.Name == "inspect_unity_schema");
             Assert.Contains("Parser.cs", restored.Content);
             Assert.Contains("script.txt", restored.Content);
             Assert.Contains("Byte roundtrip passed", restored.Content);
