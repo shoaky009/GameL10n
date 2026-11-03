@@ -827,7 +827,9 @@ public sealed class AutomaticAdaptationService(IAdaptationAgentModel model, Gene
         If binaryAvailable=true, try that parser on real samples; do not rewrite it solely because bundled source is unavailable.
         Use inspect_builtin_adapter / try_builtin_adapter on representative staged samples and required companions, then copy_adapter
         to reuse the parser; add only missing container, version or runtime glue. Don't fetch or rewrite bundled code first.
-        For missing formats use search_engine_references, inspect_engine_reference, then run_engine_python to CALL pinned library APIs.
+        For archives, inspect_engine_component / run_engine_component call fixed bounded entry points directly on staged copies;
+        prefer these to writing another Python wrapper. Inspect/extract/rebuild results are structural evidence, not runtime acceptance.
+        For other missing formats use search_engine_references, inspect_engine_reference, then run_engine_python to CALL pinned library APIs.
         use_engine_reference supplies the C# bridge and shared dependency for runtime use without LLM calls. Don't port entire parsers to C#.
         For Siglus/Scene.pck use inspect_siglus_game and copy_adapter engine.siglus; reuse actual command references and bundled glyph handling.
         Only for confirmed Unity games, use inspect_unity_schema for fields, display literals and candidate native consumers; its returned

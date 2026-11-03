@@ -10,6 +10,7 @@
     <EmbeddedResource Include="../../adapters/siglus/*.py" LogicalName="AvgTranslator.Siglus.%(Filename)%(Extension)" />
     <EmbeddedResource Include="../../adapters/siglus/*.json" LogicalName="AvgTranslator.Siglus.%(Filename)%(Extension)" />
     <EmbeddedResource Include="../../adapters/components/Cp932GlyphEncoding.cs" LogicalName="AvgTranslator.Components.Cp932GlyphEncoding.cs" />
+    <EmbeddedResource Include="../../adapters/components/engine_archive.py" LogicalName="AvgTranslator.Components.engine_archive.py" />
     <EmbeddedResource Include="../../adapters/qlie-filepack3-systemfont/QlieFont.cs" LogicalName="AvgTranslator.Components.QlieFont.cs" />
     <EmbeddedResource Include="../../adapters/system4-ain14-msg1-fnl/GlyphRasterizer.cs" LogicalName="AvgTranslator.Components.GlyphRasterizer.cs" />
     <EmbeddedResource Include="../../adapters/qlie-filepack3-systemfont/tools/QlieLauncher.cs" LogicalName="AvgTranslator.Components.QlieLauncher.cs" />

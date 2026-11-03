@@ -12,5 +12,6 @@
     <ProjectReference Include="../../tools/AvgTranslator.VnTextPatch/AvgTranslator.VnTextPatch.csproj" />
     <Using Include="Xunit" />
     <Compile Include="../../adapters/components/Cp932GlyphEncoding.cs" Link="Components/Cp932GlyphEncoding.cs" />
+    <EmbeddedResource Include="Fixtures/engine-archives-e9b8018.zip" LogicalName="EngineArchiveReference.zip" />
   </ItemGroup>
 </Project>

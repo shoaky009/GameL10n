@@ -74,6 +74,10 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
             """{"engine":{"type":"string"},"path":{"type":"string"},"query":{"type":"string"},"offset":{"type":"integer"},"length":{"type":"integer"},"retryDownload":{"type":"boolean"}}""", "engine"),
         Define("run_engine_python", "Run work/*.py or src/tools/*.py with shared portable Python and pinned python.engines/python.archives. No system Python, pip or pycache; optional modules may be missing. Use staged samples and concise output. Can follow write_file calls in one ordered batch.",
             """{"script":{"type":"string"},"arguments":{"type":"array","items":{"type":"string"}},"stdin":{"type":"string"},"timeoutSeconds":{"type":"integer"}}""", "script"),
+        Define("inspect_engine_component", "List fixed callable archive components or inspect one id. Returns supported formats, read/write operations, budgets and dependency contract. No downloads or source reading. Prefer run_engine_component over writing a Python wrapper for a supported format.",
+            """{"id":{"type":"string"}}"""),
+        Define("run_engine_component", "Directly inspect/extract/rebuild a staged archive using a fixed component, without writing code. Input under resources/ or work/; output is a NEW work/ directory. Returns bounded entries plus full manifest.json. Optional members/extensions select extraction. Rebuild replacements map exact archive names to work/ files; untouched members are verified. Uses pinned local shared Python/library, no pip/download. XP3 requires independently confirmed filter=none. Call alone.",
+            """{"id":{"type":"string"},"operation":{"type":"string","enum":["inspect","extract","rebuild"]},"archive":{"type":"string"},"output":{"type":"string"},"filter":{"type":"string","enum":["none"]},"members":{"type":"array","maxItems":1024,"items":{"type":"string"}},"extensions":{"type":"array","maxItems":16,"items":{"type":"string"}},"replacements":{"type":"object","maxProperties":128,"additionalProperties":{"type":"string"}}}""", "id", "operation", "archive", "output"),
         Define("use_engine_reference", "Bind the shared Python toolkit into src: writes a pinned dependency and a C# call bridge, without copying the toolkit into each project. Add a small src/tools/*.py JSON CLI wrapper and Program.cs using the returned example. Published adapters use the same library without LLM calls. test_adapter remains required. Call alone.", "{}", []),
         Define("search_repositories", "Search public GitHub repository NAMES/descriptions for existing engine tools; this is NOT code or file-content search. Prefer search_engine_references for an engine/signature. Uses anonymous GitHub API.",
             """{"query":{"type":"string"}}""", "query"),
@@ -106,7 +110,7 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
     ];
 
     public static bool CanBatch(string tool) => tool is "list_files" or "list_adapters" or "read_file" or "read_tool_result" or "read_session_history" or "search_text"
-        or "inspect_engine_knowledge" or "inspect_existing_text"
+        or "inspect_engine_knowledge" or "inspect_existing_text" or "inspect_engine_component"
         or "find_game_file" or "inspect_pe_imports" or "inspect_pe_code" or "inspect_unity_schema" or "inspect_builtin_adapter" or "inspect_adapter_component" or "adapter_protocol" or "search_engine_references" or "search_repositories" or "fetch_url";
 
     // One ordered local edit/run step. Publication, staging and verification stay separate.
@@ -125,6 +129,7 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
         "inspect_unity_schema" => "检查 Unity 类型与字段结构",
         "search_engine_references" or "search_repositories" or "fetch_url" or "download_tool" => "查找引擎工具",
         "inspect_engine_reference" or "use_engine_reference" => "准备共享引擎工具",
+        "inspect_engine_component" or "run_engine_component" => "调用共享引擎组件",
         "list_adapters" or "copy_adapter" or "inspect_builtin_adapter" => "检查现有适配器",
         "inspect_adapter_component" or "copy_adapter_components" => "复用编码与运行组件",
         "try_builtin_adapter" => "验证内置解析能力",
@@ -140,7 +145,7 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
         "test_adapter" => "正在编译并检查文本提取、原文回填和中文写入。",
         "finish" => "正在保存已通过资源验证的引擎适配器。",
         "run_tool" or "run_csharp" or "run_engine_python" => "正在运行本地资源分析工具。",
-        "inspect_engine_reference" or "use_engine_reference" => "正在读取共享引擎工具，首次使用时会下载所需资源。",
+        "inspect_engine_reference" or "use_engine_reference" => "正在检查发行包中的共享引擎工具。",
         _ => Stage(tool) + "。"
     };
 
@@ -181,6 +186,8 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
             "search_engine_references" => await SearchEngineReferencesAsync(args, ct),
             "inspect_engine_reference" => await InspectEngineReferenceAsync(args, ct),
             "run_engine_python" => await RunEnginePythonAsync(args, ct),
+            "inspect_engine_component" => EngineArchiveComponents.Describe(Text(args, "id", "") is { Length: > 0 } id ? id : null),
+            "run_engine_component" => await RunEngineComponentAsync(args, ct),
             "use_engine_reference" => await UseEngineReferenceAsync(args, ct),
             "search_repositories" => await SearchRepositoriesAsync(args, ct),
             "fetch_url" => await FetchAsync(args, ct),

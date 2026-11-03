@@ -41,8 +41,9 @@ public sealed partial class AdaptationTools
                     name = format.Family.Name, extensions = format.Extensions, companions = format.CompanionFileNames
                 }),
             components = ComponentAssets.List(query),
+            engineComponents = EngineArchiveComponents.All.Where(component => Matches(component.Id + " " + component.Format)),
             siglus = !disabled.Contains(SiglusAssets.Family.AdapterId) && Matches("Siglus engine.siglus Scene.pck FKDS") ? SiglusAssets.Describe() : null,
-            usage = "候选是本地采样线索，不代表兼容验证。inspect_builtin_adapter 查看相关能力；try_builtin_adapter 在少量工作副本上验证；copy_adapter 复用解析器。编码、字体、启动处理可用 inspect_adapter_component 查看适用条件，再 copy_adapter_components 直接复用代码。组件不替代当前游戏验收。"
+            usage = "候选是本地采样线索，不代表兼容验证。inspect_builtin_adapter 查看相关能力；try_builtin_adapter 在少量工作副本上验证；copy_adapter 复用解析器。封包优先 inspect_engine_component / run_engine_component 直接调用；编码、字体、启动处理可用 inspect_adapter_component 查看适用条件，再 copy_adapter_components 直接复用代码。组件不替代当前游戏验收。"
         };
     }
 
