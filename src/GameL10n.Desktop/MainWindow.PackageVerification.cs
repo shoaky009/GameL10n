@@ -24,7 +24,7 @@ public sealed partial class MainWindow
         var content = new StackPanel { Spacing = 12 };
         content.Children.Add(new TextBlock { Text = $"{version.AdapterId} · {version.Version}\n选择用于比较已有文本的游戏项目：", TextWrapping = TextWrapping.Wrap });
         content.Children.Add(picker);
-        content.Children.Add(new TextBlock { Text = "会从临时位置加载发布包，检查原文、中文回填及局部试译。不调用模型，不安装补丁，不切换项目版本。\n验证需要临时复制资源，请预留磁盘空间；完成或取消后删除本次临时副本。", TextWrapping = TextWrapping.Wrap });
+        content.Children.Add(new TextBlock { Text = "使用项目已保存的原文快照和提取记录，从临时位置加载发布包，比较文本并检查原文、中文回填及局部试译。缺少这些记录时请先完成提取。\n不调用模型，不运行游戏，不安装补丁，不切换项目版本。需要临时复制资源，请预留磁盘空间；完成或取消后删除本次临时副本。", TextWrapping = TextWrapping.Wrap });
         var choose = new ContentDialog { XamlRoot = RootGrid.XamlRoot, Title = "验证发布包", Content = content,
             PrimaryButtonText = "开始验证", CloseButtonText = "取消", DefaultButton = ContentDialogButton.Primary };
         if (await choose.ShowAsync() != ContentDialogResult.Primary || picker.SelectedItem is not GameWorkspace game) return;
@@ -82,7 +82,7 @@ public sealed partial class MainWindow
                         summary += "\n发现旧目录路径引用，需要核对是否仍依赖开发文件：" + string.Join("、", result.DevelopmentPathReferences);
                     status.Text = summary + (result.Passed ? "" : "\n" + string.Join("\n", result.Diagnostics))
                         + "\n\n本次没有运行游戏，启动与显示效果尚未验证。更换目录验收不等同于文件访问隔离。"
-                        + "\n结果已保存到项目的 package-verification.json，绑定本次包和资源指纹。";
+                        + "\n结果已保存到项目的 package-verification.json，仅适用于本次包和资源。发布包、资源或工具链变化后需要重新验证。";
                     ShowLibraryStatus(game.Name + "：" + summary, result.Passed && result.DevelopmentPathReferences.Count == 0
                         ? InfoBarSeverity.Success : InfoBarSeverity.Warning);
                 }

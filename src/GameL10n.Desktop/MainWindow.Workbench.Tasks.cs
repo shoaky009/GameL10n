@@ -120,7 +120,7 @@ public sealed partial class MainWindow
             var choice = await new ContentDialog
             {
                 XamlRoot = RootGrid.XamlRoot, Title = $"重新翻译所选 {ids.Length:N0} 条文本",
-                Content = "将使用当前翻译 API 重新生成译文，包括已翻译、已编辑和已校对的所选文本。新译文通过格式检查后替换当前译文，并标为待校对；失败文本保留原译文。",
+                Content = "将使用当前翻译 API 重新生成译文，包括已翻译、已编辑和已校对的所选文本。新译文通过格式检查后替换当前译文，并标为待校对；失败文本保留原译文。\n重译期间暂停本项目的编辑与校对；完成后需要重新生成补丁，已有补丁保留原来的内容。",
                 PrimaryButtonText = "重新翻译并替换", CloseButtonText = "取消"
             }.ShowAsync();
             if (choice != ContentDialogResult.Primary || selectedGame != game || game.Busy || !ReferenceEquals(game.Session, session)) return;

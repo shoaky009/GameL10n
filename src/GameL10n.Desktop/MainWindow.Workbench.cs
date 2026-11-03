@@ -614,7 +614,9 @@ public sealed partial class MainWindow
         EditorValidationInfo.IsOpen = row?.Text is not null || row?.Failure is not null;
         EditorValidationInfo.Severity = row?.Failure is not null || row?.Issues.Count > 0 ? InfoBarSeverity.Warning : InfoBarSeverity.Success;
         EditorValidationInfo.Title = row?.Failure is not null ? "翻译失败" : row?.Issues.Count > 0 ? "格式需要修正" : "文本格式检查通过";
-        EditorValidationInfo.Message = row?.Failure ?? (row?.Issues.Count > 0 ? string.Join("；", row.Issues.Select(issue => issue.Message)) : "");
+        EditorValidationInfo.Message = row?.Failure ?? (row?.Issues.Count > 0
+            ? string.Join("；", row.Issues.Select(issue => issue.Message)) + "\n可保留为草稿；修正后才能确认校对或将此译文加入补丁。"
+            : "确认校对前请检查含义、角色名和控制标记。");
     }
 
     private void TranslationEditor_TextChanged(object sender, TextChangedEventArgs e)

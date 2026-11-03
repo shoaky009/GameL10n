@@ -18,7 +18,6 @@
 
 ## 文档
 
-- [使用、备份与续译](docs/usage.md)
 - [模型接口配置](docs/model-providers.md)
 - [多游戏数据目录与迁移](docs/data-storage.md)
 - [引擎、资源模板与兼容游戏](docs/adapters/README.md)
