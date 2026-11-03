@@ -26,7 +26,8 @@ public sealed record AdaptationResult(AdaptationStatus Status, IGameAdapter? Ada
     IReadOnlyList<string>? PendingRuntimeChecks = null);
 
 public sealed record AdaptationProgress(string Stage, string Message, TokenUsage Usage,
-    AdaptationProgressNote? ProgressNote = null, AdaptationProgressNote? LastBreakthrough = null);
+    AdaptationProgressNote? ProgressNote = null, AdaptationProgressNote? LastBreakthrough = null,
+    string? ToolName = null);
 
 public sealed record PinnedDotNetToolchain(string RootDirectory, string SdkVersion, string RuntimeVersion)
 {

@@ -393,8 +393,10 @@ public sealed partial class MainWindow
                     game.AdaptationSummary = update.Message;
                     game.AdaptationProgressNote = update.ProgressNote;
                     game.AdaptationLastBreakthrough = update.LastBreakthrough;
-                    SetStage(game, update.Stage, update.Message);
-                    if (lastStage != update.Stage && update.Stage != "智能分析") Log(game, update.Message);
+                    var message = update.ToolName is { } toolName ? "调用工具：" + toolName : update.Message;
+                    SetStage(game, update.Stage, message);
+                    if (update.ToolName is not null || lastStage != update.Stage && update.Stage != "智能分析")
+                        Log(game, message);
                     lastStage = update.Stage;
                 });
                 var baseline = game.AdaptationObjective == AdaptationObjective.Repair

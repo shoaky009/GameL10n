@@ -353,7 +353,9 @@ public sealed class AutomaticAdaptationService(IAdaptationAgentModel model, Gene
                 {
                     var call = state.PendingCalls[0];
                     state.RunningToolId = call.Id;
-                    Report(AdaptationTools.Stage(call.Name), AdaptationTools.Description(call.Name));
+                    state.Stage = AdaptationTools.Stage(call.Name);
+                    progress?.Report(new(state.Stage, AdaptationTools.Description(call.Name), state.Usage,
+                        state.ProgressNote, state.LastBreakthrough, ToolName: call.Name));
                     await SaveAsync();
                     string output;
                     var toolTimer = Stopwatch.StartNew();
