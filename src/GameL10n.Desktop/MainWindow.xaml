@@ -102,7 +102,10 @@
     <Grid ColumnSpacing="12">
       <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
       <TextBox x:Name="GamePathBox" Header="游戏安装目录" IsReadOnly="True" PlaceholderText="从左侧添加游戏" />
-      <Button x:Name="OpenGameDataButton" Grid.Column="1" Content="项目文件" VerticalAlignment="Bottom" Click="OpenGameData_Click" />
+      <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Bottom">
+        <Button x:Name="OpenGameDataButton" Content="项目文件" Click="OpenGameData_Click" ToolTipService.ToolTip="打开此项目的译文、补丁和日志等数据文件夹。" />
+        <Button x:Name="OpenGameDirectoryButton" Content="游戏目录" Click="OpenGameDirectory_Click" IsEnabled="False" ToolTipService.ToolTip="打开当前游戏的安装文件夹。" />
+      </StackPanel>
       <Button x:Name="AnalyzeButton" Grid.Column="2" Content="常规识别" VerticalAlignment="Bottom" Click="Analyze_Click" ToolTipService.ToolTip="检查当前游戏资源并更新文本，不调用分析 API。日常打开项目直接加载已保存结果；游戏更新后请重新识别。" />
       <Button x:Name="AdaptButton" Grid.Column="3" Content="智能识别与适配" VerticalAlignment="Bottom" Click="Adapt_Click" ToolTipService.ToolTip="使用分析 API 调查资源、开发和验证引擎适配器。已识别的游戏可继续补齐遗漏文字，复用已有源码和译文。" />
     </Grid>

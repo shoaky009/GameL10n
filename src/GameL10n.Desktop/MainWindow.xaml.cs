@@ -334,6 +334,16 @@ public sealed partial class MainWindow : Window
     }
 
     private void OpenGameData_Click(object sender, RoutedEventArgs e) => OpenDirectory(selectedGame?.Directory);
+    private void OpenGameDirectory_Click(object sender, RoutedEventArgs e)
+    {
+        if (selectedGame is not { } game) return;
+        try
+        {
+            if (!Directory.Exists(game.GameDirectory)) throw new DirectoryNotFoundException("游戏目录不存在：" + game.GameDirectory);
+            Process.Start(new ProcessStartInfo(game.GameDirectory) { UseShellExecute = true });
+        }
+        catch (Exception error) { FooterText.Text = "无法打开游戏目录：" + error.Message; }
+    }
     private void OpenLogs_Click(object sender, RoutedEventArgs e) => OpenDirectory(selectedGame is { } game ? Path.Combine(game.Directory, "logs") : Path.Combine(dataDirectory, "logs"));
     private void OpenPatch_Click(object sender, RoutedEventArgs e) => OpenDirectory(selectedGame?.Result?.PatchDirectory);
     private static void OpenDirectory(string? path)
@@ -367,7 +377,7 @@ public sealed partial class MainWindow : Window
         InstallButton.IsEnabled = canUseProject && selectedGame?.Result is not null && !busy;
         OpenPatchButton.IsEnabled = selectedGame?.Result is not null;
         RestoreButton.IsEnabled = canUseProject && !busy;
-        OpenGameDataButton.IsEnabled = canNavigate && selectedGame is not null;
+        OpenGameDataButton.IsEnabled = OpenGameDirectoryButton.IsEnabled = canNavigate && selectedGame is not null;
         UpdateProjectListStatus();
         UpdateWorkbenchControls();
     }
