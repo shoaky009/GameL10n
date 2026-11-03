@@ -185,8 +185,20 @@ internal sealed class EngineArchiveFixture : IDisposable
 
     private sealed class TestPythonRunner(string python) : IAdapterProcessRunner
     {
-        public Task<AdapterProcessResult> RunAsync(AdapterProcessRequest request, CancellationToken ct) => new AdapterProcessRunner().RunAsync(
-            Path.GetFileName(request.ExecutablePath) == "python.exe" ? request with { ExecutablePath = python } : request, ct);
+        public Task<AdapterProcessResult> RunAsync(AdapterProcessRequest request, CancellationToken ct)
+        {
+            if (Path.GetFileName(request.ExecutablePath) == "python.exe") request = request with { ExecutablePath = python };
+            else if (request.StandardInput.StartsWith('{'))
+            {
+                var input = System.Text.Json.Nodes.JsonNode.Parse(request.StandardInput)!;
+                if (input["toolPaths"]?["python"] is not null)
+                {
+                    input["toolPaths"]!["python"] = python;
+                    request = request with { StandardInput = input.ToJsonString() };
+                }
+            }
+            return new AdapterProcessRunner().RunAsync(request, ct);
+        }
     }
 
     private static string FindPython()
@@ -204,7 +216,7 @@ internal sealed class EngineArchiveFixture : IDisposable
         throw new InvalidOperationException("Set AVG_TEST_PYTHON to a Python 3.10+ executable for offline archive integration tests.");
     }
 
-    public async Task<string> CreateArchiveAsync(string component, string otherName = "images/logo.bin", string? script = null)
+    public async Task<string> CreateArchiveAsync(string component, string otherName = "images/logo.bin", string? script = null, string scriptName = "script.rpy")
     {
         var archive = Path.Combine(Root, Guid.NewGuid().ToString("N") + (component == "archive.rpa3" ? ".rpa" : ".xp3"));
         var make = Path.Combine(Root, "make.py");
@@ -212,7 +224,7 @@ internal sealed class EngineArchiveFixture : IDisposable
             import sys, json, pickle, zlib
             from python.archives import xp3
             args = json.load(sys.stdin)
-            files = [("script.rpy", args["script"].encode("utf-8")), (args["otherName"], bytes([0, 1, 255, 10]))]
+            files = [(args["scriptName"], args["script"].encode("utf-8")), (args["otherName"], bytes([0, 1, 255, 10]))]
             if args["component"] == "archive.xp3":
                 data = xp3.build(files, filter_name="none", compress_index=False)
             else:
@@ -227,7 +239,7 @@ internal sealed class EngineArchiveFixture : IDisposable
             """);
         var result = await new AdapterProcessRunner().RunAsync(new(Paths.Python,
             EngineReferenceToolkit.PythonArguments(Paths, make, []), Root,
-            JsonSerializer.Serialize(new { component, archive, otherName, script = script ?? "label start:\n    \"こんにちは。\"\n" })), default);
+            JsonSerializer.Serialize(new { component, archive, otherName, scriptName, script = script ?? "label start:\n    \"こんにちは。\"\n" })), default);
         Assert.Equal(0, result.ExitCode);
         return archive;
     }

@@ -82,10 +82,10 @@ public sealed partial class BuiltinAdapterAssets(string? assetsDirectory = null)
     {
         ct.ThrowIfCancellationRequested();
         var selected = FindFormat(format);
-        var files = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase)
+        var files = editableSource ? new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase)
         {
             ["src/BuiltinScriptParser.cs"] = Utf8.GetBytes(Bridge(selected))
-        };
+        } : await PrepareSharedFilesAsync(format, ct);
         if (editableSource)
         {
             foreach (string name in new[] { "VNTextPatch.LICENSE", "VNTextPatch.NOTICE.md" })
@@ -106,7 +106,6 @@ public sealed partial class BuiltinAdapterAssets(string? assetsDirectory = null)
             foreach (var (path, content) in GeneratedSources(selected).Where(pair => pair.Key != "generated/BuiltinScriptParser.cs"))
                 files.Add("src/BuiltinVnTextPatch/" + path, Utf8.GetBytes(content));
         }
-        else files.Add("src/" + SharedDependencyPath, JsonSerializer.SerializeToUtf8Bytes(await SharedDependencyAsync(ct), new JsonSerializerOptions(JsonSerializerDefaults.Web)));
 
         // Check every destination before creating any files; a conflict must not leave a half-copied source tree.
         string root = Path.GetFullPath(workspace);
@@ -149,6 +148,12 @@ public sealed partial class BuiltinAdapterAssets(string? assetsDirectory = null)
                 : "Use the copied binary bridge with test_adapter. For in-process run_csharp probes requiring parser changes, copy editableSource=true and use its librarySourceFiles."
         };
     }
+
+    internal async Task<Dictionary<string, byte[]>> PrepareSharedFilesAsync(string format, CancellationToken ct) => new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["src/BuiltinScriptParser.cs"] = Utf8.GetBytes(Bridge(FindFormat(format))),
+        ["src/" + SharedDependencyPath] = JsonSerializer.SerializeToUtf8Bytes(await SharedDependencyAsync(ct), new JsonSerializerOptions(JsonSerializerDefaults.Web))
+    };
 
     private string Asset(string name)
     {

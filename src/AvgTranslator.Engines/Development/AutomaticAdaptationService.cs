@@ -394,7 +394,7 @@ public sealed class AutomaticAdaptationService(IAdaptationAgentModel model, Gene
                         state.PendingCalls.Clear();
                     }
                     if (state.PendingCalls.Count == 0) state.PendingCallsAreSequential = false;
-                    if (outcome.Status == "completed" && (call.Name is "copy_adapter" or "copy_adapter_components" or "use_engine_reference"
+                    if (outcome.Status == "completed" && (call.Name is "copy_adapter" or "copy_adapter_components" or "use_engine_reference" or "compose_adapter_template"
                         || call.Name == "test_adapter" && state.VerifiedPackage is not null))
                         state.LastImplementationTurn = state.TotalTurns;
                     await SaveAsync();
@@ -829,6 +829,9 @@ public sealed class AutomaticAdaptationService(IAdaptationAgentModel model, Gene
         to reuse the parser; add only missing container, version or runtime glue. Don't fetch or rewrite bundled code first.
         For archives, inspect_engine_component / run_engine_component call fixed bounded entry points directly on staged copies;
         prefer these to writing another Python wrapper. Inspect/extract/rebuild results are structural evidence, not runtime acceptance.
+        When list_adapters.templates has a matching container/script combination, compose_adapter_template supplies the complete
+        protocol entry, resource rules and pinned release dependencies. Use its testArguments with staged samples for test_adapter;
+        generation alone never verifies or publishes support. Modify only confirmed missing behavior instead of rewriting the entry.
         For other missing formats use search_engine_references, inspect_engine_reference, then run_engine_python to CALL pinned library APIs.
         use_engine_reference supplies the C# bridge and shared dependency for runtime use without LLM calls. Don't port entire parsers to C#.
         For Siglus/Scene.pck use inspect_siglus_game and copy_adapter engine.siglus; reuse actual command references and bundled glyph handling.

@@ -153,6 +153,10 @@ public static class EnginePythonBridge
             {
                 using var input = new StreamReader(Console.OpenStandardInput(), new UTF8Encoding(false, true));
                 var request = input.ReadToEnd();
+                return Run(relativeScript, request);
+            }
+            public static int Run(string relativeScript, string request)
+            {
                 using var json = JsonDocument.Parse(request);
                 var paths = json.RootElement.GetProperty("toolPaths");
                 var root = Path.GetFullPath(AppContext.BaseDirectory).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
