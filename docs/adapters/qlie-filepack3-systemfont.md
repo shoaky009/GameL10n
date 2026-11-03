@@ -10,20 +10,8 @@
 
 补丁将七个正文字体列表由仅允许等宽字体的 `system_fix` 调整为 `system`，并使用引擎枚举得到的完整 `Regular` 字体名称；独立外字槽保持原样。生成字体的内部完整名称（`name` 表 ID 4）与配置保持一致，兼容 Locale Emulator 对字体名称的本地化处理。启动器会检查内部名称及日语字体枚举结果，避免字体已加载却无法匹配。正文和明朝体分别使用配套的无衬线与衬线字体。
 
-旧版 CMD/PowerShell 启动方案可能绕过原游戏的转区配置，导致已有日文文件或视频被报为缺失。旧补丁还可能因字体列表过滤或名称不匹配回退到原字体，将中文私用码位显示为希腊字母、勾号或方框。以下修复同时更新启动入口、字体列表和字体名称。
+旧版 CMD/PowerShell 启动方案可能绕过原游戏的转区配置，导致已有日文文件或视频被报为缺失。旧补丁还可能因字体列表过滤或名称不匹配回退到原字体，将中文私用码位显示为希腊字母、勾号或方框。
 
-关闭游戏和 GameL10n 后，在仓库根目录运行以下命令生成并安装修复补丁，将路径替换为已有项目目录：
-
-```powershell
-& ./scripts/repair-qlie-launch.ps1 -ProjectDirectory 'C:\路径\数据目录\games\项目ID' -Install
-```
-
-省略 `-Install` 只生成补丁和更新本机适配器，不写入游戏目录。修复复用项目 `adaptation/current/src/tools` 中的字体和许可文件，以及已选试译文本的翻译缓存；不重新下载字体，不调用翻译 API。项目必须保留 `source.json` 指向的原始资源快照、试译选区和相应译文缓存。
-
-安装时自动恢复已确认的字体回退：游戏把 `Font[0..4,6,7].Name` 重置为 `ＭＳ ゴシック`、把原衬线槽恢复为 `ＭＳ 明朝`，或在退出时写回上一版汉化字体的同风格名称。修复按安装日志中的哈希找到已提交的补丁配置，仅还原这些字体名称；还原后必须逐字节匹配该版本。其他配置差异或无法确认的补丁文件修改会停止安装。
-
-游戏或汉化启动器仍在运行时，修复工具会提前提示关闭。如果上一次安装因文件占用等原因中断，关闭游戏后重新执行同一命令即可继续。未完成的操作由正常安装器根据文件哈希恢复，无需删除安装记录或备份。
-
-资源回填、中文写入和启动程序结构检查用于生成修复补丁；实际游戏启动、日文资源路径、中文显示、排版和存档兼容性仍需通过试译确认。
+资源回填、中文写入和启动程序结构需通过校验；实际游戏启动、日文资源路径、中文显示、排版和存档兼容性仍需通过试译确认。
 
 相关开源实现：[VNTextPatch-net8 的 QLIE 脚本处理](https://github.com/rafael-vasconcellos/VNTextPatch-net8/blob/e68e174f3db6181e03fc7fabfa7570e1b293d148/VNTextPatch.Shared/Scripts/QlieScript.cs)、[VNTranslationTools 的 SJIS 转换与运行时代理](https://github.com/arcusmaximus/VNTranslationTools#vntextproxy)、[Locale Emulator 的字体名称处理](https://github.com/xupefei/Locale-Emulator-Core/blob/ae7160dc5deb97947396abcd784f9b98b6ee38b3/LocaleEmulator/Hooks/Gdi32Hook.cpp#L301)。当前适配器使用字体映射方案，未集成 VNTextProxy。

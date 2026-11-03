@@ -2,7 +2,7 @@
 
 默认数据目录是 `%LOCALAPPDATA%\GameL10n`。在“全局 → 程序设置 → 更换保存位置”中选择目录后，可选择“迁移并切换”或“仅切换”，完成后立即生效，无需重启。
 
-从 AvgTranslator 升级时，如果新目录尚无位置设置或游戏数据，程序继续读取 `%LOCALAPPDATA%\AvgTranslator` 及其中的 `location.json`，原有游戏、译文、API 配置和扩展仍可使用，不自动搬动数据。更换位置后，启动位置设置保存在 `%LOCALAPPDATA%\GameL10n\location.json`。迁移与校验脚本和桌面程序使用同一套位置规则。
+从 AvgTranslator 升级时，如果新目录尚无位置设置或游戏数据，程序继续读取 `%LOCALAPPDATA%\AvgTranslator` 及其中的 `location.json`，原有游戏、译文、API 配置和扩展仍可使用，不自动搬动数据。更换位置后，启动位置设置保存在 `%LOCALAPPDATA%\GameL10n\location.json`。数据工具和桌面程序使用同一套位置规则。
 
 “迁移并切换”将当前项目、译文、原文快照、补丁、日志、共享适配器和 API 配置直接复制到新目录，校验后立即加载。原目录保留，不额外创建整份备份或归档。已经完整导入分片的旧版逐条缓存，以及已有有效项目对应的旧整份 `.bak` 目录，留在原目录，不重复迁移。确认译文已提交的成功请求和响应也不重复迁移；异常诊断与未完成请求保留。
 
@@ -43,27 +43,27 @@
 
 正常请求和响应只在译文提交前临时落盘，用于中断恢复；译文及本批进度、Token 汇总保存后删除。重新识别或继续翻译时，也会清理能够与已提交译文核对一致的历史成功记录。异常、拒绝、结果未知和无法确认已提交的记录保留；清理失败不会使已保存译文失效。
 
-关闭所有 GameL10n 窗口后，在发行包根目录运行：
+当前项目更换保存位置使用界面的“迁移并切换”。需要转换旧版单项目数据结构或独立校验已有数据时，关闭所有 GameL10n 窗口，在发行包根目录直接运行数据工具：
 
 ```powershell
 # 原目录升级；旧游戏目录保存为 games/<ID>.bak，旧 memory/<ID> 保留
-./scripts/migrate-data.ps1 -GameDirectory 'I:\LiLiM\DARK BLUE'
+./tools/data/GameL10n.DataTool.exe migrate --game-directory 'I:\LiLiM\DARK BLUE'
 
 # 复制到新位置，验证成功后设置下次启动的数据目录
-./scripts/migrate-data.ps1 -AllGames `
-  -DestinationRoot 'D:\GameL10n Data' -Activate `
-  -ReportPath './migration-report.json'
+./tools/data/GameL10n.DataTool.exe migrate --all `
+  --destination-root 'D:\GameL10n Data' --activate `
+  --report './migration-report.json'
 
-# 指定来源；不加 -Activate 时只迁移，不改变程序使用的数据位置
-./scripts/migrate-data.ps1 -GameDirectory 'I:\LiLiM\DARK BLUE' `
-  -SourceRoot 'D:\AvgTranslator Data' -DestinationRoot 'D:\GameL10n Data'
+# 指定来源；不加 --activate 时只迁移，不改变程序使用的数据位置
+./tools/data/GameL10n.DataTool.exe migrate --game-directory 'I:\LiLiM\DARK BLUE' `
+  --source-root 'D:\AvgTranslator Data' --destination-root 'D:\GameL10n Data'
 
 # 重新校验源文件、读取提取缓存并统计当前设置下的译文缓存命中
-./scripts/migrate-data.ps1 -GameDirectory 'I:\LiLiM\DARK BLUE' `
-  -SourceRoot 'D:\GameL10n Data' -VerifyOnly
+./tools/data/GameL10n.DataTool.exe verify --game-directory 'I:\LiLiM\DARK BLUE' `
+  --data-root 'D:\GameL10n Data'
 ```
 
-发行包自带数据工具和运行时，不需要安装 SDK。源码工作目录使用 `scripts/dotnet.ps1` 构建并运行该工具。
+发行包自带数据工具和运行时，不需要安装 SDK。源码工作目录可使用 `./scripts/dotnet.ps1 run --project tools/GameL10n.DataTool -- <命令及参数>` 构建并运行该工具。
 
 工具先将游戏数据复制到目标的 `.migration/<ID>`，用 SHA-256 校验文件，再转换并对照提取文本和翻译记忆，最后写入 `game.json` 并提交目录。中断后重复同一命令会从保留的原数据重新构建临时目录；已经完成升级的游戏只校验，不覆盖之后产生的译文、设置或任务。并发的程序或工具会被进程检查及数据目录锁拒绝。来源与目标不能互相包含，也不能位于游戏安装目录内。
 
@@ -75,4 +75,4 @@
 
 项目运行日志按天追加，自动适配失败保留具体诊断。任务完成、失败或暂停后，`adaptation/current/` 的源码、样本、工作资料和会话仍会保留。单次适配器调用、C# 探针编译及验收的临时目录在操作退出时尽力删除；程序不扫描清理历史开发目录。需要重新分析时，停止任务后手动删除 `adaptation/current/` 即可，不影响译文、已发布适配器和已有补丁。迁移报告仅包含路径、条目数量、校验状态和耗时，不包含译文或 API 配置内容。
 
-`-AllGames` 根据每个游戏的描述文件或任务记录读取原安装路径；找不到对应路径时停止并报告游戏 ID。切换数据目录会影响整个游戏库，建议迁移全部游戏后再使用 `-Activate`。已升级的游戏可直接复制到新位置，包括之后写入的分片译文。
+`--all` 根据每个游戏的描述文件或任务记录读取原安装路径；找不到对应路径时停止并报告游戏 ID。切换数据目录会影响整个游戏库，建议迁移全部游戏后再使用 `--activate`。已升级的游戏可直接复制到新位置，包括之后写入的分片译文。

@@ -44,5 +44,5 @@ Get-ChildItem -LiteralPath (Join-Path $repoRoot 'docs') -Force | Copy-Item -Dest
 New-Item -ItemType Directory -Path (Join-Path $output 'contracts') -Force | Out-Null
 Copy-Item -LiteralPath (Join-Path $repoRoot 'contracts/adapter-v1.md') -Destination (Join-Path $output 'contracts') -Force
 New-Item -ItemType Directory -Path (Join-Path $output 'scripts') -Force | Out-Null
-Copy-Item -LiteralPath (Join-Path $repoRoot 'scripts/migrate-data.ps1'), (Join-Path $repoRoot 'scripts/analyze-adaptation-log.ps1') -Destination (Join-Path $output 'scripts') -Force
+Copy-Item -LiteralPath (Join-Path $repoRoot 'scripts/analyze-adaptation-log.ps1') -Destination (Join-Path $output 'scripts') -Force
 Write-Output "Desktop package: $output"
