@@ -71,22 +71,123 @@ public sealed class AdapterTemplateTests : IDisposable
     }
 
     [Theory]
-    [InlineData("loose-renpy", "script.rpy", "label start:\n    \"こんにちは。\"\n")]
-    [InlineData("loose-kirikiri-ks", "start.ks", "\uFEFFこんにちは。[p]\n")]
-    public async Task LooseTemplatesNeedOnlySharedParserAndPassFullVerification(string id, string name, string content)
+    [InlineData("loose-renpy", ".rpy", "label start:\n    \"こんにちは。\"\n")]
+    [InlineData("loose-kirikiri-ks", ".ks", "\uFEFFこんにちは。[p]\n")]
+    [InlineData("rpa3-renpy", ".rpa", "label start:\n    \"こんにちは。\"\n")]
+    public async Task FreshSupportedCombinationsVerifyAllResourcesAndPublishWithoutModelRequests(string id, string extension, string content)
     {
         var game = Directory.CreateDirectory(Path.Combine(fixture.Root, "game")).FullName;
-        await File.WriteAllTextAsync(Path.Combine(game, name), content, new UTF8Encoding(false));
-        var (tools, state, store, _, _, _) = await ToolsAsync(game, archive: false);
-        var composition = await ComposeAsync(tools, id);
-        Assert.Equal(5, state.ReleaseFiles!.Count);
-        Assert.DoesNotContain(state.ReleaseFiles, file => file.Path == EngineReferenceToolkit.DependencyPath || file.Path.EndsWith(".py", StringComparison.Ordinal));
-        Assert.False(Directory.Exists(Path.Combine(store.RootDirectory, "engine-tools", "python")));
-        Assert.Null(state.EngineReference);
-        await tools.ExecuteAsync(new("stage", "stage_resources", JsonSerializer.Serialize(new { files = new[] { name } })), default);
-        using var tested = JsonDocument.Parse(await tools.ExecuteAsync(new("verify", "test_adapter", composition.GetProperty("testArguments").GetRawText()), default));
-        Assert.True(tested.RootElement.GetProperty("result").GetProperty("passed").GetBoolean(), tested.RootElement.ToString());
+        var archive = extension == ".rpa";
+        foreach (var name in new[] { "first", "second" })
+            if (archive) File.Copy(await fixture.CreateArchiveAsync("archive.rpa3", script: content), Path.Combine(game, name + extension));
+            else await File.WriteAllTextAsync(Path.Combine(game, name + extension), content, new UTF8Encoding(false));
+        var (_, _, store, _, compiler, assets) = await ToolsAsync(game, archive);
+        var model = new TemplateModel();
+        var result = await new AutomaticAdaptationService(model, compiler, store, builtinAssets: assets).AdaptAsync(new("game", game, []));
+        Assert.Equal(AdaptationStatus.Activated, result.Status);
+        Assert.Equal(0, model.Calls);
+        Assert.Equal(0, result.Usage.TotalTokens);
+        var workspace = Path.Combine(store.WorkDirectory, "current");
+        var state = JsonSerializer.Deserialize<AdaptationSession>(await File.ReadAllTextAsync(Path.Combine(workspace, "session.json")), Json)!;
+        Assert.Equal(0, state.TotalTurns);
+        Assert.Equal("activated", state.AutomaticTemplate!.Status);
+        Assert.Equal(id, state.AutomaticTemplate.TemplateId);
+        Assert.Equal(archive ? 2 : 0, state.AutomaticTemplate.EvidenceFiles.Count);
+        Assert.Equal(2, state.ResourceHashes.Count);
+        Assert.Equal(archive ? 7 : 5, state.ReleaseFiles!.Count);
         Assert.NotNull(state.VerifiedPackage);
+        Assert.Equal(state.VerifiedPackage.Version, store.LoadActive("game")!.Version);
+        Assert.Contains(state.VerificationDiagnostics, item => item.Contains("byte for byte", StringComparison.Ordinal));
+        Assert.Contains(state.VerificationDiagnostics, item => item.Contains("distinct Unicode translations", StringComparison.Ordinal));
+        Assert.Contains(state.VerificationDiagnostics, item => item.Contains("Partial trial edits", StringComparison.Ordinal));
+        Assert.Empty(state.TextCoverage.Samples); // The adapter's own output is never promoted to independent evidence.
+        Assert.Contains("尚未评估", result.Summary);
+        Assert.NotEmpty(result.PendingRuntimeChecks!);
+        foreach (var path in state.ResourceHashes.Keys)
+            Assert.Equal(await File.ReadAllBytesAsync(Path.Combine(game, path)), await File.ReadAllBytesAsync(Path.Combine(workspace, "resources", path)));
+        if (!archive)
+        {
+            Assert.DoesNotContain(state.ReleaseFiles, file => file.Path == EngineReferenceToolkit.DependencyPath || file.Path.EndsWith(".py", StringComparison.Ordinal));
+            Assert.False(Directory.Exists(Path.Combine(store.RootDirectory, "engine-tools", "python")));
+            Assert.Null(state.EngineReference);
+        }
+    }
+
+    [Fact]
+    public async Task CompiledArchiveMemberAndVerificationFailureRetainEvidenceForTheModelAndResume()
+    {
+        var game = Directory.CreateDirectory(Path.Combine(fixture.Root, "game")).FullName;
+        File.Copy(await fixture.CreateArchiveAsync("archive.rpa3", otherName: "scripts/compiled.rpyc"), Path.Combine(game, "scripts.rpa"));
+        var (_, _, store, _, compiler, assets) = await ToolsAsync(game, archive: true);
+        var model = new TemplateModel(context => Assert.Contains(context.Messages,
+            message => message.Content.Contains("scripts/compiled.rpyc", StringComparison.Ordinal)));
+        var service = new AutomaticAdaptationService(model, compiler, store, builtinAssets: assets);
+        var request = new AdaptationRequest("game", game, []);
+        Assert.Equal(AdaptationStatus.WaitingForUser, (await service.AdaptAsync(request)).Status);
+        var workspace = Path.Combine(store.WorkDirectory, "current");
+        var statePath = Path.Combine(workspace, "session.json");
+        var state = JsonSerializer.Deserialize<AdaptationSession>(await File.ReadAllTextAsync(statePath), Json)!;
+        Assert.Equal("archive-inspection", state.AutomaticTemplate!.Stage);
+        Assert.Equal("incomplete", state.AutomaticTemplate.Status);
+        Assert.True(File.Exists(Path.Combine(workspace, Assert.Single(state.AutomaticTemplate.EvidenceFiles))));
+        Assert.True(File.Exists(Path.Combine(workspace, "resources", "scripts.rpa")));
+        Assert.False(Directory.Exists(Path.Combine(workspace, "src")));
+        Assert.Null(store.LoadActive("game"));
+        var evidence = state.AutomaticTemplate;
+        await service.AdaptAsync(request);
+        state = JsonSerializer.Deserialize<AdaptationSession>(await File.ReadAllTextAsync(statePath), Json)!;
+        Assert.Equal(evidence.EvidenceFiles, state.AutomaticTemplate!.EvidenceFiles);
+        Assert.Equal(2, model.Calls);
+
+        // A complete template that fails real extraction is kept for repair, with its exact failed stage.
+        File.Delete(Path.Combine(game, "scripts.rpa"));
+        await File.WriteAllTextAsync(Path.Combine(game, "script.rpy"), "# no translatable text\n");
+        var secondStore = new LocalAdapterPackageStore(store.RootDirectory, Path.Combine(fixture.Root, "second-work"));
+        model = new TemplateModel(context => Assert.Contains(context.Messages,
+            message => message.Content.Contains("initial-extraction", StringComparison.Ordinal)));
+        var failed = await new AutomaticAdaptationService(model, compiler, secondStore, builtinAssets: assets).AdaptAsync(request);
+        Assert.Equal(AdaptationStatus.WaitingForUser, failed.Status);
+        workspace = Path.Combine(secondStore.WorkDirectory, "current");
+        state = JsonSerializer.Deserialize<AdaptationSession>(await File.ReadAllTextAsync(Path.Combine(workspace, "session.json")), Json)!;
+        Assert.Equal("verification", state.AutomaticTemplate!.Stage);
+        Assert.Equal("incomplete", state.AutomaticTemplate.Status);
+        Assert.True(File.Exists(Path.Combine(workspace, "src", "Program.cs")));
+        Assert.NotEmpty(state.ReleaseFiles!);
+        Assert.NotEmpty(state.VerificationDiagnostics);
+        Assert.Null(state.VerifiedPackage);
+        Assert.Null(secondStore.LoadActive("game"));
+    }
+
+    [Fact]
+    public async Task NewUnsupportedFilesDuringTheFinalProbePreventAutomaticPublication()
+    {
+        var game = Directory.CreateDirectory(Path.Combine(fixture.Root, "game")).FullName;
+        await File.WriteAllTextAsync(Path.Combine(game, "script.rpy"), "label start:\n    \"こんにちは。\"\n");
+        var (_, _, store, _, compiler, assets) = await ToolsAsync(game, archive: false);
+        var workspace = Path.Combine(store.WorkDirectory, "current");
+        var statePath = Path.Combine(workspace, "session.json");
+        var added = false;
+        var progress = new TemplateProgress(update =>
+        {
+            if (added || update.Stage != "识别引擎" || !File.Exists(statePath)) return;
+            using var saved = JsonDocument.Parse(File.ReadAllText(statePath));
+            if (saved.RootElement.GetProperty("automaticTemplate").GetProperty("stage").GetString() != "publish") return;
+            File.WriteAllText(Path.Combine(game, "late.rpyc"), "new compiled script");
+            added = true;
+        });
+        var model = new TemplateModel(context => Assert.Contains(context.Messages,
+            message => message.Content.Contains("late.rpyc", StringComparison.Ordinal)));
+        var result = await new AutomaticAdaptationService(model, compiler, store, builtinAssets: assets)
+            .AdaptAsync(new("game", game, []), progress: progress);
+        Assert.True(added);
+        Assert.Equal(AdaptationStatus.WaitingForUser, result.Status);
+        Assert.Equal(1, model.Calls);
+        var state = JsonSerializer.Deserialize<AdaptationSession>(await File.ReadAllTextAsync(statePath), Json)!;
+        Assert.Equal("scope-recheck", state.AutomaticTemplate!.Stage);
+        Assert.Equal("incomplete", state.AutomaticTemplate.Status);
+        Assert.Null(state.VerifiedPackage);
+        Assert.Null(store.LoadActive("game"));
+        Assert.True(File.Exists(Path.Combine(workspace, "src", "Program.cs")));
     }
 
     [Fact]
@@ -129,6 +230,25 @@ public sealed class AdapterTemplateTests : IDisposable
         using var response = JsonDocument.Parse(await tools.ExecuteAsync(new("compose", "compose_adapter_template",
             JsonSerializer.Serialize(new { id, filter = id == "xp3-kirikiri-ks" ? "none" : null })), default));
         return response.RootElement.GetProperty("result").Clone();
+    }
+
+    private sealed class TemplateModel(Action<AgentRequest>? inspect = null) : IAdaptationAgentModel
+    {
+        public string Identity => "template-test";
+        public int Calls { get; private set; }
+        public Task<AgentTurn> NextAsync(AgentRequest request, CancellationToken cancellationToken)
+        {
+            Calls++;
+            Assert.NotNull(inspect);
+            inspect(request);
+            return Task.FromResult(new AgentTurn(new("assistant", ToolCalls: [new("stop-" + Calls, "report_blocker",
+                """{"kind":"needs_input","summary":"保留当前证据，等待反馈。","reason":"需要启动反馈。","nextAction":"提供游戏运行结果。"}""")]), new(10, 10)));
+        }
+    }
+
+    private sealed class TemplateProgress(Action<AdaptationProgress> report) : IProgress<AdaptationProgress>
+    {
+        public void Report(AdaptationProgress value) => report(value);
     }
 
     private async Task<(AdaptationTools Tools, AdaptationSession State, LocalAdapterPackageStore Store, string Workspace,

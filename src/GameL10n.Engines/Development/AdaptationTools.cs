@@ -805,7 +805,7 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
     private string? BaselineFingerprint() => request.BaselineUnits is null ? null
         : LocalFiles.HashText(JsonSerializer.Serialize(request.BaselineUnits, Json));
 
-    private async Task<object> FinishAsync(JsonElement args, CancellationToken ct)
+    private async Task<object> FinishAsync(JsonElement args, CancellationToken ct, Func<CancellationToken, Task>? beforePublish = null)
     {
         if (request.ImproveExisting && !(session.Objective == AdaptationObjective.Repair && request.BaselineUnits is { Count: > 0 })
             && session.TextCoverage.Samples.Count == 0)
@@ -833,6 +833,7 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
         RequireLaunchResources();
         await CheckResourcesAsync(ct);
         var probe = await CheckDiscoveryAsync(new GeneratedGameAdapter(package, compiler.Toolchain, compiler.Runner, store.WorkDirectory, EngineToolkit, reportProgress), ct);
+        if (beforePublish is not null) await beforePublish(ct);
         var published = await store.PublishAndActivateAsync(request.GameId, package, session.VerificationDiagnostics, ct);
         session.VerifiedPackage = published;
         await store.RecordCompatibilityAsync(package.Family!, new(request.GameId,

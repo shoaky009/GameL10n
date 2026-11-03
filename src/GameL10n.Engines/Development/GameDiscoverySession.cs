@@ -21,13 +21,15 @@ public sealed class GameDiscoverySession
 
     private GameDiscoverySession(string directory) => DirectoryPath = Path.GetFullPath(directory);
 
-    public static GameDiscoverySession Scan(string directory, CancellationToken ct = default)
+    public static GameDiscoverySession Scan(string directory, CancellationToken ct = default, int maximumEntries = int.MaxValue)
     {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maximumEntries);
         var session = new GameDiscoverySession(directory);
         WorkspaceFiles.RejectLinkAncestors(session.DirectoryPath);
         if (!Directory.Exists(session.DirectoryPath)) throw new DirectoryNotFoundException("游戏目录不存在。");
         var pending = new Stack<string>();
         pending.Push(session.DirectoryPath);
+        var entries = 0;
         while (pending.TryPop(out var current))
         {
             ct.ThrowIfCancellationRequested();
@@ -36,6 +38,13 @@ public sealed class GameDiscoverySession
                 foreach (var path in Directory.EnumerateFileSystemEntries(current))
                 {
                     ct.ThrowIfCancellationRequested();
+                    if (++entries > maximumEntries)
+                    {
+                        session.Complete = false;
+                        session.Diagnostics.Add($"目录扫描达到 {maximumEntries:N0} 项上限，资源列表不完整。");
+                        pending.Clear();
+                        break;
+                    }
                     try
                     {
                         var attributes = File.GetAttributes(path);

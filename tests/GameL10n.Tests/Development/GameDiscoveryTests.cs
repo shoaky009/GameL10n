@@ -55,6 +55,11 @@ public sealed class GameDiscoveryTests(ITestOutputHelper output) : IDisposable
     {
         var game = await ResourceAsync("scripts/scene.pak", [1]);
         for (int i = 0; i < 513; i++) await ResourceAsync($"scripts/{i}.pak", [1]);
+        var bounded = GameDiscoverySession.Scan(game, maximumEntries: 1);
+        Assert.False(bounded.Complete);
+        Assert.InRange(bounded.FileCount, 0, 1);
+        Assert.Contains(bounded.Diagnostics, item => item.Contains("上限", StringComparison.Ordinal));
+        Assert.Equal(RecognitionStatus.Unknown, (await bounded.EvaluateAsync(new([], ["**/*.missing"], null), true)).Status);
         var session = GameDiscoverySession.Scan(game);
         for (int i = 0; i < 512; i++) await session.ReadRangeAsync($"scripts/{i}.pak", 0, 1, default);
         var descriptor = new AdapterDiscoveryDescriptor([], ["**/*.pak"],

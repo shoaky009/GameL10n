@@ -9,7 +9,8 @@ namespace GameL10n.Core.Development;
 
 /// <summary>A single, resumable tool conversation. Published adapters execute without a model.</summary>
 public sealed class AutomaticAdaptationService(IAdaptationAgentModel model, GeneratedAdapterCompiler compiler,
-    LocalAdapterPackageStore packageStore, HttpClient? researchClient = null, BuiltinAdapterTrial? builtinTrial = null)
+    LocalAdapterPackageStore packageStore, HttpClient? researchClient = null, BuiltinAdapterTrial? builtinTrial = null,
+    BuiltinAdapterAssets? builtinAssets = null)
 {
     private static readonly JsonSerializerOptions ContextJson = new(JsonSerializerDefaults.Web)
         { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
@@ -255,7 +256,7 @@ public sealed class AutomaticAdaptationService(IAdaptationAgentModel model, Gene
             state.BuiltinProbes ??= [];
             state.SuccessfulProbes ??= [];
             var tools = new AdaptationTools(request, state, directory, compiler, packageStore, researchClient,
-                builtinTrial: builtinTrial, reportProgress: Report);
+                builtinAssets: builtinAssets, builtinTrial: builtinTrial, reportProgress: Report);
             if (request.BuiltinProbes is { Count: > 0 }) state.BuiltinProbes = request.BuiltinProbes.TakeLast(6).ToArray();
             if (state.BuiltinDiscovery is null || state.BuiltinDiscovery.Revision != BuiltinAdapterDiscovery.Revision)
             {
@@ -273,6 +274,13 @@ public sealed class AutomaticAdaptationService(IAdaptationAgentModel model, Gene
             if (state.AutomaticTrials is { } automatic)
                 await TraceAsync(new { operation = "automatic-builtin-trials", automatic.Status, automatic.Reused,
                     formats = state.BuiltinTrials.Where(trial => trial.Fingerprint is not null).Select(trial => trial.Format).ToArray() });
+            // A resumed session continues its saved implementation/evidence through the normal model workflow.
+            if (!continuing) await tools.RunAutomaticTemplateAsync(disabledFamilies, SaveAsync, cancellationToken);
+            if (state.AutomaticTemplate is { } automaticTemplate)
+                await TraceAsync(new { operation = "automatic-template", automaticTemplate.Status,
+                    automaticTemplate.TemplateId, automaticTemplate.Stage });
+            if (tools.PublishedAdapter is { } automaticAdapter)
+                return await CompleteAsync(AdaptationStatus.Activated, state.Summary, automaticAdapter);
             continuation += BuiltinContext(state, disabledFamilies) + ReuseFailureContext(state);
             var continuationPending = false;
             if (state.ModelIdentity != model.Identity || state.Messages.Count == state.HistoryStart)
@@ -804,6 +812,7 @@ public sealed class AutomaticAdaptationService(IAdaptationAgentModel model, Gene
             report = state.BuiltinDiscovery with { Candidates = state.BuiltinDiscovery.Candidates.Where(candidate => !disabledFamilies.Contains(candidate.AdapterId)).ToArray() },
             regularProbes = state.BuiltinProbes,
             automaticTrials = state.AutomaticTrials,
+            automaticTemplate = state.AutomaticTemplate,
             recentTrials = state.BuiltinTrials.TakeLast(3).Select(trial => new
             {
                 trial.Format, trial.Directory, trial.Files, trial.Status, trial.RoundtripStatus, trial.UnitCount,
@@ -990,6 +999,7 @@ public sealed class AdaptationSession
     public IReadOnlyList<BuiltinAdapterProbeObservation> BuiltinProbes { get; set; } = [];
     public List<BuiltinAdapterTrialObservation> BuiltinTrials { get; set; } = [];
     public AutomaticBuiltinTrialReport? AutomaticTrials { get; set; }
+    public AutomaticTemplateReport? AutomaticTemplate { get; set; }
     public List<SuccessfulAnalysisProbe> SuccessfulProbes { get; set; } = [];
     public List<GeneratedAdapterReuseFailure> ReuseFailures { get; set; } = [];
     public string GameId { get; set; } = "";
