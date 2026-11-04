@@ -53,7 +53,7 @@ public sealed class EngineLibraryTests : IDisposable
     }
 
     [Fact]
-    public async Task DeletionRetainsProjectDataAndCompatibilityDespitePersistedOrDamagedReferences()
+    public async Task DeletionRetainsProjectDataButRemovesCompatibilityDespitePersistedOrDamagedReferences()
     {
         var store = Store;
         var package = await PublishAsync("one");
@@ -73,8 +73,7 @@ public sealed class EngineLibraryTests : IDisposable
         await File.WriteAllTextAsync(Path.Combine(project, "patches", "final", "script.dat"), "finished patch");
         await store.RecordCompatibilityAsync(Family, new(GameId, "Old game", "fixture", "one",
             "passed"));
-        var retainedFiles = new[] { project, Path.Combine(store.RootDirectory, "games"), Path.Combine(store.RootDirectory, "catalog") }
-            .SelectMany(directory => Directory.GetFiles(directory, "*", SearchOption.AllDirectories))
+        var retainedFiles = Directory.GetFiles(project, "*", SearchOption.AllDirectories)
             .ToDictionary(file => file, File.ReadAllBytes);
 
         var deleted = await store.DeleteVersionAsync(Family.AdapterId, "one");
@@ -83,11 +82,10 @@ public sealed class EngineLibraryTests : IDisposable
         Assert.Empty(deleted.Diagnostics);
         Assert.False(Directory.Exists(package.DirectoryPath));
         foreach (var (file, contents) in retainedFiles) Assert.Equal(contents, await File.ReadAllBytesAsync(file));
-        var retained = Assert.Single((await store.ReadEngineLibraryAsync([], Data)).Families).Versions.Single(item => item.Version == "one");
-        Assert.False(retained.Exists);
-        Assert.False(retained.IsCandidate);
-        Assert.Single(retained.Games);
-        Assert.Single(store.ReadCatalog([]));
+        var retained = Assert.Single((await store.ReadEngineLibraryAsync([], Data)).Families);
+        Assert.Equal(new[] { "three", "two" }, retained.Versions.Select(item => item.Version).Order());
+        Assert.Empty(retained.Games);
+        Assert.Empty(store.ReadCatalog([]));
     }
 
     [Fact]
@@ -155,18 +153,23 @@ public sealed class EngineLibraryTests : IDisposable
         var store = Store;
         await PublishAsync("one");
         await PublishAsync("two");
-        var pins = Directory.GetFiles(Path.Combine(store.RootDirectory, "games"), "*.json", SearchOption.AllDirectories)
-            .ToDictionary(file => file, File.ReadAllBytes);
+        var directory = Assert.Single(Directory.GetDirectories(Path.Combine(store.RootDirectory, "games")));
+        var active = Path.Combine(directory, "active.json");
+        var previous = Path.Combine(directory, "previous.json");
+        var retainedActive = await File.ReadAllBytesAsync(active);
         Assert.Equal(2, (await store.ReadDiscoveryCandidatesAsync()).Count);
 
         Assert.True((await store.DeleteVersionAsync(Family.AdapterId, "one")).Deleted);
         Assert.Equal("two", store.LoadActive(GameId)!.Version);
+        Assert.False(File.Exists(previous));
+        Assert.Equal(retainedActive, await File.ReadAllBytesAsync(active));
         Assert.Equal("two", Assert.Single(await store.ReadDiscoveryCandidatesAsync()).Version);
         Assert.Equal("two", Assert.Single(store.ListReusablePackages()).Version);
         Assert.True((await store.DeleteVersionAsync(Family.AdapterId, "two")).Deleted);
         Assert.Null(store.LoadActive(GameId));
         Assert.Contains("包目录不存在", Assert.Throws<GeneratedAdapterException>(() => store.LoadVersion(Family.AdapterId, "two")).Message);
-        foreach (var (file, contents) in pins) Assert.Equal(contents, await File.ReadAllBytesAsync(file));
+        Assert.False(Directory.Exists(directory));
+        Assert.Empty((await store.ReadEngineLibraryAsync([], Data)).Families);
         Assert.Empty(await store.ReadDiscoveryCandidatesAsync());
         Assert.Empty(store.ListReusablePackages());
 
@@ -175,6 +178,7 @@ public sealed class EngineLibraryTests : IDisposable
         Assert.Empty(await reopened.ReadDiscoveryCandidatesAsync());
         Assert.Empty(reopened.ListReusablePackages());
         Assert.Null(reopened.LoadActive(GameId));
+        Assert.Empty((await reopened.ReadEngineLibraryAsync([], Data)).Families);
     }
 
     [Theory]
@@ -198,11 +202,102 @@ public sealed class EngineLibraryTests : IDisposable
             Assert.True(deleted.Deleted, string.Join('\n', deleted.Diagnostics));
             Assert.Empty(deleted.Diagnostics);
             Assert.False(Directory.Exists(package.DirectoryPath));
-            var retained = Assert.Single(Assert.Single((await store.ReadEngineLibraryAsync([], Data)).Families).Versions);
-            Assert.False(retained.Exists);
-            Assert.False(retained.IsCandidate);
+            Assert.Empty((await store.ReadEngineLibraryAsync([], Data)).Families);
+            var state = System.Text.Json.Nodes.JsonNode.Parse(await File.ReadAllTextAsync(Path.Combine(store.RootDirectory, "library-state.json")))!;
+            Assert.False(state["families"]!.AsObject().ContainsKey(Family.AdapterId));
         }
         Assert.Null(store.LoadActive(GameId));
+    }
+
+    [Fact]
+    public async Task DeletionRemovesMatchingCatalogRowsLegacyFilesAndGlobalPinsOnly()
+    {
+        var store = Store;
+        var retainedPackage = await PublishAsync("one");
+        var deletedPackage = await PublishAsync("two");
+        Assert.True(await store.RollbackAsync(GameId));
+        var excludedPackage = await PublishAsync("three");
+        Assert.True(await store.RollbackAsync(GameId));
+        await store.RecordCompatibilityAsync(Family, new(GameId, "Deleted game", "", "two", "passed"));
+        await store.RecordCompatibilityAsync(Family, new("retained-game", "Retained game", "", "one", "passed"));
+        var hiddenLegacy = await WriteLegacyCompatibilityAsync("hidden-deleted.json",
+            new("retained-game", "Old observation", "", "two", "passed"), DateTimeOffset.UtcNow.AddDays(-1));
+        var retainedLegacy = await WriteLegacyCompatibilityAsync("retained.json",
+            new("legacy-game", "Retained legacy", "", "three", "passed"), DateTimeOffset.UtcNow.AddDays(-1));
+
+        var games = Path.Combine(store.RootDirectory, "games");
+        var deletedPins = new[]
+        {
+            Path.Combine(games, "active-target", "active.json"),
+            Path.Combine(games, "previous-target", "previous.json")
+        };
+        foreach (var pin in deletedPins)
+            await LocalFiles.WriteJsonAsync(pin, new { id = Family.AdapterId, version = "two", activatedAt = DateTimeOffset.UtcNow });
+        await LocalFiles.WriteJsonAsync(Path.Combine(games, "active-target", "previous.json"),
+            new { id = Family.AdapterId, version = "one", activatedAt = DateTimeOffset.UtcNow });
+        await LocalFiles.WriteJsonAsync(Path.Combine(games, "previous-target", "active.json"),
+            new { id = Family.AdapterId, version = "three", activatedAt = DateTimeOffset.UtcNow });
+        await LocalFiles.WriteJsonAsync(Path.Combine(games, "other-family", "active.json"),
+            new { id = "engine.other", version = "two", activatedAt = DateTimeOffset.UtcNow });
+        var unrelatedDamagedPin = Path.Combine(games, "damaged-other-family", "previous.json");
+        Directory.CreateDirectory(Path.GetDirectoryName(unrelatedDamagedPin)!);
+        await File.WriteAllTextAsync(unrelatedDamagedPin, "{damaged-unrelated-family");
+        var retainedFiles = Directory.GetFiles(games, "*.json", SearchOption.AllDirectories)
+            .Except(deletedPins).Append(retainedLegacy).ToDictionary(file => file, File.ReadAllBytes);
+        var retainedGame = Assert.Single(store.ReadCatalog([]).SelectMany(entry => entry.Games), game => game.GameId == "retained-game");
+
+        var result = await store.DeleteVersionAsync(Family.AdapterId, "two");
+
+        Assert.True(result.Deleted, string.Join('\n', result.Diagnostics));
+        Assert.Empty(result.Diagnostics);
+        Assert.False(Directory.Exists(deletedPackage.DirectoryPath));
+        Assert.True(Directory.Exists(retainedPackage.DirectoryPath));
+        Assert.True(Directory.Exists(excludedPackage.DirectoryPath));
+        Assert.False(File.Exists(hiddenLegacy));
+        Assert.All(deletedPins, pin => Assert.False(File.Exists(pin)));
+        foreach (var (file, contents) in retainedFiles) Assert.Equal(contents, await File.ReadAllBytesAsync(file));
+        Assert.Equal(retainedGame, Assert.Single(store.ReadCatalog([]).SelectMany(entry => entry.Games)));
+        var state = System.Text.Json.Nodes.JsonNode.Parse(await File.ReadAllTextAsync(Path.Combine(store.RootDirectory, "library-state.json")))!;
+        var familyState = state["families"]![Family.AdapterId]!;
+        Assert.Equal(new[] { "one", "three" }, familyState["releases"]!.AsArray().Select(release => release!["version"]!.GetValue<string>()).Order());
+        Assert.Equal("three", Assert.Single(familyState["excludedVersions"]!.AsArray())!.GetValue<string>());
+        var indexed = Assert.Single((await store.ReadEngineLibraryAsync([], Data)).Families);
+        Assert.DoesNotContain(indexed.Versions, version => version.Version == "two");
+        Assert.Equal(retainedGame, Assert.Single(indexed.Games));
+
+        File.Delete(Path.Combine(store.RootDirectory, "library-index.json"));
+        var reopened = new LocalAdapterPackageStore(store.RootDirectory);
+        var rebuilt = Assert.Single((await reopened.ReadEngineLibraryAsync([], Data)).Families);
+        Assert.DoesNotContain(rebuilt.Versions, version => version.Version == "two");
+        Assert.Equal(retainedGame, Assert.Single(rebuilt.Games));
+        Assert.DoesNotContain(await reopened.ReadDiscoveryCandidatesAsync(), version => version.Version == "two");
+        Assert.DoesNotContain(reopened.ListReusablePackages(), version => version.Version == "two");
+    }
+
+    [Fact]
+    public async Task MissingHistoryVersionCanBeDeletedRepeatedlyWithoutRecreatingItsFamily()
+    {
+        var store = Store;
+        await store.RecordCompatibilityAsync(Family, new(GameId, "Historical game", "", "missing", "passed"));
+        var history = Assert.Single(Assert.Single((await store.ReadEngineLibraryAsync([], Data)).Families).Versions);
+        Assert.Equal(EngineLibrarySource.History, history.Source);
+        Assert.False(history.Exists);
+
+        for (var attempt = 0; attempt < 2; attempt++)
+        {
+            var result = await store.DeleteVersionAsync(Family.AdapterId, "missing");
+            Assert.True(result.Deleted, string.Join('\n', result.Diagnostics));
+            Assert.Empty(result.Diagnostics);
+            Assert.Empty((await store.ReadEngineLibraryAsync([], Data)).Families);
+            Assert.Empty(store.ReadCatalog([]));
+            Assert.False(Directory.Exists(Path.Combine(store.RootDirectory, "catalog", Family.AdapterId)));
+            Assert.False(File.Exists(Path.Combine(store.RootDirectory, "library-state.json")));
+            File.Delete(Path.Combine(store.RootDirectory, "library-index.json"));
+            store = new LocalAdapterPackageStore(store.RootDirectory);
+            Assert.Empty((await store.ReadEngineLibraryAsync([], Data)).Families);
+            Assert.Empty(await store.ReadDiscoveryCandidatesAsync());
+            Assert.Empty(store.ListReusablePackages());
+        }
     }
 
     [Fact]

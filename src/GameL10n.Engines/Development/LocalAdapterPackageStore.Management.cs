@@ -50,14 +50,17 @@ public sealed partial class LocalAdapterPackageStore
                 var activation = JsonSerializer.Deserialize<Activation>(WorkspaceFiles.ReadBounded(directory, "active.json", 4096), Json)
                     ?? throw new InvalidDataException("无效的引擎激活记录。");
                 ValidateReferenceIdentity(activation.Id, activation.Version);
-                var state = ReadLibraryState();
-                var family = state.Families.GetValueOrDefault(activation.Id) ?? new FamilyState();
-                state.Families[activation.Id] = family with
+                if (Directory.Exists(PackagePath(activation.Id, activation.Version)))
                 {
-                    Releases = (family.Releases ?? []).Where(item => item.Version != activation.Version)
-                        .Append((family.Releases ?? []).FirstOrDefault(item => item.Version == activation.Version) ?? activation).ToArray()
-                };
-                await WriteLibraryStateAsync(state, cancellationToken);
+                    var state = ReadLibraryState();
+                    var family = state.Families.GetValueOrDefault(activation.Id) ?? new FamilyState();
+                    state.Families[activation.Id] = family with
+                    {
+                        Releases = (family.Releases ?? []).Where(item => item.Version != activation.Version)
+                            .Append((family.Releases ?? []).FirstOrDefault(item => item.Version == activation.Version) ?? activation).ToArray()
+                    };
+                    await WriteLibraryStateAsync(state, cancellationToken);
+                }
             }
             cancellationToken.ThrowIfCancellationRequested();
             if (File.Exists(active)) File.Delete(active);
@@ -67,7 +70,7 @@ public sealed partial class LocalAdapterPackageStore
         finally { activationLock.Release(); }
     }
 
-    /// <summary>Deletes an external package unless a running task uses it; compatibility and project data are retained.</summary>
+    /// <summary>Deletes a version, its compatibility records and global pins unless a running task uses it. Project data is retained.</summary>
     public Task<EngineLibraryDeleteResult> DeleteVersionAsync(string adapterId, string version,
         IReadOnlyList<EngineLibraryReference>? runtimeReferences = null, CancellationToken cancellationToken = default)
     {
@@ -79,44 +82,83 @@ public sealed partial class LocalAdapterPackageStore
             try
             {
                 var path = PackagePath(adapterId, version);
-                if (!TryFamily(adapterId, out var identity)) throw new InvalidDataException("无效的引擎或模板标识。");
+                ValidateFamilyId(adapterId);
                 var used = running.Where(item => item.Kind == EngineLibraryReferenceKind.Running
                     && item.AdapterId == adapterId && item.Version == version).Distinct().ToArray();
                 if (used.Length != 0) return new EngineLibraryDeleteResult(false, used, []);
                 // Validate every descendant before recursive deletion so a junction cannot redirect traversal.
                 if (Directory.Exists(path)) ValidatePackageTree(path, cancellationToken);
                 var state = ReadLibraryState();
-                var family = state.Families.GetValueOrDefault(adapterId) ?? new FamilyState();
-                state.Families[adapterId] = family with
+                var compatibility = ReadCompatibilityVersionRemoval(adapterId, version);
+                var pins = ReadVersionPins(adapterId, version);
+                cancellationToken.ThrowIfCancellationRequested();
+                if (Directory.Exists(path)) Directory.Delete(path, recursive: true);
+                deleted = true;
+                // After removing files, finish the small metadata writes even if the caller cancels.
+                DeleteEmptyDirectory(Path.GetDirectoryName(path)!);
+                await RemoveCompatibilityVersionAsync(compatibility, CancellationToken.None);
+                foreach (var pin in pins)
                 {
-                    Releases = (family.Releases ?? []).Where(item => item.Version != version).ToArray(),
-                    ExcludedVersions = (family.ExcludedVersions ?? []).Append(version).Distinct(StringComparer.Ordinal).ToArray()
-                };
-                // Commit candidate exclusion before removing files; the display index is derived data.
-                await LocalFiles.WriteJsonAsync(WorkspaceFiles.Resolve(RootDirectory, "library-state.json"), state, cancellationToken);
-                try
-                {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    if (Directory.Exists(path)) Directory.Delete(path, recursive: true);
-                    deleted = true;
+                    File.Delete(pin);
+                    DeleteEmptyDirectory(Path.GetDirectoryName(pin)!);
                 }
-                finally
+                if (state.Families.TryGetValue(adapterId, out var family))
                 {
-                    // Reflect exclusion even when removal fails or is cancelled after the state commit.
-                    await UpdateLibraryIndexAsync(index =>
+                    var remaining = family with
                     {
-                        ApplyIndexState(index, state);
-                        var indexedFamily = GetIndexFamily(index, identity);
-                        var entry = indexedFamily.Versions.GetValueOrDefault(version) ?? new(version, EngineLibrarySource.External, false);
-                        indexedFamily.Versions[version] = entry with { Exists = Directory.Exists(path), IsCandidate = false };
-                    }, CancellationToken.None);
+                        Releases = (family.Releases ?? []).Where(item => item.Version != version).ToArray(),
+                        ExcludedVersions = (family.ExcludedVersions ?? []).Where(item => item != version).ToArray()
+                    };
+                    if (remaining.Releases is { Count: 0 } && remaining.ExcludedVersions is { Count: 0 }
+                        && !Directory.Exists(Path.GetDirectoryName(path)!) && !Directory.Exists(compatibility.Directory))
+                        state.Families.Remove(adapterId);
+                    else state.Families[adapterId] = remaining;
+                    await LocalFiles.WriteJsonAsync(WorkspaceFiles.Resolve(RootDirectory, "library-state.json"), state, CancellationToken.None);
                 }
+                await UpdateLibraryIndexAsync(index =>
+                {
+                    ApplyIndexState(index, state);
+                    if (!index.Families.TryGetValue(adapterId, out var indexedFamily)) return;
+                    indexedFamily.Versions.Remove(version);
+                    indexedFamily.Games.RemoveAll(game => game.AdapterVersion == version);
+                    if (indexedFamily.Versions.Count == 0 && indexedFamily.Games.Count == 0) index.Families.Remove(adapterId);
+                }, CancellationToken.None);
                 return new EngineLibraryDeleteResult(true, [], []);
             }
             catch (Exception error) when (IsLibraryReadError(error))
-            { return new EngineLibraryDeleteResult(deleted, [], [(deleted ? "版本文件已删除，但引擎库索引同步失败：" : "无法安全删除外置引擎版本：") + error.Message]); }
+            { return new EngineLibraryDeleteResult(deleted, [], [(deleted
+                ? "版本文件已删除，但关联记录或索引清理未完成，请重试："
+                : "无法完成引擎版本删除，请解决问题后重试：") + error.Message]); }
             finally { activationLock.Release(); }
         }, cancellationToken);
+    }
+
+    private List<string> ReadVersionPins(string adapterId, string version)
+    {
+        var pins = new List<string>();
+        var root = WorkspaceFiles.Resolve(RootDirectory, "games");
+        if (!Directory.Exists(root)) return pins;
+        foreach (var child in Directory.EnumerateDirectories(root))
+        {
+            var directory = WorkspaceFiles.Resolve(root, Path.GetFileName(child));
+            foreach (var name in new[] { "active.json", "previous.json" })
+            {
+                var path = WorkspaceFiles.Resolve(directory, name);
+                if (!File.Exists(path)) continue;
+                var contents = WorkspaceFiles.ReadBounded(directory, name, 4096);
+                if (!System.Text.Encoding.UTF8.GetString(contents).Contains(adapterId, StringComparison.Ordinal)) continue;
+                var activation = JsonSerializer.Deserialize<Activation>(contents, Json)
+                    ?? throw new InvalidDataException("无效的引擎激活记录：" + path);
+                if (activation.Id == adapterId && activation.Version == version) pins.Add(path);
+            }
+        }
+        return pins;
+    }
+
+    private static void DeleteEmptyDirectory(string directory)
+    {
+        WorkspaceFiles.RejectLinkAncestors(directory);
+        if (Directory.Exists(directory) && !Directory.EnumerateFileSystemEntries(directory).Any()) Directory.Delete(directory);
     }
 
     private LibraryState ReadLibraryState()

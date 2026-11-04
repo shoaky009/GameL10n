@@ -10,6 +10,52 @@ public sealed partial class LocalAdapterPackageStore
 {
     private const string CompatibilityCatalogFile = "games.json";
 
+    private CompatibilityVersionRemoval ReadCompatibilityVersionRemoval(string adapterId, string version)
+    {
+        var directory = WorkspaceFiles.Resolve(RootDirectory, Path.Combine("catalog", adapterId));
+        CompatibilityCatalog? updated = null;
+        var catalogPath = WorkspaceFiles.Resolve(directory, CompatibilityCatalogFile);
+        if (File.Exists(catalogPath))
+        {
+            var catalog = ReadCompatibilityCatalog(directory);
+            var remaining = catalog.Games.Where(game => game.AdapterVersion != version).ToArray();
+            if (remaining.Length == 0 || remaining.Length != catalog.Games.Count) updated = catalog with { Games = remaining };
+        }
+        var legacy = new List<string>();
+        if (Directory.Exists(directory))
+        {
+            // Inspect every legacy observation, including those hidden by games.json or a newer observation of the same game.
+            foreach (var file in Directory.EnumerateFiles(directory, "*.json"))
+            {
+                var name = Path.GetFileName(file);
+                if (name == CompatibilityCatalogFile) continue;
+                var path = WorkspaceFiles.Resolve(directory, name);
+                var record = JsonSerializer.Deserialize<CompatibilityRecord>(ReadDirectMetadata(directory, name, 128 * 1024), Json)
+                    ?? throw new InvalidDataException("兼容记录为空：" + path);
+                ValidateCompatibilityFamily(record.Family, directory);
+                ValidateCompatibilityGame(record.Game);
+                if (record.Game.AdapterVersion == version) legacy.Add(path);
+            }
+        }
+        return new(directory, updated, legacy);
+    }
+
+    private static async Task RemoveCompatibilityVersionAsync(CompatibilityVersionRemoval removal, CancellationToken ct)
+    {
+        var path = WorkspaceFiles.Resolve(removal.Directory, CompatibilityCatalogFile);
+        if (removal.UpdatedCatalog is { } catalog)
+        {
+            if (catalog.Games.Count == 0) File.Delete(path);
+            else await LocalFiles.WriteJsonAsync(path, catalog, ct);
+        }
+        foreach (var legacy in removal.LegacyFiles)
+        {
+            ct.ThrowIfCancellationRequested();
+            File.Delete(legacy);
+        }
+        DeleteEmptyDirectory(removal.Directory);
+    }
+
     public async Task RecordCompatibilityAsync(AdapterFamily family, GameCompatibility game, CancellationToken cancellationToken = default)
     {
         family.Validate();
@@ -164,4 +210,6 @@ public sealed partial class LocalAdapterPackageStore
     private sealed record CompatibilityRecord(AdapterFamily Family, GameCompatibility Game);
     private sealed record CompatibilityCatalog(AdapterFamily Family, IReadOnlyList<GameCompatibility> Games);
     private sealed record LegacyCompatibilityFile(string Name, byte[] Sha256, DateTime LastWriteTimeUtc);
+    private sealed record CompatibilityVersionRemoval(string Directory, CompatibilityCatalog? UpdatedCatalog,
+        IReadOnlyList<string> LegacyFiles);
 }

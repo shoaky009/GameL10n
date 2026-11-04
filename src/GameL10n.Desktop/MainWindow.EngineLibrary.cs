@@ -333,13 +333,13 @@ public sealed partial class MainWindow
         var version = SelectedInspectedLibraryVersion;
         CatalogOpenVersionButton.IsEnabled = !SavingEngineLibrary && version is { Source: EngineLibrarySource.External, Exists: true, DirectoryPath: not null };
         CatalogVerifyVersionButton.IsEnabled = !SavingEngineLibrary && version is { Source: EngineLibrarySource.External, Exists: true };
-        CatalogDeleteVersionButton.IsEnabled = !SavingEngineLibrary && version is { Source: EngineLibrarySource.External };
+        CatalogDeleteVersionButton.IsEnabled = !SavingEngineLibrary && version is { Source: not EngineLibrarySource.BuiltIn };
         if (selected is null)
             CatalogVersionReferenceText.Text = "选择版本以检查文件和查看可用操作。";
         else if (selected.Source == EngineLibrarySource.BuiltIn)
             CatalogVersionReferenceText.Text = "内置版本随程序提供，不能删除。";
         else if (selected.Source == EngineLibrarySource.History)
-            CatalogVersionReferenceText.Text = "仅保留兼容历史记录，没有可删除的扩展文件。";
+            CatalogVersionReferenceText.Text = "此版本仅有历史记录，可以删除对应的记录和索引。";
         else if (engineLibraryVersionInspecting)
             CatalogVersionReferenceText.Text = "正在检查此版本的文件…";
         else if (engineLibraryVersionInspectionError is { } error)
@@ -347,7 +347,7 @@ public sealed partial class MainWindow
         else if (version is null)
             CatalogVersionReferenceText.Text = "文件尚未检查。选择此版本检查文件是否存在。";
         else if (!version.Exists)
-            CatalogVersionReferenceText.Text = "版本文件已删除或不完整。可删除此版本以停止后续复用，兼容历史记录仍保留。";
+            CatalogVersionReferenceText.Text = "版本文件已删除或不完整。删除此版本会一并移除对应的记录和索引。";
         else
             CatalogVersionReferenceText.Text = "删除后不再复用此版本。已有文本、译文和补丁保留；重新提取或生成新补丁需要可用的适配器。";
     }
@@ -396,13 +396,14 @@ public sealed partial class MainWindow
 
     private async void CatalogDeleteVersion_Click(object sender, RoutedEventArgs e)
     {
-        if (SavingEngineLibrary || changingDataDirectory || closing || SelectedInspectedLibraryVersion is not { Source: EngineLibrarySource.External } version) return;
+        if (SavingEngineLibrary || changingDataDirectory || closing || SelectedInspectedLibraryVersion is not { Source: not EngineLibrarySource.BuiltIn } version) return;
         var directory = dataDirectory;
         var dialog = new ContentDialog
         {
-            XamlRoot = RootGrid.XamlRoot, Title = "删除外置引擎版本？",
-            Content = new TextBlock { Text = $"{selectedEngineFamily?.Name}\n{version.AdapterId}\n版本：{version.Version}\n位置：{version.DirectoryPath}\n\n"
-                + "将删除此版本的扩展文件并停止后续复用。已有文本、译文、补丁及兼容历史记录保留，已安装的游戏不受影响。\n\n使用此版本的项目仍可翻译和校对；重新提取或生成新补丁前需要重新识别或智能适配。此操作无法撤销。", TextWrapping = TextWrapping.Wrap },
+            XamlRoot = RootGrid.XamlRoot, Title = "删除引擎版本？",
+            Content = new TextBlock { Text = $"{selectedEngineFamily?.Name}\n{version.AdapterId}\n版本：{version.Version}"
+                + (version.DirectoryPath is { } path ? "\n位置：" + path : "")
+                + "\n\n将删除此版本的扩展文件、兼容记录、激活记录和索引条目。游戏项目的原文、译文及补丁保留；生成新补丁前需要可用的适配器。此操作无法撤销。", TextWrapping = TextWrapping.Wrap },
             PrimaryButtonText = "删除此版本", CloseButtonText = "取消", DefaultButton = ContentDialogButton.Close
         };
         if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
@@ -423,7 +424,9 @@ public sealed partial class MainWindow
             if (result.Deleted) DetachDeletedEngineVersion(version.AdapterId, version.Version);
             InvalidateEngineLibrary();
             await EnsureEngineLibraryAsync();
-            ShowLibraryStatus((result.Deleted ? $"已删除外置版本 {version.AdapterId} · {version.Version}，后续不再复用。项目文本、译文和补丁已保留。" : "未删除此版本。")
+            ShowLibraryStatus((result.Deleted && result.Diagnostics.Count == 0
+                    ? $"已删除版本 {version.AdapterId} · {version.Version} 及对应记录和索引。项目文本、译文和补丁已保留。"
+                    : result.Deleted ? "版本文件已删除，部分清理未完成：" : "未删除此版本。")
                 + (result.Diagnostics.Count > 0 ? "\n" + string.Join("\n", result.Diagnostics) : "")
                 + (result.References.Count > 0 ? "\n" + FormatLibraryReferences(result.References) : ""),
                 result.Deleted && result.Diagnostics.Count == 0 ? InfoBarSeverity.Success : InfoBarSeverity.Warning);
