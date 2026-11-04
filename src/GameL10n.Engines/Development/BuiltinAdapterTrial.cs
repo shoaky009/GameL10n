@@ -145,29 +145,38 @@ public sealed class BuiltinAdapterTrial(IAdapterProcessRunner runner, string? wo
     private static void RequireCompanions(VnTextPatchFormat format, string source, IReadOnlyList<string> resources)
     {
         var selected = resources.ToHashSet(StringComparer.OrdinalIgnoreCase);
-        Span<byte> signature = stackalloc byte[4];
         foreach (var script in resources.Where(path => format.Extensions.Contains(Path.GetExtension(path), StringComparer.OrdinalIgnoreCase)))
         {
-            bool required = format.Key == "Softpal";
-            if (format.Key == "Yuris")
+            foreach (var companion in SampleGroup(format, source, script).Skip(1))
             {
-                using var stream = File.OpenRead(WorkspaceFiles.Resolve(source, script));
-                required = stream.Read(signature) == 4 && signature.SequenceEqual("YSTB"u8);
-                if (!required) continue;
-            }
-            foreach (var name in format.CompanionFileNames)
-            {
-                var companion = Normalize(Path.Combine(Path.GetDirectoryName(script) ?? "", name));
-                var path = WorkspaceFiles.Resolve(source, companion);
-                if (!File.Exists(path))
-                {
-                    if (required) throw new FileNotFoundException($"{script} 缺少同目录伴随文件 {companion}；请先将它复制到工作区再试提取。", companion);
-                    continue;
-                }
                 if (!selected.Contains(companion))
                     throw new FileNotFoundException($"解析 {script} 会读取伴随文件 {companion}；请将它一并加入 files，确保样本范围和大小可核验。", companion);
             }
         }
+    }
+
+    /// <summary>One script and the companion files the parser will read, before staging or hashing samples.</summary>
+    internal static IReadOnlyList<string> SampleGroup(VnTextPatchFormat format, string sourceDirectory, string path)
+    {
+        var script = Normalize(path);
+        var source = WorkspaceFiles.Resolve(sourceDirectory, script);
+        if (!File.Exists(source)) throw new FileNotFoundException("候选样本不存在：" + script, script);
+        var required = format.Key == "Softpal";
+        if (format.Key == "Yuris")
+        {
+            using var stream = File.OpenRead(source);
+            Span<byte> signature = stackalloc byte[4];
+            required = stream.ReadAtLeast(signature, 4, throwOnEndOfStream: false) == 4 && signature.SequenceEqual("YSTB"u8);
+            if (!required) return [script];
+        }
+        var group = new List<string> { script };
+        foreach (var name in format.CompanionFileNames)
+        {
+            var companion = Normalize(Path.Combine(Path.GetDirectoryName(script) ?? "", name));
+            if (File.Exists(WorkspaceFiles.Resolve(sourceDirectory, companion))) group.Add(companion);
+            else if (required) throw new FileNotFoundException($"{script} 缺少同目录必需伴随文件 {companion}。", companion);
+        }
+        return group;
     }
 
     private static async Task RequireUnchangedAsync(string source, IReadOnlyDictionary<string, string> hashes, CancellationToken ct)

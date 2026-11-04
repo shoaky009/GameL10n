@@ -51,7 +51,7 @@ public sealed partial class AdaptationTools
                         || format.CompanionFileNames.Contains(Path.GetFileName(path), StringComparer.OrdinalIgnoreCase)) continue;
                     try
                     {
-                        var group = SampleGroup(format, path);
+                        var group = BuiltinAdapterTrial.SampleGroup(format, request.GameDirectory, path);
                         var extra = group.Where(file => !lengths.ContainsKey(file)).Distinct(StringComparer.OrdinalIgnoreCase)
                             .ToDictionary(file => file, file => new FileInfo(WorkspaceFiles.Resolve(request.GameDirectory, file)).Length,
                                 StringComparer.OrdinalIgnoreCase);
@@ -114,29 +114,6 @@ public sealed partial class AdaptationTools
         await save();
 
         void Skip(string reason) { if (skipped.Count < 6 && !skipped.Contains(reason)) skipped.Add(reason); }
-    }
-
-    private IReadOnlyList<string> SampleGroup(VnTextPatchFormat format, string path)
-    {
-        var script = path.Replace('\\', '/');
-        var source = WorkspaceFiles.Resolve(request.GameDirectory, script);
-        if (!File.Exists(source)) throw new FileNotFoundException("候选样本不存在：" + script, script);
-        var required = format.Key == "Softpal";
-        if (format.Key == "Yuris")
-        {
-            using var stream = File.OpenRead(source);
-            Span<byte> header = stackalloc byte[4];
-            required = stream.ReadAtLeast(header, 4, throwOnEndOfStream: false) == 4 && header.SequenceEqual("YSTB"u8);
-            if (!required) return [script];
-        }
-        var group = new List<string> { script };
-        foreach (var name in format.CompanionFileNames)
-        {
-            var companion = Path.Combine(Path.GetDirectoryName(script) ?? "", name).Replace('\\', '/');
-            if (File.Exists(WorkspaceFiles.Resolve(request.GameDirectory, companion))) group.Add(companion);
-            else if (required) throw new FileNotFoundException("候选脚本缺少必需伴随文件：" + companion, companion);
-        }
-        return group;
     }
 
     private static bool DeterministicParseFailure(VnTextPatchDiagnostic? diagnostic)
