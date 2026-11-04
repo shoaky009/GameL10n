@@ -16,7 +16,7 @@
 
 ## 首次自动组合
 
-首次新建适配在模型请求前还会尝试明确受支持的组合：纯裸 `.rpy`、纯裸 `.ks`，或 RPA3 封包中的 Ren’Py `.rpy` 源码。宿主检查完整目录、封包版本与全部成员，暂存全部规则匹配资源后，直接复用模板组合、完整 `test_adapter` 和 `finish` 的路径。通过后发布并启用当前版本，本次不发出模型请求、不消耗分析 Token。桌面入口的分析 API 配置要求不变。
+首次新建适配在模型请求前还会尝试明确受支持的组合：纯裸 `.rpy`、纯裸 `.ks`，或 RPA3 封包中的 Ren’Py `.rpy` 源码。宿主检查完整目录、封包版本与全部成员，暂存全部规则匹配资源后，调用 `AdapterDevelopmentWorkflow` 的组合、验收和发布方法；模型工具也调用同一组强类型方法。通过后发布并启用当前版本，本次不发出模型请求、不消耗分析 Token。模型通过工厂延迟创建，未配置分析 API 不影响本地组合；需要模型接手时才报告配置问题并保存进度。
 
 此路径只处理无补充要求、无已有实现的新建 Develop 任务；修复、覆盖扩展、已有文本基线、恢复中的会话及复用失败后的继续开发仍交给原有模型流程。模板 family 或底层解析器 family 被禁用时不自动组合。已有源码不会被模板覆盖。
 
@@ -90,9 +90,10 @@
 | --- | --- |
 | `src/GameL10n.Engines/Development/AutomaticAdaptationService.cs` | 会话循环、常驻提示、恢复与停止策略 |
 | `src/GameL10n.Engines/Development/AdaptationTools.cs` | 工具参数定义、执行分派与批处理约束 |
+| `src/GameL10n.Engines/Development/AdapterDevelopmentWorkflow.cs` | 开发工作区的编译、验收与发布，不依赖模型工具 JSON |
 | `src/GameL10n.Engines/Development/AdaptationToolGroups.cs` | 按需提供工具定义及历史调用恢复 |
-| `src/GameL10n.Engines/Development/AdaptationTools.VerificationCache.cs` | 验收指纹、复用与失效规则 |
-| `src/GameL10n.Engines/Development/AdaptationTools.AutomaticTemplates.cs` | 首次模板适用条件、完整资源准备与自动验收发布 |
+| `src/GameL10n.Engines/Development/AdapterDevelopmentWorkflow.VerificationCache.cs` | 验收指纹、复用与失效规则 |
+| `src/GameL10n.Engines/Development/AdapterDevelopmentWorkflow.AutomaticTemplates.cs` | 首次模板适用条件、完整资源准备与自动验收发布 |
 | `src/GameL10n.Engines/Development/AdaptationTools.Downloads.cs` | 下载缓存与项目依赖固定 |
 | `src/GameL10n.Engines/Development/AdaptationTrace.cs` | 每轮 API 和工具诊断 |
 

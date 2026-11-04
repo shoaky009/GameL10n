@@ -15,27 +15,6 @@ public sealed partial class AdaptationTools
         return file;
     }
 
-    private void RegisterReleaseFiles(IEnumerable<AdapterReleaseFile> files)
-    {
-        var additions = files.ToArray();
-        if (additions.Length == 0) return;
-        AdapterReleaseFiles.Validate(additions, requireSource: false);
-        var next = (session.ReleaseFiles ?? session.VerifiedPackage?.ReleaseFiles ?? [])
-            .ToDictionary(file => file.Path, StringComparer.OrdinalIgnoreCase);
-        foreach (var file in additions) next[file.Path] = file;
-        AddDownloadProvenance(next);
-        SetReleaseFiles(next.Values.ToArray());
-    }
-
-    private void SetReleaseFiles(IReadOnlyList<AdapterReleaseFile> files)
-    {
-        var next = files.Count == 0 ? [] : AdapterReleaseFiles.Validate(files, requireSource: false);
-        var current = session.ReleaseFiles ?? session.VerifiedPackage?.ReleaseFiles ?? [];
-        if (!current.OrderBy(file => file.Path, StringComparer.Ordinal).SequenceEqual(next))
-            session.VerifiedPackage = null;
-        session.ReleaseFiles = next;
-    }
-
     private object UpdateReleaseFiles(JsonElement args)
     {
         var next = (session.ReleaseFiles ?? []).ToDictionary(file => file.Path, StringComparer.OrdinalIgnoreCase);
@@ -57,8 +36,8 @@ public sealed partial class AdaptationTools
                 _ = WorkspaceFiles.Resolve(workspace, path);
                 next.Remove(path);
             }
-        AddDownloadProvenance(next);
-        SetReleaseFiles(next.Values.ToArray());
+        Development.AddDownloadProvenance(next);
+        Development.SetReleaseFiles(next.Values.ToArray());
         var selected = next.Keys.ToHashSet(StringComparer.OrdinalIgnoreCase);
         var unregistered = Directory.Exists(SourceDirectory)
             ? GeneratedGameAdapter.EnumerateFiles(SourceDirectory)
@@ -70,22 +49,4 @@ public sealed partial class AdaptationTools
             nextAction = "未登记文件不会发布；只补充确实需要的依赖。分析脚本与样本保留在工作区即可，不必登记或删除。" };
     }
 
-    private void AddDownloadProvenance(Dictionary<string, AdapterReleaseFile> files)
-    {
-        if (files.Keys.Any(path => path.StartsWith("tools/", StringComparison.Ordinal))
-            && File.Exists(Path.Combine(SourceDirectory, "tools", "sources.json")))
-            files.TryAdd("tools/sources.json", new("tools/sources.json", "license", "下载依赖的来源与校验记录"));
-    }
-
-    private void CheckReleaseGameInputs(GeneratedAdapterPackage package)
-    {
-        // Known staged originals can be identified even after renaming. This is not a
-        // heuristic for executables: custom launchers remain valid release assets.
-        var originals = session.ResourceHashes.Values.ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var copies = package.ReleaseFiles!.Where(file => originals.Contains(package.PackageFiles![file.Path]))
-            .Select(file => file.Path).ToArray();
-        if (copies.Length > 0)
-            throw new InvalidDataException("正式引擎包包含当前游戏的原文件副本：" + string.Join("、", copies.Take(8))
-                + "。从发布清单移除，改由适配器读取当前游戏资源；修改后的 EXE/资源写入补丁输出，不作为引擎依赖携带。");
-    }
 }

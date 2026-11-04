@@ -42,7 +42,7 @@ public sealed partial class AdaptationTools
             Directory.CreateDirectory(Path.GetDirectoryName(target)!);
             if (!File.Exists(target)) await File.WriteAllTextAsync(target, content, new UTF8Encoding(false), ct);
         }
-        RegisterReleaseFiles(files.Keys.Select(path => new AdapterReleaseFile(AdapterReleaseFiles.PackagePath(path),
+        Development.RegisterReleaseFiles(files.Keys.Select(path => new AdapterReleaseFile(AdapterReleaseFiles.PackagePath(path),
             path.StartsWith("src/tools/", StringComparison.Ordinal) ? "runtime" : "source", "共享引擎工具链连接与规则")));
         return new { files = files.Keys, prepared.Dependency,
             resourcePatterns = new[] { "Scene.pck", "Gameexe.dat", "*.exe", "*.exe.le.config", "g00/_moji_AN48_*.g00", "g00/_moji_SE48_*.g00" },

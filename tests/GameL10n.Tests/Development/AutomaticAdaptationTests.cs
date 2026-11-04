@@ -992,7 +992,8 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
             ResourceHashes = new() { ["game.exe"] = "fixture" } };
         var store = new LocalAdapterPackageStore(Path.Combine(root, "store"));
         var tools = new AdaptationTools(request, state, Path.Combine(root, "workspace"), Compiler(new ScriptedRunner()), store);
-        var error = await Assert.ThrowsAsync<InvalidDataException>(() => tools.ExecuteAsync(new("test", "test_adapter", "{}"), default));
+        var error = await Assert.ThrowsAsync<InvalidDataException>(() => tools.ExecuteAsync(new("test", "test_adapter",
+            """{"kind":"template","key":"locale-test","name":"Locale fixture","resourcePatterns":["*.exe"]}"""), default));
         Assert.Contains("game.exe.le.config", error.Message);
         Assert.Null(state.VerifiedPackage);
     }

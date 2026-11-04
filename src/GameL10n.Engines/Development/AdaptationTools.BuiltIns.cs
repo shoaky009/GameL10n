@@ -5,7 +5,7 @@ namespace GameL10n.Core.Development;
 
 public sealed partial class AdaptationTools
 {
-    private BuiltinAdapterAssets BuiltinAssets => builtinAssets ?? new BuiltinAdapterAssets();
+    private BuiltinAdapterAssets BuiltinAssets => Development.BuiltinAssets;
     private AdapterComponentAssets ComponentAssets => componentAssets ?? new AdapterComponentAssets();
 
     private async Task<object> ListAdaptersAsync(JsonElement args, CancellationToken ct)
@@ -84,7 +84,7 @@ public sealed partial class AdaptationTools
         session.VerifiedPackage = null;
         var copied = new List<AdapterReleaseFile>();
         var result = await ComponentAssets.CopyAsync(Strings(args, "ids"), workspace, ct, copied);
-        RegisterReleaseFiles(copied);
+        Development.RegisterReleaseFiles(copied);
         return result;
     }
 
@@ -119,6 +119,18 @@ public sealed partial class AdaptationTools
         if (value.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
             throw new InvalidDataException(name + " 必须为布尔值。");
         return value.GetBoolean();
+    }
+
+    private async Task<object> ComposeAdapterTemplateAsync(JsonElement args, CancellationToken ct)
+    {
+        var composed = await Development.ComposeAsync(Text(args, "id"),
+            args.TryGetProperty("resourcePatterns", out _) ? Strings(args, "resourcePatterns") : null,
+            Text(args, "filter", ""), ct);
+        var template = composed.Template;
+        return new { template, files = composed.Files, releaseFiles = session.ReleaseFiles,
+            testArguments = new { kind = template.Family.Kind, key = template.Family.Key, name = template.Family.Name, resourcePatterns = composed.ResourcePatterns },
+            limitations = "只连接已声明的源脚本与封包组件。脚本编码沿用解析器；不生成未经当前游戏验证的字体、转区或运行时补丁。",
+            nextAction = "暂存与规则匹配的真实资源，用返回的 testArguments 调用完整 test_adapter。模板生成不代表已验证，也不会发布。" };
     }
 }
 

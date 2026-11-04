@@ -117,13 +117,14 @@ $tools = @($toolRows | Group-Object { $_.entry.tool } | ForEach-Object {
 $runs = @($rows | Where-Object { $_.runId } | Group-Object runId | ForEach-Object {
     $group = $_.Group
     $start = $group | Where-Object { $_.entry.operation -eq 'run-start' } | Select-Object -First 1
+    $modelStart = $group | Where-Object { $_.entry.operation -eq 'model-start' } | Select-Object -First 1
     $end = $group | Where-Object { $_.entry.operation -eq 'run-end' } | Select-Object -Last 1
     $runAttempts = @($attempts | Where-Object { $_.row.runId -eq $group[0].runId })
     $item = [ordered]@{ runId = $_.Name; firstEvent = $group[0].at; lastEvent = $group[-1].at
         status = if ($end) { $end.entry.status } else { 'no-run-end-observed' }
         usage = Usage-Summary $runAttempts }
     if ($start) {
-        $item.model = $start.entry.model
+        $item.model = if ($modelStart) { $modelStart.entry.model } else { $start.entry.model }
         $item.maximumTokens = $start.entry.maximumTokens
         $item.maximumTurns = $start.entry.maximumTurns
         $item.fixedInstructionBytes = $start.entry.fixedInstructionBytes

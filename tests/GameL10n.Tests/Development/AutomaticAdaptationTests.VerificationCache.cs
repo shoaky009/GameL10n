@@ -138,7 +138,7 @@ public sealed partial class AutomaticAdaptationTests
         }
         using var next = JsonDocument.Parse(await tools.ExecuteAsync(new("again", "test_adapter", arguments), default));
         Assert.True(runs > initialRuns, "Changed inputs or build artifacts must execute a fresh check.");
-        Assert.False(next.RootElement.GetProperty("result").TryGetProperty("reused", out _));
+        Assert.False(next.RootElement.GetProperty("result").GetProperty("reused").GetBoolean());
         if (change == "baseline") Assert.Null(state.VerifiedPackage);
     }
 

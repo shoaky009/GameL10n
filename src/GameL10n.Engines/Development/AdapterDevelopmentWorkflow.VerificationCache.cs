@@ -1,12 +1,11 @@
 using System.Text.Json;
-using System.Text.Json.Nodes;
 using GameL10n.Core.Adapters;
 using GameL10n.Core.Isolation;
 using GameL10n.Core.Storage;
 
 namespace GameL10n.Core.Development;
 
-public sealed partial class AdaptationTools
+public sealed partial class AdapterDevelopmentWorkflow
 {
     private void ClearVerification()
     {
@@ -59,7 +58,7 @@ public sealed partial class AdaptationTools
         return LocalFiles.HashText(JsonSerializer.Serialize(new
         {
             cacheSchema = 1, verifierRevision = GeneratedAdapterVerifier.Revision,
-            hostBuild = typeof(AdaptationTools).Module.ModuleVersionId,
+            hostBuild = typeof(AdapterDevelopmentWorkflow).Module.ModuleVersionId,
             compiler.Toolchain, gameDirectory = Path.GetFullPath(request.GameDirectory),
             family, patterns = patterns.Select(GeneratedAdapterResources.Normalize).Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.Ordinal),
             releaseFiles, sources, discoveryOnly, session.Recognition, session.Objective, session.LaunchInspection,
@@ -70,7 +69,7 @@ public sealed partial class AdaptationTools
         }, Json));
     }
 
-    private async Task<object?> ReuseVerificationAsync(string? fingerprint, CancellationToken ct)
+    private async Task<AdapterTestResult?> ReuseVerificationAsync(string? fingerprint, CancellationToken ct)
     {
         var cached = session.VerificationCache;
         if (fingerprint is null || cached is null || cached.Fingerprint != fingerprint
@@ -88,22 +87,14 @@ public sealed partial class AdaptationTools
             { return null; }
         }
         if (cached.CompilationError is { } errorMessage) throw new GeneratedAdapterException(errorMessage);
-        if (cached.Result is not { ValueKind: JsonValueKind.Object } saved || cached.Package is null) return null;
-        var result = JsonNode.Parse(saved.GetRawText())!.AsObject();
-        session.VerificationDiagnostics = saved.GetProperty("diagnostics").Deserialize<string[]>(Json)!;
-        if (saved.GetProperty("passed").GetBoolean() && saved.GetProperty("stage").GetString() == "finish-ready")
-            AcceptVerification(cached.Package);
-        result["reused"] = true;
-        result["compileMs"] = 0;
-        result["discoveryMs"] = 0;
-        result["verificationMs"] = 0;
-        result["pendingCoverage"] = JsonSerializer.SerializeToNode(session.TextCoverage.Pending, Json);
-        result["runtimeChecks"] = JsonSerializer.SerializeToNode(session.TextCoverage.RuntimeChecks, Json);
+        if (cached.Result is not { } saved || cached.Package is null) return null;
+        session.VerificationDiagnostics = saved.Diagnostics.ToArray();
+        if (saved.ReadyToPublish) AcceptVerification(cached.Package);
         reportProgress?.Invoke("复用适配器验收", "验收输入未变化，沿用已完成的资源检查结果；游戏运行效果仍需实际验证。");
-        return result;
+        return saved with { Reused = true, CompileMs = 0, DiscoveryMs = 0, VerificationMs = 0 };
     }
 }
 
 /// <summary>Only the last completed check is retained; interrupted operations never create an entry.</summary>
 public sealed record AdapterVerificationCache(string Fingerprint, int Revision, GeneratedAdapterPackage? Package,
-    JsonElement? Result = null, string? CompilationError = null);
+    AdapterTestResult? Result = null, string? CompilationError = null);

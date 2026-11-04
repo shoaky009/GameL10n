@@ -7,7 +7,7 @@ namespace GameL10n.Core.Development;
 public sealed record AutomaticTemplateReport(int Revision, string Status, string? TemplateId, string Stage,
     IReadOnlyList<string> Diagnostics, IReadOnlyList<string> EvidenceFiles);
 
-public sealed partial class AdaptationTools
+public sealed partial class AdapterDevelopmentWorkflow
 {
     private const long AutomaticTemplateBytes = 256L * 1024 * 1024;
     private const string AutomaticTemplateRuntimeCheck = "游戏启动、中文显示、字体及排版尚未实机验证。";
@@ -94,12 +94,12 @@ public sealed partial class AdaptationTools
                     reportProgress?.Invoke("检查自动组合封包", "正在检查 " + resource + " 的全部成员及支持条件。");
                     var output = inspection + "/" + evidence.Count.ToString("D2");
                     // The fixed component checks the exact RPA version, safe names and bounded decoded members.
-                    var inspected = JsonSerializer.SerializeToElement(await RunEngineComponentAsync(JsonSerializer.SerializeToElement(new
-                    {
-                        id = template.ArchiveComponent, operation = "inspect", archive = "resources/" + resource,
-                        output, extensions = template.ScriptExtensions
-                    }, Json), token), Json);
-                    evidence.Add(inspected.GetProperty("manifest").GetString()!);
+                    var prepared = await PythonAsync(token);
+                    var outputPath = WorkspaceFiles.Resolve(workspace, output);
+                    var inspected = await new EngineArchiveComponentClient(compiler.Runner).InvokeAsync(prepared.Paths,
+                        new(1, template.ArchiveComponent, "inspect", WorkspaceFiles.Resolve(ResourceDirectory, resource),
+                            Path.Combine(outputPath, "manifest.json"), Extensions: template.ScriptExtensions), workspace, token);
+                    evidence.Add(output + "/manifest.json");
                     await RecordAsync("running");
                     if (!inspected.GetProperty("success").GetBoolean())
                         throw new InvalidDataException(resource + "：" + inspected.GetProperty("error").GetString());
@@ -118,27 +118,21 @@ public sealed partial class AdaptationTools
             stage = "compose";
             await RecordAsync("running");
             reportProgress?.Invoke("自动组合适配器", "资源符合 " + template.Id + " 的条件，正在连接现有组件。");
-            await ComposeAdapterTemplateAsync(JsonSerializer.SerializeToElement(new { id = template.Id }, Json), token);
+            await ComposeAsync(template.Id, null, null, token);
             session.TextCoverage = session.TextCoverage with
             { RuntimeChecks = session.TextCoverage.RuntimeChecks.Append(AutomaticTemplateRuntimeCheck).ToArray() };
             stage = "verification";
             await RecordAsync("running");
             reportProgress?.Invoke("验证自动组合适配器", "正在对全部匹配资源检查原字节往返、完整中文回填及部分试译。");
-            var tested = JsonSerializer.SerializeToElement(await TestAsync(JsonSerializer.SerializeToElement(new
-            {
-                kind = template.Family.Kind, key = template.Family.Key, name = template.Family.Name, resourcePatterns = template.ResourcePatterns
-            }, Json), token), Json);
+            var tested = await TestAsync(template.Family, template.ResourcePatterns, false, token);
             diagnostics.AddRange(session.VerificationDiagnostics);
-            if (!tested.GetProperty("passed").GetBoolean() || tested.GetProperty("stage").GetString() != "finish-ready")
+            if (!tested.ReadyToPublish)
             { await RecordAsync("incomplete"); return; }
             stage = "publish";
             await RecordAsync("running");
-            await FinishAsync(JsonSerializer.SerializeToElement(new
-            {
-                summary = "已自动组合 " + template.Family.Name + "，全部匹配资源已通过提取、原字节往返、完整中文及部分中文回填验收。"
+            await PublishAsync("已自动组合 " + template.Family.Name + "，全部匹配资源已通过提取、原字节往返、完整中文及部分中文回填验收。"
                     + "支持范围仅为此模板选中的源脚本；独立文字覆盖" + (session.TextCoverage.Samples.Count == 0 ? "尚未评估" : "仅核对已保留样本")
-                    + "，不代表整款游戏文字已完整覆盖。"
-            }, Json), token, async publicationToken =>
+                    + "，不代表整款游戏文字已完整覆盖。", false, token, async publicationToken =>
             {
                 stage = "scope-recheck";
                 await RecordAsync("running");

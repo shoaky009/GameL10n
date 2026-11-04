@@ -45,7 +45,7 @@ public sealed partial class AdaptationTools
         }
         var members = args.TryGetProperty("members", out _) ? Strings(args, "members") : null;
         var extensions = args.TryGetProperty("extensions", out _) ? Strings(args, "extensions") : null;
-        var prepared = await PythonAsync(ct);
+        var prepared = await Development.PythonAsync(ct);
         if (prepared.Dependency.Reference.Kind != "galtransl") throw new InvalidDataException("此组件需要 GalTransl 共享工具库。");
         var response = await new EngineArchiveComponentClient(compiler.Runner).InvokeAsync(prepared.Paths,
             new(1, id, operation, archive, Path.Combine(output, "manifest.json"), Path.Combine(output, "files"),

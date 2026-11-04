@@ -1,4 +1,3 @@
-using System.Security.Cryptography;
 using System.Text.Json;
 using GameL10n.Core.Adapters;
 using GameL10n.Core.Isolation;
@@ -83,7 +82,7 @@ public sealed partial class AdaptationTools
                 using var candidateBudget = CancellationTokenSource.CreateLinkedTokenSource(budget.Token);
                 candidateBudget.CancelAfter(TimeSpan.FromSeconds(20));
                 var token = candidateBudget.Token;
-                var hashes = await SampleHashesAsync(request.GameDirectory, lengths, token);
+                var hashes = await AdapterDevelopmentWorkflow.SampleHashesAsync(request.GameDirectory, lengths, token);
                 var fingerprint = LocalFiles.HashText(JsonSerializer.Serialize(new
                 {
                     revision = AutomaticTrialRevision, trialRevision = BuiltinAdapterTrial.Revision, format = format.Key,
@@ -91,11 +90,11 @@ public sealed partial class AdaptationTools
                 }, Json));
                 var cached = session.BuiltinTrials.FirstOrDefault(item => item.Format == format.Key && item.Fingerprint == fingerprint);
                 if (cached is null) session.BuiltinTrials.RemoveAll(item => item.Format == format.Key);
-                await StageAutomaticSamplesAsync(lengths, hashes, token);
+                await Development.StageAutomaticSamplesAsync(lengths, hashes, token);
                 if (parserFingerprint != await trial.FingerprintAsync(token)) throw new IOException("自动试用期间解析工具发生变化，结果未复用。");
                 if (cached is not null) { reused++; continue; }
                 var result = await trial.RunAsync(format.Key, workspace, "resources", files, checkRoundtrip: true, token);
-                var after = await SampleHashesAsync(request.GameDirectory, lengths, token);
+                var after = await AdapterDevelopmentWorkflow.SampleHashesAsync(request.GameDirectory, lengths, token);
                 if (hashes.Any(pair => !after.TryGetValue(pair.Key, out var value) || value != pair.Value)
                     || result.SourceHashes.Any(pair => !hashes.TryGetValue(pair.Key, out var value) || value != pair.Value))
                     throw new IOException("自动试用期间原始资源或样本发生变化，结果未缓存，请重新确认资源。");
@@ -138,73 +137,6 @@ public sealed partial class AdaptationTools
             else if (required) throw new FileNotFoundException("候选脚本缺少必需伴随文件：" + companion, companion);
         }
         return group;
-    }
-
-    private static async Task<Dictionary<string, string>> SampleHashesAsync(string root, IReadOnlyDictionary<string, long> lengths, CancellationToken ct)
-    {
-        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var (file, expectedLength) in lengths)
-        {
-            await using var input = new FileStream(WorkspaceFiles.Resolve(root, file), FileMode.Open, FileAccess.Read, FileShare.Read,
-                128 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
-            if (input.Length != expectedLength) throw new IOException("自动试用样本大小发生变化：" + file);
-            using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-            var buffer = new byte[128 * 1024];
-            long read = 0;
-            int count;
-            while ((count = await input.ReadAsync(buffer, ct)) != 0)
-            {
-                if (count > expectedLength - read) throw new IOException("自动试用样本超出预算：" + file);
-                read += count;
-                hash.AppendData(buffer, 0, count);
-            }
-            if (read != expectedLength) throw new IOException("自动试用样本被截断：" + file);
-            result[file] = Convert.ToHexStringLower(hash.GetHashAndReset());
-        }
-        return result;
-    }
-
-    private async Task StageAutomaticSamplesAsync(IReadOnlyDictionary<string, long> lengths, IReadOnlyDictionary<string, string> hashes, CancellationToken ct)
-    {
-        var pending = WorkspaceFiles.Resolve(workspace, "work/.auto-stage-" + Guid.NewGuid().ToString("N"));
-        try
-        {
-            foreach (var (file, expectedLength) in lengths)
-            {
-                var staged = WorkspaceFiles.Resolve(ResourceDirectory, file);
-                if (File.Exists(staged) && new FileInfo(staged).Length == expectedLength
-                    && await LocalFiles.HashFileAsync(staged, ct) == hashes[file]) continue;
-                var destination = WorkspaceFiles.Resolve(pending, file);
-                Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
-                await using (var input = new FileStream(WorkspaceFiles.Resolve(request.GameDirectory, file), FileMode.Open, FileAccess.Read, FileShare.Read,
-                    128 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan))
-                await using (var output = new FileStream(destination, FileMode.CreateNew, FileAccess.Write, FileShare.None,
-                    128 * 1024, FileOptions.Asynchronous))
-                {
-                    var buffer = new byte[128 * 1024];
-                    long total = 0;
-                    int count;
-                    while ((count = await input.ReadAsync(buffer, ct)) != 0)
-                    {
-                        if (count > expectedLength - total) throw new IOException("自动试用复制超出样本预算：" + file);
-                        await output.WriteAsync(buffer.AsMemory(0, count), ct);
-                        total += count;
-                    }
-                }
-                if (new FileInfo(destination).Length != expectedLength || await LocalFiles.HashFileAsync(destination, ct) != hashes[file])
-                    throw new IOException("自动试用复制的样本与原始资源不一致：" + file);
-            }
-            var actual = await SampleHashesAsync(request.GameDirectory, lengths, ct);
-            if (hashes.Any(pair => actual[pair.Key] != pair.Value)) throw new IOException("自动试用暂存期间原始资源发生变化。");
-            foreach (var (file, hash) in hashes)
-            {
-                var destination = WorkspaceFiles.Resolve(ResourceDirectory, file);
-                var copy = WorkspaceFiles.Resolve(pending, file);
-                if (File.Exists(copy)) { Directory.CreateDirectory(Path.GetDirectoryName(destination)!); File.Move(copy, destination, true); }
-                session.ResourceHashes[file] = hash;
-            }
-        }
-        finally { GeneratedGameAdapter.DeleteStagedTree(pending); }
     }
 
     private static bool DeterministicParseFailure(VnTextPatchDiagnostic? diagnostic)

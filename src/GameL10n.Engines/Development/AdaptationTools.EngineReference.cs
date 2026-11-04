@@ -6,36 +6,14 @@ namespace GameL10n.Core.Development;
 
 public sealed partial class AdaptationTools
 {
-    private EngineReferenceToolkit? engineToolkit;
-    private EngineReferenceToolkit EngineToolkit => engineToolkit ??= new(Path.Combine(store.RootDirectory, "engine-tools"), researchClient, reportProgress);
-    private string? toolkitFailure;
+    private EngineReferenceToolkit EngineToolkit => Development.EngineToolkit;
     private Task<string?> AnalysisParserPathAsync(CancellationToken ct) => session.ReleaseFiles is not null
         && !session.ReleaseFiles.Any(file => file.Path == BuiltinAdapterAssets.SharedDependencyPath)
         ? Task.FromResult<string?>(null) : EngineToolkit.ResolveVnTextPatchAsync(SourceDirectory, ct, BuiltinAssets);
 
-    private async Task<EngineReferencePin> ReferenceAsync(bool retry, CancellationToken ct)
-    {
-        if (toolkitFailure is not null && !retry)
-            throw new InvalidDataException("共享引擎工具准备失败，当前会话不自动重复准备：" + toolkitFailure
-                + "。可继续使用内置解析器或在线参考资料；恢复完整发行包的工具文件后 inspect_engine_reference(retryDownload=true)。");
-        try
-        {
-            var dependency = await SourceDependencyAsync(ct);
-            var selected = dependency?.Reference.Kind == "galtransl" ? dependency.Reference
-                : session.EngineReference?.Kind == "galtransl" ? session.EngineReference : null;
-            var pin = await EngineToolkit.EnsureReferenceAsync(selected, ct);
-            session.EngineReference = pin;
-            toolkitFailure = null;
-            return pin;
-        }
-        catch (Exception error) when (error is HttpRequestException or IOException
-            || error is OperationCanceledException && !ct.IsCancellationRequested)
-        { toolkitFailure = Limit(error.Message, 500); throw; }
-    }
-
     private async Task<object> InspectEngineReferenceAsync(JsonElement args, CancellationToken ct)
     {
-        var pin = await ReferenceAsync(args.TryGetProperty("retryDownload", out var retry) && retry.ValueKind == JsonValueKind.True, ct);
+        var pin = await Development.ReferenceAsync(args.TryGetProperty("retryDownload", out var retry) && retry.ValueKind == JsonValueKind.True, ct);
         var engine = Text(args, "engine");
         using var catalog = JsonDocument.Parse(EngineToolkit.Read(pin, "catalog/engines.json"));
         var selected = catalog.RootElement.GetProperty("engines").EnumerateArray()
@@ -69,21 +47,6 @@ public sealed partial class AdaptationTools
         };
     }
 
-    private async Task<(EnginePythonDependency Dependency, EnginePythonPaths Paths)> PythonAsync(CancellationToken ct)
-    {
-        var dependency = await SourceDependencyAsync(ct);
-        var pin = dependency?.Reference.Kind == "siglus"
-            ? await EngineToolkit.EnsureReferenceAsync(dependency.Reference, ct) : await ReferenceAsync(false, ct);
-        try { return await EngineToolkit.EnsurePythonAsync(pin, dependency, ct); }
-        catch (Exception error) when (error is HttpRequestException or IOException
-            || error is OperationCanceledException && !ct.IsCancellationRequested)
-        { toolkitFailure = Limit(error.Message, 500); throw; }
-    }
-
-    private Task<EnginePythonDependency?> SourceDependencyAsync(CancellationToken ct) =>
-        GameL10n.Core.Storage.LocalFiles.ReadJsonAsync<EnginePythonDependency>(
-            WorkspaceFiles.Resolve(SourceDirectory, EngineReferenceToolkit.DependencyPath), ct);
-
     private async Task<object> RunEnginePythonAsync(JsonElement args, CancellationToken ct)
     {
         var relative = Text(args, "script").Replace('\\', '/');
@@ -95,7 +58,7 @@ public sealed partial class AdaptationTools
         var arguments = args.TryGetProperty("arguments", out _) ? Strings(args, "arguments") : [];
         if (arguments.Count > 128 || arguments.Sum(value => value.Length) > 64 * 1024)
             throw new InvalidDataException("Python 参数过大。");
-        var prepared = await PythonAsync(ct);
+        var prepared = await Development.PythonAsync(ct);
         reportProgress?.Invoke("分析游戏资源", "解析工具已就绪，正在运行资源分析脚本。");
         var result = await compiler.Runner.RunAsync(new(prepared.Paths.Python,
             EngineReferenceToolkit.PythonArguments(prepared.Paths, script, arguments), workspace, Text(args, "stdin", ""),
@@ -106,7 +69,7 @@ public sealed partial class AdaptationTools
 
     private async Task<object> UseEngineReferenceAsync(JsonElement args, CancellationToken ct)
     {
-        var prepared = await PythonAsync(ct);
+        var prepared = await Development.PythonAsync(ct);
         var files = new Dictionary<string, string>
         {
             ["src/" + EngineReferenceToolkit.DependencyPath] = JsonSerializer.Serialize(prepared.Dependency, Json),
@@ -125,7 +88,7 @@ public sealed partial class AdaptationTools
             Directory.CreateDirectory(Path.GetDirectoryName(target)!);
             if (!File.Exists(target)) await File.WriteAllTextAsync(target, content, new UTF8Encoding(false), ct);
         }
-        RegisterReleaseFiles(files.Keys.Select(path => new AdapterReleaseFile(AdapterReleaseFiles.PackagePath(path),
+        Development.RegisterReleaseFiles(files.Keys.Select(path => new AdapterReleaseFile(AdapterReleaseFiles.PackagePath(path),
             path.StartsWith("src/tools/", StringComparison.Ordinal) ? "runtime" : "source", "共享引擎工具链连接与规则")));
         return new { files = files.Keys, prepared.Dependency,
             example = "Program.cs: return EngineReferencePython.Run(\"tools/adapter.py\");",

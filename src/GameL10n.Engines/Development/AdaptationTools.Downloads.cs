@@ -64,7 +64,7 @@ public sealed partial class AdaptationTools
             sources[relative["src/tools/".Length..]] = new(url, sha256);
             await LocalFiles.WriteJsonAsync(manifest, sources, ct);
         }
-        if (release is not null) RegisterReleaseFiles([release]);
+        if (release is not null) Development.RegisterReleaseFiles([release]);
         var bytes = new FileInfo(path).Length;
         reportProgress?.Invoke(reused ? "复用已有工具" : "额外工具已保存", $"{relative} · {bytes / 1048576.0:F2} MiB");
         return new { path = relative, sha256, bytes, reused,

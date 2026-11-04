@@ -82,10 +82,9 @@ public sealed class AdapterTemplateTests : IDisposable
             if (archive) File.Copy(await fixture.CreateArchiveAsync("archive.rpa3", script: content), Path.Combine(game, name + extension));
             else await File.WriteAllTextAsync(Path.Combine(game, name + extension), content, new UTF8Encoding(false));
         var (_, _, store, _, compiler, assets) = await ToolsAsync(game, archive);
-        var model = new TemplateModel();
-        var result = await new AutomaticAdaptationService(model, compiler, store, builtinAssets: assets).AdaptAsync(new("game", game, []));
+        var result = await new AutomaticAdaptationService(() => throw new InvalidOperationException("No analysis API configured"),
+            compiler, store, builtinAssets: assets).AdaptAsync(new("game", game, []));
         Assert.Equal(AdaptationStatus.Activated, result.Status);
-        Assert.Equal(0, model.Calls);
         Assert.Equal(0, result.Usage.TotalTokens);
         var workspace = Path.Combine(store.WorkDirectory, "current");
         var state = JsonSerializer.Deserialize<AdaptationSession>(await File.ReadAllTextAsync(Path.Combine(workspace, "session.json")), Json)!;

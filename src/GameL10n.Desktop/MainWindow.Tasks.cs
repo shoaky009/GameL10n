@@ -294,8 +294,9 @@ public sealed partial class MainWindow
         try
         {
             await SaveSettingsAsync();
-            var profile = ResolveGameApi(game).Resolve(ApiPurpose.GameAnalysis);
-            var provider = CreateAnalysisProvider(game, profile);
+            var api = ResolveGameApi(game);
+            var profile = api.Profiles.FirstOrDefault(item => item.Id == api.AnalysisProfileId);
+            var createModel = CreateAnalysisModelFactory(game, profile);
             if (changingDataDirectory || closing || !games.Contains(game)) return;
             var continuing = File.Exists(Path.Combine(game.Directory, "adaptation", "current", "session.json"));
             var improving = game.Project.AdapterId is not null;
@@ -350,7 +351,9 @@ public sealed partial class MainWindow
                 PlaceholderText = "例如：对话已翻译，但装备名称、技能说明和菜单仍是原文；或补充中文显示问题。" };
             var content = new StackPanel { Spacing = 12, MaxWidth = 480 };
             content.Children.Add(new TextBlock { TextWrapping = TextWrapping.Wrap,
-                Text = $"分析 API：{profile.Name} · {profile.Model}\n必要的资源片段和工具结果会发送到 {new Uri(profile.Endpoint).Host}。智能体可查找公开工具，在本机编写和执行解析代码。"
+                Text = "先尝试本地组件组合和验收；能完成时不调用模型。\n"
+                    + (profile is null ? "尚未配置分析 API；需要模型接手时会保存进度，配置后可继续。"
+                        : $"需要模型接手时使用：{profile.Name} · {profile.Model}\n必要的资源片段和工具结果会发送到 {profile.Endpoint}。智能体可查找公开工具，在本机编写和执行解析代码。")
                     + (continuing ? "\n沿用已有源码和适配进度，按本次目标继续。"
                         : improving ? "\n复用现有适配器，按本次目标处理。" : "\n适配通过后可选择少量文本试译。")
                     + "\n适配成功后会自动重新提取文本，已提交且仍兼容的译文继续复用。" });
@@ -414,7 +417,7 @@ public sealed partial class MainWindow
                 });
                 var baseline = game.AdaptationObjective == AdaptationObjective.Repair
                     ? await LoadAdaptationBaselineAsync(game, token) : null;
-                var adaptation = await Task.Run(() => new AutomaticAdaptationService(provider, compiler, store)
+                var adaptation = await Task.Run(() => new AutomaticAdaptationService(createModel, compiler, store)
                     .AdaptAsync(new AdaptationRequest(game.Id, game.GameDirectory, adapters, limits, game.AdaptationInstruction,
                         game.BuiltinProbes.ToArray(), ImproveExisting: improving, Objective: game.AdaptationObjective,
                         BaselineUnits: baseline), token, progress));
@@ -592,12 +595,24 @@ public sealed partial class MainWindow
         return new(provider, ProviderAccount(settings));
     }
 
-    private ScheduledAgentModel CreateAnalysisProvider(GameWorkspace game, ApiProfile profile)
+    private IAdaptationAgentModel CreateAnalysisProvider(GameWorkspace game, ApiProfile profile) =>
+        CreateAnalysisModelFactory(game, profile)();
+
+    private Func<IAdaptationAgentModel> CreateAnalysisModelFactory(GameWorkspace game, ApiProfile? profile)
     {
-        var settings = ReadProviderSettings(profile);
-        var provider = new OpenAiCompatibleAgentModel(httpClient, settings,
-            Path.Combine(game.Directory, "logs")) { DisplayName = profile.Name };
-        return new(provider, ProviderAccount(settings));
+        // Capture settings and session keys on the UI thread; local work does not require a usable API.
+        ProviderSettings settings;
+        try
+        {
+            if (profile is null) throw new InvalidOperationException("请配置全局默认分析 API，或在“项目设置”中单独选择。");
+            settings = ReadProviderSettings(profile);
+        }
+        catch (Exception error) when (error is ArgumentException or FormatException or InvalidOperationException or System.Security.Cryptography.CryptographicException)
+        { return () => throw new InvalidOperationException(error.Message, error); }
+        var name = profile.Name;
+        var logs = Path.Combine(game.Directory, "logs");
+        return () => new ScheduledAgentModel(new OpenAiCompatibleAgentModel(httpClient, settings, logs)
+            { DisplayName = name }, ProviderAccount(settings));
     }
 
     private ProviderSettings ReadProviderSettings(ApiProfile profile)

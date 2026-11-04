@@ -17,7 +17,7 @@ public sealed partial class AutomaticAdaptationTests
         async Task<AdaptationSession> Run(AdaptationRequest current, IReadOnlySet<string>? disabled = null)
         {
             var state = new AdaptationSession { Objective = AutomaticAdaptationService.ResolveObjective(current), BuiltinDiscovery = discovery };
-            await new AdaptationTools(current, state, workspace, compiler, store)
+            await new AdapterDevelopmentWorkflow(current, state, workspace, compiler, store)
                 .RunAutomaticTemplateAsync(disabled ?? new HashSet<string>(), () => Task.CompletedTask, default);
             Assert.Null(store.LoadActive(request.GameId));
             Assert.Null(state.ReleaseFiles);
@@ -64,7 +64,7 @@ public sealed partial class AutomaticAdaptationTests
                 BuiltinDiscovery = await BuiltinAdapterDiscovery.InspectAsync(request.GameDirectory),
                 LaunchInspection = await GameLaunchInspector.InspectAsync(request.GameDirectory)
             };
-            await new AdaptationTools(request, state, workspace, compiler, store)
+            await new AdapterDevelopmentWorkflow(request, state, workspace, compiler, store)
                 .RunAutomaticTemplateAsync(new HashSet<string>(), () => Task.CompletedTask, default);
             Assert.Equal("incomplete", state.AutomaticTemplate!.Status);
             Assert.Contains(state.AutomaticTemplate.Diagnostics, item => item.Contains(blocker, StringComparison.Ordinal));

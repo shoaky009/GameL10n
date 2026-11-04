@@ -8,10 +8,15 @@ using GameL10n.Core.Storage;
 namespace GameL10n.Core.Development;
 
 /// <summary>A single, resumable tool conversation. Published adapters execute without a model.</summary>
-public sealed class AutomaticAdaptationService(IAdaptationAgentModel model, GeneratedAdapterCompiler compiler,
+public sealed class AutomaticAdaptationService(Func<IAdaptationAgentModel> createModel, GeneratedAdapterCompiler compiler,
     LocalAdapterPackageStore packageStore, HttpClient? researchClient = null, BuiltinAdapterTrial? builtinTrial = null,
     BuiltinAdapterAssets? builtinAssets = null)
 {
+    public AutomaticAdaptationService(IAdaptationAgentModel model, GeneratedAdapterCompiler compiler,
+        LocalAdapterPackageStore packageStore, HttpClient? researchClient = null, BuiltinAdapterTrial? builtinTrial = null,
+        BuiltinAdapterAssets? builtinAssets = null)
+        : this(() => model, compiler, packageStore, researchClient, builtinTrial, builtinAssets) { }
+
     private static readonly JsonSerializerOptions ContextJson = new(JsonSerializerDefaults.Web)
         { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
 
@@ -75,6 +80,13 @@ public sealed class AutomaticAdaptationService(IAdaptationAgentModel model, Gene
             state.Stage = stage;
             progress?.Report(new(stage, message, state.Usage, state.ProgressNote, state.LastBreakthrough));
         }
+        Task TraceRunAsync(string operation, bool continuing, IAdaptationAgentModel? model = null) => TraceAsync(new
+        {
+            operation, continuing, coreBuild = typeof(AutomaticAdaptationService).Module.ModuleVersionId.ToString("N"),
+            model = model?.AnalysisModelName ?? model?.DisplayName, modelIdentity = model?.Identity,
+            startingTokens, state.TotalTurns, objective = state.Objective.ToString(), limits.MaximumTokens, limits.MaximumTurns,
+            fixedInstructionBytes = Encoding.UTF8.GetByteCount(Instructions), registeredToolCount = AdaptationTools.Definitions.Count
+        });
 
         try
         {
@@ -190,12 +202,7 @@ public sealed class AutomaticAdaptationService(IAdaptationAgentModel model, Gene
             state.TextCoverage ??= TextCoverage.Empty;
             state.TextCoverage.Validate();
             startingTokens = state.Usage.TotalTokens;
-            await TraceAsync(new { operation = "run-start", continuing,
-                coreBuild = typeof(AutomaticAdaptationService).Module.ModuleVersionId.ToString("N"),
-                model = model.AnalysisModelName ?? model.DisplayName, modelIdentity = model.Identity,
-                startingTokens, state.TotalTurns, objective = state.Objective.ToString(), limits.MaximumTokens, limits.MaximumTurns,
-                fixedInstructionBytes = Encoding.UTF8.GetByteCount(Instructions),
-                registeredToolCount = AdaptationTools.Definitions.Count });
+            await TraceRunAsync("run-start", continuing);
             if (state.RunningToolId is { } interrupted)
             {
                 const string interruption = "上次执行被中断，结果未确认。请先检查现有文件，再决定是否重试。";
@@ -255,8 +262,10 @@ public sealed class AutomaticAdaptationService(IAdaptationAgentModel model, Gene
             state.BuiltinTrials ??= [];
             state.BuiltinProbes ??= [];
             state.SuccessfulProbes ??= [];
+            var development = new AdapterDevelopmentWorkflow(request, state, directory, compiler, packageStore,
+                researchClient, builtinAssets, Report);
             var tools = new AdaptationTools(request, state, directory, compiler, packageStore, researchClient,
-                builtinAssets: builtinAssets, builtinTrial: builtinTrial, reportProgress: Report);
+                builtinAssets: builtinAssets, builtinTrial: builtinTrial, reportProgress: Report, development: development);
             if (request.BuiltinProbes is { Count: > 0 }) state.BuiltinProbes = request.BuiltinProbes.TakeLast(6).ToArray();
             if (state.BuiltinDiscovery is null || state.BuiltinDiscovery.Revision != BuiltinAdapterDiscovery.Revision)
             {
@@ -275,12 +284,20 @@ public sealed class AutomaticAdaptationService(IAdaptationAgentModel model, Gene
                 await TraceAsync(new { operation = "automatic-builtin-trials", automatic.Status, automatic.Reused,
                     formats = state.BuiltinTrials.Where(trial => trial.Fingerprint is not null).Select(trial => trial.Format).ToArray() });
             // A resumed session continues its saved implementation/evidence through the normal model workflow.
-            if (!continuing) await tools.RunAutomaticTemplateAsync(disabledFamilies, SaveAsync, cancellationToken);
+            if (!continuing) await development.RunAutomaticTemplateAsync(disabledFamilies, SaveAsync, cancellationToken);
             if (state.AutomaticTemplate is { } automaticTemplate)
                 await TraceAsync(new { operation = "automatic-template", automaticTemplate.Status,
                     automaticTemplate.TemplateId, automaticTemplate.Stage });
             if (tools.PublishedAdapter is { } automaticAdapter)
                 return await CompleteAsync(AdaptationStatus.Activated, state.Summary, automaticAdapter);
+            IAdaptationAgentModel model;
+            try { model = createModel(); }
+            catch (Exception error) when (error is ArgumentException or InvalidOperationException)
+            {
+                state.Blocker = new(true, error.Message, "配置可用的分析 API 后继续适配，已有本地检查和工作文件会保留。", true);
+                return await CompleteAsync(AdaptationStatus.WaitingForUser, "本地适配尚未完成，需要分析 API 接手：" + error.Message);
+            }
+            await TraceRunAsync("model-start", continuing, model);
             continuation += BuiltinContext(state, disabledFamilies) + ReuseFailureContext(state);
             var continuationPending = false;
             if (state.ModelIdentity != model.Identity || state.Messages.Count == state.HistoryStart)

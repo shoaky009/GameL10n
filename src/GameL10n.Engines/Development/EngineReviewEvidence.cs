@@ -100,7 +100,7 @@ public sealed class EngineReviewEvidence
                     var row = doc.RootElement;
                     if (!row.TryGetProperty("entry", out var entry)) continue;
                     var operation = Text(entry, "operation", 80);
-                    if (operation == "run-start")
+                    if (operation is "run-start" or "model-start")
                         runs[Text(row, "runId", 80)] = new { at = Text(row, "at", 80), coreBuild = Text(entry, "coreBuild", 80),
                             model = Text(entry, "model", 160), instructions = Number(entry, "instructionBytes"), tools = Number(entry, "toolDefinitionBytes") };
                     if (operation == "model")
