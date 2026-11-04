@@ -6,4 +6,11 @@
   <ItemGroup>
     <ProjectReference Include="../../src/GameL10n.Core/GameL10n.Core.csproj" />
   </ItemGroup>
+  <!-- Data migration and verification do not use the engine disassembler. -->
+  <Target Name="ExcludeEngineAnalysisAssets" AfterTargets="ComputeFilesToPublish">
+    <ItemGroup>
+      <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)"
+        Condition="'%(ResolvedFileToPublish.RelativePath)' == 'tools/analysis/capstone.dll' or '%(ResolvedFileToPublish.RelativePath)' == 'tools/analysis/Capstone-LICENSE.txt'" />
+    </ItemGroup>
+  </Target>
 </Project>

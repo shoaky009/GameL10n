@@ -18,7 +18,11 @@
     <Content Update="Assets/GameL10n.ico" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
   <ItemGroup>
-    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.5.1" />
+    <!-- Model providers use HTTP; only the desktop UI components are needed locally. -->
+    <PackageReference Include="Microsoft.WindowsAppSDK.WinUI" Version="2.3.9" />
+    <PackageReference Include="Microsoft.WindowsAppSDK.InteractiveExperiences" Version="2.1.9" />
+    <PackageReference Include="Microsoft.WindowsAppSDK.DWrite" Version="2.1.0" />
+    <PackageReference Include="Microsoft.WindowsAppSDK.Runtime" Version="2.5.1" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools.MSIX" Version="1.7.261008100" PrivateAssets="all" />
     <ProjectReference Include="../GameL10n.Core/GameL10n.Core.csproj" />
   </ItemGroup>

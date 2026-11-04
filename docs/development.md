@@ -15,7 +15,11 @@
 
 根目录的 `logo.png` 用于 README，`icon.png` 是程序图标原图。Windows 使用由原图转换的多尺寸 `src/GameL10n.Desktop/Assets/GameL10n.ico`；替换原图时同步更新 ICO。构建将其嵌入 EXE 并复制到应用的 `Assets` 目录，运行时窗口使用同一文件。
 
-工具链打包来源为 `.tools/dotnet`，使用 SDK 10.0.402 与运行时 10.0.13。数据工具和 VNTextPatch 共用 `toolchain/` 中的固定版本运行时，不再各自携带一份，也不依赖用户安装的 .NET。使用 `-WithoutToolchain` 可省略自动适配的编译器和引用程序集，辅助程序需要的共享运行时仍会保留。引用程序集只打包 `ref/net10.0/*.dll`，不包含 XML 文档、分析器和 SDK 元数据。
+工具链打包来源为 `.tools/dotnet`，使用 SDK 10.0.402 与运行时 10.0.13。桌面程序、数据工具和 VNTextPatch 共用 `toolchain/` 中的固定版本 .NET 运行时，不依赖用户安装 .NET。WinUI 的原生运行组件仍随包提供；项目按需引用 WinUI、DWrite 和 Runtime，不携带 Windows AI、机器学习或搜索组件。智能适配通过 HTTP 调用模型，无需 ONNX Runtime 或 DirectML。
+
+编译工具只包含直接调用 `csc.dll` 所需的程序集、运行配置和简体中文诊断资源，不包含 VB 编译器或编译服务。引用程序集只打包 `ref/net10.0/*.dll`，不包含 XML 文档、分析器和 SDK 元数据。使用 `-WithoutToolchain` 可省略编译器和引用程序集，共享运行时仍会保留。
+
+发行脚本会重建已有的发行目录，避免旧依赖残留；非空目录必须能识别为桌面发行包，且不能包含应用数据。请勿在发行输出目录中保存个人文件。
 
 内置 VNTextPatch 脚本工具随发行包保存在 `tools/vntextpatch`，包含独立 EXE，并使用包内的共享运行时，不需要安装 SDK，也不在每次处理脚本时解压运行时。辅助程序从各自 EXE 所在位置查找 `../../toolchain`，移动发行包时应保留相对目录结构。其上游源码固定版本并随仓库保存，构建时不从 GitHub 动态下载；具体脚本格式与运行限制见[内置脚本适配说明](adapters/engines/vntextpatch.md)。
 

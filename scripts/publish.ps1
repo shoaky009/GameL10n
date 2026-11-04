@@ -7,7 +7,15 @@ $sdkVersion = '10.0.402'
 $toolchainSource = Join-Path $repoRoot '.tools/dotnet'
 $toolchainTarget = Join-Path $output 'toolchain'
 $toolchainItems = @('dotnet.exe', "host/fxr/$runtimeVersion", "shared/Microsoft.NETCore.App/$runtimeVersion", 'LICENSE.txt', 'ThirdPartyNotices.txt')
-if (-not $WithoutToolchain) { $toolchainItems += "sdk/$sdkVersion/Roslyn/bincore" }
+if (-not $WithoutToolchain) {
+    $compilerDirectory = "sdk/$sdkVersion/Roslyn/bincore"
+    # csc runs directly; Visual Basic, the compiler server and other locale resources are not used.
+    foreach ($name in @('csc.dll', 'csc.deps.json', 'csc.runtimeconfig.json',
+        'Microsoft.CodeAnalysis.dll', 'Microsoft.CodeAnalysis.CSharp.dll',
+        'zh-Hans/Microsoft.CodeAnalysis.resources.dll', 'zh-Hans/Microsoft.CodeAnalysis.CSharp.resources.dll')) {
+        $toolchainItems += "$compilerDirectory/$name"
+    }
+}
 foreach ($relative in $toolchainItems) {
     if (-not (Test-Path -LiteralPath (Join-Path $toolchainSource $relative))) { throw "Pinned toolchain component is missing: $relative" }
 }
@@ -20,23 +28,45 @@ if (Get-Process -Name GameL10n.Desktop -ErrorAction SilentlyContinue | Where-Obj
     throw 'The desktop app is using this output directory. Close it before publishing, or select another -OutputDirectory.'
 }
 if (-not $SkipBuild) {
-    & (Join-Path $PSScriptRoot 'dotnet.ps1') publish (Join-Path $repoRoot 'src/GameL10n.Desktop/GameL10n.Desktop.csproj') -c Release -o $output --self-contained true
-    if ($LASTEXITCODE -ne 0) { throw 'Desktop publish failed.' }
-    # Remove old self-contained tool outputs before switching to the shared runtime.
-    foreach ($relative in @('tools/data', 'tools/vntextpatch')) {
-        $directory = Join-Path $output $relative
-        if (Test-Path -LiteralPath $directory) { Remove-Item -LiteralPath $directory -Recurse -Force }
+    # Recreate recognized distribution output so removed dependencies cannot linger between publishes.
+    if (Test-Path -LiteralPath $output) {
+        $trimmedOutput = [IO.Path]::TrimEndingDirectorySeparator($output)
+        if ($trimmedOutput -eq [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetPathRoot($output)) -or
+            $repoRoot -eq $trimmedOutput -or $repoRoot.StartsWith($trimmedOutput + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'The output directory must not be the repository or one of its ancestors.'
+        }
+        for ($ancestor = [IO.DirectoryInfo]::new($output); $null -ne $ancestor; $ancestor = $ancestor.Parent) {
+            if ($ancestor.Exists -and ($ancestor.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'The output directory must not contain links.' }
+        }
+        if ((Get-ChildItem -LiteralPath $output -Force | Select-Object -First 1) -and
+            (-not (Test-Path -LiteralPath $desktopExecutable) -or -not (Test-Path -LiteralPath (Join-Path $output 'GameL10n.Desktop.deps.json')))) {
+            throw 'The output directory is not an existing desktop package. Choose an empty output directory.'
+        }
+        foreach ($name in @('.app.lock', 'settings.json', 'location.json', 'games', 'extensions', 'memory')) {
+            if (Test-Path -LiteralPath (Join-Path $output $name)) { throw 'The output directory contains application data. Choose another output directory.' }
+        }
+        $cache = [IO.Path]::GetFullPath([IO.Path]::Combine($repoRoot, $EngineToolsCacheDirectory))
+        if ($cache -eq $trimmedOutput -or $cache.StartsWith($trimmedOutput + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'The engine tools cache must be outside the output directory.'
+        }
+        Remove-Item -LiteralPath $output -Recurse -Force
     }
-    $sharedRuntimeArguments = @('--self-contained', 'false', '-p:AppHostDotNetSearch=AppRelative',
-        '-p:AppHostRelativeDotNet=../../toolchain', "-p:RuntimeFrameworkVersion=$runtimeVersion", '-p:RollForward=Disable')
-    & (Join-Path $PSScriptRoot 'dotnet.ps1') publish (Join-Path $repoRoot 'tools/GameL10n.DataTool/GameL10n.DataTool.csproj') -c Release -r win-x64 @sharedRuntimeArguments -o (Join-Path $output 'tools/data')
+    $sharedRuntimeArguments = @('--self-contained', 'false', '-p:AppHostDotNetSearch=AppRelative', '-p:RollForward=Disable')
+    # RuntimeFrameworkVersion would also override the Windows SDK framework. The pinned SDK selects its .NET patch.
+    & (Join-Path $PSScriptRoot 'dotnet.ps1') publish (Join-Path $repoRoot 'src/GameL10n.Desktop/GameL10n.Desktop.csproj') -c Release -o $output @sharedRuntimeArguments '-p:TargetLatestRuntimePatch=true' '-p:AppHostRelativeDotNet=toolchain'
+    if ($LASTEXITCODE -ne 0) { throw 'Desktop publish failed.' }
+    & (Join-Path $PSScriptRoot 'dotnet.ps1') publish (Join-Path $repoRoot 'tools/GameL10n.DataTool/GameL10n.DataTool.csproj') -c Release -r win-x64 @sharedRuntimeArguments "-p:RuntimeFrameworkVersion=$runtimeVersion" '-p:AppHostRelativeDotNet=../../toolchain' -o (Join-Path $output 'tools/data')
     if ($LASTEXITCODE -ne 0) { throw 'Data tool publish failed.' }
-    & (Join-Path $PSScriptRoot 'dotnet.ps1') publish (Join-Path $repoRoot 'tools/GameL10n.VnTextPatch/GameL10n.VnTextPatch.csproj') -c Release -r win-x64 @sharedRuntimeArguments '-p:PublishSingleFile=true' '-p:IncludeNativeLibrariesForSelfExtract=false' '-p:DebugType=None' '-p:DebugSymbols=false' -o (Join-Path $output 'tools/vntextpatch')
+    & (Join-Path $PSScriptRoot 'dotnet.ps1') publish (Join-Path $repoRoot 'tools/GameL10n.VnTextPatch/GameL10n.VnTextPatch.csproj') -c Release -r win-x64 @sharedRuntimeArguments "-p:RuntimeFrameworkVersion=$runtimeVersion" '-p:AppHostRelativeDotNet=../../toolchain' '-p:PublishSingleFile=true' '-p:IncludeNativeLibrariesForSelfExtract=false' '-p:DebugType=None' '-p:DebugSymbols=false' -o (Join-Path $output 'tools/vntextpatch')
     if ($LASTEXITCODE -ne 0) { throw 'Built-in script tool publish failed.' }
 }
-foreach ($relative in @('tools/data', 'tools/vntextpatch')) {
+$desktopRuntime = Get-Content -LiteralPath (Join-Path $output 'GameL10n.Desktop.runtimeconfig.json') -Raw | ConvertFrom-Json
+if ($desktopRuntime.runtimeOptions.framework.name -ne 'Microsoft.NETCore.App' -or $desktopRuntime.runtimeOptions.framework.version -ne $runtimeVersion) {
+    throw 'The desktop runtime configuration does not match the packaged .NET runtime. Rebuild with the pinned SDK.'
+}
+foreach ($relative in @('.', 'tools/data', 'tools/vntextpatch')) {
     if (Test-Path -LiteralPath (Join-Path $output "$relative/coreclr.dll")) {
-        throw 'Self-contained helper files remain in the output. Run publish.ps1 without -SkipBuild to rebuild the helpers.'
+        throw 'Duplicate runtime files remain in the output. Run publish.ps1 without -SkipBuild to rebuild the package.'
     }
 }
 & (Join-Path $PSScriptRoot 'package-vntextpatch-assets.ps1') -OutputDirectory (Join-Path $output 'tools/vntextpatch') -Configuration Release -SkipBuild:$SkipBuild
