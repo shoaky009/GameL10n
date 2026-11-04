@@ -13,6 +13,7 @@
     <WindowsAppSDKDeploymentManagerInitialize>false</WindowsAppSDKDeploymentManagerInitialize>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <PlatformTarget>x64</PlatformTarget>
+    <SatelliteResourceLanguages>zh-Hans;zh-CN;en;en-US</SatelliteResourceLanguages>
   </PropertyGroup>
   <ItemGroup>
     <Content Update="Assets/GameL10n.ico" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
@@ -23,7 +24,18 @@
     <PackageReference Include="Microsoft.WindowsAppSDK.InteractiveExperiences" Version="2.1.9" />
     <PackageReference Include="Microsoft.WindowsAppSDK.DWrite" Version="2.1.0" />
     <PackageReference Include="Microsoft.WindowsAppSDK.Runtime" Version="2.5.1" />
+    <!-- The UI does not host web content; omit WinUI's optional browser assets. -->
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.3719.77" ExcludeAssets="all" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools.MSIX" Version="1.7.261008100" PrivateAssets="all" />
     <ProjectReference Include="../GameL10n.Core/GameL10n.Core.csproj" />
   </ItemGroup>
+  <!-- Native WinUI MUI files are separate from managed satellite assemblies. -->
+  <Target Name="LimitWinUiResourceLanguages" BeforeTargets="AddMicrosoftWindowsAppSDKPayloadFilesFromComponents"
+    DependsOnTargets="GetWindowsAppSDKNativePlatform">
+    <ItemGroup>
+      <MicrosoftWindowsAppSDKFilesExcluded
+        Include="%(WindowsAppSdkComponentPackages.Identity)runtimes-framework/win-$(NativePlatform)/native/**/*.mui"
+        Exclude="%(WindowsAppSdkComponentPackages.Identity)runtimes-framework/win-$(NativePlatform)/native/zh-CN/*.mui;%(WindowsAppSdkComponentPackages.Identity)runtimes-framework/win-$(NativePlatform)/native/en-us/*.mui" />
+    </ItemGroup>
+  </Target>
 </Project>
