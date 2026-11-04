@@ -91,6 +91,29 @@ public sealed class EngineLibraryTests : IDisposable
     }
 
     [Fact]
+    public async Task DeletedPackageRemainsDeletedWhenDisplayIndexCannotBeWritten()
+    {
+        var store = Store;
+        var package = await PublishAsync("one");
+        var index = Path.Combine(store.RootDirectory, "library-index.json");
+        File.Delete(index);
+        Directory.CreateDirectory(index);
+
+        var result = await store.DeleteVersionAsync(Family.AdapterId, "one");
+
+        Assert.True(result.Deleted);
+        Assert.NotEmpty(result.Diagnostics);
+        Assert.False(Directory.Exists(package.DirectoryPath));
+        Assert.Null(store.LoadActive(GameId));
+        Assert.Empty(store.ListReusablePackages());
+        Directory.Delete(index);
+        var rebuilt = await store.ReadEngineLibraryAsync([], Data);
+        Assert.Empty(rebuilt.Diagnostics);
+        Assert.DoesNotContain(rebuilt.Families.SelectMany(family => family.Versions),
+            version => version.Version == "one" && (version.Exists || version.IsCandidate));
+    }
+
+    [Fact]
     public async Task ExplicitProjectDeletionReleasesPinsAndRetainsLegacyPublishedCapability()
     {
         var store = Store;

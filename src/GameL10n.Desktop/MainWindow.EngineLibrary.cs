@@ -423,9 +423,10 @@ public sealed partial class MainWindow
             if (result.Deleted) DetachDeletedEngineVersion(version.AdapterId, version.Version);
             InvalidateEngineLibrary();
             await EnsureEngineLibraryAsync();
-            ShowLibraryStatus(result.Deleted ? $"已删除外置版本 {version.AdapterId} · {version.Version}，后续不再复用。项目文本、译文和补丁已保留。" : "未删除此版本：\n"
-                + string.Join("\n", result.Diagnostics) + (result.References.Count > 0 ? "\n" + FormatLibraryReferences(result.References) : ""),
-                result.Deleted ? InfoBarSeverity.Success : InfoBarSeverity.Warning);
+            ShowLibraryStatus((result.Deleted ? $"已删除外置版本 {version.AdapterId} · {version.Version}，后续不再复用。项目文本、译文和补丁已保留。" : "未删除此版本。")
+                + (result.Diagnostics.Count > 0 ? "\n" + string.Join("\n", result.Diagnostics) : "")
+                + (result.References.Count > 0 ? "\n" + FormatLibraryReferences(result.References) : ""),
+                result.Deleted && result.Diagnostics.Count == 0 ? InfoBarSeverity.Success : InfoBarSeverity.Warning);
         }
         catch (Exception error) { ShowLibraryStatus("删除版本失败：" + error.Message, InfoBarSeverity.Error); }
         finally { changingAdapterLibrary = false; engineLibrarySaving = false; UpdateControls(); UpdateLibraryActions(); }

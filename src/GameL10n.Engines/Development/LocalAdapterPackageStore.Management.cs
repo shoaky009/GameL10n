@@ -75,6 +75,7 @@ public sealed partial class LocalAdapterPackageStore
         return Task.Run(async () =>
         {
             await activationLock.WaitAsync(cancellationToken);
+            var deleted = false;
             try
             {
                 var path = PackagePath(adapterId, version);
@@ -91,19 +92,29 @@ public sealed partial class LocalAdapterPackageStore
                     Releases = (family.Releases ?? []).Where(item => item.Version != version).ToArray(),
                     ExcludedVersions = (family.ExcludedVersions ?? []).Append(version).Distinct(StringComparer.Ordinal).ToArray()
                 };
-                await WriteLibraryStateAsync(state, cancellationToken);
-                cancellationToken.ThrowIfCancellationRequested();
-                if (Directory.Exists(path)) Directory.Delete(path, recursive: true);
-                await UpdateLibraryIndexAsync(index =>
+                // Commit candidate exclusion before removing files; the display index is derived data.
+                await LocalFiles.WriteJsonAsync(WorkspaceFiles.Resolve(RootDirectory, "library-state.json"), state, cancellationToken);
+                try
                 {
-                    var indexedFamily = GetIndexFamily(index, identity);
-                    var deleted = indexedFamily.Versions.GetValueOrDefault(version) ?? new(version, EngineLibrarySource.External, false);
-                    indexedFamily.Versions[version] = deleted with { Exists = false, IsCandidate = false };
-                }, CancellationToken.None);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (Directory.Exists(path)) Directory.Delete(path, recursive: true);
+                    deleted = true;
+                }
+                finally
+                {
+                    // Reflect exclusion even when removal fails or is cancelled after the state commit.
+                    await UpdateLibraryIndexAsync(index =>
+                    {
+                        ApplyIndexState(index, state);
+                        var indexedFamily = GetIndexFamily(index, identity);
+                        var entry = indexedFamily.Versions.GetValueOrDefault(version) ?? new(version, EngineLibrarySource.External, false);
+                        indexedFamily.Versions[version] = entry with { Exists = Directory.Exists(path), IsCandidate = false };
+                    }, CancellationToken.None);
+                }
                 return new EngineLibraryDeleteResult(true, [], []);
             }
             catch (Exception error) when (IsLibraryReadError(error))
-            { return new EngineLibraryDeleteResult(false, [], ["无法安全删除外置引擎版本：" + error.Message]); }
+            { return new EngineLibraryDeleteResult(deleted, [], [(deleted ? "版本文件已删除，但引擎库索引同步失败：" : "无法安全删除外置引擎版本：") + error.Message]); }
             finally { activationLock.Release(); }
         }, cancellationToken);
     }
