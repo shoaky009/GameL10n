@@ -1,6 +1,7 @@
 <Window x:Class="GameL10n.Desktop.MainWindow"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Title="GameL10n">
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:GameL10n.Desktop" Title="GameL10n">
   <Grid x:Name="RootGrid" RequestedTheme="Default" Background="{ThemeResource WorkspaceBackgroundBrush}" Padding="20" ColumnSpacing="20">
     <Grid.ColumnDefinitions><ColumnDefinition x:Name="SidebarColumn" Width="240" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
     <Grid RowSpacing="16">
@@ -46,11 +47,7 @@
       </Grid>
       <Grid x:Name="ProjectView" Grid.Row="1" RowSpacing="16">
     <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="*" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
-    <StackPanel Spacing="6">
-      <TextBlock x:Name="GameNameText" Text="选择或添加游戏" FontSize="26" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
-      <TextBlock Text="识别引擎、翻译校对，再生成可安装的汉化补丁" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
-
-    </StackPanel>
+    <TextBlock x:Name="GameNameText" Text="选择或添加游戏" FontSize="26" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="识别引擎、翻译校对，再生成可安装的汉化补丁。" />
     <Border Grid.Row="1" Background="{ThemeResource TaskSurfaceBrush}" CornerRadius="6" Padding="14,10">
       <Grid RowSpacing="6" ColumnSpacing="16">
         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
@@ -98,7 +95,10 @@
       <TabViewItem x:Name="RecognitionTab" Header="识别与适配" IsClosable="False">
         <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
           <StackPanel Spacing="20" Padding="16,20,16,12">
-            <TextBlock Text="游戏资源" FontSize="20" FontWeight="SemiBold"/>
+            <StackPanel Orientation="Horizontal" Spacing="6">
+              <TextBlock Text="游戏资源" FontSize="20" FontWeight="SemiBold" VerticalAlignment="Center"/>
+              <local:HelpButton AutomationProperties.Name="识别与适配说明" Text="常规识别匹配已有引擎，不调用分析 API。智能适配先尝试本地组件，必要时使用分析 API 开发和验证适配器。打开已有项目只加载保存的结果，游戏更新后再重新识别；失败或取消会保留上一次成功结果。"/>
+            </StackPanel>
     <Grid ColumnSpacing="12">
       <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
       <TextBox x:Name="GamePathBox" Header="游戏安装目录" IsReadOnly="True" PlaceholderText="从左侧添加游戏" />
@@ -107,12 +107,11 @@
         <Button x:Name="OpenGameDirectoryButton" Content="游戏目录" Click="OpenGameDirectory_Click" IsEnabled="False" ToolTipService.ToolTip="打开当前游戏的安装文件夹。" />
       </StackPanel>
       <Button x:Name="AnalyzeButton" Grid.Column="2" Content="常规识别" VerticalAlignment="Bottom" Click="Analyze_Click" ToolTipService.ToolTip="检查当前游戏资源并更新文本，不调用分析 API。日常打开项目直接加载已保存结果；游戏更新后请重新识别。" />
-      <Button x:Name="AdaptButton" Grid.Column="3" Content="智能识别与适配" VerticalAlignment="Bottom" Click="Adapt_Click" ToolTipService.ToolTip="使用分析 API 调查资源、开发和验证引擎适配器。已识别的游戏可继续补齐遗漏文字，复用已有源码和译文。" />
+      <Button x:Name="AdaptButton" Grid.Column="3" Content="智能识别与适配" VerticalAlignment="Bottom" Click="Adapt_Click" ToolTipService.ToolTip="先尝试本地适配，必要时使用分析 API 调查资源、开发和验证适配器。已识别的游戏可继续补齐遗漏文字，复用已有源码和译文。" />
     </Grid>
             <InfoBar x:Name="GameInfoBar" IsOpen="True" IsClosable="False" Severity="Informational" Title="尚未导入游戏" Message="识别后可查看文本数量与适配结果。" />
             <StackPanel Spacing="8">
-              <Button x:Name="EngineReviewButton" Content="总结" Click="EngineReview_Click" HorizontalAlignment="Left" ToolTipService.ToolTip="复用本项目智能适配的分析 API、思考等级、Token 预算和模型轮数，从本项目提炼同类引擎的可复用经验，保存到全局库。证据未变化时复用上次总结；没有优化空间时不会强行生成内容。" />
-              <TextBlock Text="总结与智能适配共用分析 API 和预算设置，未单独设置时使用全局默认。证据未变化时复用上次结果。经验供所有项目共享，可在全局引擎库的“相关经验”中停用。" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+              <Button x:Name="EngineReviewButton" Content="总结" Click="EngineReview_Click" HorizontalAlignment="Left" ToolTipService.ToolTip="共用本项目智能适配的分析 API、思考等级和预算，未单独设置时使用全局默认。提炼同类引擎的可复用经验，供所有项目共享，可在全局引擎库的“相关经验”中停用。证据未变化时复用上次总结；没有优化空间时不会强行生成内容。" />
               <Expander x:Name="EngineReviewPanel" Header="引擎经验总结" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" Visibility="Collapsed">
                 <StackPanel Spacing="8">
                   <TextBlock x:Name="EngineReviewSummaryText" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
@@ -135,7 +134,6 @@
             </StackPanel>
 
             <TextBlock x:Name="RecognitionDetailsText" Text="添加游戏后先匹配已有适配器，未匹配时可使用智能识别。" TextWrapping="Wrap" IsTextSelectionEnabled="True"/>
-            <TextBlock Text="常规识别匹配已有引擎，不调用分析 API；智能适配会调用分析 API 开发和验证适配器。打开已有项目只加载保存的结果，游戏更新后再重新识别；失败或取消会保留上一次成功结果。" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
             <Expander Header="支持范围与注意事项" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
               <StackPanel Spacing="12">
                 <TextBlock Text="可翻译范围以本次提取结果为准，图片和视频内的文字不在提取范围内。确认支持后，先选少量容易在游戏中找到的文本试译；发现遗漏可继续智能适配，补充遗漏位置。" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
@@ -213,7 +211,10 @@
               <Grid RowSpacing="10">
                 <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                 <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                  <TextBlock Text="文本校对" FontWeight="SemiBold" FontSize="18"/>
+                  <StackPanel Orientation="Horizontal" Spacing="6">
+                    <TextBlock Text="文本校对" FontWeight="SemiBold" FontSize="18" VerticalAlignment="Center"/>
+                    <local:HelpButton AutomationProperties.Name="校对与自动保存说明" Text="输入后稍停即自动保存。修改会取消本条校对确认；普通翻译期间也可编辑，手工修改优先保留。"/>
+                  </StackPanel>
                   <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="4"><Button Content="↑" Click="PreviousText_Click" AutomationProperties.Name="上一条文本" ToolTipService.ToolTip="上一条文本（Alt+↑）"/><Button Content="↓" Click="NextText_Click" AutomationProperties.Name="下一条文本" ToolTipService.ToolTip="下一条文本（Alt+↓）"/></StackPanel>
                 </Grid>
                 <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
@@ -223,7 +224,6 @@
                     <Expander Header="相邻文本与上下文" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" ToolTipService.ToolTip="按资源提取顺序显示相邻文本；位置由适配器提供，未必是脚本行号或剧情播放顺序。"><TextBlock x:Name="EditorContextText" TextWrapping="Wrap" IsTextSelectionEnabled="True" FontSize="12"/></Expander>
                     <TextBlock x:Name="PreviousEditText" Visibility="Collapsed" TextWrapping="Wrap" IsTextSelectionEnabled="True" FontSize="12" Foreground="{ThemeResource WarningTextBrush}"/>
                     <TextBox x:Name="TranslationEditorBox" Header="译文" PlaceholderText="输入译文，稍停后自动保存" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="100" MaxHeight="260" TextChanged="TranslationEditor_TextChanged" IsEnabled="False"/>
-                    <TextBlock Text="输入后稍停即自动保存。修改会取消本条校对确认；普通翻译期间也可编辑，手工修改优先保留。" FontSize="12" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
                     <TextBlock x:Name="EditorSaveText" FontSize="12" Foreground="{ThemeResource MetadataTextBrush}" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite"/>
                     <InfoBar x:Name="EditorValidationInfo" IsOpen="False" IsClosable="False"/>
 
@@ -245,21 +245,22 @@
       <TabViewItem x:Name="PatchTab" Header="补丁与验证" IsClosable="False">
         <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
           <StackPanel Spacing="16" Padding="0,20,8,12">
-            <TextBlock Text="生成的汉化文件可独立安装和运行，游戏运行不依赖适配器或本工具。需要替换的文件会先备份为 .bak；已有备份不会覆盖。" TextWrapping="Wrap" />
-            <Button x:Name="BuildSavedPatchButton" Content="从已保存译文生成补丁" Click="GeneratePatch_Click" HorizontalAlignment="Left" ToolTipService.ToolTip="不调用翻译 API。可使用全部、所选或仅已校对的译文，未包含的文本保留原文。"/>
+            <StackPanel Orientation="Horizontal" Spacing="6">
+              <Button x:Name="BuildSavedPatchButton" Content="从已保存译文生成补丁" Click="GeneratePatch_Click" HorizontalAlignment="Left" ToolTipService.ToolTip="不调用翻译 API。可使用全部、所选或仅已校对的译文，未包含的文本保留原文。"/>
+              <local:HelpButton AutomationProperties.Name="补丁生成说明" Text="生成的汉化文件可独立安装和运行，游戏运行不依赖适配器或本工具。需要替换的文件会先备份为 .bak；已有备份不会覆盖。"/>
+            </StackPanel>
             <InfoBar x:Name="PatchChangedInfo" IsOpen="False" IsClosable="False" Severity="Warning" Title="补丁包含的译文已修改" Message="当前补丁保留生成时的内容。要使用修改后的译文，请重新生成。"/>
             <TextBlock x:Name="PatchScopeText" Text="尚未生成补丁。可先选择少量文本试译，检查游戏中的显示效果。" TextWrapping="Wrap" FontWeight="SemiBold" />
             <TextBox x:Name="PatchPathBox" Header="补丁目录" IsReadOnly="True" PlaceholderText="翻译完成后生成" />
             <TextBlock x:Name="InstallTargetText" Text="安装位置：上方选择的游戏目录" TextWrapping="Wrap" />
-            <TextBlock Text="安装或恢复前先关闭游戏和汉化启动器。安装会写入上方游戏目录，无需手工复制文件。" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
             <InfoBar x:Name="PatchInstallInfo" IsOpen="False" IsClosable="True" />
             <TextBlock x:Name="LaunchText" Text="启动方式将在生成补丁后显示。" TextWrapping="Wrap" />
             <TextBlock x:Name="ValidationText" Text="结构校验：未执行　游戏运行验证：未执行" TextWrapping="Wrap" />
             <StackPanel Orientation="Horizontal" Spacing="12">
-              <Button x:Name="InstallButton" Content="安装汉化补丁" Style="{StaticResource AccentButtonStyle}" Click="Install_Click" IsEnabled="False" />
+              <Button x:Name="InstallButton" Content="安装汉化补丁" Style="{StaticResource AccentButtonStyle}" Click="Install_Click" IsEnabled="False" ToolTipService.ToolTip="先关闭游戏和汉化启动器。补丁会写入上方游戏目录，无需手工复制文件。" />
               <Button x:Name="ShowPatchTextsButton" Content="查看本次文本" Click="ShowPatchTexts_Click" ToolTipService.ToolTip="查看生成这份补丁时实际使用的译文；后续编辑需要重新生成补丁才会生效。"/>
               <Button x:Name="OpenPatchButton" Content="打开补丁目录" Click="OpenPatch_Click" IsEnabled="False" />
-              <Button x:Name="RestoreButton" Content="恢复原版" Click="Restore_Click" IsEnabled="False" ToolTipService.ToolTip="根据项目安装记录恢复原文件，移除工具新增的补丁文件。遇到游戏更新或外部修改时会保留文件并提示冲突。" />
+              <Button x:Name="RestoreButton" Content="恢复原版" Click="Restore_Click" IsEnabled="False" ToolTipService.ToolTip="先关闭游戏和汉化启动器。根据项目安装记录恢复原文件，移除工具新增的补丁文件。遇到游戏更新或外部修改时会保留文件并提示冲突。" />
             </StackPanel>
             <Expander Header="安装与恢复须知" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
               <StackPanel Spacing="12">
@@ -268,9 +269,11 @@
                 <TextBlock Text="自动恢复原版需要项目数据中的安装记录，以及游戏目录中的原文件备份。备份时请同时保留数据保存目录和游戏目录中的 .bak 文件；删除项目数据后将无法通过该项目自动恢复。" TextWrapping="Wrap"/>
               </StackPanel>
             </Expander>
-            <TextBlock Text="游戏内显示验证" FontWeight="SemiBold"/>
+            <StackPanel Orientation="Horizontal" Spacing="6">
+              <TextBlock Text="游戏内显示验证" FontWeight="SemiBold" VerticalAlignment="Center"/>
+              <local:HelpButton AutomationProperties.Name="游戏内验证说明" Text="按上方启动方式进入试译片段，检查字体、乱码、换行、角色名和选项；完整验证还需检查分支与存档。记录只对应当前补丁。"/>
+            </StackPanel>
             <TextBlock x:Name="RuntimeCheckText" Text="尚未记录游戏内验证结果。结构校验通过不代表中文显示已验证。" TextWrapping="Wrap"/>
-            <TextBlock Text="按上方启动方式进入试译片段，检查字体、乱码、换行、角色名和选项；完整验证还需检查分支与存档。下方记录只对应当前补丁。" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
             <StackPanel Orientation="Horizontal" Spacing="8"><Button x:Name="RecordRuntimePassedButton" Content="记录：显示正常" Tag="passed" Click="RecordRuntime_Click"/><Button x:Name="RecordRuntimeFailedButton" Content="记录：存在问题" Tag="failed" Click="RecordRuntime_Click"/></StackPanel>
           </StackPanel>
         </ScrollViewer>
@@ -278,14 +281,18 @@
       <TabViewItem Header="项目设置" IsClosable="False">
         <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
           <StackPanel Spacing="16" Padding="0,20,8,12" HorizontalAlignment="Stretch">
-            <TextBlock Text="API 和适配预算可跟随全局默认；取消勾选可为当前项目单独设置。已有独立设置会保留，术语与翻译风格始终属于当前项目。" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-            <Button Content="管理全局 API 与任务默认值" Click="ManageApis_Click" HorizontalAlignment="Left" />
+            <StackPanel Orientation="Horizontal" Spacing="6">
+              <Button Content="管理全局 API 与任务默认值" Click="ManageApis_Click" HorizontalAlignment="Left" />
+              <local:HelpButton AutomationProperties.Name="项目设置与全局默认说明" Text="API 和适配预算可跟随全局默认；取消勾选可为当前项目单独设置。已有独立设置会保留，术语与翻译风格始终属于当前项目。"/>
+            </StackPanel>
             <CheckBox x:Name="UseGlobalAnalysisApiBox" Content="分析 API 使用全局默认" Click="ApiInheritance_Click" />
             <ComboBox x:Name="AnalysisApiBox" Header="智能识别与适配 API" DisplayMemberPath="Name" PlaceholderText="选择已保存的 API 配置" HorizontalAlignment="Stretch" SelectionChanged="ApiPurpose_SelectionChanged" />
             <StackPanel Spacing="8">
-              <TextBlock Text="文本翻译 API 链" FontWeight="SemiBold" />
+              <StackPanel Orientation="Horizontal" Spacing="6">
+                <TextBlock Text="文本翻译 API 链" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                <local:HelpButton AutomationProperties.Name="翻译 API 链说明" Text="从上到下尝试；仅在模型拒绝处理内容时交给下一项。网络、429、超时和格式错误会在当前 API 重试。"/>
+              </StackPanel>
               <CheckBox x:Name="UseGlobalTranslationApiBox" Content="翻译 API 链使用全局默认" Click="ApiInheritance_Click" />
-              <TextBlock Text="从上到下尝试；仅在模型拒绝处理内容时交给下一项。网络、429、超时和格式错误会在当前 API 重试。" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
               <ListView x:Name="TranslationChainList" DisplayMemberPath="Name" SelectionMode="Single" MaxHeight="160" SelectionChanged="TranslationChain_SelectionChanged" AutomationProperties.Name="翻译 API 顺序，第一项优先" />
               <TextBlock x:Name="TranslationChainEmptyText" Text="尚未配置翻译 API。请设置全局默认，或取消跟随后在此添加。" TextWrapping="Wrap" />
               <StackPanel Orientation="Horizontal" Spacing="12">
@@ -303,18 +310,19 @@
             <InfoBar x:Name="ApiSettingsInfo" IsOpen="False" IsClosable="True" />
             <Expander Header="智能适配预算" IsExpanded="True" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
               <StackPanel Spacing="12">
-                <CheckBox x:Name="UseGlobalAdaptationLimitsBox" Content="适配预算与轮数使用全局默认" Click="AdaptationInheritance_Click" />
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                  <CheckBox x:Name="UseGlobalAdaptationLimitsBox" Content="适配预算与轮数使用全局默认" Click="AdaptationInheritance_Click" />
+                  <local:HelpButton AutomationProperties.Name="智能适配预算说明" Text="每次开始或继续适配时使用。任一上限达到后暂停并保存进度，不影响已完成的工作。取消勾选可为当前项目单独设置。"/>
+                </StackPanel>
                 <NumberBox x:Name="ProjectTokenBudgetBox" Header="每次适配 Token 预算" Value="1000000" Minimum="1000" Maximum="20000000" SpinButtonPlacementMode="Inline" />
                 <NumberBox x:Name="ProjectMaximumTurnsBox" Header="每次最多模型轮数" Value="60" Minimum="1" Maximum="400" SpinButtonPlacementMode="Inline" />
-                <TextBlock Text="每次开始或继续适配时使用。任一上限达到后暂停并保存进度，不影响已完成的工作。" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
               </StackPanel>
             </Expander>
             <Expander Header="翻译语言与术语" IsExpanded="True" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
               <StackPanel Spacing="16">
                 <TextBox x:Name="LanguageBox" Header="目标语言" Text="简体中文" />
                 <TextBox x:Name="StyleBox" Header="翻译风格" Text="自然流畅，保留人物语气、情绪和原文含义。" TextWrapping="Wrap" />
-                <TextBox x:Name="TerminologyBox" Header="术语表（每行：原文=译文）" PlaceholderText="角色原名=中文译名" AcceptsReturn="True" MinHeight="100" TextWrapping="Wrap" />
-                <TextBlock Text="已有译文按目标语言、风格和相关术语匹配复用；更改术语只影响相关文本的译文复用。" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+                <TextBox x:Name="TerminologyBox" Header="术语表（每行：原文=译文）" PlaceholderText="角色原名=中文译名" AcceptsReturn="True" MinHeight="100" TextWrapping="Wrap" ToolTipService.ToolTip="已有译文按目标语言、风格和相关术语匹配复用；更改术语只影响相关文本的译文复用。" />
                 <NumberBox x:Name="BatchSizeBox" Header="每批文本数" Value="24" Minimum="1" Maximum="80" SpinButtonPlacementMode="Inline" />
               </StackPanel>
             </Expander>
@@ -338,9 +346,9 @@
       </Grid>
       <Grid x:Name="ApiProfilesView" Grid.Row="1" Visibility="Collapsed" RowSpacing="16">
         <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
-        <StackPanel Spacing="6">
-          <TextBlock Text="API 与任务默认值" FontSize="26" FontWeight="SemiBold" />
-          <TextBlock Text="全局默认供新项目及选择跟随的项目使用。项目可独立覆盖；修改后用于后续任务，无需重启。" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+        <StackPanel Orientation="Horizontal" Spacing="6">
+          <TextBlock Text="API 与任务默认值" FontSize="26" FontWeight="SemiBold" VerticalAlignment="Center"/>
+          <local:HelpButton AutomationProperties.Name="全局默认说明" Text="全局默认供新项目及选择跟随的项目使用。项目可独立覆盖；修改后用于后续任务，无需重启。"/>
         </StackPanel>
         <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
           <StackPanel Spacing="16" Padding="0,8,8,12">
@@ -364,8 +372,10 @@
             <Expander Header="默认 API 用途" IsExpanded="True" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
               <StackPanel Spacing="12">
                 <ComboBox x:Name="DefaultAnalysisApiBox" Header="默认智能识别与适配 API" DisplayMemberPath="Name" PlaceholderText="选择已保存的 API 配置" HorizontalAlignment="Stretch" SelectionChanged="ApiPurpose_SelectionChanged" />
-                <TextBlock Text="默认文本翻译 API 链" FontWeight="SemiBold" />
-                <TextBlock Text="从上到下尝试；仅在模型拒绝处理内容时交给下一项。网络、限流、超时和格式错误会在当前 API 重试。用途选择和链顺序自动保存，跟随的项目从下一次任务开始使用。" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                  <TextBlock Text="默认文本翻译 API 链" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                  <local:HelpButton AutomationProperties.Name="默认翻译 API 链说明" Text="从上到下尝试；仅在模型拒绝处理内容时交给下一项。网络、限流、超时和格式错误会在当前 API 重试。用途选择和链顺序自动保存，跟随的项目从下一次任务开始使用。"/>
+                </StackPanel>
                 <ListView x:Name="DefaultTranslationChainList" DisplayMemberPath="Name" SelectionMode="Single" MaxHeight="160" SelectionChanged="TranslationChain_SelectionChanged" AutomationProperties.Name="全局默认翻译 API 顺序，第一项优先" />
                 <TextBlock x:Name="DefaultTranslationChainEmptyText" Text="尚未配置默认翻译 API，请从下方添加。" TextWrapping="Wrap" />
                 <StackPanel Orientation="Horizontal" Spacing="12">
@@ -384,8 +394,10 @@
               <StackPanel Spacing="12">
                 <NumberBox x:Name="DefaultTokenBudgetBox" Header="每次适配 Token 预算" Value="1000000" Minimum="1000" Maximum="20000000" SpinButtonPlacementMode="Inline" />
                 <NumberBox x:Name="DefaultMaximumTurnsBox" Header="每次最多模型轮数" Value="60" Minimum="1" Maximum="400" SpinButtonPlacementMode="Inline" />
-                <TextBlock Text="Token 默认 1M，最多 20M；轮数默认 60，最多 400。每次开始或继续适配时使用，任一上限达到后暂停并保存进度。" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                <Button x:Name="SaveGlobalLimitsButton" Content="保存默认预算与轮数" Click="SaveGlobalLimits_Click" HorizontalAlignment="Left" />
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                  <Button x:Name="SaveGlobalLimitsButton" Content="保存默认预算与轮数" Click="SaveGlobalLimits_Click" HorizontalAlignment="Left" />
+                  <local:HelpButton AutomationProperties.Name="默认适配预算说明" Text="Token 默认 1M，最多 20M；轮数默认 60，最多 400。每次开始或继续适配时使用，任一上限达到后暂停并保存进度。"/>
+                </StackPanel>
               </StackPanel>
             </Expander>
           </StackPanel>
@@ -393,9 +405,9 @@
       </Grid>
       <Grid x:Name="CatalogView" Grid.Row="1" Visibility="Collapsed" RowSpacing="16">
         <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
-        <StackPanel Spacing="6">
-          <TextBlock Text="全局引擎库" FontSize="26" FontWeight="SemiBold" />
-          <TextBlock Text="管理所有项目共用的引擎、资源模板与经验。启停仅影响新的识别候选，已有项目固定的版本仍可使用。" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+        <StackPanel Orientation="Horizontal" Spacing="6">
+          <TextBlock Text="全局引擎库" FontSize="26" FontWeight="SemiBold" VerticalAlignment="Center"/>
+          <local:HelpButton AutomationProperties.Name="引擎库管理说明" Text="管理所有项目共用的引擎、资源模板与经验。启停影响后续新识别和适配的候选选择，项目已有的固定版本和回滚记录会保留。样本回填或结构校验通过，不代表游戏内运行已验证；兼容记录保留各版本的验证结果。"/>
         </StackPanel>
         <InfoBar x:Name="CatalogInfo" Grid.Row="1" IsOpen="False" IsClosable="True" Severity="Informational" />
         <Grid x:Name="CatalogLayout" Grid.Row="2" ColumnSpacing="16" SizeChanged="CatalogLayout_SizeChanged">
@@ -458,8 +470,6 @@
                 <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
                   <StackPanel Spacing="16" Padding="0,16,8,12">
                     <TextBlock x:Name="CatalogOverviewText" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
-                    <TextBlock Text="样本回填或结构校验通过，不代表游戏内运行已验证。兼容记录保留各版本的验证结果。" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                    <TextBlock Text="启停影响后续新识别和适配的候选选择。项目已有的固定版本和回滚记录会保留。" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                   </StackPanel>
                 </ScrollViewer>
               </TabViewItem>
@@ -518,16 +528,14 @@
       </Grid>
       <Grid x:Name="ApplicationSettingsView" Grid.Row="1" Visibility="Collapsed" RowSpacing="16">
         <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
-        <StackPanel Spacing="6">
-          <TextBlock Text="程序设置" FontSize="26" FontWeight="SemiBold" />
-          <TextBlock Text="全局设置 · 数据保存位置与并行翻译数量应用于整个游戏库。" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-        </StackPanel>
+        <TextBlock Text="程序设置" FontSize="26" FontWeight="SemiBold" ToolTipService.ToolTip="全局设置：数据保存位置与并行翻译数量应用于整个游戏库。" />
         <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
           <StackPanel Spacing="20" Padding="0,20,8,12">
             <TextBox x:Name="DataDirectoryBox" Header="数据保存位置" IsReadOnly="True" TextWrapping="Wrap" />
-            <Button x:Name="ChangeDataDirectoryButton" Content="更换保存位置" Click="ChangeDataDirectory_Click" HorizontalAlignment="Left" />
-            <TextBlock Text="更换时可选择迁移现有数据或仅切换目录，完成后立即生效。原目录的数据会保留，运行中的任务会先暂停。" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-            <TextBlock Text="此目录保存游戏项目、译文、校对、原文快照、安装记录及 API 配置。备份时先关闭程序，再复制整个目录；自动恢复游戏原文件还需保留游戏目录中的 .bak 备份。" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+            <StackPanel Orientation="Horizontal" Spacing="6">
+              <Button x:Name="ChangeDataDirectoryButton" Content="更换保存位置" Click="ChangeDataDirectory_Click" HorizontalAlignment="Left" ToolTipService.ToolTip="可迁移现有数据或仅切换目录，完成后立即生效。原目录的数据会保留，运行中的任务会先暂停。" />
+              <local:HelpButton AutomationProperties.Name="数据保存与备份说明" Text="此目录保存游戏项目、译文、校对、原文快照、安装记录及 API 配置。备份时先关闭程序，再复制整个目录；自动恢复游戏原文件还需保留游戏目录中的 .bak 备份。"/>
+            </StackPanel>
             <Expander Header="备份与数据迁移" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
               <StackPanel Spacing="12">
                 <TextBlock Text="“迁移并切换”复制并校验现有数据；首次迁移选择空目录，中断后可从原位置重新选择相同目标继续。“仅切换”直接打开所选目录已有的数据，空目录显示为空游戏库。" TextWrapping="Wrap"/>
@@ -535,8 +543,11 @@
               </StackPanel>
             </Expander>
             <ProgressBar x:Name="DataDirectoryProgress" IsIndeterminate="True" Visibility="Collapsed" />
-            <NumberBox x:Name="ConcurrentGamesBox" Header="同时翻译的游戏数量" Value="2" Minimum="1" Maximum="8" SpinButtonPlacementMode="Inline" Width="220" HorizontalAlignment="Left" />
-            <TextBlock Text="并行翻译数量保存后在下次启动时生效。同一游戏同时执行一个任务；常规识别、智能适配和翻译分别调度，智能适配同时运行一个游戏，同一 API 的请求会排队。" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            <Grid ColumnSpacing="6" HorizontalAlignment="Left">
+              <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+              <NumberBox x:Name="ConcurrentGamesBox" Header="同时翻译的游戏数量" Value="2" Minimum="1" Maximum="8" SpinButtonPlacementMode="Inline" Width="220" HorizontalAlignment="Left" />
+              <local:HelpButton Grid.Column="1" VerticalAlignment="Bottom" Margin="0,0,0,2" AutomationProperties.Name="并行任务说明" Text="并行翻译数量保存后在下次启动时生效。同一游戏同时执行一个任务；常规识别、智能适配和翻译分别调度，智能适配同时运行一个游戏，同一 API 的请求会排队。"/>
+            </Grid>
             <Button x:Name="SaveApplicationSettingsButton" Content="保存程序设置" Click="SaveApplicationSettings_Click" HorizontalAlignment="Left" />
             <InfoBar x:Name="ApplicationSettingsInfo" IsOpen="False" IsClosable="True" />
           </StackPanel>

@@ -30,6 +30,19 @@
           <SolidColorBrush x:Key="WarningTextBrush" Color="{ThemeResource SystemColorWindowTextColor}" />
         </ResourceDictionary>
       </ResourceDictionary.ThemeDictionaries>
+      <Style x:Key="HelpButtonStyle" TargetType="Button">
+        <Setter Property="Width" Value="28" />
+        <Setter Property="Height" Value="28" />
+        <Setter Property="MinWidth" Value="0" />
+        <Setter Property="MinHeight" Value="0" />
+        <Setter Property="Padding" Value="0" />
+        <Setter Property="CornerRadius" Value="14" />
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="BorderThickness" Value="0" />
+        <Setter Property="Foreground" Value="{ThemeResource TextFillColorSecondaryBrush}" />
+        <Setter Property="HorizontalAlignment" Value="Left" />
+        <Setter Property="VerticalAlignment" Value="Center" />
+      </Style>
       <Color x:Key="SystemAccentColor">#2563A6</Color>
       <Color x:Key="SystemAccentColorDark1">#20588F</Color>
       <Color x:Key="SystemAccentColorDark2">#1C4D7B</Color>

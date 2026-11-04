@@ -10,6 +10,7 @@ using GameL10n.Core.Providers;
 using GameL10n.Core.Storage;
 using GameL10n.Core.Translation;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 
 namespace GameL10n.Desktop;
@@ -234,7 +235,12 @@ public sealed partial class MainWindow
                 objective.Items.Add(item);
                 if (value == defaultObjective) objective.SelectedItem = item;
             }
-            var objectiveDescription = new TextBlock { TextWrapping = TextWrapping.Wrap };
+            var objectiveDescription = new HelpButton { VerticalAlignment = VerticalAlignment.Bottom, Margin = new Thickness(0, 0, 0, 2) };
+            AutomationProperties.SetName(objectiveDescription, "适配目标说明");
+            Grid.SetColumn(objectiveDescription, 1);
+            var objectiveField = new Grid { ColumnSpacing = 6,
+                ColumnDefinitions = { new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) }, new ColumnDefinition { Width = GridLength.Auto } },
+                Children = { objective, objectiveDescription } };
             void UpdateObjectiveDescription() => objectiveDescription.Text = (AdaptationObjective)((ComboBoxItem)objective.SelectedItem).Tag switch
             {
                 AdaptationObjective.Repair => "修复编码、字体、启动或回填问题，保留已有文本与译文的匹配关系；完成相关检查后先生成补丁试用。其他遗漏文字留待单独补全。",
@@ -279,13 +285,14 @@ public sealed partial class MainWindow
                 content.Children.Add(new TextBlock { TextWrapping = TextWrapping.Wrap,
                     Text = (game.AdaptationBlocker is { } blocker ? "当前卡点：" + blocker.Reason + "\n" : "")
                         + "下一步：" + game.AdaptationNextAction });
-            content.Children.Add(objective);
-            content.Children.Add(objectiveDescription);
+            content.Children.Add(objectiveField);
             content.Children.Add(instruction);
-            content.Children.Add(useGlobalLimits);
+            var budgetHelp = new HelpButton { Text = "Token 或轮数任一达到上限时暂停并保存进度。取消勾选可为当前项目单独设置，两项设置均会记住。全局默认可在“API 与任务默认值”中修改。" };
+            AutomationProperties.SetName(budgetHelp, "本次适配预算说明");
+            content.Children.Add(new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6,
+                Children = { useGlobalLimits, budgetHelp } });
             content.Children.Add(budget);
             content.Children.Add(turns);
-            content.Children.Add(new TextBlock { Text = "Token 或轮数任一达到上限时暂停并保存进度。取消勾选可为当前项目单独设置，两项设置均会记住。全局默认可在“API 与任务默认值”中修改。", TextWrapping = TextWrapping.Wrap });
             var dialog = new ContentDialog { XamlRoot = RootGrid.XamlRoot, Title = adaptationTitle,
                 Content = new ScrollViewer { Content = content, MaxHeight = 540, VerticalScrollBarVisibility = ScrollBarVisibility.Auto },
                 PrimaryButtonText = continuing || improving ? "继续适配" : "开始适配", CloseButtonText = "取消", DefaultButton = ContentDialogButton.Primary };

@@ -206,14 +206,24 @@ public sealed partial class MainWindow
         var translationFormat = new ComboBox { Header = "翻译输入格式", HorizontalAlignment = HorizontalAlignment.Stretch,
             ItemsSource = new[] { "批量 JSON（通用模型）", "逐条纯文本（GalTransl 等专用翻译模型）" },
             SelectedIndex = existing?.TranslationFormat == TranslationInputFormat.PlainText ? 1 : 0 };
-        var translationHelp = new TextBlock { Text = "逐条纯文本只发送一条原文，风格与相关术语放在 system 中。成功一条保存一条；翻译链含此模式时整条链按单条处理。此选项不改变智能识别请求。",
-            TextWrapping = TextWrapping.Wrap, FontSize = 12 };
+        var translationHelp = new HelpButton { VerticalAlignment = VerticalAlignment.Bottom, Margin = new Thickness(0, 0, 0, 2),
+            Text = "逐条纯文本只发送一条原文，风格与相关术语放在 system 中。成功一条保存一条；翻译链含此模式时整条链按单条处理。此选项不改变智能识别请求。" };
+        AutomationProperties.SetName(translationHelp, "翻译输入格式说明");
+        Grid.SetColumn(translationHelp, 1);
+        var translationField = new Grid { ColumnSpacing = 6,
+            ColumnDefinitions = { new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) }, new ColumnDefinition { Width = GridLength.Auto } },
+            Children = { translationFormat, translationHelp } };
         string?[] effortValues = [null, "low", "medium", "high", "xhigh"];
         var effort = new ComboBox { Header = "分析思考等级", HorizontalAlignment = HorizontalAlignment.Stretch,
             ItemsSource = new[] { "接口默认（不指定）", "low", "medium", "high", "xhigh" },
             SelectedIndex = Math.Max(0, Array.IndexOf(effortValues, existing?.AnalysisReasoningEffort)) };
-        var effortHelp = new TextBlock { Text = "仅用于智能识别与适配。支持的等级取决于模型；更高等级可能更慢。不确定时使用接口默认。",
-            TextWrapping = TextWrapping.Wrap, FontSize = 12 };
+        var effortHelp = new HelpButton { VerticalAlignment = VerticalAlignment.Bottom, Margin = new Thickness(0, 0, 0, 2),
+            Text = "仅用于智能识别与适配。支持的等级取决于模型；更高等级可能更慢。不确定时使用接口默认。" };
+        AutomationProperties.SetName(effortHelp, "分析思考等级说明");
+        Grid.SetColumn(effortHelp, 1);
+        var effortField = new Grid { ColumnSpacing = 6,
+            ColumnDefinitions = { new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) }, new ColumnDefinition { Width = GridLength.Auto } },
+            Children = { effort, effortHelp } };
         var key = new PasswordBox { Header = "API Key", MaxLength = 8192 };
         var rememberKey = new CheckBox { Content = "记住 API Key（在本机加密保存）", IsChecked = existing?.RequiresSessionKey != true };
         var errorBar = new InfoBar { IsOpen = false, IsClosable = false, Severity = InfoBarSeverity.Error };
@@ -230,7 +240,7 @@ public sealed partial class MainWindow
         AutomationProperties.SetAutomationId(key, "ProfileApiKeyInput");
         AutomationProperties.SetAutomationId(rememberKey, "RememberApiKeyInput");
         var form = new StackPanel { Spacing = 12 };
-        foreach (var element in new FrameworkElement[] { name, protocol, endpoint, model, translationFormat, translationHelp, effort, effortHelp, key, rememberKey, errorBar }) form.Children.Add(element);
+        foreach (var element in new FrameworkElement[] { name, protocol, endpoint, model, translationField, effortField, key, rememberKey, errorBar }) form.Children.Add(element);
         var dialog = new ContentDialog { XamlRoot = RootGrid.XamlRoot, Title = existing is null ? "新增全局 API 配置" : "编辑全局 API 配置",
             Content = new ScrollViewer { Content = form, MaxHeight = 480, VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
                 HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled },
