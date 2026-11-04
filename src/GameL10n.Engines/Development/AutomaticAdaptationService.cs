@@ -97,77 +97,14 @@ public sealed class AutomaticAdaptationService(Func<IAdaptationAgentModel> creat
             if (!continuing && state.Objective == AdaptationObjective.Develop && !request.ImproveExisting
                 && string.IsNullOrWhiteSpace(request.UserInstruction))
             {
-                Report("检查现有适配器", "正在检查可复用的引擎能力。");
-                var discovery = await Task.Run(() => GameDiscoverySession.Scan(request.GameDirectory, cancellationToken), cancellationToken);
-                diagnostics.AddRange(discovery.Diagnostics);
-                var indexed = await packageStore.ReadDiscoveryCandidatesAsync(diagnostics, cancellationToken);
-                var candidates = await AdapterDiscoveryPlanner.SelectAsync(discovery, indexed, cancellationToken);
-                Report("检查现有适配器", $"已扫描 {discovery.FileCount:N0} 个文件，外置适配器由 {indexed.Count:N0} 个版本筛选为 {candidates.Count:N0} 个候选。");
                 var toolkit = new EngineReferenceToolkit(Path.Combine(packageStore.RootDirectory, "engine-tools"), researchClient, Report);
-                // Generic loose-script support must not short-circuit requested archive or Chinese-runtime development.
-                var loaders = request.ExistingAdapters.Where(adapter => adapter is not VnTextPatchAdapter)
-                    .Append(new SiglusAdapter(toolkit, compiler.Runner, Report))
-                    .Where(adapter => !disabledFamilies.Contains(adapter.CatalogEntry?.Family.AdapterId ?? adapter.Id))
-                    .Select(adapter => (adapter.Id, adapter.Version, Generated: adapter is GeneratedGameAdapter, RecognitionEvidence: 0,
-                        Load: (Func<IGameAdapter>)(() => adapter)))
-                    .Concat(candidates.Select(candidate => (candidate.Id, candidate.Version, Generated: true,
-                        RecognitionEvidence: candidate.Match.Evidence, Load: (Func<IGameAdapter>)(() =>
-                        new GeneratedGameAdapter(packageStore.LoadVersion(candidate.Id, candidate.Version), compiler.Toolchain,
-                            compiler.Runner, packageStore.WorkDirectory, toolkit, Report, discovery)))));
-                foreach (var loader in loaders)
-                {
-                    var candidateWatch = Stopwatch.StartNew();
-                    string phase = "load";
-                    string? sourceDirectory = null;
-                    var recognized = false;
-                    try
-                    {
-                        var adapter = loader.Load();
-                        if (adapter is GeneratedGameAdapter loaded)
-                            sourceDirectory = Directory.Exists(Path.Combine(loaded.Package.DirectoryPath, "src"))
-                                ? Path.Combine(loaded.Package.DirectoryPath, "src") : loaded.Package.DirectoryPath;
-                        phase = "probe";
-                        var probe = await adapter.ProbeAsync(request.GameDirectory, cancellationToken);
-                        if (probe is null) continue;
-                        recognized = true;
-                        phase = "verify";
-                        if (adapter is GeneratedGameAdapter generated)
-                        {
-                            var verificationDirectory = Isolation.WorkspaceFiles.Resolve(packageStore.WorkDirectory, "reuse-check");
-                            GeneratedGameAdapter.DeleteStagedTree(verificationDirectory);
-                            var verification = await new GeneratedAdapterVerifier().VerifyAsync(generated, request.GameDirectory,
-                                verificationDirectory, cancellationToken);
-                            if (!verification.Passed)
-                            {
-                                diagnostics.AddRange(verification.Diagnostics);
-                                var evidence = verification.Diagnostics.TakeLast(3)
-                                    .Select(item => item[..Math.Min(item.Length, 1500)]).ToArray();
-                                var failure = verification.Diagnostics.LastOrDefault();
-                                var end = failure?.IndexOf(']') ?? -1;
-                                var failedStage = failure?.StartsWith('[') == true && end is > 1 and < 80
-                                    ? failure[1..end] : phase;
-                                if (state.ReuseFailures.Count < 6)
-                                    state.ReuseFailures.Add(new(loader.Id, loader.Version, failedStage, evidence,
-                                        sourceDirectory, verification.OriginalRoundtripPassed));
-                                continue;
-                            }
-                            await packageStore.RecordCompatibilityAsync(generated.Package.Family!,
-                                new(request.GameId, Path.GetFileName(request.GameDirectory), probe.Description, generated.Version,
-                                    "resource-roundtrip-passed"), cancellationToken);
-                            await packageStore.PublishAndActivateAsync(request.GameId, generated.Package, verification.Diagnostics, cancellationToken);
-                        }
-                        else if ((await adapter.ExtractAsync(request.GameDirectory, cancellationToken)).Units.Count == 0) continue;
-                        return await CompleteAsync(AdaptationStatus.Reused, "已找到可用适配器，可以选择文本试译。", adapter);
-                    }
-                    catch (Exception error) when (error is not OperationCanceledException)
-                    {
-                        diagnostics.Add("Existing adapter " + loader.Id + ": " + error.Message);
-                        if (loader.Generated && (recognized || loader.RecognitionEvidence > 0) && state.ReuseFailures.Count < 6)
-                            state.ReuseFailures.Add(new(loader.Id, loader.Version, phase,
-                                [error.Message[..Math.Min(error.Message.Length, 1500)]], sourceDirectory));
-                    }
-                    finally { await TraceAsync(new { operation = "reuse-candidate", adapterId = loader.Id, phase, elapsedMs = candidateWatch.ElapsedMilliseconds }); }
-                }
+                var discovery = await new AdapterDiscoveryService(packageStore, () => compiler.Toolchain, compiler.Runner, toolkit)
+                    .FindAsync(new(request.GameId, request.GameDirectory, request.ExistingAdapters,
+                        PreviousFailures: request.ReuseFailures), cancellationToken, progress: Report, trace: TraceAsync);
+                diagnostics.AddRange(discovery.Diagnostics);
+                state.ReuseFailures.AddRange(discovery.Failures);
+                if (discovery.Adapter is { } reused)
+                    return await CompleteAsync(AdaptationStatus.Reused, "已找到可用适配器，可以选择文本试译。", reused);
             }
 
             if (!File.Exists(compiler.Toolchain.ExecutablePath))
@@ -755,7 +692,11 @@ public sealed class AutomaticAdaptationService(Func<IAdaptationAgentModel> creat
 
     private static string ReuseFailureContext(AdaptationSession state) => state.ReuseFailures.Count == 0 ? ""
         : "\n主程序已检查的外置适配器复用失败记录（仅代表本次游戏，不否定整个引擎的支持）：\n"
-            + JsonSerializer.Serialize(state.ReuseFailures, ContextJson)
+            + JsonSerializer.Serialize(state.ReuseFailures.Select(failure => new
+            {
+                failure.Id, failure.Version, failure.FailedStage, failure.Evidence,
+                failure.SourceDirectory, failure.OriginalRoundtripPassed
+            }), ContextJson)
             + "\nsourceDirectory 仅为已有源码位置记录。沿用这些探测与验收证据，优先用 copy_adapter 的 id/version 将相关源码复制到当前 src 后修复失败环节；"
             + "已确认的原文回填结果不代表中文或局部试译通过。仅相关源码或输入变化、或确需新证据时重测，不要重复查找同一适配器或从头实现。";
 
@@ -1063,6 +1004,3 @@ public sealed class AdaptationSession
 }
 
 public sealed record SuccessfulAnalysisProbe(string Tool, string Arguments, int Turn);
-
-public sealed record GeneratedAdapterReuseFailure(string Id, string Version, string FailedStage,
-    IReadOnlyList<string> Evidence, string? SourceDirectory, bool OriginalRoundtripPassed = false);

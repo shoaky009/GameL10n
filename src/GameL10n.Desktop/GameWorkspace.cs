@@ -56,6 +56,7 @@ internal sealed class GameWorkspace(GameProject project, string directory) : INo
     public string? AdaptationInstruction { get; set; }
     public AdaptationObjective? AdaptationObjective { get; set; }
     public List<BuiltinAdapterProbeObservation> BuiltinProbes { get; } = [];
+    public IReadOnlyList<GeneratedAdapterReuseFailure> ReuseFailures { get; set; } = [];
     public DateTimeOffset LastViewed { get; set; }
     public Task DurableWrites { get; private set; } = Task.CompletedTask;
     public StringBuilder Log { get; } = new();

@@ -21,7 +21,8 @@ public sealed record AdaptationRequest(string GameId, string GameDirectory,
     IReadOnlyList<IGameAdapter> ExistingAdapters,
     AdaptationLimits? Limits = null, string? UserInstruction = null,
     IReadOnlyList<BuiltinAdapterProbeObservation>? BuiltinProbes = null, bool ImproveExisting = false,
-    AdaptationObjective? Objective = null, IReadOnlyList<TranslationUnit>? BaselineUnits = null);
+    AdaptationObjective? Objective = null, IReadOnlyList<TranslationUnit>? BaselineUnits = null,
+    IReadOnlyList<GeneratedAdapterReuseFailure>? ReuseFailures = null);
 
 public enum AdaptationStatus { Activated, Reused, Failed, Unavailable, BudgetExhausted, Cancelled, Incomplete, WaitingForUser, Unsupported }
 

@@ -40,6 +40,8 @@
 
 依赖方向为 `Desktop → Core → Engines → Translation`，Core 同时直接使用 Translation。Translation 仅依赖 .NET 基础库，不引用 Core、Engines、WinUI 或引擎原生工具；引擎脚本、字形组件和分析运行库随 Engines 提供。类型使用 `GameL10n.*` 命名空间，程序集归属由上述项目边界确定。
 
+常规识别由 Core 的 `GameAnalysisService` 编排原文快照和提取结果提交；Engines 的 `AdapterDiscoveryService` 负责候选筛选、探测、复用验收和失败证据，常规识别与智能适配共用。Engines 通过调用方提供的资源准备回调取得待验证目录，不依赖项目存储。Desktop 负责发起任务和展示结果。
+
 `TranslationEngine.RunAsync` 接收文本列表、Provider 链和翻译策略，返回译文、缓存命中数与 Token 用量；它独立处理分批、去重、重试、拒绝切换、请求恢复和有效译文提交。调用方提供工作目录，并串行管理同一目录中的任务。通用校验在翻译核心中执行，资源专用校验通过可选回调传入；游戏原文哈希、Adapter、补丁构建和安装由 Core 编排。进度通过可等待的回调交给调用方保存和展示。
 
 全量翻译保留成功结果并继续处理失败文本之后的批次，返回成功与失败计数；`LoadFailuresAsync` 按原文和策略指纹查询当前失败原因。需要完整译文的调用方可设置 `RequireAllTranslations`，在所有批次尝试结束后报告失败，避免把未完成的全量翻译自动生成补丁。依赖项目原文快照和提取基线的 `PublishedPackageVerifier` 由 Core 提供，Engines 中的资源验收不依赖项目存储。

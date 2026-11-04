@@ -2275,7 +2275,31 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         var published = await store.PublishAndActivateAsync("first-game", CreatePackage(), ["previously passed"]);
         var request = Request();
         var runs = 0;
-        var runner = new ScriptedRunner { CorruptUntouchedTrialText = true, ObserveRequest = _ => runs++ };
+        var builds = 0;
+        var runner = new ScriptedRunner
+        {
+            CorruptUntouchedTrialText = true,
+            ObserveRequest = execution =>
+            {
+                runs++;
+                if (execution.StandardInput is not { } input) return;
+                using var document = JsonDocument.Parse(input);
+                if (document.RootElement.TryGetProperty("operation", out var operation) && operation.GetString() == "build") builds++;
+            }
+        };
+        foreach (var format in VnTextPatchFormatCatalog.All.Where(format => format.Extensions.Contains(".txt")))
+            await store.SetFamilyEnabledAsync(format.Family.AdapterId, false);
+        var compiler = Compiler(runner);
+        var discovery = new AdapterDiscoveryService(store, () => compiler.Toolchain, runner,
+            new EngineReferenceToolkit(Path.Combine(store.RootDirectory, "engine-tools")));
+        var analysis = await new GameAnalysisService(new TranslationPipeline(Path.Combine(root, "data")), discovery)
+            .AnalyzeAsync(new(request.GameId, request.GameDirectory, request.ExistingAdapters));
+        Assert.Null(analysis.Session);
+        Assert.NotNull(Assert.Single(analysis.Discovery.Failures).InputFingerprint);
+        Assert.Null(store.LoadActive(request.GameId));
+        Assert.True(builds > 0);
+        var previousBuilds = builds;
+        request = request with { ReuseFailures = analysis.Discovery.Failures };
         void CheckEvidence(AgentRequest context)
         {
             Assert.Contains(context.Messages, message => message.Role == "user"
@@ -2297,6 +2321,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         var result = await new AutomaticAdaptationService(model, Compiler(runner), store).AdaptAsync(request);
         Assert.Equal(AdaptationStatus.WaitingForUser, result.Status);
         Assert.Equal(2, model.Calls);
+        Assert.Equal(previousBuilds, builds);
         var saved = await LocalFiles.ReadJsonAsync<AdaptationSession>(Path.Combine(store.WorkDirectory, "current", "session.json"));
         var failure = Assert.Single(saved!.ReuseFailures);
         Assert.Equal("partial-translation-re-extraction", failure.FailedStage);
@@ -2312,6 +2337,16 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         await new AutomaticAdaptationService(resumedModel, Compiler(runner), store).AdaptAsync(request);
         Assert.Equal(previousRuns, runs);
         Assert.Equal(published.SourceSha256, Hash(Path.Combine(published.DirectoryPath, "Program.cs")));
+
+        // Equal length and timestamp must not hide a changed resource from failure reuse.
+        var script = Path.Combine(request.GameDirectory, "script.txt");
+        var timestamp = File.GetLastWriteTimeUtc(script);
+        await File.WriteAllTextAsync(script, "Third line\nSecond line", new UTF8Encoding(false));
+        File.SetLastWriteTimeUtc(script, timestamp);
+        var changed = await discovery.FindAsync(new(request.GameId, request.GameDirectory, request.ExistingAdapters,
+            PreviousFailures: analysis.Discovery.Failures));
+        Assert.True(builds > previousBuilds);
+        Assert.NotEqual(failure.InputFingerprint, Assert.Single(changed.Failures).InputFingerprint);
     }
 
     [Fact]

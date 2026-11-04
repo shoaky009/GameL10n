@@ -28,100 +28,18 @@ public sealed partial class MainWindow
         Action<string, string> report = (stage, message) => game.ReportProgress?.Invoke(stage, message);
         var engineToolkit = new EngineReferenceToolkit(Path.Combine(store.RootDirectory, "engine-tools"), reportProgress: report);
         await FlushEditsAsync(game);
-        GameSession? nextSession = null;
         game.BuiltinProbes.Clear();
-        SetStage(game, "扫描游戏目录", "正在收集资源路径和文件大小。");
-        var discovery = await Task.Run(() => GameDiscoverySession.Scan(game.GameDirectory, token), token);
-        var diagnostics = new List<string>();
-        diagnostics.AddRange(discovery.Diagnostics);
-        SetStage(game, "筛选引擎候选", $"已扫描 {discovery.FileCount:N0} 个文件，正在匹配引擎索引。");
-        var indexed = await store.ReadDiscoveryCandidatesAsync(diagnostics, token);
-        var reusable = await Task.Run(() => AdapterDiscoveryPlanner.SelectAsync(discovery, indexed, token), token);
-        var (active, disabled) = await Task.Run(() => (store.LoadActive(game.Id), store.ReadDisabledFamilyIds()), token);
-        bool CanMatch(IGameAdapter adapter) => !disabled.Contains(adapter.CatalogEntry?.Family.AdapterId ?? adapter.Id)
-            || (game.Project.AdapterId == adapter.Id && game.Project.AdapterVersion == adapter.Version);
-        var candidates = new List<(string Id, string Version, string Name, Func<IGameAdapter> Load)>();
-        var candidateKeys = new HashSet<(string, string)>();
-        void AddCandidate(IGameAdapter adapter)
-        {
-            if (candidateKeys.Add((adapter.Id, adapter.Version)))
-                candidates.Add((adapter.Id, adapter.Version, adapter.CatalogEntry?.Family.Name ?? adapter.Id, () => adapter));
-        }
-        if (active is not null)
-            AddCandidate(new GeneratedGameAdapter(active, FindToolchain(), new AdapterProcessRunner(), store.WorkDirectory, engineToolkit, report, discovery));
-        foreach (var adapter in adapters.Where(adapter => adapter is not VnTextPatchAdapter).Where(CanMatch)) AddCandidate(adapter);
-        var siglus = new SiglusAdapter(engineToolkit, reportProgress: report);
-        if (CanMatch(siglus)) AddCandidate(siglus);
-        foreach (var candidate in reusable)
-        {
-            if (!candidateKeys.Add((candidate.Id, candidate.Version))) continue;
-            // No package payload is opened until this candidate is actually attempted.
-            candidates.Add((candidate.Id, candidate.Version, candidate.Family?.Name ?? candidate.Id, () => new GeneratedGameAdapter(
-                store.LoadVersion(candidate.Id, candidate.Version), FindToolchain(), new AdapterProcessRunner(),
-                store.WorkDirectory, engineToolkit, report, discovery)));
-        }
-        foreach (var builtin in VnTextPatchAdapters.CreateAll(discoverySession: discovery).Where(CanMatch)) AddCandidate(builtin);
-        foreach (var diagnostic in diagnostics) Log(game, diagnostic);
-        SetStage(game, "筛选引擎候选", $"外置适配器由 {indexed.Count:N0} 个版本筛选为 {reusable.Count:N0} 个候选，准备深入探测。");
-        LogDiscoveryDiagnostic(game, new { stage = "selection", elapsedMs = watch.ElapsedMilliseconds,
-            files = discovery.FileCount, indexedVersions = indexed.Count, candidates = reusable.Count,
-            signatureReads = discovery.RangeReads, signatureBytes = discovery.BytesRead });
-        var candidateIndex = 0;
-        foreach (var candidate in candidates)
-        {
-            token.ThrowIfCancellationRequested();
-            SetStage(game, "匹配游戏引擎", $"正在检查 {++candidateIndex} / {candidates.Count}：{candidate.Name}");
-            IGameAdapter? adapter = null;
-            var candidateWatch = Stopwatch.StartNew();
-            string phase = "load";
-            bool accepted = false;
-            try
-            {
-                adapter = await Task.Run(candidate.Load, token);
-                phase = "probe";
-                var probe = await Task.Run(() => adapter.ProbeAsync(game.GameDirectory, token), token);
-                if (adapter is VnTextPatchAdapter builtin && (probe is not null || builtin.LastProbeDiagnostic is not null))
-                    game.BuiltinProbes.Add(new(builtin.FormatKey, probe is null ? "failed" : "script-probe-passed",
-                        probe?.RequiredFiles.Take(8).ToArray() ?? [], builtin.LastProbeDiagnostic, DateTimeOffset.UtcNow));
-                if (probe is null) continue;
-                phase = "extract";
-                var analyzed = await Task.Run(() => pipeline.AnalyzeAsync(game.GameDirectory, adapter, token, game.Id, probe, report,
-                    commitSnapshot: false), token);
-                if (adapter is GeneratedGameAdapter generated && (active?.Id != generated.Id || active.Version != generated.Version))
-                {
-                    phase = "verify";
-                    SetStage(game, "验证资源兼容性", "正在验证原文回填、中文修改和部分试译，确认适配器可用于当前游戏。");
-                    var verification = await Task.Run(() => new GeneratedAdapterVerifier().VerifyAsync(generated,
-                        analyzed.SourceDirectory, Path.Combine(store.WorkDirectory, "reuse-" + Guid.NewGuid().ToString("N")), token), token);
-                    if (!verification.Passed) { foreach (var item in verification.Diagnostics) Log(game, item); continue; }
-                    await store.RecordCompatibilityAsync(generated.Package.Family!, new GameCompatibility(analyzed.Id,
-                        game.Name, "模板声明的资源集合", generated.Version,
-                        "resource-roundtrip-passed"), token);
-                    await store.PublishAndActivateAsync(analyzed.Id, generated.Package, verification.Diagnostics, token);
-                }
-                nextSession = analyzed;
-                accepted = true;
-                break;
-            }
-            catch (Exception error) when (error is not OperationCanceledException
-                && (adapter is null or GeneratedGameAdapter or VnTextPatchAdapter or SiglusAdapter))
-            {
-                if (adapter is VnTextPatchAdapter builtin)
-                {
-                    game.BuiltinProbes.RemoveAll(item => item.Format == builtin.FormatKey);
-                    game.BuiltinProbes.Add(new(builtin.FormatKey, "failed", [], error.Message[..Math.Min(error.Message.Length, 2000)], DateTimeOffset.UtcNow));
-                }
-                if (adapter is SiglusAdapter)
-                    game.BuiltinProbes.Add(new("Siglus", "failed", [], error.Message[..Math.Min(error.Message.Length, 2000)], DateTimeOffset.UtcNow));
-                Log(game, $"适配器 {candidate.Id} 未匹配：{error.Message}");
-                if (adapter is VnTextPatchAdapter && error is AdapterProcessUnavailableException) break;
-            }
-            finally
-            {
-                LogDiscoveryDiagnostic(game, new { stage = "candidate", adapterId = candidate.Id, version = candidate.Version,
-                    phase, accepted, elapsedMs = candidateWatch.ElapsedMilliseconds });
-            }
-        }
+        game.ReuseFailures = [];
+        IProgress<string> messages = new Progress<string>(message => Log(game, message));
+        IProgress<object> trace = new Progress<object>(detail => LogDiscoveryDiagnostic(game, detail));
+        var request = new AdapterDiscoveryRequest(game.Id, game.GameDirectory, adapters,
+            PinnedAdapterId: game.Project.AdapterId, PinnedAdapterVersion: game.Project.AdapterVersion);
+        var discovery = new AdapterDiscoveryService(store, FindToolchain, new AdapterProcessRunner(), engineToolkit);
+        var analysis = await Task.Run(() => new GameAnalysisService(pipeline, discovery).AnalyzeAsync(request, token,
+            report, messages.Report, detail => { trace.Report(detail); return Task.CompletedTask; }), token);
+        game.BuiltinProbes.AddRange(analysis.Discovery.BuiltinProbes);
+        game.ReuseFailures = analysis.Discovery.Failures;
+        var nextSession = analysis.Session;
         if (nextSession is null)
         {
             SetStage(game, "未找到可用适配器", game.HasSavedAnalysis ? "上一次成功提取的结果仍可使用。" : "可选择智能识别与适配继续分析。");
@@ -129,7 +47,6 @@ public sealed partial class MainWindow
         }
         else
         {
-            await pipeline.CommitAnalysisAsync(nextSession, token);
             ForgetWorkbenchCache(game);
             game.Rows = null; game.RowsById.Clear(); game.RowsSession = null; game.Candidates.Clear();
             game.Session = nextSession;
@@ -420,7 +337,7 @@ public sealed partial class MainWindow
                 var adaptation = await Task.Run(() => new AutomaticAdaptationService(createModel, compiler, store)
                     .AdaptAsync(new AdaptationRequest(game.Id, game.GameDirectory, adapters, limits, game.AdaptationInstruction,
                         game.BuiltinProbes.ToArray(), ImproveExisting: improving, Objective: game.AdaptationObjective,
-                        BaselineUnits: baseline), token, progress));
+                        BaselineUnits: baseline, ReuseFailures: game.ReuseFailures), token, progress));
                 game.AdaptationUsage = adaptation.Usage;
                 game.HasAdaptationSession = File.Exists(Path.Combine(game.Directory, "adaptation", "current", "session.json"));
                 game.AdaptationSummary = adaptation.Summary;
