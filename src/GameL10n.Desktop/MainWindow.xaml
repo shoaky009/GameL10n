@@ -114,8 +114,18 @@
               <Button x:Name="EngineReviewButton" Content="总结" Click="EngineReview_Click" HorizontalAlignment="Left" ToolTipService.ToolTip="共用本项目智能适配的分析 API、思考等级和预算，未单独设置时使用全局默认。提炼同类引擎的可复用经验，供所有项目共享，可在全局引擎库的“相关经验”中停用。证据未变化时复用上次总结；没有优化空间时不会强行生成内容。" />
               <Expander x:Name="EngineReviewPanel" Header="引擎经验总结" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" Visibility="Collapsed">
                 <StackPanel Spacing="8">
+                  <TextBlock x:Name="EngineReviewOutcomeText" FontWeight="SemiBold" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
                   <TextBlock x:Name="EngineReviewSummaryText" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
                   <TextBlock x:Name="EngineReviewUsageText" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                  <StackPanel x:Name="EngineReviewArtifactPanel" Spacing="8" Visibility="Collapsed">
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                      <Button x:Name="OpenReviewKnowledgeButton" Content="查看全局经验" Click="OpenReviewKnowledge_Click" IsEnabled="False" />
+                      <Button Content="打开经验文件夹" Click="OpenReviewArtifacts_Click" />
+                    </StackPanel>
+                    <ScrollViewer MaxHeight="360" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                      <TextBlock x:Name="EngineReviewContentText" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+                    </ScrollViewer>
+                  </StackPanel>
                 </StackPanel>
               </Expander>
             </StackPanel>

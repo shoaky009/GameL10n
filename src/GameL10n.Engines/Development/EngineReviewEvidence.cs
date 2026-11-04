@@ -12,6 +12,7 @@ public sealed class EngineReviewEvidence
     private readonly HashSet<string> inspected = new(StringComparer.Ordinal);
     private string project = "";
     private string? gameDirectory;
+    private string? gameMetadata;
     private readonly HashSet<string> engineKeys = new(StringComparer.OrdinalIgnoreCase);
     public IReadOnlyCollection<string> EngineKeys => engineKeys;
     public string Fingerprint => LocalFiles.HashText(string.Join('\n', hashes.OrderBy(pair => pair.Key, StringComparer.Ordinal).Select(pair => pair.Key + ":" + pair.Value)));
@@ -53,11 +54,13 @@ public sealed class EngineReviewEvidence
         var gamePath = LocalFiles.UnderRoot(result.project, "game.json");
         if (File.Exists(gamePath))
         {
-            await result.AddAsync("game.json", ct);
             using var doc = JsonDocument.Parse(await File.ReadAllTextAsync(gamePath, ct));
             result.engineKeys.Add(Text(doc.RootElement, "adapterId", 160));
             result.gameDirectory = Text(doc.RootElement, "gameDirectory", 4096);
+            result.gameMetadata = GameMetadata(doc.RootElement);
+            result.hashes["game.json"] = LocalFiles.HashText(result.gameMetadata);
         }
+        result.engineKeys.RemoveWhere(string.IsNullOrWhiteSpace);
         var files = new List<object>();
         var partialInventory = false;
         foreach (var area in new[] { "src", "work" })
@@ -84,6 +87,7 @@ public sealed class EngineReviewEvidence
         long inputTokens = 0, outputTokens = 0;
         double apiMs = 0, queueMs = 0;
         int calls = 0, incompleteLines = 0;
+        object? lastSourceEdit = null, lastVerification = null, lastSuccessfulVerification = null;
         var logs = LocalFiles.UnderRoot(result.project, "logs");
         if (Directory.Exists(logs))
         foreach (var path in Directory.EnumerateFiles(logs, "adaptation-*.jsonl").Order(StringComparer.Ordinal))
@@ -108,9 +112,25 @@ public sealed class EngineReviewEvidence
                         calls++; inputTokens += (long)Number(entry, "inputTokens"); outputTokens += (long)Number(entry, "outputTokens");
                         apiMs += Number(entry, "apiMs"); queueMs += Number(entry, "queueMs");
                     }
+                    if (operation == "output-limit-recovery")
+                    {
+                        inputTokens += (long)Number(entry, "inputTokens"); outputTokens += (long)Number(entry, "outputTokens");
+                    }
                     if (operation != "tool") continue;
                     var tool = Text(entry, "tool", 80);
                     var failed = Text(entry, "status", 80) == "failed";
+                    var eventInfo = new { path = relative, at = Text(row, "at", 80), runId = Text(row, "runId", 80),
+                        turn = Number(row, "turn"), callId = Text(entry, "callId", 160), tool,
+                        status = Text(entry, "status", 80), result = Raw(entry, "result", 2400), error = Text(entry, "error", 1200) };
+                    if (tool is "write_file" or "replace_text" && !failed) lastSourceEdit = eventInfo;
+                    if (tool == "test_adapter")
+                    {
+                        lastVerification = eventInfo;
+                        if (!failed && entry.TryGetProperty("result", out var testResult)
+                            && testResult.ValueKind == JsonValueKind.Object
+                            && testResult.TryGetProperty("passed", out var passed) && passed.ValueKind == JsonValueKind.True)
+                            lastSuccessfulVerification = eventInfo;
+                    }
                     var prior = tools.GetValueOrDefault(tool);
                     tools[tool] = (prior.Calls + 1, prior.Failures + (failed ? 1 : 0), prior.Ms + Number(entry, "elapsedMs"), prior.Bytes + (long)Number(entry, "outputBytes"));
                     if (entry.TryGetProperty("call", out var call))
@@ -135,21 +155,29 @@ public sealed class EngineReviewEvidence
             repeatedArguments = repeats.Where(pair => pair.Value > 1).OrderByDescending(pair => pair.Value).Take(12)
                 .Select(pair => new { fingerprint = pair.Key, calls = pair.Value }),
             recentFailures = failures.ToArray(), recentRuns = runs.TakeLast(12).ToDictionary(), session = sessionSummary,
+            lastSourceEdit, lastVerification, lastSuccessfulVerification,
             files, logFiles = result.hashes.Keys.Where(path => path.StartsWith("logs/", StringComparison.Ordinal)).ToArray(), partialInventory, incompleteLines,
             caveat = "相同参数可能因源码或资源变化而需要重跑；累计耗时不是单次耗时；旧日志缺失字段不等于没有问题。静态验收不代表实机显示或完整覆盖。"
         };
         return result;
     }
 
-    public async Task<object> ReadAsync(string path, int offset, int length, CancellationToken ct)
+    public async Task<object> ReadAsync(string path, int offset, int length, CancellationToken ct, string? query = null)
     {
         if (offset < 0 || length is < 1 or > 12000) throw new InvalidDataException("读取范围无效；每次最多 12000 字符。");
+        if (query?.Length > 256) throw new InvalidDataException("查询最多 256 字符。");
         path = path.Replace('\\', '/');
+        if (path == "overview.json") path = "overview";
         if (path.EndsWith("session.json", StringComparison.Ordinal)) throw new InvalidDataException("会话摘要已在 overview 中；请读取日志或源码，避免回放全部 API 历史。");
-        var source = await ReadTextAsync(path, ct);
+        var source = path == "overview" ? JsonSerializer.Serialize(Overview, EvidenceJson) : await ReadTextAsync(path, ct);
         inspected.Add(path);
         offset = Math.Min(offset, source.Length);
-        return new { path, offset, totalCharacters = source.Length, content = source.Substring(offset, Math.Min(length, source.Length - offset)) };
+        var found = string.IsNullOrEmpty(query) ? offset : source.IndexOf(query, offset, StringComparison.OrdinalIgnoreCase);
+        if (found < 0) return new { path, queryFound = false, totalCharacters = source.Length };
+        offset = found;
+        var count = Math.Min(length, source.Length - offset);
+        return new { path, offset, totalCharacters = source.Length, queryFound = true,
+            nextOffset = offset + count, content = source.Substring(offset, count) };
     }
 
     public async Task<string> ToolSourceAsync(string path, CancellationToken ct)
@@ -166,12 +194,13 @@ public sealed class EngineReviewEvidence
         return text;
     }
 
-    public bool IsEvidence(string path) => path == "overview" || inspected.Contains(path.Replace('\\', '/'));
+    public bool IsEvidence(string path) => path is "overview" or "overview.json" || inspected.Contains(path.Replace('\\', '/'));
 
     public async Task EnsureUnchangedAsync(CancellationToken ct)
     {
         foreach (var (relative, hash) in hashes)
-            if (await LocalFiles.HashFileAsync(LocalFiles.UnderRoot(project, relative), ct) != hash)
+            if (relative == "game.json") await CheckGameMetadataAsync(ct);
+            else if (await LocalFiles.HashFileAsync(LocalFiles.UnderRoot(project, relative), ct) != hash)
                 throw new IOException("总结期间项目证据发生了变化，请待当前任务结束后重新总结。");
     }
 
@@ -179,10 +208,27 @@ public sealed class EngineReviewEvidence
     private async Task<string> ReadTextAsync(string path, CancellationToken ct)
     {
         if (!hashes.TryGetValue(path, out var hash)) throw new InvalidDataException("只能读取当前项目证据索引中的文件。");
+        if (path == "game.json") { await CheckGameMetadataAsync(ct); return gameMetadata!; }
         var fullPath = LocalFiles.UnderRoot(project, path);
         if (await LocalFiles.HashFileAsync(fullPath, ct) != hash) throw new IOException("证据文件已变化，请重新总结。");
         return await File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
     }
+
+    private async Task CheckGameMetadataAsync(CancellationToken ct)
+    {
+        using var doc = JsonDocument.Parse(await File.ReadAllTextAsync(LocalFiles.UnderRoot(project, "game.json"), ct));
+        if (GameMetadata(doc.RootElement) != gameMetadata)
+            throw new IOException("总结期间游戏目录或解析结果发生变化，请重新总结。");
+    }
+
+    // Task/UI/API settings change while a summary runs; only game identity and extraction inputs are evidence.
+    private static string GameMetadata(JsonElement game) => JsonSerializer.Serialize(new
+    {
+        id = Text(game, "id", 160), gameDirectory = Text(game, "gameDirectory", 4096),
+        adapterId = Text(game, "adapterId", 160), adapterVersion = Text(game, "adapterVersion", 160),
+        sourceFingerprint = game.TryGetProperty("analysis", out var analysis) && analysis.ValueKind == JsonValueKind.Object
+            ? Text(analysis, "sourceFingerprint", 256) : null
+    }, EvidenceJson);
 
     private static double Number(JsonElement value, string key) => value.TryGetProperty(key, out var item) && item.ValueKind == JsonValueKind.Number && item.TryGetDouble(out var number) ? number : 0;
     private static string Text(JsonElement value, string key, int limit) => value.TryGetProperty(key, out var item) && item.ValueKind == JsonValueKind.String

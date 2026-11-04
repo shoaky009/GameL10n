@@ -6,7 +6,7 @@ using GameL10n.Core.Storage;
 
 namespace GameL10n.Tests.Development;
 
-public sealed class EngineReviewTests : IDisposable
+public sealed partial class EngineReviewTests : IDisposable
 {
     private readonly string root = Path.Combine(Path.GetTempPath(), "gamel10n-engine-review-" + Guid.NewGuid().ToString("N"));
     private EngineKnowledgeStore Store => new(Path.Combine(root, "extensions", "engine-knowledge"));
@@ -31,6 +31,7 @@ public sealed class EngineReviewTests : IDisposable
         var service = new EngineReviewService(model, Store);
         var report = await service.ReviewAsync(project, "one", "First game");
         Assert.Equal("engine.yuris.ybn-layout", report.EntryId);
+        Assert.Equal("created", report.ChangeKind);
         Assert.Equal(2, model.Calls);
         var global = Assert.Single(Store.ReadAll());
         Assert.Contains("work/probe.cs", Assert.Single(global.Tools).Files.Keys);
@@ -45,6 +46,7 @@ public sealed class EngineReviewTests : IDisposable
         var second = new EngineReviewService(noImprovement, Store);
         var declined = await second.ReviewAsync(project, "one", "First game");
         Assert.Null(declined.EntryId);
+        Assert.Equal("none", declined.ChangeKind);
         Assert.Contains("没有新增", declined.Summary);
         Assert.True((await second.ReviewAsync(project, "one", "First game")).Reused);
         Assert.Equal(1, noImprovement.Calls);

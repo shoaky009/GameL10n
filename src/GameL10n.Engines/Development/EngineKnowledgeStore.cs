@@ -105,10 +105,60 @@ public sealed class EngineKnowledgeStore(string directory)
         entries.OrderBy(entry => entry.Id, StringComparer.Ordinal).Select(entry => entry.Id + ":" + entry.Revision + ":" + entry.Enabled)));
 
     public static IReadOnlyList<EngineKnowledgeEntry> Match(IEnumerable<EngineKnowledgeEntry> entries, IEnumerable<string> engineKeys)
+        => Match(entries, engineKeys, entry => entry.Id, entry => entry.Family, entry => entry.Aliases, entry => entry.Enabled);
+
+    public static IReadOnlyList<EngineKnowledgeSummary> Match(IEnumerable<EngineKnowledgeSummary> entries,
+        IEnumerable<string> engineKeys, bool includeDisabled = false)
+        => Match(entries, engineKeys, entry => entry.Id, entry => entry.Family, entry => entry.Aliases,
+            entry => includeDisabled || entry.Enabled);
+
+    private static IReadOnlyList<T> Match<T>(IEnumerable<T> entries, IEnumerable<string> engineKeys,
+        Func<T, string> id, Func<T, AdapterFamily> family, Func<T, IReadOnlyList<string>> aliases, Func<T, bool> enabled)
     {
         var keys = engineKeys.Where(value => !string.IsNullOrWhiteSpace(value)).Select(value => value.Trim()).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        return entries.Where(entry => entry.Enabled && new[] { entry.Family.Key, entry.Family.AdapterId, entry.Family.Name }
-            .Concat(entry.Aliases).Any(keys.Contains)).OrderBy(entry => entry.Id, StringComparer.Ordinal).ToArray();
+        foreach (var format in VnTextPatchFormatCatalog.All)
+            if (keys.Contains(format.Key) || keys.Contains(format.Family.AdapterId) || keys.Contains(format.Family.Name))
+                keys.UnionWith([format.Key, format.Family.AdapterId, format.Family.Name]);
+        var roots = keys.Select(EngineRoot).Where(root => root is not null).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return entries.Where(enabled).Select(entry =>
+        {
+            var category = family(entry);
+            var names = new[] { category.Key, category.AdapterId, category.Name }.Concat(aliases(entry)).ToArray();
+            return (Entry: entry, Score: names.Any(keys.Contains) ? 2
+                : names.Select(EngineRoot).Any(root => root is not null && roots.Contains(root)) ? 1 : 0);
+        }).Where(item => item.Score > 0).OrderByDescending(item => item.Score)
+            .ThenBy(item => id(item.Entry), StringComparer.Ordinal).Select(item => item.Entry).ToArray();
+    }
+
+    // A family match is a research lead only. It does not grant adapter compatibility or select a filter.
+    private static readonly IReadOnlyDictionary<string, string> FormatRoots = VnTextPatchFormatCatalog.All
+        .SelectMany(format => new[] { format.Key, format.Family.AdapterId, format.Family.Name }
+            .Select(key => (Key: key, Root: NormalizeRoot(format.Family.Name.Split('/')[0]))))
+        .DistinctBy(item => item.Key, StringComparer.OrdinalIgnoreCase)
+        .ToDictionary(item => item.Key, item => item.Root, StringComparer.OrdinalIgnoreCase);
+    private static readonly KeyValuePair<string, string>[] RootNames = VnTextPatchFormatCatalog.All
+        .SelectMany(format => new[] { format.Family.Name.Split('/')[0].Trim(), NormalizeRoot(format.Family.Name.Split('/')[0]) })
+        .Distinct(StringComparer.OrdinalIgnoreCase).OrderByDescending(name => name.Length)
+        .Select(name => new KeyValuePair<string, string>(name, NormalizeRoot(name))).ToArray();
+
+    private static string NormalizeRoot(string value) => string.Concat(value.Where(char.IsLetterOrDigit)).ToLowerInvariant();
+
+    private static string? EngineRoot(string value)
+    {
+        value = value.Trim();
+        foreach (var prefix in new[] { "engine.", "template.", "builtin." })
+            if (value.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) { value = value[prefix.Length..]; break; }
+        if (FormatRoots.TryGetValue(value, out var root)) return root;
+        if (value.StartsWith("vntextpatch-", StringComparison.OrdinalIgnoreCase))
+        {
+            value = value["vntextpatch-".Length..];
+            if (FormatRoots.TryGetValue(value, out root)) return root;
+        }
+        foreach (var name in RootNames)
+            if (value.StartsWith(name.Key, StringComparison.OrdinalIgnoreCase)
+                && (value.Length == name.Key.Length || !char.IsLetter(value[name.Key.Length]))) return name.Value;
+        root = NormalizeRoot(value.Split(['/', '-', '.', ' '], StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? "");
+        return root.Length >= 3 && root is not ("loose" or "archive" or "script" or "text") ? root : null;
     }
 
     public async Task<EngineKnowledgeEntry> SaveAsync(EngineKnowledgeEntry entry, string? expectedRevision, CancellationToken ct = default)

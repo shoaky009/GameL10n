@@ -37,9 +37,9 @@ public sealed partial class MainWindow
                     .ReviewAsync(game.Directory, game.Id, game.Name, token, progress, limits), token);
                 game.EngineReview = result;
                 SetStage(game, result.Reused ? "已复用上次总结" : "总结完成");
-                Log(game, result.Reused ? "证据和全局经验未变化，本次未调用模型。" : result.EntryId is null
+                Log(game, result.Reused ? "证据和相关引擎经验未变化，本次未调用模型。" : result.EntryId is null
                     ? $"总结完成，没有新增引擎经验；本次使用 {result.Usage.TotalTokens:N0} Token。"
-                    : $"已更新全局引擎经验 {result.EntryId}；本次使用 {result.Usage.TotalTokens:N0} Token。");
+                    : $"{ReviewOutcome(result)}：{result.EntryId}；本次使用 {result.Usage.TotalTokens:N0} Token。可在总结中查看具体产物。");
                 if (selectedGame == game) { RenderEngineReview(game); EngineReviewPanel.IsExpanded = true; }
                 RefreshEngineKnowledge();
             });
@@ -49,6 +49,8 @@ public sealed partial class MainWindow
 
     private void RenderEngineReview(GameWorkspace? game)
     {
+        var version = ++projectReviewReadVersion;
+        projectReviewEntry = null;
         var review = game?.EngineReview;
         EngineReviewPanel.Visibility = review is null ? Visibility.Collapsed : Visibility.Visible;
         EngineReviewSummaryText.Text = review is null ? "" : review.Summary
@@ -56,6 +58,72 @@ public sealed partial class MainWindow
             + (review.MainProgramSuggestions is { Count: > 0 } ? "\n\n主程序改进建议（尚未实施）：\n" + string.Join("\n", review.MainProgramSuggestions) : "");
         EngineReviewUsageText.Text = review is null ? "" : $"{review.ReviewedAt.ToLocalTime():yyyy-MM-dd HH:mm} · 总结 Token：{review.Usage.TotalTokens:N0}"
             + (review.Usage.Estimated ? "（含估算）" : "") + (review.Reused ? " · 本次复用，未调用模型" : "");
+        EngineReviewOutcomeText.Text = review is null ? "" : ReviewOutcome(review);
+        EngineReviewArtifactPanel.Visibility = review?.EntryId is null ? Visibility.Collapsed : Visibility.Visible;
+        EngineReviewContentText.Text = "正在读取已保存的产物…";
+        OpenReviewKnowledgeButton.IsEnabled = false;
+        if (review?.EntryId is { } id && game is not null) _ = LoadProjectReviewAsync(game, id, version);
+    }
+
+    private int projectReviewReadVersion;
+    private EngineKnowledgeEntry? projectReviewEntry;
+
+    private static string ReviewOutcome(EngineReviewResult review) => review.Reused ? "复用上次总结，本次未生成新产物" : review.ChangeKind switch
+    {
+        "created" => "已新增全局引擎经验", "updated" => "已更新全局引擎经验", "unchanged" => "已有经验已覆盖，本次未新增内容",
+        _ => review.EntryId is null ? "本次没有新增可复用内容" : "已保存全局引擎经验"
+    };
+
+    private async Task LoadProjectReviewAsync(GameWorkspace game, string id, int version)
+    {
+        var directory = dataDirectory;
+        var store = KnowledgeStore();
+        bool IsCurrent() => version == projectReviewReadVersion && selectedGame == game && dataDirectory == directory;
+        try
+        {
+            var entry = await Task.Run(() => store.ReadEntry(id));
+            if (!IsCurrent()) return;
+            if (entry is null) { EngineReviewContentText.Text = "这条全局经验的文件已不存在，项目总结记录仍保留。"; return; }
+            projectReviewEntry = entry;
+            var updated = entry.Revision != game.EngineReview?.Revision ? "当前全局经验已更新，下方展示最新内容。\n\n" : "";
+            EngineReviewContentText.Text = updated + $"{entry.Family.Name} · {(entry.Enabled ? "已启用" : "已停用")}\n"
+                + $"{entry.Summary}\n\n适用条件\n{entry.Conditions}\n\n可复用的分析指引\n{entry.Guidance}"
+                + $"\n\n辅助工具：{entry.Tools.Count:N0} 个"
+                + (entry.Tools.Count == 0 ? "" : "\n" + string.Join("\n\n", entry.Tools.Select(tool =>
+                    $"{tool.Name}：{tool.Description}\n源码：{string.Join("、", tool.Files.Keys)}\n{tool.Usage}")))
+                + "\n\n以上内容保存在全局经验中，后续智能识别按引擎关联并核对适用条件。";
+            OpenReviewKnowledgeButton.IsEnabled = true;
+        }
+        catch (Exception error) { if (IsCurrent()) EngineReviewContentText.Text = "读取总结产物失败：" + error.Message; }
+    }
+
+    private void OpenReviewArtifacts_Click(object sender, RoutedEventArgs e) => OpenDirectory(KnowledgeStore().DirectoryPath);
+
+    private async void OpenReviewKnowledge_Click(object sender, RoutedEventArgs e)
+    {
+        if (projectReviewEntry is not { } entry || switchingGames || changingDataDirectory || removingGames || closing) return;
+        switchingGames = true;
+        UpdateControls();
+        try
+        {
+            await SaveSettingsAsync(persistNavigation: false);
+            ShowPage("catalog");
+            GlobalNavigation.SelectedItem = GlobalNavigation.Items.OfType<ListViewItem>().First(item => Equals(item.Tag, "catalog"));
+            await EnsureEngineLibraryAsync();
+            if (engineFamilyRows.FirstOrDefault(row => row.Id == entry.Family.AdapterId) is not { } family)
+                throw new InvalidOperationException("全局引擎经验索引中没有这条记录，请刷新引擎库。");
+            CatalogSourceFilter.SelectedIndex = 0;
+            CatalogEnabledFilter.SelectedIndex = 0;
+            CatalogSearchBox.Text = entry.Family.Key;
+            CatalogFamiliesList.SelectedItem = family;
+            CatalogFamiliesList.ScrollIntoView(family);
+            ShowEngineFamily(family, true);
+            CatalogDetailTabs.SelectedIndex = CatalogDetailTabs.TabItems.Count - 1;
+            EngineKnowledgeList.SelectedItem = EngineKnowledgeList.Items.OfType<EngineKnowledgeRow>().FirstOrDefault(row => row.Data.Id == entry.Id);
+            await LoadLibraryKnowledgeAsync(entry.Id);
+        }
+        catch (Exception error) { ShowError(error); }
+        finally { switchingGames = false; UpdateControls(); }
     }
 
     private int engineKnowledgeReadVersion;
@@ -68,8 +136,8 @@ public sealed partial class MainWindow
     private void RenderLibraryKnowledge(AdapterFamily family, bool changedFamily)
     {
         var keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { family.AdapterId, family.Key, family.Name };
-        var related = engineKnowledgeSummaries.Where(entry => entry.Family.AdapterId == family.AdapterId || entry.Aliases.Any(keys.Contains))
-            .OrderBy(entry => entry.Summary, StringComparer.CurrentCultureIgnoreCase).Select(entry => new EngineKnowledgeRow(entry)).ToArray();
+        var related = EngineKnowledgeStore.Match(engineKnowledgeSummaries, keys, includeDisabled: true)
+            .Select(entry => new EngineKnowledgeRow(entry)).ToArray();
         var previousId = changedFamily ? null : selectedKnowledgeId;
         renderingLibraryKnowledge = true;
         try
