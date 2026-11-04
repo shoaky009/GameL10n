@@ -59,6 +59,7 @@ internal sealed class GameWorkspace(GameProject project, string directory) : INo
     public IReadOnlyList<GeneratedAdapterReuseFailure> ReuseFailures { get; set; } = [];
     public DateTimeOffset LastViewed { get; set; }
     public Task DurableWrites { get; private set; } = Task.CompletedTask;
+    private readonly object writeGate = new();
     public StringBuilder Log { get; } = new();
     public TranslationRow[]? Rows { get; set; }
     public Dictionary<string, TranslationRow> RowsById { get; set; } = new(StringComparer.Ordinal);
@@ -92,13 +93,16 @@ internal sealed class GameWorkspace(GameProject project, string directory) : INo
     // One ordered writer per game; a failed diagnostic write does not poison later state saves.
     public Task EnqueueWrite(Func<Task> write)
     {
-        var previous = DurableWrites;
-        return DurableWrites = ContinueAsync();
-        async Task ContinueAsync()
+        lock (writeGate)
         {
-            try { await previous.ConfigureAwait(false); }
-            catch (Exception error) { System.Diagnostics.Debug.WriteLine(error); }
-            await write().ConfigureAwait(false);
+            var previous = DurableWrites;
+            return DurableWrites = ContinueAsync();
+            async Task ContinueAsync()
+            {
+                try { await previous.ConfigureAwait(false); }
+                catch (Exception error) { System.Diagnostics.Debug.WriteLine(error); }
+                await write().ConfigureAwait(false);
+            }
         }
     }
 }

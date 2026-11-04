@@ -103,8 +103,9 @@ public sealed partial class TranslationPipeline(string dataDirectory, string? di
 
     public async Task<GameSession> AnalyzeAsync(string gameDirectory, IGameAdapter adapter,
         CancellationToken ct = default, string? projectId = null, GameProbe? knownProbe = null,
-        Action<string, string>? reportProgress = null, bool commitSnapshot = true)
+        Action<string, string>? reportProgress = null, bool commitSnapshot = true, Func<object, Task>? trace = null)
     {
+        var timing = new AdapterOperationTrace(trace, "analysis-phase", adapter.Id, adapter.Version);
         var gameRoot = Path.GetFullPath(gameDirectory);
         if (!Directory.Exists(gameRoot)) throw new DirectoryNotFoundException("游戏目录不存在。");
         reportProgress?.Invoke("识别游戏资源", "正在确认引擎和需要处理的资源文件。");
@@ -118,18 +119,24 @@ public sealed partial class TranslationPipeline(string dataDirectory, string? di
         await using var projectLock = AcquireProjectLock(project);
         var installer = new PatchInstaller(project);
         var sourceFiles = new List<(SourceFile File, string Path)>();
-        foreach (var relative in probe.RequiredFiles.Distinct(StringComparer.OrdinalIgnoreCase))
+        await timing.MeasureAsync("source-hash", async () =>
         {
-            reportProgress?.Invoke("校验原始资源", $"{sourceFiles.Count + 1} / {probe.RequiredFiles.Count} · {relative}");
-            LocalFiles.UnderRoot(gameRoot, relative);
-            var sourcePath = await installer.ResolveOriginalFileAsync(gameRoot, relative, ct);
-            sourceFiles.Add((new SourceFile(relative, await LocalFiles.HashFileAsync(sourcePath, ct)), sourcePath));
-        }
+            foreach (var relative in probe.RequiredFiles.Distinct(StringComparer.OrdinalIgnoreCase))
+            {
+                reportProgress?.Invoke("校验原始资源", $"{sourceFiles.Count + 1} / {probe.RequiredFiles.Count} · {relative}");
+                LocalFiles.UnderRoot(gameRoot, relative);
+                var sourcePath = await installer.ResolveOriginalFileAsync(gameRoot, relative, ct);
+                var hash = await timing.FileAsync("source-file-hash", relative, sourcePath, () => LocalFiles.HashFileAsync(sourcePath, ct));
+                sourceFiles.Add((new SourceFile(relative, hash), sourcePath));
+            }
+        }, new { files = probe.RequiredFiles.Count });
         if (sourceFiles.Count == 0) throw new InvalidDataException("Adapter 未声明需要处理的资源文件。");
         var fingerprint = LocalFiles.HashText(JsonSerializer.Serialize(sourceFiles.Select(f => f.File).OrderBy(f => f.RelativePath)));
         var snapshotDirectory = Path.Combine(project, "sources", fingerprint);
-        if (!Directory.Exists(snapshotDirectory))
+        var reusedSnapshot = Directory.Exists(snapshotDirectory);
+        await timing.MeasureAsync("source-snapshot", async () =>
         {
+            if (reusedSnapshot) return;
             var staging = snapshotDirectory + ".pending-" + Guid.NewGuid().ToString("N");
             Directory.CreateDirectory(staging);
             foreach (var (file, sourcePath) in sourceFiles)
@@ -137,48 +144,61 @@ public sealed partial class TranslationPipeline(string dataDirectory, string? di
                 reportProgress?.Invoke("保存原文快照", "正在复制并校验：" + file.RelativePath);
                 var target = LocalFiles.UnderRoot(staging, file.RelativePath);
                 Directory.CreateDirectory(Path.GetDirectoryName(target)!);
-                File.Copy(sourcePath, target, false);
-                if (await LocalFiles.HashFileAsync(target, ct) != file.Sha256 ||
-                    await LocalFiles.HashFileAsync(sourcePath, ct) != file.Sha256)
-                    throw new IOException("扫描期间游戏资源发生变化，请等待游戏更新完成后重试。");
+                await timing.FileAsync("snapshot-file-copy", file.RelativePath, sourcePath, () =>
+                {
+                    File.Copy(sourcePath, target, false);
+                    return Task.CompletedTask;
+                });
+                await timing.FileAsync("snapshot-copy-check", file.RelativePath, sourcePath, async () =>
+                {
+                    if (await LocalFiles.HashFileAsync(target, ct) != file.Sha256 ||
+                        await LocalFiles.HashFileAsync(sourcePath, ct) != file.Sha256)
+                        throw new IOException("扫描期间游戏资源发生变化，请等待游戏更新完成后重试。");
+                });
             }
             Directory.Move(staging, snapshotDirectory);
-        }
+        }, new { reused = reusedSnapshot });
         var files = sourceFiles.Select(f => f.File).ToArray();
         reportProgress?.Invoke("校验原文快照", "正在确认已保存资源完整，文件较大时需要一些时间。");
-        await VerifySourcesAsync(snapshotDirectory, files, ct);
-        var executableAnalysis = new List<ExecutableAnalysis>();
-        foreach (var file in files.Where(file => file.RelativePath.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)))
-            executableAnalysis.Add(ExecutableChecks.Analyze(file.RelativePath,
-                await File.ReadAllBytesAsync(LocalFiles.UnderRoot(snapshotDirectory, file.RelativePath), ct)));
-        await LocalFiles.WriteJsonAsync(Path.Combine(project, "executable-analysis.json"), executableAnalysis, ct);
+        await timing.MeasureAsync("snapshot-verify", () => VerifySourcesAsync(snapshotDirectory, files, ct, timing));
+        await timing.MeasureAsync("executable-analysis", async () =>
+        {
+            var executableAnalysis = new List<ExecutableAnalysis>();
+            foreach (var file in files.Where(file => file.RelativePath.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)))
+                executableAnalysis.Add(ExecutableChecks.Analyze(file.RelativePath,
+                    await File.ReadAllBytesAsync(LocalFiles.UnderRoot(snapshotDirectory, file.RelativePath), ct)));
+            await LocalFiles.WriteJsonAsync(Path.Combine(project, "executable-analysis.json"), executableAnalysis, ct);
+        });
         var store = new ExtractionStore(project);
         reportProgress?.Invoke("加载文本缓存", "正在读取已有的提取结果。");
-        var extraction = await store.LoadAsync(fingerprint, adapter.Id, adapter.Version, ct);
+        var extraction = await timing.MeasureAsync("extraction-cache", () => store.LoadAsync(fingerprint, adapter.Id, adapter.Version, ct));
         var cachedExtraction = extraction is not null;
         // Legacy extraction.json has no fingerprint of its own and may belong to an older
         // source snapshot. Only a verified cache can replace extraction from current resources.
         if (extraction is null)
         {
             reportProgress?.Invoke("提取剧情文本", "正在从游戏资源提取对白、名称和选项。");
-            extraction = await adapter.ExtractAsync(snapshotDirectory, ct);
+            extraction = await timing.MeasureAsync("extract", () => adapter.ExtractAsync(snapshotDirectory, ct));
         }
         if (extraction.Units.Count == 0) throw new InvalidDataException("未提取到可翻译文本，不能报告为汉化成功。");
         if (extraction.Units.Any(u => string.IsNullOrWhiteSpace(u.Id) || string.IsNullOrWhiteSpace(u.SourceText)) ||
             extraction.Units.Select(u => u.Id).Distinct(StringComparer.Ordinal).Count() != extraction.Units.Count)
             throw new InvalidDataException("提取结果包含空文本或重复的文本 ID。");
         reportProgress?.Invoke("整理项目文本", $"已读取 {extraction.Units.Count:N0} 条文本，正在保存项目记录。");
-        if (!cachedExtraction) await store.StoreAsync(fingerprint, adapter.Id, adapter.Version, extraction, ct);
+        if (trace is not null) await trace(new { operation = "extraction-result", adapterId = adapter.Id,
+            version = adapter.Version, cached = cachedExtraction, units = extraction.Units.Count });
+        if (!cachedExtraction) await timing.MeasureAsync("extraction-store", () => store.StoreAsync(fingerprint, adapter.Id, adapter.Version, extraction, ct));
         if (Directory.Exists(Path.Combine(project, "memory")))
         {
             reportProgress?.Invoke("核对已保存译文", "正在核对已提交的翻译记录，已有译文会继续复用。");
-            await TranslationEngine.CleanupCommittedResponsesAsync(project, new TranslationMemory(Path.Combine(project, "memory")), ct);
+            await timing.MeasureAsync("translation-cleanup", () => TranslationEngine.CleanupCommittedResponsesAsync(project,
+                new TranslationMemory(Path.Combine(project, "memory")), ct));
         }
         // Probe may exclude unsupported files outside the snapshot; keep that coverage visible on cache hits too.
         extraction = extraction with { Warnings = probe.Warnings.Concat(extraction.Warnings).Distinct(StringComparer.Ordinal).ToArray() };
         var session = new GameSession(id, gameRoot, project, snapshotDirectory, probe, files, extraction, adapter);
         ct.ThrowIfCancellationRequested();
-        if (commitSnapshot) await CommitAnalysisCoreAsync(session, ct);
+        if (commitSnapshot) await timing.MeasureAsync("commit", () => CommitAnalysisCoreAsync(session, ct));
         return session;
     }
 
@@ -340,11 +360,17 @@ public sealed partial class TranslationPipeline(string dataDirectory, string? di
         catch (IOException error) { throw new IOException("这个游戏已有任务正在运行，请等待完成或暂停后重试。", error); }
     }
 
-    private static async Task VerifySourcesAsync(string directory, IReadOnlyList<SourceFile> files, CancellationToken ct)
+    private static async Task VerifySourcesAsync(string directory, IReadOnlyList<SourceFile> files, CancellationToken ct,
+        AdapterOperationTrace? timing = null)
     {
         foreach (var file in files)
-            if (await LocalFiles.HashFileAsync(LocalFiles.UnderRoot(directory, file.RelativePath), ct) != file.Sha256)
+        {
+            var path = LocalFiles.UnderRoot(directory, file.RelativePath);
+            var hash = timing is null ? await LocalFiles.HashFileAsync(path, ct)
+                : await timing.FileAsync("snapshot-file-hash", file.RelativePath, path, () => LocalFiles.HashFileAsync(path, ct));
+            if (hash != file.Sha256)
                 throw new InvalidDataException("原文快照校验失败，请重新识别游戏。");
+        }
     }
 
     private static async Task<bool> PatchIsIntactAsync(string directory, CancellationToken ct)

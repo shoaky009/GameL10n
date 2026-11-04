@@ -35,12 +35,17 @@ public sealed class VnTextPatchAdapter : IGameAdapter
 
     public void ResetDiscovery() => discovery.Reset();
 
-    public async Task<GameProbe?> ProbeAsync(string gameDirectory, CancellationToken cancellationToken = default)
+    public Task<GameProbe?> ProbeAsync(string gameDirectory, CancellationToken cancellationToken = default) =>
+        ProbeAsync(gameDirectory, null, cancellationToken);
+
+    internal async Task<GameProbe?> ProbeAsync(string gameDirectory, Func<VnTextPatchFormat, IReadOnlyList<string>, Task>? reportResources,
+        CancellationToken cancellationToken)
     {
         LastProbeDiagnostic = null;
         try
         {
             var resources = discovery.ForProbe(gameDirectory, format, cancellationToken);
+            if (reportResources is not null) await reportResources(format, resources);
             if (resources.Count == 0) return null;
             var response = await client.InvokeAsync("probe", format.Key, gameDirectory, resources, null, null, cancellationToken);
             if (response.Probe is not { } probe) return null;

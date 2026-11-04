@@ -32,12 +32,12 @@ public sealed partial class MainWindow
         game.BuiltinProbes.Clear();
         game.ReuseFailures = [];
         IProgress<string> messages = new Progress<string>(message => Log(game, message));
-        IProgress<object> trace = new Progress<object>(detail => LogDiscoveryDiagnostic(game, detail));
+        var runId = game.RunId;
         var request = new AdapterDiscoveryRequest(game.Id, game.GameDirectory, adapters,
             PinnedAdapterId: game.Project.AdapterId, PinnedAdapterVersion: game.Project.AdapterVersion);
         var discovery = new AdapterDiscoveryService(store, FindToolchain, new AdapterProcessRunner(), engineToolkit);
         var analysis = await Task.Run(() => new GameAnalysisService(pipeline, discovery).AnalyzeAsync(request, token,
-            report, messages.Report, detail => { trace.Report(detail); return Task.CompletedTask; }), token);
+            report, messages.Report, detail => LogDiscoveryDiagnostic(game, runId, detail)), token);
         game.BuiltinProbes.AddRange(analysis.Discovery.BuiltinProbes);
         game.ReuseFailures = analysis.Discovery.Failures;
         var nextSession = analysis.Session;
@@ -58,15 +58,20 @@ public sealed partial class MainWindow
         }
     });
 
-    private static void LogDiscoveryDiagnostic(GameWorkspace game, object detail)
+    private static async Task LogDiscoveryDiagnostic(GameWorkspace game, string? runId, object detail)
     {
-        var line = $"[{DateTime.Now:HH:mm:ss}] [识别诊断] " + JsonSerializer.Serialize(detail) + "\n";
+        var line = $"[{DateTime.Now:HH:mm:ss.fff}] [识别诊断] "
+            + JsonSerializer.Serialize(new { schemaVersion = 1, runId, at = DateTimeOffset.UtcNow, entry = detail }) + "\n";
         var path = Path.Combine(game.Directory, "logs", $"{DateTime.Now:yyyyMMdd}.log");
-        _ = game.EnqueueWrite(async () =>
+        try
         {
-            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-            await File.AppendAllTextAsync(path, line);
-        });
+            await game.EnqueueWrite(async () =>
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                await File.AppendAllTextAsync(path, line);
+            });
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException) { Debug.WriteLine(error); }
     }
 
     private async Task<GameSession?> LoadSavedSessionAsync(GameWorkspace game, LocalAdapterPackageStore store,

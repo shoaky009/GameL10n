@@ -2276,6 +2276,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         var request = Request();
         var runs = 0;
         var builds = 0;
+        var trace = new List<JsonElement>();
         var runner = new ScriptedRunner
         {
             CorruptUntouchedTrialText = true,
@@ -2284,7 +2285,11 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
                 runs++;
                 if (execution.StandardInput is not { } input) return;
                 using var document = JsonDocument.Parse(input);
-                if (document.RootElement.TryGetProperty("operation", out var operation) && operation.GetString() == "build") builds++;
+                if (document.RootElement.TryGetProperty("operation", out var operation) && operation.GetString() == "probe")
+                    Assert.Contains(trace, entry => entry.GetProperty("operation").GetString() == "candidate-phase"
+                        && entry.GetProperty("adapterId").GetString() == published.Id
+                        && entry.GetProperty("phase").GetString() == "probe" && entry.GetProperty("status").GetString() == "started");
+                if (operation.ValueKind == JsonValueKind.String && operation.GetString() == "build") builds++;
             }
         };
         foreach (var format in VnTextPatchFormatCatalog.All.Where(format => format.Extensions.Contains(".txt")))
@@ -2293,11 +2298,21 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         var discovery = new AdapterDiscoveryService(store, () => compiler.Toolchain, runner,
             new EngineReferenceToolkit(Path.Combine(store.RootDirectory, "engine-tools")));
         var analysis = await new GameAnalysisService(new TranslationPipeline(Path.Combine(root, "data")), discovery)
-            .AnalyzeAsync(new(request.GameId, request.GameDirectory, request.ExistingAdapters));
+            .AnalyzeAsync(new(request.GameId, request.GameDirectory, request.ExistingAdapters), trace: async entry =>
+            {
+                await Task.Yield();
+                trace.Add(JsonSerializer.SerializeToElement(entry, Json));
+            });
         Assert.Null(analysis.Session);
         Assert.NotNull(Assert.Single(analysis.Discovery.Failures).InputFingerprint);
         Assert.Null(store.LoadActive(request.GameId));
         Assert.True(builds > 0);
+        var start = Assert.Single(trace, entry => entry.GetProperty("operation").GetString() == "candidate-start"
+            && entry.GetProperty("adapterId").GetString() == published.Id);
+        Assert.Equal(new FileInfo(Path.Combine(request.GameDirectory, "script.txt")).Length,
+            start.GetProperty("selection").GetProperty("resources").GetProperty("totalBytes").GetInt64());
+        Assert.Contains(trace, entry => entry.GetProperty("operation").GetString() == "verification-result"
+            && !entry.GetProperty("passed").GetBoolean());
         var previousBuilds = builds;
         request = request with { ReuseFailures = analysis.Discovery.Failures };
         void CheckEvidence(AgentRequest context)

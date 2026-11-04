@@ -17,6 +17,7 @@ public sealed class GameDiscoverySession
     public int FileCount => files.Count;
     public int RangeReads { get; private set; }
     public long BytesRead { get; private set; }
+    public long? FileLength(string relativePath) => files.GetValueOrDefault(GeneratedAdapterResources.Normalize(relativePath))?.Length;
     public List<string> Diagnostics { get; } = [];
 
     private GameDiscoverySession(string directory) => DirectoryPath = Path.GetFullPath(directory);
