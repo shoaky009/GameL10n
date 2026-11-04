@@ -1,9 +1,10 @@
-# 编码与运行组件
+# 文本与运行组件
 
-本文面向维护适配器的开发者，说明可复用的编码、字体和启动实现。它们按能力或引擎模板提供，适配器负责资源发现、脚本解析、封包以及当前游戏的兼容验证。
+本文面向维护适配器的开发者，说明可复用的文本语义、编码、字体和启动实现。它们按能力或引擎模板提供，适配器负责资源发现、封包以及当前游戏的兼容验证。
 
 | 组件 ID | 能力 | 适用条件 |
 |---|---|---|
+| `kirikiri-scn-text` | PSB SCN 正文、显示姓名、选项、场景标题；缓存及长度自动重算 | 已解密、无资源的 PSB v2/v3 SCN，明确选择语言槽；依赖固定共享 Python 工具库 |
 | `cp932-glyph-map` | 全补丁字符映射、严格编解码、复用已有映射 | 已确认脚本使用 CP932，且运行时与字库接受指定码位 |
 | `qlie-sfnt-font` | 添加 SFNT 字形别名、调整字体名称及度量 | 已确认的 QLIE system 字体列表、MS Gothic／Mincho 替换策略、单字体 SFNT |
 | `system4-fnl-glyph` | 用宋体生成与参考字形尺寸匹配的单色位图 | Windows GDI、BMP 字符及对应 FNL 位图布局；本机须有 SimSun |
@@ -16,6 +17,14 @@
 普通 C# 组件作为源码参加适配器编译，启动器源码和已编译 EXE 作为依赖放在 `src/tools/`。组件不引用主程序程序集，也不要求 NuGet 或额外服务。
 
 复制前检查所有目标文件，相同内容复用，不同内容保留现有修改并报告冲突。复制的文件及哈希纳入适配器包，应用更新不会自动替换已发布版本中的组件。
+
+## SCN 文本语义
+
+`kirikiri-scn-text` 连接共享库的 `kirikiri_psb` / `kirikiri_scn` 读写器。`SceneText` 的字段位置沿用原树路径，去除派生缓存不会重排正文 ID；内部 speaker ID 默认只作上下文，不能当作显示姓名翻译。只修改选中的正文及其朗读、搜索和可见长度字段，回填后复提比较译文、保留字段及其他数据。未知布局或缓存规则会报错。
+
+复制组件后先用 `run_engine_python` 执行 `src/tools/kirikiri_scn_text.py`，stdin 为 `{"operation":"verify","input":"work/sample.scn"}`。它检查原字节往返及一条正文的中文修改，输出有界摘要；不运行游戏。正式适配器用 `use_engine_reference` 固定依赖，再导入组件处理已解包字节。Hxv4 等封包过滤、覆盖优先级、字体与游戏显示分别验证。
+
+`run_engine_python` 也支持 `module` 参数直接调用固定库中的 `python.engines.*` / `python.archives.*` CLI，无需临时 runpy 脚本。Python 连接内置 C# 脚本解析器时，可用 `EngineReferencePython.Run("tools/adapter.py", args, BuiltinScriptParser.ExecuteJson)` 作为入口；子进程参数由 `request['builtinCommand']` 提供，JSON 输入输出统一使用 UTF-8。
 
 ## CP932 映射
 

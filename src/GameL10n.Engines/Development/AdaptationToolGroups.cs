@@ -9,18 +9,18 @@ internal static class AdaptationToolGroups
 
     private static readonly Group[] Groups =
     [
-        new("reuse", "Local engine knowledge, bundled parsers, archive components and adapter templates",
+        new("reuse", "Local engine knowledge, bundled parsers, reusable text/font components and adapter templates",
             ["inspect_engine_knowledge", "copy_engine_knowledge_tools", "inspect_existing_text", "inspect_builtin_adapter",
-                "try_builtin_adapter", "copy_adapter", "inspect_engine_component", "run_engine_component", "compose_adapter_template"]),
+                "try_builtin_adapter", "copy_adapter", "inspect_engine_component", "run_engine_component", "compose_adapter_template",
+                "inspect_adapter_component", "copy_adapter_components"]),
         new("development", "Adapter protocol, source edits, local probes, verification and publication",
             ["adapter_protocol", "write_file", "replace_text", "remove_file", "run_tool", "run_csharp", "test_adapter",
                 "update_release_files", "finish"]),
         new("research", "Shared engine guides/Python, repository search, web pages and extra downloads",
             ["search_engine_references", "inspect_engine_reference", "run_engine_python", "use_engine_reference",
                 "search_repositories", "fetch_url", "download_tool"]),
-        new("native", "Launch/file diagnostics, PE imports/disassembly and encoding/font/launcher components",
-            ["inspect_game_launch", "find_game_file", "inspect_pe_imports", "inspect_pe_code",
-                "inspect_adapter_component", "copy_adapter_components"]),
+        new("native", "Launch/file diagnostics and PE imports/disassembly",
+            ["inspect_game_launch", "find_game_file", "inspect_pe_imports", "inspect_pe_code"]),
         new("unity", "Unity managed/IL2CPP types, fields, literals and native reference candidates", ["inspect_unity_schema"]),
         new("siglus", "Siglus scene commands, display rules and bundled parser sources", ["inspect_siglus_game"])
     ];

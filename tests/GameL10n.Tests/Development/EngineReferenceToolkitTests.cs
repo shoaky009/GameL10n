@@ -187,6 +187,18 @@ public sealed class EngineReferenceToolkitTests : IDisposable
         Assert.Equal("中文 空格", runner.Last.Arguments[^1]);
         Assert.Equal("输入", runner.Last.StandardInput);
         Assert.Equal(3, downloads.Count);
+        await tools.ExecuteAsync(new("module", "run_engine_python",
+            """{"module":"python.engines.fixture","arguments":["--help"],"stdin":"模块输入"}"""), default);
+        Assert.Contains(EngineReferenceToolkit.ModuleBootstrap, runner.Last.Arguments);
+        Assert.Contains("python.engines.fixture", runner.Last.Arguments);
+        Assert.Equal("--help", runner.Last.Arguments[^1]);
+        Assert.Equal("模块输入", runner.Last.StandardInput);
+        await Assert.ThrowsAsync<InvalidDataException>(() => tools.ExecuteAsync(new("both", "run_engine_python",
+            """{"script":"work/sample.py","module":"python.engines.fixture"}"""), default));
+        await Assert.ThrowsAsync<InvalidDataException>(() => tools.ExecuteAsync(new("outside", "run_engine_python",
+            """{"module":"os"}"""), default));
+        await Assert.ThrowsAsync<FileNotFoundException>(() => tools.ExecuteAsync(new("absent", "run_engine_python",
+            """{"module":"python.engines.absent"}"""), default));
         // Subsequent search uses the pinned local catalog, not main or another HTTP request.
         using var searched = JsonDocument.Parse(await tools.ExecuteAsync(new("search", "search_engine_references", """{"query":"fixture"}"""), default));
         Assert.Contains(Revision, searched.RootElement.GetProperty("result").GetProperty("matches")[0].GetProperty("documentUrl").GetString());

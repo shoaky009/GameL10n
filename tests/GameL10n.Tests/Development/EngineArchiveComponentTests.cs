@@ -150,11 +150,11 @@ internal sealed class EngineArchiveFixture : IDisposable
     public string LastOutput { get; private set; } = "";
     public EnginePythonPaths Paths { get; }
     public IAdapterProcessRunner Runner => new TestPythonRunner(Paths.Python);
-    public EngineArchiveFixture()
+    public EngineArchiveFixture(string libraryResource = "EngineArchiveReference.zip")
     {
         Directory.CreateDirectory(Root);
         var library = Path.Combine(Root, "library.zip");
-        using var source = typeof(EngineArchiveFixture).Assembly.GetManifestResourceStream("EngineArchiveReference.zip")!;
+        using var source = typeof(EngineArchiveFixture).Assembly.GetManifestResourceStream(libraryResource)!;
         using (var file = File.Create(library)) source.CopyTo(file);
         Paths = new(FindPython(), library);
     }

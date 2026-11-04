@@ -33,6 +33,43 @@ public sealed class GeneratedAdapterRuntimeTests : IDisposable
     }
 
     [Fact]
+    public async Task ComposedPythonEntryCallsBuiltinBranchWithUnicodeJsonAndCorrectDotnetArguments()
+    {
+        using var fixture = new EngineArchiveFixture();
+        var source = Directory.CreateDirectory(Path.Combine(root, "src")).FullName;
+        Directory.CreateDirectory(Path.Combine(source, "tools"));
+        await File.WriteAllTextAsync(Path.Combine(source, "EngineReferencePython.cs"), EnginePythonBridge.Source);
+        await File.WriteAllTextAsync(Path.Combine(source, "Program.cs"), """
+            using System.Text.Json.Nodes;
+            return EngineReferencePython.Run("tools/compose.py", args,
+                json => JsonNode.Parse(json)!.ToJsonString());
+            """);
+        await File.WriteAllTextAsync(Path.Combine(source, "tools/compose.py"), """
+            import json, subprocess, sys
+            request = json.load(sys.stdin)
+            payload = {'text': request['text']}
+            result = subprocess.run(request['builtinCommand'], input=json.dumps(payload, ensure_ascii=False),
+                                    encoding='utf-8', stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if result.returncode != 0: raise RuntimeError(result.stderr)
+            assert json.loads(result.stdout) == payload
+            print(result.stdout)
+            """, new UTF8Encoding(false));
+        var toolchain = FindToolchain();
+        var runner = new AdapterProcessRunner();
+        var package = await new GeneratedAdapterCompiler(toolchain, runner).CompileWorkspaceAsync(source,
+            Path.Combine(root, "composed-package"), ["*.scn"], releaseFiles:
+            [new("src/Program.cs", "source", "Entry"), new("src/EngineReferencePython.cs", "source", "Bridge"),
+             new("tools/compose.py", "runtime", "Python entry")]);
+        const string text = "中文 日本語𠮷\\n保留控制符";
+        var request = JsonSerializer.Serialize(new { text, toolPaths = new { python = fixture.Paths.Python, engineLibrary = fixture.Paths.EngineLibrary } });
+        var result = await runner.RunAsync(new(toolchain.ExecutablePath, [Path.Combine(package.DirectoryPath, "adapter.dll")],
+            root, request), default);
+        Assert.True(result.ExitCode == 0, result.StandardError);
+        using var response = JsonDocument.Parse(result.StandardOutput);
+        Assert.Equal(text, response.RootElement.GetProperty("text").GetString());
+    }
+
+    [Fact]
     public async Task CSharpAnalysisCompilesMultipleSourcesWithLocalReferencesAndUnicodeIoWithoutAdapterSources()
     {
         var compiler = new GeneratedAdapterCompiler(FindToolchain(), new AdapterProcessRunner());

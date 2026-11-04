@@ -13,5 +13,7 @@
     <Using Include="Xunit" />
     <Compile Include="../../adapters/components/Cp932GlyphEncoding.cs" Link="Components/Cp932GlyphEncoding.cs" />
     <EmbeddedResource Include="Fixtures/engine-archives-e9b8018.zip" LogicalName="EngineArchiveReference.zip" />
+    <EmbeddedResource Include="Fixtures/kirikiri-scn-reference-442ae2f.zip" LogicalName="KirikiriScnReference.zip" />
+    <EmbeddedResource Include="Fixtures/check_kirikiri_scn_component.py" LogicalName="KirikiriScnComponentCheck.py" />
   </ItemGroup>
 </Project>

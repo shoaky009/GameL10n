@@ -11,6 +11,7 @@
     <EmbeddedResource Include="../../adapters/siglus/*.json" LogicalName="GameL10n.Siglus.%(Filename)%(Extension)" />
     <EmbeddedResource Include="../../adapters/components/Cp932GlyphEncoding.cs" LogicalName="GameL10n.Components.Cp932GlyphEncoding.cs" />
     <EmbeddedResource Include="../../adapters/components/engine_archive.py" LogicalName="GameL10n.Components.engine_archive.py" />
+    <EmbeddedResource Include="../../adapters/components/kirikiri_scn_text.py" LogicalName="GameL10n.Components.kirikiri_scn_text.py" />
     <EmbeddedResource Include="../../adapters/templates/ScriptComponentAdapter.cs" LogicalName="GameL10n.Templates.ScriptComponentAdapter.cs" />
     <EmbeddedResource Include="../../adapters/qlie-filepack3-systemfont/QlieFont.cs" LogicalName="GameL10n.Components.QlieFont.cs" />
     <EmbeddedResource Include="../../adapters/system4-ain14-msg1-fnl/GlyphRasterizer.cs" LogicalName="GameL10n.Components.GlyphRasterizer.cs" />

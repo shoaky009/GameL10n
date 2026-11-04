@@ -238,8 +238,12 @@ public sealed class EngineReferenceToolkit(string rootDirectory, HttpClient? htt
     public static IReadOnlyList<string> PythonArguments(EnginePythonPaths paths, string script, IReadOnlyList<string> arguments) =>
         ["-I", "-B", "-X", "utf8", "-c", Bootstrap, paths.EngineLibrary, script, .. arguments];
 
+    public static IReadOnlyList<string> PythonModuleArguments(EnginePythonPaths paths, string module, IReadOnlyList<string> arguments) =>
+        ["-I", "-B", "-X", "utf8", "-c", ModuleBootstrap, paths.EngineLibrary, module, .. arguments];
+
     // Explicit sys.path insertion works with the embeddable distribution's isolated ._pth configuration.
     public const string Bootstrap = "import sys,runpy,os; sys.path.insert(0,sys.argv.pop(1)); p=sys.argv.pop(1); sys.path.append(os.path.dirname(p)); sys.argv[0]=p; runpy.run_path(p,run_name='__main__')";
+    public const string ModuleBootstrap = "import sys,runpy; sys.path.insert(0,sys.argv.pop(1)); p=sys.argv.pop(1); sys.argv[0]=p; runpy.run_module(p,run_name='__main__',alter_sys=True)";
 
     private async Task<byte[]> DownloadAsync(string url, int maximum, CancellationToken ct, string name)
     {

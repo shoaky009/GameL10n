@@ -13,6 +13,18 @@ public sealed class AdapterComponentAssets(string? assetsDirectory = null)
     private const string Version = "1.0.0";
     private static readonly Component[] Components =
     [
+        new("kirikiri-scn-text", "Kirikiri PSB / KAGEX SCN 文本", "已解密、无资源的 PSB v2/v3 SCN；显式选择 language_index，内部 speaker ID 默认仅作上下文。只提取正文、显示名、选项和场景标题，派生朗读/搜索缓存不送翻译。未知元组、控制语法或缓存规则会明确失败，不猜测回填。",
+            "连接固定 GalTransl python.engines.kirikiri_psb / kirikiri_scn 语义读写器；不复制或改写 PSB 编解码算法。",
+            "use_engine_reference 固定共享依赖后，from kirikiri_scn_text import SceneText, tokens。SceneText(data, language_index=0, speaker_name=False).fields 为 (path,text,kind,node)；build({path:translation}) 返回 bytes 或无修改时 None，自动重算缓存/可见长度，复提核对修改与保留字段。语义路径用于稳定 ID。容器过滤、资源覆盖顺序、字体和游戏运行另行验证。",
+            """
+            // After copy_adapter_components(ids=["kirikiri-scn-text"]), verify one staged plain SCN without writing a wrapper:
+            run_engine_python(script="src/tools/kirikiri_scn_text.py", stdin='{"operation":"verify","input":"work/sample.scn","speakerName":false}')
+            // In src/tools/adapter.py:
+            from kirikiri_scn_text import SceneText
+            scene = SceneText(plain_scn_bytes, language_index=0, speaker_name=False)
+            # Existing fields such as scenes/0/texts/1/1/0/1 keep their IDs. Do not translate derived caches separately.
+            patched = scene.build(translations_by_semantic_path)
+            """, [new("kirikiri_scn_text.py", "src/tools/kirikiri_scn_text.py")]),
         new("cp932-glyph-map", "CP932 字形映射", "确定性分配、保留原文码位、已有映射复用、严格编解码；不修改 EXE 或字体。调用者必须确认允许码位能被原引擎遍历、查字和显示。",
             "基于现有 QLIE / System4 适配器的映射流程整理；增加全补丁保留文本及严格往返检查。",
             "GameL10n.AdapterComponents.Cp932GlyphEncoding.Plan(outputTexts, allowedSlots, preservedTexts, existingMap=null)；返回 Encoding，SlotToUnicode 为码位→真实 Unicode。new Cp932GlyphEncoding(savedMap) 用于重提取。完整文本单元接口，不用于分块流式编码。",
@@ -60,7 +72,7 @@ public sealed class AdapterComponentAssets(string? assetsDirectory = null)
                 path = file.Destination, binary = file.Binary,
                 available = !file.Binary || File.Exists(Path.Combine(directory, file.Name))
             }).ToArray(),
-            usage = "copy_adapter_components 按需复制。源码可直接参加现有 .NET 10 适配器编译，不依赖主程序程序集；tools 下的启动器源码不会成为适配器 Main。组件本身不保证当前游戏兼容，仍需资源回填及运行显示验证。"
+            usage = "copy_adapter_components 按需复制。C# 源码可参加现有 .NET 10 编译；Python 组件由 use_engine_reference 的固定共享运行库执行，支持的 JSON CLI 可用 run_engine_python 直接运行。tools 下的启动器源码不会成为适配器 Main。组件本身不保证当前游戏兼容，仍需资源回填及运行显示验证。"
         };
     }
 
@@ -122,7 +134,7 @@ public sealed class AdapterComponentAssets(string? assetsDirectory = null)
             // The editable launcher source is development material; its precompiled EXE is the patch asset.
             if (path.StartsWith("src/tools/", StringComparison.Ordinal) && path.EndsWith(".cs", StringComparison.OrdinalIgnoreCase)) continue;
             releaseFiles?.Add(new(AdapterReleaseFiles.PackagePath(path),
-                path.StartsWith("src/tools/", StringComparison.Ordinal) ? "asset" : "source", "内置编码、字体或启动组件"));
+                path.StartsWith("src/tools/", StringComparison.Ordinal) ? "asset" : "source", "内置文本、编码、字体或启动组件"));
         }
         return new
         {

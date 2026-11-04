@@ -234,7 +234,8 @@ public sealed partial class BuiltinAdapterAssets(string? assetsDirectory = null)
         $"在 src/Program.cs 实现独立协议入口。使用 BuiltinScriptParser.ExecuteJson(requestJson) 调用 {format.Key}；调用桥固定 format，返回完整 JSON 字符串。" +
         "先解包到独立工作目录，再传入该目录及相对 resourceFiles；build 的 outputDirectory 必须与 sourceDirectory 分开，随后把结果重新封包并声明所有最终输出。" +
         "二进制模式只登记固定版本的共享 DLL，由宿主提供路径，不复制到项目；无需添加编译引用，不要复制自包含 EXE。需要修改解析器时使用源码模式 src/BuiltinVnTextPatch；优先使用已编译进适配器的源码。" +
-        "调用桥不写 responseFile；Program 应按协议把最终响应写到 responseFile，并把诊断写 stderr。";
+        "调用桥不写 responseFile；Program 应按协议把最终响应写到 responseFile，并把诊断写 stderr。" +
+        "若同时 use_engine_reference 连接 Python，可直接用 EngineReferencePython.Run(\"tools/adapter.py\", args, BuiltinScriptParser.ExecuteJson) 作为 Program 入口，复用 UTF-8 JSON 和 request['builtinCommand'] 子进程调用，不另写 --builtin 分支。";
 
     private static string Example(VnTextPatchFormat format) => $$"""
         // No Main is supplied. Implement header-only probe in your protocol entry point.

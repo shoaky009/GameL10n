@@ -9,6 +9,20 @@ internal static class KirikiriTextGuidance
     internal static bool AppliesTo(string format) => format.Equals("KirikiriKs", StringComparison.OrdinalIgnoreCase)
         || format.Equals("KirikiriSoc", StringComparison.OrdinalIgnoreCase);
 
+    internal static bool MatchesReference(string query) => query == "kag"
+        || new[] { "kirikiri", "krkr", "xp3", "吉里吉里", "hxv4", "kagex", "psb", "scn" }
+            .Any(query.Contains);
+
+    internal static object ScnSupport() => new
+    {
+        component = "kirikiri-scn-text",
+        condition = "已解密 PSB v2/v3 的 KAGEX SCN；不能据此认定 XP3 的过滤器相同。Hxv4 与 Adler 等过滤变体分别确认。",
+        next = "inspect_adapter_component(id=kirikiri-scn-text)，copy_adapter_components 后直接 run_engine_python 运行组件的 verify JSON CLI，先验证一个原始解包样本。",
+        semanticLayer = "正文、显示名、选项才是独立译文；朗读/搜索缓存与可见长度由现成 kirikiri_scn writer 同步重算，禁止对它们独立翻译。未知布局要报告具体不兼容项，只扩展该层。",
+        existingApis = new[] { "python.engines.kirikiri_hxv4_text", "python.engines.kirikiri_scn", "python.engines.kirikiri_psb" },
+        moduleEntry = "run_engine_python(module=python.engines.kirikiri_hxv4_text, arguments=[--help]) 可直接查看现成 CLI，无需编写 runpy 脚本。高层 extract/pack 只解决其声明范围；最终整包重建、字体、脚本覆盖顺序仍需验证。"
+    };
+
     internal static object Describe() => new
     {
         parserReuse = Summary,

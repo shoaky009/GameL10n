@@ -129,7 +129,8 @@ public sealed partial class AdaptationTools
                 sourceUrls = ReferenceStrings(engine, "python_references").Take(16).Select(path => ReferenceUrl(path, selectedRoot)).ToArray(),
                 publicSymbols = engine.TryGetProperty("public_symbols", out var symbols) ? symbols.Clone() : (JsonElement?)null,
                 scope = Limit(Text(engine, "scope", "Read the engine page for version and stage limits."), 1000),
-                evidence = Limit(Text(engine, "evidence", "Reference only; no game verification implied."), 1000)
+                evidence = Limit(Text(engine, "evidence", "Reference only; no game verification implied."), 1000),
+                readySupport = Text(engine, "id") == "kirikiri" ? KirikiriTextGuidance.ScnSupport() : null
             }).ToArray();
         }
         catch (Exception exception) when (exception is HttpRequestException or IOException or JsonException
@@ -173,7 +174,8 @@ public sealed partial class AdaptationTools
     {
         var id = Text(item, "id", "");
         var title = Text(item, "title", "");
-        var aliases = ReferenceStrings(item, "aliases").ToArray();
+        var aliases = ReferenceStrings(item, "aliases")
+            .Concat(id == "kirikiri" ? new[] { "Hxv4", "KAGEX", "PSB SCN" } : []).ToArray();
         var exact = NormalizeReferenceQuery(id) == query ? 3
             : aliases.Any(alias => NormalizeReferenceQuery(alias) == query) ? 2
             : terms.Length > 0 && NormalizeReferenceQuery(title) == query ? 1 : 0;
@@ -209,7 +211,7 @@ public sealed partial class AdaptationTools
             new { topic = "缺口定位", url = ReferenceRoot + "guides/extending-engines.md",
                 note = "分别确认容器、解码、文本语义、回填、打包、运行显示。缺 writer 或已知算法尚未实现时继续补齐当前层；没有搜索结果不是不支持的证据。" }
         };
-        if (query == "kag" || new[] { "kirikiri", "krkr", "xp3", "吉里吉里" }.Any(query.Contains))
+        if (KirikiriTextGuidance.MatchesReference(query))
             guidance.Add(new { topic = "Kirikiri 脚本编码", url = ReferenceRoot + "engines/kirikiri.md",
                 note = KirikiriTextGuidance.Summary });
         if (query.Contains("qlie", StringComparison.Ordinal) || query.Contains("imos", StringComparison.Ordinal))

@@ -76,6 +76,22 @@ public sealed partial class AutomaticAdaptationTests
         Assert.DoesNotContain("Kirikiri 脚本编码", result.GetProperty("guidance").ToString());
     }
 
+    [Theory]
+    [InlineData("Hxv4")]
+    [InlineData("PSB SCN")]
+    [InlineData("KAGEX")]
+    public async Task ReferenceSearchFindsSemanticSupportWhenTheCatalogListsOnlyTheContainer(string query)
+    {
+        using var client = ReferenceSearchOfflineClient();
+        var tools = CreateReferenceSearchTools(client, Path.Combine(root, "workspace"));
+        using var response = JsonDocument.Parse(await tools.ExecuteAsync(new("search", "search_engine_references",
+            JsonSerializer.Serialize(new { query })), default));
+        var match = Assert.Single(response.RootElement.GetProperty("result").GetProperty("matches").EnumerateArray());
+        Assert.Equal("kirikiri", match.GetProperty("id").GetString());
+        Assert.Equal("kirikiri-scn-text", match.GetProperty("readySupport").GetProperty("component").GetString());
+        Assert.Contains("过滤", match.GetProperty("readySupport").GetProperty("condition").GetString());
+    }
+
     private AdaptationTools CreateReferenceSearchTools(HttpClient client, string workspace)
     {
         var engines = new List<object>

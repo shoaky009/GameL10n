@@ -38,9 +38,10 @@ public sealed partial class AdaptationTools
             engine, revision = pin.Revision, path,
             publicSymbols = selected.TryGetProperty("public_symbols", out var symbols) ? symbols.Clone() : (JsonElement?)null,
             pythonModules = ReferenceStrings(selected, "python_references").ToArray(),
+            readySupport = engine == "kirikiri" ? KirikiriTextGuidance.ScnSupport() : null,
             content = found < 0 ? "" : content[offset..end], queryFound = found >= 0,
             offset, nextOffset = end, more = end < content.Length, totalCharacters = content.Length,
-            usage = "先用 work/*.py 小样本调用 python.engines / python.archives 的现成函数，run_engine_python 自动提供共享解释器和库。"
+            usage = "先用现成 CLI（run_engine_python 的 module 参数）或 work/*.py 小样本调用 python.engines / python.archives 的现成函数，工具自动提供共享解释器和库。"
                 + "模块接口按引擎和版本不同，请按 publicSymbols/指南定位，不要把整个算法改写为 C#。"
                 + "只补资源选择、容器与脚本连接及版本差异。需要正式复用时 use_engine_reference 生成固定版本依赖和 C# 调用桥，"
                 + "将 JSON CLI 连接脚本放到 src/tools/*.py，再通过 test_adapter 验收。可选第三方模块不自动安装，缺依赖需明确报告。"
@@ -49,19 +50,32 @@ public sealed partial class AdaptationTools
 
     private async Task<object> RunEnginePythonAsync(JsonElement args, CancellationToken ct)
     {
-        var relative = Text(args, "script").Replace('\\', '/');
-        if (!(relative.StartsWith("work/", StringComparison.Ordinal) || relative.StartsWith("src/tools/", StringComparison.Ordinal))
-            || !relative.EndsWith(".py", StringComparison.OrdinalIgnoreCase))
-            throw new InvalidDataException("Python 脚本必须在 work/ 或 src/tools/ 中。");
-        var script = WorkspaceFiles.Resolve(workspace, relative);
-        if (!File.Exists(script)) throw new FileNotFoundException("请先写入 Python 连接脚本。", relative);
+        var relative = Text(args, "script", "").Replace('\\', '/');
+        var module = Text(args, "module", "");
+        if ((relative.Length == 0) == (module.Length == 0))
+            throw new InvalidDataException("script 和 module 必须且只能指定一个。");
+        string? script = null;
+        if (relative.Length > 0)
+        {
+            if (!(relative.StartsWith("work/", StringComparison.Ordinal) || relative.StartsWith("src/tools/", StringComparison.Ordinal))
+                || !relative.EndsWith(".py", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("Python 脚本必须在 work/ 或 src/tools/ 中。");
+            script = WorkspaceFiles.Resolve(workspace, relative);
+            if (!File.Exists(script)) throw new FileNotFoundException("请先写入 Python 连接脚本。", relative);
+        }
+        else if (!(module.StartsWith("python.engines.", StringComparison.Ordinal) || module.StartsWith("python.archives.", StringComparison.Ordinal))
+            || module.Split('.').Any(part => part.Length == 0 || !char.IsAsciiLetter(part[0]) && part[0] != '_'
+                || part.Any(character => !char.IsAsciiLetterOrDigit(character) && character != '_')))
+            throw new InvalidDataException("module 必须是固定工具库内 python.engines / python.archives 的完整模块名。");
         var arguments = args.TryGetProperty("arguments", out _) ? Strings(args, "arguments") : [];
         if (arguments.Count > 128 || arguments.Sum(value => value.Length) > 64 * 1024)
             throw new InvalidDataException("Python 参数过大。");
         var prepared = await Development.PythonAsync(ct);
+        if (script is null) _ = EngineToolkit.Read(prepared.Dependency.Reference, module.Replace('.', '/') + ".py");
         reportProgress?.Invoke("分析游戏资源", "解析工具已就绪，正在运行资源分析脚本。");
         var result = await compiler.Runner.RunAsync(new(prepared.Paths.Python,
-            EngineReferenceToolkit.PythonArguments(prepared.Paths, script, arguments), workspace, Text(args, "stdin", ""),
+            script is null ? EngineReferenceToolkit.PythonModuleArguments(prepared.Paths, module, arguments)
+                : EngineReferenceToolkit.PythonArguments(prepared.Paths, script, arguments), workspace, Text(args, "stdin", ""),
             TimeSpan.FromSeconds(Number(args, "timeoutSeconds", 120, 1, 600)), 1024 * 1024), ct);
         return new { revision = prepared.Dependency.Reference.Revision, result.ExitCode,
             stdout = Limit(result.StandardOutput, 12000), stderr = Limit(result.StandardError, 6000) };
@@ -92,6 +106,8 @@ public sealed partial class AdaptationTools
             path.StartsWith("src/tools/", StringComparison.Ordinal) ? "runtime" : "source", "共享引擎工具链连接与规则")));
         return new { files = files.Keys, prepared.Dependency,
             example = "Program.cs: return EngineReferencePython.Run(\"tools/adapter.py\");",
+            composedParserExample = "同时 copy_adapter 复用内置脚本解析器时，Program.cs 只需：return EngineReferencePython.Run(\"tools/adapter.py\", args, BuiltinScriptParser.ExecuteJson); "
+                + "Python 使用 request['builtinCommand'] 作为 subprocess 参数列表，以 UTF-8 JSON 调用。入口已处理 --builtin 分支、dotnet 主机参数及 Unicode stdin/stdout，不要另写 Main 或猜测解析器 DLL 路径。",
             protocol = "tools/adapter.py reads one JSON request from stdin and writes the standard adapter response to request['responseFile']. "
                 + "Use from python.engines.<module> import ... and the existing sourceDirectory/resourceFiles/probeRanges. "
                 + "The host supplies pinned paths in toolPaths, including after publication. Never hardcode data paths or download at runtime. "
@@ -108,10 +124,30 @@ public static class EnginePythonBridge
         using System.IO;
         using System.Text;
         using System.Text.Json;
+        using System.Text.Json.Nodes;
         using System.Threading.Tasks;
 
         internal static class EngineReferencePython
         {
+            public static int Run(string relativeScript, string[] args, Func<string, string> builtinParser)
+            {
+                using var input = new StreamReader(Console.OpenStandardInput(), new UTF8Encoding(false, true));
+                var request = input.ReadToEnd();
+                if (args.Length == 1 && args[0] == "--builtin")
+                {
+                    using var output = new StreamWriter(Console.OpenStandardOutput(), new UTF8Encoding(false));
+                    output.Write(builtinParser(request));
+                    return 0;
+                }
+                if (args.Length != 0) throw new InvalidDataException("Unknown adapter entry arguments.");
+                var json = JsonNode.Parse(request)!.AsObject();
+                var command = new JsonArray(Environment.ProcessPath!);
+                if (Path.GetFileNameWithoutExtension(Environment.ProcessPath!).Equals("dotnet", StringComparison.OrdinalIgnoreCase))
+                    command.Add(typeof(EngineReferencePython).Assembly.Location);
+                command.Add("--builtin");
+                json["builtinCommand"] = command;
+                return Run(relativeScript, json.ToJsonString());
+            }
             public static int Run(string relativeScript)
             {
                 using var input = new StreamReader(Console.OpenStandardInput(), new UTF8Encoding(false, true));
