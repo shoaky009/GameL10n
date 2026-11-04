@@ -266,6 +266,26 @@ public sealed class AutomaticAdaptationService(Func<IAdaptationAgentModel> creat
             var matchedKnowledge = tools.MatchedKnowledge.Take(6).Select(entry => new { entry.Id, entry.Revision }).ToArray();
             var knownToolNames = AdaptationTools.Definitions.Select(tool => tool.Name).ToHashSet(StringComparer.Ordinal);
             var instructionBytes = Encoding.UTF8.GetByteCount(instructions);
+            var preloadedGroups = new HashSet<string>(StringComparer.Ordinal);
+            IEnumerable<string> ToolGroupHints()
+            {
+                if (state.BuiltinDiscovery?.Candidates.Count > 0 || state.ReuseFailures.Count > 0 || matchedKnowledge.Length > 0
+                    || state.Objective != AdaptationObjective.Develop)
+                    yield return "reuse";
+                if (state.ProtocolRead || state.ReleaseFiles is { Count: > 0 } || state.VerifiedPackage is not null
+                    || Directory.Exists(Path.Combine(directory, "src")) || state.Objective != AdaptationObjective.Develop)
+                    yield return "development";
+                if (state.EngineReference is not null) yield return "research";
+                if (state.BuiltinDiscovery?.Candidates.Any(candidate => candidate.Format == "Siglus") == true)
+                    yield return "siglus";
+            }
+            void SelectContextTools(IEnumerable<AgentMessage> recent)
+            {
+                var hints = ToolGroupHints().ToArray();
+                AdaptationToolGroups.SelectForContext(state, hints, recent);
+                preloadedGroups = hints.ToHashSet(StringComparer.Ordinal);
+            }
+            SelectContextTools(state.Messages.Skip(state.HistoryStart));
             if (matchedKnowledge.Length > 0)
                 Report("匹配全局引擎经验", $"找到 {matchedKnowledge.Length} 项相关经验，将结合当前资源核对适用条件。");
             await TraceAsync(new { operation = "engine-knowledge", entries = matchedKnowledge,
@@ -278,6 +298,10 @@ public sealed class AutomaticAdaptationService(Func<IAdaptationAgentModel> creat
             var summariesWithoutTools = 0;
             var reviewLegacyProgress = continuing && state.LastImplementationTurn is null && state.TotalTurns >= 60;
             state.LastImplementationTurn ??= state.TotalTurns;
+            var reviewLegacyVerification = continuing && state.LastVerificationProgressTurn is null && state.TotalTurns >= 24;
+            state.LastVerificationProgressTurn ??= state.TotalTurns;
+            if (state.VerifiedPackage is not null)
+                state.HighestVerificationMilestone = AdapterVerificationMilestone.Complete;
             var checkpointRequested = state.Messages.Skip(state.HistoryStart).Any(message => message.Role == "user"
                 && message.Content.StartsWith("当前会话较长。下一步先调用 checkpoint", StringComparison.Ordinal));
             string CompactContext(string notes) => ObjectiveContext(state.Objective.Value)
@@ -393,13 +417,18 @@ public sealed class AutomaticAdaptationService(Func<IAdaptationAgentModel> creat
                     state.HistoryStart = state.Messages.Count;
                     state.Messages.Add(new("user", CompactContext(checkpoint)));
                     state.Messages.AddRange(recent);
+                    SelectContextTools(recent);
                     state.Checkpoint = null;
                     checkpointRequested = false;
                     await SaveAsync();
                 }
-                if (reviewLegacyProgress || state.TotalTurns - Math.Max(state.LastImplementationTurn.Value, state.LastEfficiencyReviewTurn) >= 24)
+                var reviewImplementation = reviewLegacyProgress
+                    || state.TotalTurns - Math.Max(state.LastImplementationTurn.Value, state.LastEfficiencyReviewTurn) >= 24;
+                var reviewVerification = reviewLegacyVerification
+                    || state.TotalTurns - Math.Max(state.LastVerificationProgressTurn.Value, state.LastVerificationReviewTurn) >= 24;
+                if (reviewImplementation || reviewVerification)
                 {
-                    state.Messages.Add(new("user", "收敛检查：请对照已有源码和最近验证结果，优先完成一个能进入 test_adapter 的实现步骤。"
+                    var review = reviewImplementation ? "收敛检查：请对照已有源码和最近验证结果，优先完成一个能进入 test_adapter 的实现步骤。"
                         + "若仍需调查，选一个会决定实现方案的实验，将相关已知地址和边界放在同一脚本中批量检查，得到结果后接入 src。"
                         + "区分当前游戏已有证据的阻碍与假设的边界；不要用不断增加探针和笔记代替实现，也不要反复验证未修改的失败代码。"
                         + "确实需要更多研究时，简短说明待解决的问题和决定下一步的判据，然后继续工具操作；无需为回应本提示额外调用模型或写总结文件。"
@@ -407,12 +436,22 @@ public sealed class AutomaticAdaptationService(Func<IAdaptationAgentModel> creat
                         + "保留真实限制，不降低原文、中文回填和发布验收要求。已通过完整验收时，根据本次目标直接 finish；长会话可先 checkpoint，勿重复调查或增加其他类别。\n"
                         + $"主程序记录：最近实现/验收在第 {state.LastImplementationTurn} 轮；当前{(state.VerifiedPackage is null ? "尚无通过完整验收的产物" : "已有通过完整验收的产物")}。"
                         + "已复制的解析组件用 copy_adapter 返回的完整 librarySourceFiles 编译探针，不要重新逐个拼接依赖。"
-                        + ProbeContext(state) + "\n"
-                        + ObjectiveContext(state.Objective.Value)));
-                    state.LastEfficiencyReviewTurn = state.TotalTurns;
-                    await TraceAsync(new { operation = "implementation-review", state.LastImplementationTurn,
-                        state.TotalTurns, legacy = reviewLegacyProgress });
+                        + ProbeContext(state) : "";
+                    if (reviewVerification)
+                        review += (review.Length == 0 ? "" : "\n")
+                            + "验证进展检查：已有较长时间未推进 test_adapter 的已通过阶段。连续修改源码、checkpoint、报告进度和重复失败的测试不会刷新此记录。"
+                            + "请用现有资源与已保存的发布清单尽快运行 test_adapter；已有失败时先修复明确的 diagnostics，再验证修正。"
+                            + "不要反复测试未变化的失败实现。若仍有具体阻碍，简短说明决定下一步的实验或实现判据并继续操作。"
+                            + "不降低原文、中文回填及发布验收要求；完整验收通过且当前目标完成后直接 finish。无需为此提示额外调用模型或写总结文件。\n"
+                            + $"主程序记录：最近验证进展在第 {state.LastVerificationProgressTurn} 轮；历史最高通过阶段 {state.HighestVerificationMilestone}。";
+                    state.Messages.Add(new("user", review + "\n" + ObjectiveContext(state.Objective.Value)));
+                    if (reviewImplementation) state.LastEfficiencyReviewTurn = state.TotalTurns;
+                    if (reviewVerification) state.LastVerificationReviewTurn = state.TotalTurns;
+                    await TraceAsync(new { operation = reviewImplementation ? "implementation-review" : "verification-review",
+                        state.LastImplementationTurn, state.LastVerificationProgressTurn, state.HighestVerificationMilestone,
+                        state.TotalTurns, reviewVerification, legacy = reviewLegacyProgress || reviewLegacyVerification });
                     reviewLegacyProgress = false;
+                    reviewLegacyVerification = false;
                     Report("调整分析方向", "正在核对已有成果，优先推进可验证的适配实现。");
                     await SaveAsync();
                 }
@@ -440,6 +479,7 @@ public sealed class AutomaticAdaptationService(Func<IAdaptationAgentModel> creat
                             + "\n主程序已自动缩短请求历史；这不是新的语义结论。沿用下方记录，仅在缺少具体事实时定向查回旧消息。\n"
                             + snapshot + "\n近期证据索引（messageIndex 为会话中的原始位置）：\n" + index));
                         state.Messages.AddRange(recent);
+                        SelectContextTools(recent);
                         checkpointRequested = false;
                         await TraceAsync(new { operation = "history-compacted", visibleHistoryBytes = historyBytes,
                             retainedHistoryBytes, state.HistoryStart, keptMessages = recent.Length });
@@ -457,16 +497,9 @@ public sealed class AutomaticAdaptationService(Func<IAdaptationAgentModel> creat
                     historyBytes = VisibleHistoryBytes(replay.Messages);
                     await SaveAsync();
                 }
-                // Preload from concrete current evidence; these hints only add tools and never gate access.
-                if (state.BuiltinDiscovery?.Candidates.Count > 0 || state.ReuseFailures.Count > 0 || matchedKnowledge.Length > 0
-                    || state.Objective != AdaptationObjective.Develop)
-                    AdaptationToolGroups.Enable(state, ["reuse"]);
-                if (state.ProtocolRead || state.ReleaseFiles is { Count: > 0 } || state.VerifiedPackage is not null
-                    || Directory.Exists(Path.Combine(directory, "src")) || state.Objective != AdaptationObjective.Develop)
-                    AdaptationToolGroups.Enable(state, ["development"]);
-                if (state.EngineReference is not null) AdaptationToolGroups.Enable(state, ["research"]);
-                if (state.BuiltinDiscovery?.Candidates.Any(candidate => candidate.Format == "Siglus") == true)
-                    AdaptationToolGroups.Enable(state, ["siglus"]);
+                // New evidence can preload tools once. Explicit replacement must not be undone on every request.
+                foreach (var group in ToolGroupHints())
+                    if (preloadedGroups.Add(group)) AdaptationToolGroups.Enable(state, [group]);
                 var requestTools = AdaptationToolGroups.ForRequest(state);
                 var toolDefinitionBytes = Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(requestTools));
                 var estimatedInput = (historyBytes + instructionBytes + toolDefinitionBytes) / 3 + 1;
@@ -984,7 +1017,7 @@ public sealed class AdaptationSession
     public string? Checkpoint { get; set; }
     public bool ProtocolRead { get; set; }
     public List<AgentMessage> Messages { get; set; } = [];
-    /// <summary>Tool groups remain enabled for the whole session, including archived exchanges.</summary>
+    /// <summary>Current optional schemas; context changes discard unused historical groups.</summary>
     public List<string> EnabledToolGroups { get; set; } = [];
     /// <summary>First replayed message; earlier messages remain available for evidence retrieval.</summary>
     public int HistoryStart { get; set; }
@@ -994,6 +1027,16 @@ public sealed class AdaptationSession
     public int TotalTurns { get; set; }
     public int? LastImplementationTurn { get; set; }
     public int LastEfficiencyReviewTurn { get; set; }
+    public int? LastVerificationProgressTurn { get; set; }
+    public int LastVerificationReviewTurn { get; set; }
+    public AdapterVerificationMilestone HighestVerificationMilestone { get; set; }
+    internal void RecordVerificationProgress(AdapterVerificationMilestone milestone)
+    {
+        // Reaching the same partial stage again is not convergence. A fresh complete check is.
+        if (milestone <= HighestVerificationMilestone && milestone != AdapterVerificationMilestone.Complete) return;
+        if (milestone > HighestVerificationMilestone) HighestVerificationMilestone = milestone;
+        LastVerificationProgressTurn = TotalTurns;
+    }
     public TokenUsage Usage { get; set; } = new(0, 0);
     public Dictionary<string, string> ResourceHashes { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public GeneratedAdapterPackage? VerifiedPackage { get; set; }

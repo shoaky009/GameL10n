@@ -2,7 +2,7 @@ using System.Text.Json;
 
 namespace GameL10n.Core.Development;
 
-/// <summary>Tool discovery is additive: engine hints never restrict which operations can be requested.</summary>
+/// <summary>Optional schemas can be selected without restricting which host operations are supported.</summary>
 internal static class AdaptationToolGroups
 {
     private sealed record Group(string Name, string Description, string[] Tools);
@@ -31,8 +31,9 @@ internal static class AdaptationToolGroups
 
     internal static string Parameters { get; } = JsonSerializer.Serialize(new
     {
-        groups = new { type = "array", minItems = 1, maxItems = Groups.Length + 1,
-            items = new { type = "string", @enum = Groups.Select(group => group.Name).Append("all") } }
+        groups = new { type = "array", minItems = 0, maxItems = Groups.Length + 1,
+            items = new { type = "string", @enum = Groups.Select(group => group.Name).Append("all") } },
+        mode = new { type = "string", @enum = new[] { "add", "replace" }, @default = "add" }
     });
 
     internal static string Context { get; } = """
@@ -40,14 +41,16 @@ internal static class AdaptationToolGroups
         Capability directory (group: purpose; tool names):
         """ + "\n" + string.Join("\n", Groups.Select(group =>
             $"{group.Name}: {group.Description}; {string.Join(", ", group.Tools)}")) + "\n"
-        + "Before using a tool whose schema is absent, call load_tool_groups with one or more group IDs. "
-        + "Use groups=[\"all\"] if unsure or a capability seems missing. Call alone; the next request includes the schemas. "
+        + "Before using a tool whose schema is absent, call load_tool_groups with the relevant group IDs. "
+        + "The default mode=add enables more schemas; mode=replace selects only the supplied groups (an empty array keeps basic tools only). "
+        + "Use replace when the working set changes; all is available for a broad inspection, not required when unsure. "
+        + "Call alone; the next request includes the schemas. "
         + "Loading is local, requires no downloads and does not execute the loaded tools. "
-        + "Enabled groups persist through checkpoints, restarts and model changes; no phase locks or unloading.\n";
+        + "On checkpoint, resume or model change, unused groups are trimmed to current context and recent operations. "
+        + "Any group can be loaded again; there are no phase locks.\n";
 
     internal static IReadOnlyList<AgentToolDefinition> ForRequest(AdaptationSession session)
     {
-        if (session.EnabledToolGroups.Contains("all")) return AdaptationTools.Definitions;
         // New tools default to visible until deliberately assigned to an optional group.
         return AdaptationTools.Definitions.Where(tool => !GroupByTool.TryGetValue(tool.Name, out var group)
             || session.EnabledToolGroups.Contains(group)).ToArray();
@@ -55,9 +58,8 @@ internal static class AdaptationToolGroups
 
     internal static bool Enable(AdaptationSession session, IEnumerable<string> groups)
     {
-        if (session.EnabledToolGroups.Contains("all")) return false;
         var changed = false;
-        foreach (var group in groups)
+        foreach (var group in Expand(groups))
             if (!session.EnabledToolGroups.Contains(group))
             {
                 session.EnabledToolGroups.Add(group);
@@ -69,40 +71,60 @@ internal static class AdaptationToolGroups
     internal static void EnableForTools(AdaptationSession session, IEnumerable<string> tools) =>
         Enable(session, tools.Where(GroupByTool.ContainsKey).Select(tool => GroupByTool[tool]));
 
+    internal static void SelectForContext(AdaptationSession session, IEnumerable<string> hints,
+        IEnumerable<AgentMessage> recent)
+    {
+        session.EnabledToolGroups.Clear();
+        Enable(session, hints);
+        // Read only the working tail, not all archived calls. Old research must not keep schemas alive forever.
+        foreach (var message in recent.Where(message => message.Role == "assistant").TakeLast(4))
+            EnableForTools(session, ToolNames(message));
+        EnableForTools(session, session.PendingCalls.Select(call => call.Name));
+    }
+
     internal static object Load(AdaptationSession session, JsonElement args)
     {
+        var mode = args.TryGetProperty("mode", out var selectedMode)
+            ? selectedMode.ValueKind == JsonValueKind.String ? selectedMode.GetString() : null
+            : "add";
+        if (mode is not ("add" or "replace")) throw new InvalidDataException("mode 必须为 add 或 replace。");
         if (!args.TryGetProperty("groups", out var value) || value.ValueKind != JsonValueKind.Array
-            || value.GetArrayLength() is < 1 || value.GetArrayLength() > Groups.Length + 1)
-            throw new InvalidDataException("groups 必须为非空工具组数组，可使用 all 加载全部工具。");
+            || value.GetArrayLength() > Groups.Length + 1 || mode == "add" && value.GetArrayLength() == 0)
+            throw new InvalidDataException("groups 必须为工具组数组；仅 mode=replace 时允许空数组。");
         var names = value.EnumerateArray().Select(item => item.ValueKind == JsonValueKind.String ? item.GetString() : null).ToArray();
         if (names.Any(name => !IsKnownGroup(name)))
             throw new InvalidDataException("未知工具组。可用组：" + string.Join(", ", Groups.Select(group => group.Name).Append("all")));
+        if (mode == "replace") session.EnabledToolGroups.Clear();
         Enable(session, names.Select(name => name!));
         return new { enabledGroups = session.EnabledToolGroups.ToArray(), availableToolCount = ForRequest(session).Count };
     }
 
     internal static void Restore(AdaptationSession session)
     {
-        session.EnabledToolGroups = (session.EnabledToolGroups ?? []).Where(IsKnownGroup).Distinct(StringComparer.Ordinal).ToList();
+        session.EnabledToolGroups = Expand((session.EnabledToolGroups ?? []).Where(IsKnownGroup))
+            .Distinct(StringComparer.Ordinal).ToList();
         EnableForTools(session, session.PendingCalls.Select(call => call.Name));
-        // Include archived/provider-only calls before model changes or interrupted batches clear pending calls.
-        foreach (var message in session.Messages)
+    }
+
+    private static IEnumerable<string> Expand(IEnumerable<string> groups) => groups.SelectMany(group =>
+        group == "all" ? Groups.Select(item => item.Name) : [group]);
+
+    private static IEnumerable<string> ToolNames(AgentMessage message)
+    {
+        foreach (var call in message.ToolCalls ?? []) yield return call.Name;
+        if (message.ProviderData is not { } data) yield break;
+        if (data.ValueKind == JsonValueKind.Array)
         {
-            EnableForTools(session, (message.ToolCalls ?? []).Select(call => call.Name));
-            if (message.ProviderData is not { } data) continue;
-            if (data.ValueKind == JsonValueKind.Array)
-            {
-                foreach (var item in data.EnumerateArray())
-                    if (String(item, "type") == "function_call" && String(item, "name") is { } name)
-                        EnableForTools(session, [name]);
-            }
-            else if (data.ValueKind == JsonValueKind.Object && data.TryGetProperty("tool_calls", out var calls)
-                && calls.ValueKind == JsonValueKind.Array)
-                foreach (var call in calls.EnumerateArray())
-                    if (call.ValueKind == JsonValueKind.Object && call.TryGetProperty("function", out var function)
-                        && String(function, "name") is { } name)
-                        EnableForTools(session, [name]);
+            foreach (var item in data.EnumerateArray())
+                if (String(item, "type") == "function_call" && String(item, "name") is { } name)
+                    yield return name;
         }
+        else if (data.ValueKind == JsonValueKind.Object && data.TryGetProperty("tool_calls", out var calls)
+            && calls.ValueKind == JsonValueKind.Array)
+            foreach (var call in calls.EnumerateArray())
+                if (call.ValueKind == JsonValueKind.Object && call.TryGetProperty("function", out var function)
+                    && String(function, "name") is { } name)
+                    yield return name;
     }
 
     private static bool IsKnownGroup(string? name) => name == "all" || Groups.Any(group => group.Name == name);

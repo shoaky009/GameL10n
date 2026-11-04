@@ -29,7 +29,7 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
 
     public static IReadOnlyList<AgentToolDefinition> Definitions { get; } =
     [
-        Define("load_tool_groups", "Append tool schemas from the capability directory for the next request. Supply one or more group IDs, or all when unsure. Groups remain loaded for this session. Local only; does not run tools or download anything. Call alone.",
+        Define("load_tool_groups", "Select tool schemas for the next request. mode=add (default) loads more groups; mode=replace keeps only the supplied groups, or basic tools with groups=[]. Load the relevant groups; all is available for broad inspection. Checkpoint/resume/model changes trim unused schemas, and any group can be reloaded. Local only; does not run tools or download anything. Call alone.",
             AdaptationToolGroups.Parameters, "groups"),
         Define("report_progress", "Brief Chinese progress for the user when evidence or direction changes. exploring: unresolved issue and next probe; breakthrough: observed evidence and what it enables; implementing: established route; correction: retract an earlier claim. <=400 characters, no private reasoning, percentages or ETA. Accompany normal tools in the same response; no extra model turn. This report never validates or publishes an adapter.",
             """{"kind":{"type":"string","enum":["exploring","breakthrough","implementing","correction"]},"message":{"type":"string","minLength":1,"maxLength":400}}""", "kind", "message"),

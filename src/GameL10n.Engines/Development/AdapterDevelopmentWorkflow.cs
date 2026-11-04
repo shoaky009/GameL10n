@@ -17,6 +17,12 @@ public enum AdapterTestStage
     [JsonStringEnumMemberName("finish-ready")] FinishReady
 }
 
+[JsonConverter(typeof(JsonStringEnumConverter<AdapterVerificationMilestone>))]
+public enum AdapterVerificationMilestone
+{
+    None, Compiled, Discovery, OriginalRoundtrip, Complete
+}
+
 public sealed record AdapterTestResult(bool Passed, AdapterTestStage Stage, IReadOnlyList<string> Diagnostics,
     string? Id = null, string? Version = null, bool Reused = false,
     long CompileMs = 0, long DiscoveryMs = 0, long VerificationMs = 0)
@@ -86,6 +92,7 @@ public sealed partial class AdapterDevelopmentWorkflow(AdaptationRequest request
             throw;
         }
         CheckReleaseGameInputs(package);
+        session.RecordVerificationProgress(AdapterVerificationMilestone.Compiled);
         var compileMs = timer.ElapsedMilliseconds;
         timer.Restart();
         var adapter = new GeneratedGameAdapter(package, compiler.Toolchain, compiler.Runner, store.WorkDirectory, EngineToolkit, reportProgress);
@@ -100,6 +107,7 @@ public sealed partial class AdapterDevelopmentWorkflow(AdaptationRequest request
                 CompileMs: compileMs, DiscoveryMs: timer.ElapsedMilliseconds), package,
                 cacheable: (error is not IOException || error is InvalidDataException) && error.InnerException is not IOException);
         }
+        session.RecordVerificationProgress(AdapterVerificationMilestone.Discovery);
         var discoveryMs = timer.ElapsedMilliseconds;
         if (discoveryOnly)
         {
@@ -114,8 +122,13 @@ public sealed partial class AdapterDevelopmentWorkflow(AdaptationRequest request
             sourceIsSnapshot: true, coverage: session.TextCoverage,
             baselineUnits: session.Objective == AdaptationObjective.Repair ? request.BaselineUnits : null);
         session.VerificationDiagnostics = verification.Diagnostics.ToArray();
+        if (verification.OriginalRoundtripPassed)
+            session.RecordVerificationProgress(AdapterVerificationMilestone.OriginalRoundtrip);
         if (verification.Passed)
+        {
+            session.RecordVerificationProgress(AdapterVerificationMilestone.Complete);
             ReportVerifiedProgress("原文回填、中文回填和局部试译的资源验收已通过；游戏启动与显示仍需实际验证。");
+        }
         else if (verification.OriginalRoundtripPassed)
             ReportVerifiedProgress("原文回填已通过逐字节验证；中文或局部试译验收尚未通过，正在修复。");
         if (verification.Passed)

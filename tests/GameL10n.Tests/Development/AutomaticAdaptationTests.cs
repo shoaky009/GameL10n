@@ -1414,7 +1414,8 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         var model = new FakeModel(context =>
         {
             var restored = Assert.Single(context.Messages, item => item.Role == "user" && item.Content.Contains("恢复快照", StringComparison.Ordinal));
-            Assert.Contains(context.Tools, tool => tool.Name == "inspect_pe_code");
+            Assert.DoesNotContain(context.Tools, tool => tool.Name == "inspect_pe_code");
+            Assert.Contains("inspect_pe_code", context.KnownToolNames!);
             Assert.Contains(context.Tools, tool => tool.Name == "test_adapter");
             Assert.DoesNotContain(context.Tools, tool => tool.Name == "inspect_unity_schema");
             Assert.Contains("Parser.cs", restored.Content);
