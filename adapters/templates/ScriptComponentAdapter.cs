@@ -17,13 +17,24 @@ internal static class ScriptComponentAdapter
     {
         Console.InputEncoding = new UTF8Encoding(false);
         Console.OutputEncoding = new UTF8Encoding(false);
+        var input = Console.In.ReadToEnd();
+        var response = JsonNode.Parse(ExecuteJson(input, AppContext.BaseDirectory))!.AsObject();
+        JsonNode? request = null;
+        try { request = JsonNode.Parse(input); } catch (JsonException) { }
+        if (request?["responseFile"]?.GetValue<string>() is { } path) File.WriteAllText(path, response.ToJsonString(), new UTF8Encoding(false));
+        else Console.WriteLine(response.ToJsonString());
+        return response["success"]!.GetValue<bool>() ? 0 : 1;
+    }
+
+    public static string ExecuteJson(string input, string adapterDirectory)
+    {
         JsonObject? request = null;
         JsonObject response;
         try
         {
-            request = JsonNode.Parse(Console.In.ReadToEnd())!.AsObject();
+            request = JsonNode.Parse(input)!.AsObject();
             if (request["protocolVersion"]?.GetValue<int>() != 1) throw new InvalidDataException("不支持的协议版本。");
-            var config = JsonSerializer.Deserialize<Config>(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "tools", "adapter-template.json")), Json)
+            var config = JsonSerializer.Deserialize<Config>(File.ReadAllText(Path.Combine(adapterDirectory, "tools", "adapter-template.json")), Json)
                 ?? throw new InvalidDataException("缺少模板配置。");
             if (config.SchemaVersion != 1 || config.TemplateVersion != 1 || config.Format != BuiltinScriptParser.Format
                 || config.ScriptExtensions.Length == 0) throw new InvalidDataException("模板与组件配置版本不一致。");
@@ -39,9 +50,7 @@ internal static class ScriptComponentAdapter
             response = new() { ["protocolVersion"] = 1, ["success"] = false,
                 ["error"] = "组件模板处理失败：" + error.GetBaseException().Message };
         }
-        if (request?["responseFile"]?.GetValue<string>() is { } path) File.WriteAllText(path, response.ToJsonString(), new UTF8Encoding(false));
-        else Console.WriteLine(response.ToJsonString());
-        return response["success"]!.GetValue<bool>() ? 0 : 1;
+        return response.ToJsonString();
     }
 
     private sealed record Config(int SchemaVersion, string TemplateId, int TemplateVersion, string Format,
@@ -206,7 +215,8 @@ internal static class ScriptComponentAdapter
                 operation, archive, responseFile = responsePath, outputDirectory = directory, outputFile = output,
                 filter = config.Filter, extensions = config.ScriptExtensions, replacements }, Json)!.AsObject();
             input["toolPaths"] = request["toolPaths"]!.DeepClone();
-            var exit = EngineReferencePython.Run("tools/engine_archive.py", input.ToJsonString());
+            input["adapterDirectory"] = request["adapterDirectory"]?.DeepClone();
+            var exit = EngineReferencePython.Run("tools/engine_archive.py", input.ToJsonString(), forwardOutput: false);
             if (!File.Exists(responsePath)) throw new InvalidDataException("封包组件未返回结果。");
             var response = JsonNode.Parse(File.ReadAllText(responsePath))!.AsObject();
             if (exit != 0 || response["success"]?.GetValue<bool>() != true)

@@ -11,7 +11,8 @@ namespace GameL10n.Core.Development;
 public sealed record EngineReferencePin(string Revision, string SourceSha256, string LibrarySha256, string Kind = "galtransl");
 public sealed record EnginePythonDependency(EngineReferencePin Reference, string PythonVersion, string PythonSha256);
 public sealed record EnginePythonPaths(string Python, string EngineLibrary);
-public sealed record AdapterToolPaths(string? Python, string? EngineLibrary, string? VnTextPatch);
+public sealed record AdapterToolPaths(string? Python, string? EngineLibrary, string? VnTextPatch,
+    IReadOnlyList<string>? HostCommand = null);
 
 /// <summary>One shared source archive and portable interpreter, outside game/project directories.</summary>
 public sealed class EngineReferenceToolkit(string rootDirectory, HttpClient? httpClient = null,
@@ -237,6 +238,9 @@ public sealed class EngineReferenceToolkit(string rootDirectory, HttpClient? htt
 
     public static IReadOnlyList<string> PythonArguments(EnginePythonPaths paths, string script, IReadOnlyList<string> arguments) =>
         ["-I", "-B", "-X", "utf8", "-c", Bootstrap, paths.EngineLibrary, script, .. arguments];
+
+    public static IReadOnlyList<string> AdapterHostCommand(PinnedDotNetToolchain toolchain) =>
+        [toolchain.ExecutablePath, Path.Combine(AppContext.BaseDirectory, "tools", "adapter-host", "GameL10n.AdapterHost.dll")];
 
     public static IReadOnlyList<string> PythonModuleArguments(EnginePythonPaths paths, string module, IReadOnlyList<string> arguments) =>
         ["-I", "-B", "-X", "utf8", "-c", ModuleBootstrap, paths.EngineLibrary, module, .. arguments];

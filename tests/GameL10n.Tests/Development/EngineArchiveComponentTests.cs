@@ -150,6 +150,17 @@ internal sealed class EngineArchiveFixture : IDisposable
     public string LastOutput { get; private set; } = "";
     public EnginePythonPaths Paths { get; }
     public IAdapterProcessRunner Runner => new TestPythonRunner(Paths.Python);
+    public static IReadOnlyList<string> HostCommand
+    {
+        get
+        {
+            var directory = new DirectoryInfo(AppContext.BaseDirectory);
+            while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "global.json"))) directory = directory.Parent;
+            if (directory is null) throw new InvalidOperationException("找不到测试工具链。");
+            return [Path.Combine(directory.FullName, ".tools", "dotnet", "dotnet.exe"), "exec", "--runtimeconfig",
+                Path.Combine(AppContext.BaseDirectory, "GameL10n.Tests.runtimeconfig.json"), typeof(GameL10n.AdapterHost.Program).Assembly.Location];
+        }
+    }
     public EngineArchiveFixture(string libraryResource = "EngineArchiveReference.zip")
     {
         Directory.CreateDirectory(Root);
@@ -188,12 +199,18 @@ internal sealed class EngineArchiveFixture : IDisposable
         public Task<AdapterProcessResult> RunAsync(AdapterProcessRequest request, CancellationToken ct)
         {
             if (Path.GetFileName(request.ExecutablePath) == "python.exe") request = request with { ExecutablePath = python };
-            else if (request.StandardInput.StartsWith('{'))
+            if (request.AdapterHostCommand is not null) request = request with { AdapterHostCommand = HostCommand };
+            if (request.StandardInput.StartsWith('{'))
             {
                 var input = System.Text.Json.Nodes.JsonNode.Parse(request.StandardInput)!;
                 if (input["toolPaths"]?["python"] is not null)
                 {
                     input["toolPaths"]!["python"] = python;
+                    request = request with { StandardInput = input.ToJsonString() };
+                }
+                if (input["toolPaths"]?["hostCommand"] is not null)
+                {
+                    input["toolPaths"]!["hostCommand"] = System.Text.Json.JsonSerializer.SerializeToNode(HostCommand);
                     request = request with { StandardInput = input.ToJsonString() };
                 }
             }

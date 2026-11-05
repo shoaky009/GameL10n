@@ -128,6 +128,8 @@ public sealed class GeneratedGameAdapter(
         if ((File.Exists(dependency) || File.Exists(WorkspaceFiles.Resolve(package.DirectoryPath, BuiltinAdapterAssets.SharedDependencyPath))) && engineToolkit is null)
             throw new GeneratedAdapterException("该适配器依赖共享引擎工具，请通过完整应用加载。");
         var toolPaths = engineToolkit is null ? null : await engineToolkit.ResolvePackageAsync(package.DirectoryPath, cancellationToken);
+        if (package.IsPython && toolPaths is not null)
+            toolPaths = toolPaths with { HostCommand = EngineReferenceToolkit.AdapterHostCommand(toolchain) };
         var python = package.IsPython ? toolPaths is { Python: not null, EngineLibrary: not null }
             ? new EnginePythonPaths(toolPaths.Python, toolPaths.EngineLibrary)
             : throw new GeneratedAdapterException("Python 适配器缺少固定版本的共享解释器或引擎库。") : null;
@@ -211,6 +213,7 @@ public sealed class GeneratedGameAdapter(
                 var request = JsonSerializer.Serialize(new
                 {
                     protocolVersion = package.ProtocolVersion, operation, sourceDirectory = source, outputDirectory = output,
+                    adapterDirectory = package.IsPython ? package.DirectoryPath : null,
                     resourceFiles = resources, probeFiles,
                     probeRanges = probeReads?.Ranges, probeReadLimits = probeReads is null ? null : GeneratedProbeReads.Limits,
                     translations = translationsPath is null ? translations : null, translationsFile = translationsPath,

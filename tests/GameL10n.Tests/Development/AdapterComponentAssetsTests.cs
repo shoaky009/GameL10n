@@ -14,7 +14,7 @@ public sealed class AdapterComponentAssetsTests : IDisposable
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
     [Fact]
-    public void WholePatchPlanPreservesJapaneseAndExistingMappingsRegardlessOfTextOrder()
+    public async Task WholePatchPlanPreservesJapaneseAndExistingMappingsRegardlessOfTextOrder()
     {
         string[] text = ["こんにちは。\ue000", "译文与简体𠮷"];
         int[] slots = [0xe003, 0xe001, 0xe000, 0xe002, 0xe004, 0xe005, 0xe006, 0xe007];
@@ -28,6 +28,15 @@ public sealed class AdapterComponentAssetsTests : IDisposable
         var restored = new Cp932GlyphEncoding(first.SlotToUnicode);
         foreach (var value in text) Assert.Equal(value, restored.GetString(first.GetBytes(value)));
         Assert.Single(saved);
+        using var fixture = new EngineArchiveFixture();
+        var command = EngineArchiveFixture.HostCommand;
+        var response = await fixture.Runner.RunAsync(new(command[0], command.Skip(1).Append("component").ToArray(), fixture.Root,
+            JsonSerializer.Serialize(new { protocolVersion = 1, operation = "glyph_plan", texts = text, allowedSlots = slots,
+                preservedTexts = new[] { "UI\ue003" }, map = saved }, Json)), default);
+        Assert.True(response.ExitCode == 0, response.StandardError);
+        using var parsed = JsonDocument.Parse(response.StandardOutput);
+        var actual = parsed.RootElement.GetProperty("result").GetProperty("map").Deserialize<Dictionary<int, int>>(Json)!;
+        Assert.Equal(first.SlotToUnicode.OrderBy(pair => pair.Key), actual.OrderBy(pair => pair.Key));
     }
 
     [Fact]

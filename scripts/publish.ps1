@@ -57,6 +57,8 @@ if (-not $SkipBuild) {
     if ($LASTEXITCODE -ne 0) { throw 'Desktop publish failed.' }
     & (Join-Path $PSScriptRoot 'dotnet.ps1') publish (Join-Path $repoRoot 'tools/GameL10n.DataTool/GameL10n.DataTool.csproj') -c Release -r win-x64 @sharedRuntimeArguments "-p:RuntimeFrameworkVersion=$runtimeVersion" '-p:AppHostRelativeDotNet=../../toolchain' -o (Join-Path $output 'tools/data')
     if ($LASTEXITCODE -ne 0) { throw 'Data tool publish failed.' }
+    & (Join-Path $PSScriptRoot 'dotnet.ps1') publish (Join-Path $repoRoot 'tools/GameL10n.AdapterHost/GameL10n.AdapterHost.csproj') -c Release -r win-x64 @sharedRuntimeArguments "-p:RuntimeFrameworkVersion=$runtimeVersion" '-p:AppHostRelativeDotNet=../../toolchain' -o (Join-Path $output 'tools/adapter-host')
+    if ($LASTEXITCODE -ne 0) { throw 'Adapter component host publish failed.' }
     & (Join-Path $PSScriptRoot 'dotnet.ps1') publish (Join-Path $repoRoot 'tools/GameL10n.VnTextPatch/GameL10n.VnTextPatch.csproj') -c Release -r win-x64 @sharedRuntimeArguments "-p:RuntimeFrameworkVersion=$runtimeVersion" '-p:AppHostRelativeDotNet=../../toolchain' '-p:PublishSingleFile=true' '-p:IncludeNativeLibrariesForSelfExtract=false' '-p:DebugType=None' '-p:DebugSymbols=false' -o (Join-Path $output 'tools/vntextpatch')
     if ($LASTEXITCODE -ne 0) { throw 'Built-in script tool publish failed.' }
 }
@@ -64,7 +66,7 @@ $desktopRuntime = Get-Content -LiteralPath (Join-Path $output 'GameL10n.Desktop.
 if ($desktopRuntime.runtimeOptions.framework.name -ne 'Microsoft.NETCore.App' -or $desktopRuntime.runtimeOptions.framework.version -ne $runtimeVersion) {
     throw 'The desktop runtime configuration does not match the packaged .NET runtime. Rebuild with the pinned SDK.'
 }
-foreach ($relative in @('.', 'tools/data', 'tools/vntextpatch')) {
+foreach ($relative in @('.', 'tools/data', 'tools/vntextpatch', 'tools/adapter-host')) {
     if (Test-Path -LiteralPath (Join-Path $output "$relative/coreclr.dll")) {
         throw 'Duplicate runtime files remain in the output. Run publish.ps1 without -SkipBuild to rebuild the package.'
     }

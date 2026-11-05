@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <StartupObject>GameL10n.AdapterHost.Program</StartupObject>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../adapters/templates/ScriptComponentAdapter.cs" Link="ScriptComponentAdapter.cs" />
+    <Compile Include="../../adapters/components/EngineReferencePython.cs" Link="EngineReferencePython.cs" />
+    <Compile Include="../../adapters/components/Cp932GlyphEncoding.cs" Link="Cp932GlyphEncoding.cs" />
+    <Compile Include="../../adapters/qlie-filepack3-systemfont/QlieFont.cs" Link="QlieFont.cs" />
+    <Compile Include="../../adapters/system4-ain14-msg1-fnl/GlyphRasterizer.cs" Link="GlyphRasterizer.cs" />
+  </ItemGroup>
+</Project>

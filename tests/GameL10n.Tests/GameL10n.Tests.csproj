@@ -10,8 +10,8 @@
     <PackageReference Include="xunit.runner.visualstudio" Version="3.0.2"><PrivateAssets>all</PrivateAssets></PackageReference>
     <ProjectReference Include="../../src/GameL10n.Core/GameL10n.Core.csproj" />
     <ProjectReference Include="../../tools/GameL10n.VnTextPatch/GameL10n.VnTextPatch.csproj" />
+    <ProjectReference Include="../../tools/GameL10n.AdapterHost/GameL10n.AdapterHost.csproj" />
     <Using Include="Xunit" />
-    <Compile Include="../../adapters/components/Cp932GlyphEncoding.cs" Link="Components/Cp932GlyphEncoding.cs" />
     <EmbeddedResource Include="Fixtures/engine-archives-e9b8018.zip" LogicalName="EngineArchiveReference.zip" />
     <EmbeddedResource Include="Fixtures/kirikiri-scn-reference-442ae2f.zip" LogicalName="KirikiriScnReference.zip" />
     <EmbeddedResource Include="Fixtures/check_kirikiri_scn_component.py" LogicalName="KirikiriScnComponentCheck.py" />
