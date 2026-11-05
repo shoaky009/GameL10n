@@ -48,7 +48,13 @@ public sealed record GeneratedAdapterPackage(string Id, string Version, string D
     IReadOnlyList<string>? ResourcePatterns = null,
     IReadOnlyDictionary<string, string>? PackageFiles = null,
     int ProtocolVersion = 1, int ManifestVersion = 1,
-    IReadOnlyList<AdapterReleaseFile>? ReleaseFiles = null, AdapterRecognition? Recognition = null);
+    IReadOnlyList<AdapterReleaseFile>? ReleaseFiles = null, AdapterRecognition? Recognition = null)
+{
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool IsPython => ManifestVersion == 4;
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string EntryFile => IsPython ? "src/adapter.py" : "adapter.dll";
+}
 
 public sealed record GeneratedAdapterVerification(bool Passed, IReadOnlyList<string> Diagnostics,
     bool OriginalRoundtripPassed = false, bool Cacheable = true);

@@ -128,6 +128,9 @@ public sealed class GeneratedGameAdapter(
         if ((File.Exists(dependency) || File.Exists(WorkspaceFiles.Resolve(package.DirectoryPath, BuiltinAdapterAssets.SharedDependencyPath))) && engineToolkit is null)
             throw new GeneratedAdapterException("该适配器依赖共享引擎工具，请通过完整应用加载。");
         var toolPaths = engineToolkit is null ? null : await engineToolkit.ResolvePackageAsync(package.DirectoryPath, cancellationToken);
+        var python = package.IsPython ? toolPaths is { Python: not null, EngineLibrary: not null }
+            ? new EnginePythonPaths(toolPaths.Python, toolPaths.EngineLibrary)
+            : throw new GeneratedAdapterException("Python 适配器缺少固定版本的共享解释器或引擎库。") : null;
         var stage = operation switch { "probe" => "识别引擎", "extract" => "提取游戏文本", "build" => "生成补丁文件", _ => "校验补丁资源" };
         reportProgress?.Invoke(stage, "正在准备资源并运行 " + (package.Family?.Name ?? package.Id) + " 适配器。");
         Directory.CreateDirectory(workRoot);
@@ -213,8 +216,9 @@ public sealed class GeneratedGameAdapter(
                     translations = translationsPath is null ? translations : null, translationsFile = translationsPath,
                     responseFile = responsePath, toolPaths
                 }, Json);
-                var result = await runner.RunAsync(new AdapterProcessRequest(toolchain.ExecutablePath,
-                    [Path.Combine(package.DirectoryPath, "adapter.dll")], workspace, request,
+                var result = await runner.RunAsync(new AdapterProcessRequest(python?.Python ?? toolchain.ExecutablePath,
+                    python is null ? [Path.Combine(package.DirectoryPath, "adapter.dll")]
+                        : EngineReferenceToolkit.PythonArguments(python, WorkspaceFiles.Resolve(package.DirectoryPath, package.EntryFile), []), workspace, request,
                     Timeout: TimeSpan.FromMinutes(10), MaximumOutputBytes: package.ManifestVersion >= 2 ? 8L * 1024 * 1024 : 128L * 1024 * 1024,
                     VnTextPatchAssemblyPath: toolPaths?.VnTextPatch), cancellationToken);
                 reportProgress?.Invoke(stage, "资源处理完成，正在校验结果与原文件完整性。");

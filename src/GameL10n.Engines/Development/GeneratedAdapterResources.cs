@@ -73,7 +73,7 @@ internal static class GeneratedAdapterResources
 
     internal static void VerifyPackage(GeneratedAdapterPackage package)
     {
-        if (package.ProtocolVersion != 1 || package.ManifestVersion is < 1 or > 3)
+        if (package.ProtocolVersion != 1 || package.ManifestVersion is < 1 or > 4)
             throw new GeneratedAdapterException("The local adapter uses an unsupported package or CLI protocol version.");
         if (package.Family is { } family)
         {
@@ -84,8 +84,8 @@ internal static class GeneratedAdapterResources
         if (package.ResourceFiles is null) throw new GeneratedAdapterException("The resource manifest is invalid.");
         foreach (var file in package.ResourceFiles) _ = WorkspaceFiles.Resolve(package.DirectoryPath, file);
         if (package.ResourcePatterns is { } patterns) ValidatePatterns(patterns);
-        if (HashFile(WorkspaceFiles.Resolve(package.DirectoryPath, "adapter.dll")) != package.AssemblySha256)
-            throw new GeneratedAdapterException("The local adapter assembly failed its integrity check.");
+        if (HashFile(WorkspaceFiles.Resolve(package.DirectoryPath, package.EntryFile)) != package.AssemblySha256)
+            throw new GeneratedAdapterException("The local adapter entry point failed its integrity check.");
         if (package.ManifestVersion == 1)
         {
             if (HashFile(WorkspaceFiles.Resolve(package.DirectoryPath, "Program.cs")) != package.SourceSha256)
@@ -94,13 +94,18 @@ internal static class GeneratedAdapterResources
         }
         if (package.ResourcePatterns is not { Count: > 0 })
             throw new GeneratedAdapterException("The adapter package has no resource discovery rules.");
-        if (package.PackageFiles is not { Count: > 0 } files || !files.ContainsKey("adapter.dll")
-            || !files.ContainsKey("adapter.runtimeconfig.json"))
+        if (package.PackageFiles is not { Count: > 0 } files || !files.ContainsKey(package.EntryFile)
+            || !package.IsPython && !files.ContainsKey("adapter.runtimeconfig.json"))
             throw new GeneratedAdapterException("The adapter package has an incomplete file manifest.");
         if (package.ManifestVersion >= 3)
         {
             var release = AdapterReleaseFiles.Validate(package.ReleaseFiles);
-            var expected = release.Select(file => file.Path).Append("adapter.dll").Append("adapter.runtimeconfig.json");
+            if (package.IsPython && (release.Any(file => file.Role == "source" && !file.Path.EndsWith(".py", StringComparison.OrdinalIgnoreCase))
+                || !release.Any(file => file.Path == "src/adapter.py" && file.Role == "source")
+                || !release.Any(file => file.Path == EngineReferenceToolkit.DependencyPath && file.Role == "runtime")))
+                throw new GeneratedAdapterException("Python 适配器缺少入口或固定解释器依赖，或包含非 Python 源码。");
+            var expected = package.IsPython ? release.Select(file => file.Path)
+                : release.Select(file => file.Path).Append("adapter.dll").Append("adapter.runtimeconfig.json");
             if (!files.Keys.ToHashSet(StringComparer.Ordinal).SetEquals(expected))
                 throw new GeneratedAdapterException("正式包文件与 releaseFiles 发布清单不一致。");
         }
@@ -114,7 +119,7 @@ internal static class GeneratedAdapterResources
             if (HashFile(WorkspaceFiles.Resolve(package.DirectoryPath, pair.Key)) != pair.Value)
                 throw new GeneratedAdapterException("The local adapter file failed its integrity check: " + pair.Key);
         var sources = files.Where(pair => pair.Key.StartsWith("src/", StringComparison.Ordinal)
-            && pair.Key.EndsWith(".cs", StringComparison.OrdinalIgnoreCase)).ToArray();
+            && pair.Key.EndsWith(package.IsPython ? ".py" : ".cs", StringComparison.OrdinalIgnoreCase)).ToArray();
         if (sources.Length == 0 || HashEntries(sources) != package.SourceSha256)
             throw new GeneratedAdapterException("The adapter source manifest is invalid.");
     }

@@ -15,6 +15,48 @@ public sealed class GeneratedAdapterRuntimeTests : IDisposable
     public GeneratedAdapterRuntimeTests() => Directory.CreateDirectory(root);
 
     [Fact]
+    public async Task PythonAdapterBuildsPublishesAndLoadsWithoutDotnetAndRejectsModifiedSource()
+    {
+        using var fixture = new EngineArchiveFixture();
+        var store = new LocalAdapterPackageStore(Path.Combine(root, "store"));
+        var dependency = await fixture.PrepareSharedToolsAsync(store.RootDirectory);
+        var source = Directory.CreateDirectory(Path.Combine(root, "src")).FullName;
+        Directory.CreateDirectory(Path.Combine(source, "tools"));
+        await File.WriteAllTextAsync(Path.Combine(source, EngineReferenceToolkit.DependencyPath), JsonSerializer.Serialize(dependency, Json));
+        await File.WriteAllTextAsync(Path.Combine(source, "adapter.py"), """
+            import json, sys
+            from pathlib import Path
+            request = json.load(sys.stdin)
+            response = {'protocolVersion': 1, 'success': True}
+            if request['operation'] == 'probe':
+                response['probe'] = dict(engineId='python-fixture', adapterId='python-fixture', adapterVersion='1',
+                    description='中文路径', requiredFiles=request['resourceFiles'], warnings=[])
+            else:
+                response['extraction'] = dict(units=[dict(id='line:1', resourcePath=request['resourceFiles'][0],
+                    locator='line:1', sourceText=Path(request['sourceDirectory'], request['resourceFiles'][0]).read_text(encoding='utf-8'), context='fixture')], warnings=[])
+            Path(request['responseFile']).write_text(json.dumps(response, ensure_ascii=False), encoding='utf-8')
+            """, new UTF8Encoding(false));
+        var builder = new GeneratedAdapterBuilder(fixture.Runner);
+        AdapterReleaseFile[] release = [new("src/adapter.py", "source", "Entry"), new(EngineReferenceToolkit.DependencyPath, "runtime", "Pinned Python")];
+        var package = await builder.BuildWorkspaceAsync(source, Path.Combine(root, "build"), ["*.lines"], release, fixture.Paths,
+            family: new("engine", "python-fixture", "Python fixture"));
+        Assert.True(package.IsPython);
+        Assert.False(File.Exists(Path.Combine(package.DirectoryPath, "adapter.dll")));
+        var published = await store.PublishAndActivateAsync("game", package, []);
+        var loaded = store.LoadActive("game")!;
+        Assert.Equal(published.Version, loaded.Version);
+        var toolkit = new EngineReferenceToolkit(Path.Combine(store.RootDirectory, "engine-tools"));
+        var adapter = new GeneratedGameAdapter(loaded, new(Path.Combine(root, "absent-dotnet"), "10.0.402", "10.0.13"),
+            fixture.Runner, store.WorkDirectory, toolkit);
+        var game = Directory.CreateDirectory(Path.Combine(root, "游戏 目录")).FullName;
+        await File.WriteAllTextAsync(Path.Combine(game, "中文.lines"), "原文 日本語𠮷", new UTF8Encoding(false));
+        Assert.NotNull(await adapter.ProbeAsync(game));
+        Assert.Equal("原文 日本語𠮷", Assert.Single((await adapter.ExtractAsync(game)).Units).SourceText);
+        await File.AppendAllTextAsync(Path.Combine(loaded.DirectoryPath, loaded.EntryFile), "\n# changed");
+        await Assert.ThrowsAsync<GeneratedAdapterException>(() => adapter.ExtractAsync(game));
+    }
+
+    [Fact]
     public async Task SharedPythonBridgeCompilesWithOnlyFrameworkReferences()
     {
         var source = Path.Combine(root, "src");

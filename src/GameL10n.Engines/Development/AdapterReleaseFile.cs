@@ -22,12 +22,12 @@ internal static class AdapterReleaseFiles
             if (!paths.Add(file.Path)) throw new GeneratedAdapterException("发布文件路径重复：" + file.Path);
             var source = file.Role == "source" && file.Path.StartsWith("src/", StringComparison.Ordinal)
                 && !file.Path.StartsWith("src/tools/", StringComparison.OrdinalIgnoreCase)
-                && file.Path.EndsWith(".cs", StringComparison.OrdinalIgnoreCase);
+                && (file.Path.EndsWith(".cs", StringComparison.OrdinalIgnoreCase) || file.Path.EndsWith(".py", StringComparison.OrdinalIgnoreCase));
             var dependency = file.Role is "runtime" or "asset" or "license"
                 && file.Path.StartsWith("tools/", StringComparison.Ordinal);
             if (!source && !dependency)
                 throw new GeneratedAdapterException("发布角色或路径无效：" + file.Path
-                    + "。source 使用 src/*.cs；runtime、asset、license 使用 tools/ 下的明确文件，不允许通配符。");
+                    + "。source 使用 src/*.py（旧包可为 .cs）；runtime、asset、license 使用 tools/ 下的明确文件，不允许通配符。");
         }
         if (requireSource && !files.Any(file => file.Role == "source")) throw new GeneratedAdapterException("发布清单至少需要一个 source 源文件。");
         return files.OrderBy(file => file.Path, StringComparer.Ordinal).ToArray();

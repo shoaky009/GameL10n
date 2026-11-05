@@ -65,8 +65,14 @@ public sealed partial class LocalAdapterPackageStore
             cancellationToken.ThrowIfCancellationRequested();
             if (version.Source != EngineLibrarySource.External) return version;
             var path = PackagePath(version.AdapterId, version.Version);
-            var exists = Directory.Exists(path) && new[] { "package.json", "adapter.dll", "adapter.runtimeconfig.json" }
-                .All(name => File.Exists(WorkspaceFiles.Resolve(path, name)));
+            var exists = false;
+            try
+            {
+                var package = ReadPackage(path);
+                exists = package is not null && File.Exists(WorkspaceFiles.Resolve(path, package.EntryFile))
+                    && (package.IsPython || File.Exists(WorkspaceFiles.Resolve(path, "adapter.runtimeconfig.json")));
+            }
+            catch (Exception error) when (IsLibraryReadError(error)) { }
             return version with { Exists = exists, DirectoryPath = path };
         }, cancellationToken);
 
