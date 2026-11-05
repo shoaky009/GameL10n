@@ -4,6 +4,7 @@
 
 - [智能适配工具使用指引](adapter-development.md)：按任务选择内置能力、调查资源、验收与发布。
 - [历史 C# 脚本与适配逻辑迁移任务](tasks/migrate-csharp-analysis-scripts.md)：在持有旧数据的机器上迁移需继续使用的脚本及正式逻辑，保留已发布旧包和历史记录。
+- [固定版本脚本解析器改为进程调用](tasks/native-parser-process.md)：复用命令行协议替代动态加载 DLL，保留版本锁定、离线工具和旧依赖迁移边界，为 Native AOT 发布做准备。
 - [智能适配日志调查 skill](../.agents/skills/review-adaptation-logs/SKILL.md)：用 `$review-adaptation-logs` 调用，先统计、再按失败阶段和调用 ID 定位，控制排查时的上下文用量。
 
 这些文件供按需查阅，不是程序运行时自动加载的提示词，也不随桌面发行包分发。运行时指令与参数定义仍由 `src/GameL10n.Engines/Development/AutomaticAdaptationService.cs`、`AdaptationTools.cs` 和 `AdaptationToolGroups.cs` 提供；修改本目录不会改变模型请求。
