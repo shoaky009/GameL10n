@@ -582,6 +582,7 @@ public sealed class AutomaticAdaptationService(Func<IAdaptationAgentModel> creat
                             ["engineReference"] = EngineJson.Node(state.EngineReference, ContextJson),
                             ["stagedResources"] = EngineJson.Node((state.ResourceHashes.Keys.Take(256)).ToArray(), ContextJson),
                             ["lastVerification"] = EngineJson.Node(state.VerificationDiagnostics, ContextJson),
+                            ["lastResourceTrial"] = EngineJson.Node(state.TrialVerificationCache?.Result, ContextJson),
                             ["verifiedPackage"] = state.VerifiedPackage?.Id,
                             ["verificationRevision"] = state.VerificationRevision
                         }, EngineJson.TypeInfo<JsonObject>(ContextJson));
@@ -873,6 +874,7 @@ public sealed class AutomaticAdaptationService(Func<IAdaptationAgentModel> creat
             ["engineReference"] = EngineJson.Node(state.EngineReference, ContextJson),
             ["stagedResources"] = EngineJson.Node(state.ResourceHashes.Keys.Take(256).ToArray(), ContextJson),
             ["lastVerification"] = EngineJson.Node(state.VerificationDiagnostics, ContextJson),
+            ["lastResourceTrial"] = EngineJson.Node(state.TrialVerificationCache?.Result, ContextJson),
             ["verifiedPackage"] = state.VerifiedPackage?.Id,
             ["registeredReleaseFiles"] = (state.ReleaseFiles ?? state.VerifiedPackage?.ReleaseFiles)?.Count ?? 0,
             ["workingNotes"] = workingNotes
@@ -1224,6 +1226,7 @@ public sealed class AdaptationSession
     public int VerificationRevision { get; set; }
     public string[] VerificationDiagnostics { get; set; } = [];
     public AdapterVerificationCache? VerificationCache { get; set; }
+    public AdapterVerificationCache? TrialVerificationCache { get; set; }
 }
 
 public sealed record SuccessfulAnalysisProbe(string Tool, string Arguments, int Turn);

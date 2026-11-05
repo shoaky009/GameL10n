@@ -27,22 +27,34 @@ public sealed partial class AdapterDevelopmentWorkflow
     }
 
     private async Task<string?> VerificationFingerprintAsync(AdapterFamily family, IReadOnlyList<string> patterns,
-        IReadOnlyList<AdapterReleaseFile> releaseFiles, bool discoveryOnly, CancellationToken ct)
+        IReadOnlyList<AdapterReleaseFile> releaseFiles, bool discoveryOnly, CancellationToken ct,
+        IReadOnlyList<string>? trialFiles = null)
     {
-        var game = GameDiscoverySession.Scan(request.GameDirectory, ct);
-        var staged = GameDiscoverySession.Scan(ResourceDirectory, ct);
-        // An incomplete inventory cannot establish that the discovery inputs are identical.
-        if (!game.Complete || !staged.Complete)
+        IEnumerable<string> gameFiles, stagedFiles;
+        var approvedResources = session.ResourceHashes.AsEnumerable();
+        if (trialFiles is not null)
         {
-            await CheckResourcesAsync(ct);
-            return null;
+            // A scoped trial depends only on these files, not the rest of the game's inventory.
+            gameFiles = stagedFiles = trialFiles;
+            approvedResources = approvedResources.Where(pair => trialFiles.Contains(pair.Key, StringComparer.OrdinalIgnoreCase));
         }
-        var recognitionPatterns = session.Recognition is { } recognition
-            ? recognition.Required.Concat(recognition.Hints).SelectMany(rule => rule.Patterns) : [];
-        var gameFiles = game.Select(patterns.Concat(recognitionPatterns).Append("**/*.exe.le.config").ToArray(), ct)
-            .Concat(session.ResourceHashes.Keys).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal);
-        var stagedFiles = staged.Select(patterns, ct).Concat(session.ResourceHashes.Keys)
-            .Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal);
+        else
+        {
+            var game = GameDiscoverySession.Scan(request.GameDirectory, ct);
+            var staged = GameDiscoverySession.Scan(ResourceDirectory, ct);
+            // An incomplete inventory cannot establish that the discovery inputs are identical.
+            if (!game.Complete || !staged.Complete)
+            {
+                await CheckResourcesAsync(ct);
+                return null;
+            }
+            var recognitionPatterns = session.Recognition is { } recognition
+                ? recognition.Required.Concat(recognition.Hints).SelectMany(rule => rule.Patterns) : [];
+            gameFiles = game.Select(patterns.Concat(recognitionPatterns).Append("**/*.exe.le.config").ToArray(), ct)
+                .Concat(session.ResourceHashes.Keys).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal);
+            stagedFiles = staged.Select(patterns, ct).Concat(session.ResourceHashes.Keys)
+                .Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal);
+        }
         var sources = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var file in releaseFiles)
             sources[file.Path] = await LocalFiles.HashFileAsync(AdapterReleaseFiles.SourcePath(SourceDirectory, file), ct);
@@ -54,12 +66,13 @@ public sealed partial class AdapterDevelopmentWorkflow
         }
         var gameHashes = await HashFiles(request.GameDirectory, gameFiles);
         var stagedHashes = await HashFiles(ResourceDirectory, stagedFiles);
-        foreach (var (relative, hash) in session.ResourceHashes)
+        foreach (var (relative, hash) in approvedResources)
             if (gameHashes[relative] != hash || stagedHashes[relative] != hash)
                 throw new InvalidDataException("原资源或工作副本发生变化，请重新 stage_resources 并验证：" + relative);
+        var (coverage, baseline) = VerificationEvidence(trialFiles);
         return LocalFiles.HashText(JsonSerializer.Serialize(new JsonObject
         {
-            ["cacheSchema"] = 1,
+            ["cacheSchema"] = 2,
             ["verifierRevision"] = GeneratedAdapterVerifier.Revision,
             ["hostBuild"] = typeof(AdapterDevelopmentWorkflow).Module.ModuleVersionId,
             ["toolchain"] = EngineJson.Node(runtime.Toolchain, Json),
@@ -69,20 +82,22 @@ public sealed partial class AdapterDevelopmentWorkflow
             ["releaseFiles"] = EngineJson.Node((releaseFiles).ToArray(), Json),
             ["sources"] = EngineJson.Node(sources, Json),
             ["discoveryOnly"] = discoveryOnly,
+            ["trialFiles"] = EngineJson.Node(trialFiles, Json),
             ["recognition"] = EngineJson.Node(session.Recognition, Json),
             ["objective"] = EngineJson.Node(session.Objective, Json),
             ["launchInspection"] = EngineJson.Node(session.LaunchInspection, Json),
-            ["coverage"] = session.TextCoverage.Fingerprint(),
-            ["baseline"] = session.Objective == AdaptationObjective.Repair ? BaselineFingerprint() : null,
+            ["coverage"] = coverage.Fingerprint(),
+            ["baseline"] = baseline is null ? null
+                : LocalFiles.HashText(JsonSerializer.Serialize(baseline, EngineJson.TypeInfo<IReadOnlyList<TranslationUnit>>(Json))),
             ["gameResources"] = EngineJson.Node(gameHashes, Json),
             ["stagedResources"] = EngineJson.Node(stagedHashes, Json),
-            ["approvedResources"] = EngineJson.Node((session.ResourceHashes.OrderBy(pair => pair.Key, StringComparer.Ordinal)).ToArray(), Json)
+            ["approvedResources"] = EngineJson.Node((approvedResources.OrderBy(pair => pair.Key, StringComparer.Ordinal)).ToArray(), Json)
         }, EngineJson.TypeInfo<JsonObject>(Json)));
     }
 
-    private async Task<AdapterTestResult?> ReuseVerificationAsync(string? fingerprint, CancellationToken ct)
+    private async Task<AdapterTestResult?> ReuseVerificationAsync(string? fingerprint, CancellationToken ct, bool trial = false)
     {
-        var cached = session.VerificationCache;
+        var cached = trial ? session.TrialVerificationCache : session.VerificationCache;
         if (fingerprint is null || cached is null || cached.Fingerprint != fingerprint
             || cached.Revision != GeneratedAdapterVerifier.Revision) return null;
         if (cached.Package is { } package)
@@ -99,9 +114,13 @@ public sealed partial class AdapterDevelopmentWorkflow
         }
         if (cached.CompilationError is { } errorMessage) throw new GeneratedAdapterException(errorMessage);
         if (cached.Result is not { } saved || cached.Package is null) return null;
-        session.VerificationDiagnostics = saved.Diagnostics.ToArray();
-        if (saved.ReadyToPublish) AcceptVerification(cached.Package);
-        reportProgress?.Invoke("复用适配器验收", "验收输入未变化，沿用已完成的资源检查结果；游戏运行效果仍需实际验证。");
+        if (!trial)
+        {
+            session.VerificationDiagnostics = saved.Diagnostics.ToArray();
+            if (saved.ReadyToPublish) AcceptVerification(cached.Package);
+        }
+        reportProgress?.Invoke(trial ? "复用资源试验" : "复用适配器验收",
+            trial ? "试验输入未变化，沿用小范围结果；发布仍需完整资源验收。" : "验收输入未变化，沿用已完成的资源检查结果；游戏运行效果仍需实际验证。");
         return saved with { Reused = true, CompileMs = 0, DiscoveryMs = 0, VerificationMs = 0 };
     }
 }

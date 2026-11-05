@@ -128,6 +128,8 @@ Python 探针使用 `run_engine_python`，其他本地工具使用 `run_tool`。
 
 `test_adapter` 的 `discoveryOnly=true` 仅检查探测，不授予发布资格。完整验收要求提取、原文逐字节回填、完整与部分中文回填、身份稳定和路径检查通过。样本通过、编译成功和编码可逆都不能替代这一步。
 
+实现尚在迭代时，优先用 `trialFiles` 选 1～12 个已 `stage_resources` 的完整文件及所需伴随文件，保持正式 `resourcePatterns` 不变，先验证小范围提取和中文往返。例如在原有 `test_adapter` 参数中增加 `"trialFiles": ["scripts/chapter01.bin", "scripts/index.dat"]`。宿主只提供所选文件的隔离副本，只核对所选路径的独立样本与修复基线；`stage=trial` 不能发布。资源不能独立处理时补齐依赖或直接完整验收，不截断封包。试验与完整验收分别缓存；通过后扩大资源集，省略 `trialFiles` 完整验收再 `finish`。此参数与 `discoveryOnly` 互斥。
+
 旧工作区首次登记或需要整体替换时，`test_adapter` 的发布输入可以声明为：
 
 ```json

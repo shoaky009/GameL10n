@@ -36,6 +36,13 @@ public sealed class AdapterTemplateTests : IDisposable
         Assert.Empty(Directory.EnumerateFiles(Path.Combine(workspace, "src"), "*.dll", SearchOption.AllDirectories));
         Assert.False(Directory.Exists(Path.Combine(workspace, "src", "python")));
         await tools.ExecuteAsync(new("stage", "stage_resources", JsonSerializer.Serialize(new { files = new[] { "first" + extension, "second" + extension } })), default);
+        var arguments = composition.GetProperty("testArguments").GetRawText();
+        using var trial = JsonDocument.Parse(await tools.ExecuteAsync(new("trial", "test_adapter",
+            arguments[..^1] + ",\"trialFiles\":[\"first" + extension + "\"]}"), default));
+        Assert.True(trial.RootElement.GetProperty("result").GetProperty("passed").GetBoolean(), trial.RootElement.ToString());
+        Assert.Equal("trial", trial.RootElement.GetProperty("result").GetProperty("stage").GetString());
+        Assert.Null(state.VerifiedPackage);
+        Assert.Null(state.VerificationCache);
         using var tested = JsonDocument.Parse(await tools.ExecuteAsync(new("verify", "test_adapter", composition.GetProperty("testArguments").GetRawText()), default));
         var result = tested.RootElement.GetProperty("result");
         Assert.True(result.GetProperty("passed").GetBoolean(), tested.RootElement.ToString());

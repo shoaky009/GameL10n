@@ -40,12 +40,15 @@ internal static class AdaptationTrace
                 fields[name + "Bytes"] = Encoding.UTF8.GetByteCount(value.GetString()!);
         if (call.Name == "inspect_unity_schema" && args.TryGetProperty("query", out var typeQuery) && typeQuery.ValueKind == JsonValueKind.String)
             fields["typeQuery"] = Limit(typeQuery.GetString()!, 320);
-        foreach (var name in new[] { "files", "sourceFiles", "resourcePatterns" })
+        foreach (var name in new[] { "files", "sourceFiles", "resourcePatterns", "trialFiles" })
             if (args.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.Array)
                 fields[name + "Count"] = value.GetArrayLength();
         if (args.TryGetProperty("resourcePatterns", out var patterns) && patterns.ValueKind == JsonValueKind.Array)
             fields["resourcePatterns"] = patterns.EnumerateArray().Where(item => item.ValueKind == JsonValueKind.String)
                 .Take(8).Select(item => Limit(item.GetString()!, 160)).ToArray();
+        if (args.TryGetProperty("trialFiles", out var trialFiles) && trialFiles.ValueKind == JsonValueKind.Array)
+            fields["trialFiles"] = trialFiles.EnumerateArray().Where(item => item.ValueKind == JsonValueKind.String)
+                .Take(12).Select(item => Limit(item.GetString()!, 240)).ToArray();
         if (args.TryGetProperty("ranges", out var ranges) && ranges.ValueKind == JsonValueKind.Array)
             fields["ranges"] = ranges.EnumerateArray().Where(item => item.ValueKind == JsonValueKind.Object).Take(8)
                 .Select(item => new JsonObject
@@ -71,7 +74,7 @@ internal static class AdaptationTrace
                 fields[name] = value.ValueKind == JsonValueKind.String ? Limit(value.GetString()!, 160) : value.Clone();
         if (document.RootElement.TryGetProperty("result", out var result) && result.ValueKind == JsonValueKind.Object)
         {
-            foreach (var name in new[] { "passed", "stage", "compiled", "changed", "reused", "stale", "unitCount", "status", "stopped", "more", "nextOffset", "totalCharacters", "queryFound", "totalMatches", "failedRanges", "compileMs", "discoveryMs", "verificationMs", "encoding", "bytes", "sha256", "releaseRegistered", "component", "entryCount", "selectedCount", "inputBytes", "selectedBytes", "readBytes", "allContentsVerified" })
+            foreach (var name in new[] { "passed", "stage", "compiled", "changed", "reused", "stale", "unitCount", "status", "stopped", "more", "nextOffset", "totalCharacters", "queryFound", "totalMatches", "failedRanges", "compileMs", "discoveryMs", "verificationMs", "scope", "trialResourceCount", "trialBytes", "encoding", "bytes", "sha256", "releaseRegistered", "component", "entryCount", "selectedCount", "inputBytes", "selectedBytes", "readBytes", "allContentsVerified" })
                 if (result.TryGetProperty(name, out var value) && value.ValueKind is JsonValueKind.True or JsonValueKind.False or JsonValueKind.Number or JsonValueKind.String)
                     fields[name] = value.ValueKind == JsonValueKind.String ? Limit(value.GetString()!, 160) : value.Clone();
             if (result.TryGetProperty("matches", out var matches) && matches.ValueKind == JsonValueKind.Array)

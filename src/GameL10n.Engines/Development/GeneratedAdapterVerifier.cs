@@ -16,9 +16,9 @@ public sealed class GeneratedAdapterVerifier
     public async Task<GeneratedAdapterVerification> VerifyAsync(GeneratedGameAdapter adapter, string sampleDirectory,
         string verificationDirectory, CancellationToken cancellationToken = default, bool sourceIsSnapshot = false,
         TextCoverage? coverage = null, IReadOnlyList<TranslationUnit>? baselineUnits = null, bool requireExactBaseline = false,
-        Func<object, Task>? trace = null)
+        Func<object, Task>? trace = null, string scope = "full")
     {
-        var timing = new AdapterOperationTrace(trace, "verification-phase", adapter.Id, adapter.Version);
+        var timing = new AdapterOperationTrace(trace, "verification-phase", adapter.Id, adapter.Version, scope);
         if (Directory.Exists(verificationDirectory) && Directory.EnumerateFileSystemEntries(verificationDirectory).Any())
             throw new InvalidDataException("适配验证需要空的临时目录。");
         Directory.CreateDirectory(verificationDirectory);

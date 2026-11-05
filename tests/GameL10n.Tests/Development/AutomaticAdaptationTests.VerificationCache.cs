@@ -180,14 +180,16 @@ public sealed partial class AutomaticAdaptationTests
         Assert.Null(store.LoadActive(request.GameId));
     }
 
-    [Fact]
-    public async Task DiscoveryOnlyCacheCannotReplaceFullVerificationOrGrantPublication()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task LimitedChecksCannotReplaceFullVerificationOrGrantPublication(bool trial)
     {
         var runs = 0;
         var runner = new ScriptedRunner { ObserveRequest = _ => runs++ };
         var (request, state, workspace, store) = await VerificationCacheFixtureAsync(runner);
         var tools = new AdaptationTools(request, state, workspace, Runtime(runner), store);
-        var discovery = CacheTestArguments[..^1] + ",\"discoveryOnly\":true}";
+        var discovery = CacheTestArguments[..^1] + (trial ? ",\"trialFiles\":[\"script.txt\"]}" : ",\"discoveryOnly\":true}");
         await tools.ExecuteAsync(new("discovery", "test_adapter", discovery), default);
         var initialRuns = runs;
         using var cached = JsonDocument.Parse(await tools.ExecuteAsync(new("repeat", "test_adapter", discovery), default));
@@ -200,6 +202,14 @@ public sealed partial class AutomaticAdaptationTests
         await tools.ExecuteAsync(new("discovery-again", "test_adapter", discovery), default);
         Assert.Null(state.VerifiedPackage);
         await Assert.ThrowsAsync<InvalidDataException>(() => tools.ExecuteAsync(new("finish", "finish", """{"summary":"Discovery only."}"""), default));
+        if (trial)
+        {
+            var beforeFullReuse = runs;
+            using var full = JsonDocument.Parse(await tools.ExecuteAsync(new("full-again", "test_adapter", CacheTestArguments), default));
+            Assert.True(full.RootElement.GetProperty("result").GetProperty("reused").GetBoolean());
+            Assert.Equal(beforeFullReuse, runs);
+            Assert.NotNull(state.VerifiedPackage);
+        }
     }
 
     [Theory]

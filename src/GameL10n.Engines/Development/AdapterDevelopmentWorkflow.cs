@@ -15,6 +15,7 @@ public enum AdapterTestStage
     [JsonStringEnumMemberName("compilation")] Compilation,
     [JsonStringEnumMemberName("discovery")] Discovery,
     [JsonStringEnumMemberName("verification")] Verification,
+    [JsonStringEnumMemberName("trial")] Trial,
     [JsonStringEnumMemberName("finish-ready")] FinishReady
 }
 
@@ -26,7 +27,8 @@ public enum AdapterVerificationMilestone
 
 public sealed record AdapterTestResult(bool Passed, AdapterTestStage Stage, IReadOnlyList<string> Diagnostics,
     string? Id = null, string? Version = null, bool Reused = false,
-    long CompileMs = 0, long DiscoveryMs = 0, long VerificationMs = 0)
+    long CompileMs = 0, long DiscoveryMs = 0, long VerificationMs = 0,
+    IReadOnlyList<string>? TrialFiles = null, long? TrialBytes = null)
 {
     [JsonIgnore] public bool ReadyToPublish => Passed && Stage == AdapterTestStage.FinishReady;
 }
@@ -61,25 +63,35 @@ public sealed partial class AdapterDevelopmentWorkflow(AdaptationRequest request
     }
 
     public async Task<AdapterTestResult> TestAsync(AdapterFamily family, IReadOnlyList<string> patterns,
-        bool discoveryOnly, CancellationToken ct)
+        bool discoveryOnly, CancellationToken ct, IReadOnlyList<string>? trialFiles = null)
     {
+        if (trialFiles is not null)
+        {
+            if (discoveryOnly) throw new InvalidDataException("trialFiles 与 discoveryOnly 不能同时使用。");
+            trialFiles = ValidateTrialFiles(trialFiles);
+        }
         session.Recognition?.Validate();
         ClearVerification();
         if (session.ResourceHashes.Count == 0) throw new InvalidDataException("请先 stage_resources 选择用于验证的真实资源。");
-        RequireLaunchResources();
+        if (trialFiles is null) RequireLaunchResources();
         family.Validate();
         GeneratedAdapterResources.ValidatePatterns(patterns);
         var python = await PreparePythonReleaseAsync(ct);
         var releaseFiles = AdapterReleaseFiles.Validate(session.ReleaseFiles);
-        var fingerprint = await VerificationFingerprintAsync(family, patterns, releaseFiles, discoveryOnly, ct);
-        if (await ReuseVerificationAsync(fingerprint, ct) is { } reused) return reused;
-        session.VerificationCache = null;
+        var fingerprint = await VerificationFingerprintAsync(family, patterns, releaseFiles, discoveryOnly, ct, trialFiles);
+        if (await ReuseVerificationAsync(fingerprint, ct, trialFiles is not null) is { } reused) return reused;
+        if (trialFiles is null) session.VerificationCache = null;
+        else session.TrialVerificationCache = null;
         async Task<AdapterTestResult> CompleteTestAsync(AdapterTestResult result, GeneratedAdapterPackage? package = null, string? compilationError = null, bool cacheable = true)
         {
             // Tools and external edits may change inputs during a check. Such a result is never reusable.
-            if (cacheable && fingerprint is not null && fingerprint == await VerificationFingerprintAsync(family, patterns, releaseFiles, discoveryOnly, ct))
-                session.VerificationCache = new(fingerprint, GeneratedAdapterVerifier.Revision, package,
+            if (cacheable && fingerprint is not null && fingerprint == await VerificationFingerprintAsync(family, patterns, releaseFiles, discoveryOnly, ct, trialFiles))
+            {
+                var cached = new AdapterVerificationCache(fingerprint, GeneratedAdapterVerifier.Revision, package,
                     compilationError is null ? result : null, compilationError);
+                if (trialFiles is null) session.VerificationCache = cached;
+                else session.TrialVerificationCache = cached;
+            }
             return result;
         }
         var timer = System.Diagnostics.Stopwatch.StartNew();
@@ -87,7 +99,7 @@ public sealed partial class AdapterDevelopmentWorkflow(AdaptationRequest request
         try
         {
             package = await new GeneratedAdapterBuilder(runtime.Runner).BuildWorkspaceAsync(SourceDirectory,
-                Path.Combine(workspace, "build"), patterns, releaseFiles, python, ct, family, session.Recognition);
+                Path.Combine(workspace, trialFiles is null ? "build" : "trial-build"), patterns, releaseFiles, python, ct, family, session.Recognition);
         }
         catch (GeneratedAdapterException error)
         {
@@ -99,6 +111,14 @@ public sealed partial class AdapterDevelopmentWorkflow(AdaptationRequest request
         var compileMs = timer.ElapsedMilliseconds;
         timer.Restart();
         var adapter = new GeneratedGameAdapter(package, runtime.Toolchain, runtime.Runner, store.WorkDirectory, EngineToolkit, reportProgress);
+        if (trialFiles is not null)
+        {
+            var (trial, bytes) = await VerifyTrialAsync(adapter, trialFiles, ct);
+            var diagnostics = trial.Diagnostics.Prepend($"小范围试验仅覆盖所选 {trialFiles.Count} 个完整资源；发布仍需完整资源验收。").ToArray();
+            return await CompleteTestAsync(new(trial.Passed, AdapterTestStage.Trial, diagnostics,
+                package.Id, package.Version, CompileMs: compileMs, VerificationMs: timer.ElapsedMilliseconds,
+                TrialFiles: trialFiles, TrialBytes: bytes), package, cacheable: trial.Cacheable);
+        }
         try
         {
             await CheckDiscoveryAsync(adapter, ct);

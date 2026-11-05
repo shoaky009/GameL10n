@@ -6,7 +6,7 @@ namespace GameL10n.Core.Development;
 
 /// <summary>Times adapter work through the caller's existing diagnostic sink.</summary>
 public sealed class AdapterOperationTrace(Func<object, Task>? write, string operation,
-    string? adapterId = null, string? version = null)
+    string? adapterId = null, string? version = null, string? scope = null)
 {
     private const long LargeFileBytes = 64L * 1024 * 1024;
 
@@ -18,6 +18,7 @@ public sealed class AdapterOperationTrace(Func<object, Task>? write, string oper
             ["operation"] = operation,
             ["adapterId"] = adapterId,
             ["version"] = version,
+            ["scope"] = scope,
             ["phase"] = phase,
             ["status"] = "started",
             ["detail"] = EngineJson.Node(detail, EngineJson.Web)
@@ -33,6 +34,7 @@ public sealed class AdapterOperationTrace(Func<object, Task>? write, string oper
                 ["operation"] = operation,
                 ["adapterId"] = adapterId,
                 ["version"] = version,
+                ["scope"] = scope,
                 ["phase"] = phase,
                 ["status"] = failure is OperationCanceledException ? "cancelled" : failure is null ? "completed" : "failed",
                 ["elapsedMs"] = watch.ElapsedMilliseconds,
