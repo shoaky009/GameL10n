@@ -85,7 +85,7 @@ public sealed class GameProjectTests : IDisposable
         await store.SaveAsync(first with { Settings = first.Settings with { Style = "edited" } });
         Assert.False(File.Exists(Path.Combine(store.GetProjectDirectory(first.Id), "game.json.bak")));
         // Recovery remains compatible with a backup written by an older app.
-        await LocalFiles.WriteJsonAsync(Path.Combine(store.GetProjectDirectory(first.Id), "game.json.bak"), first);
+        await LocalFiles.WriteJsonAsync(Path.Combine(store.GetProjectDirectory(first.Id), "game.json.bak"), first, FixtureJson.TypeInfo<global::GameL10n.Core.Storage.GameProject>(FixtureJson.Storage));
         await File.WriteAllTextAsync(Path.Combine(store.GetProjectDirectory(first.Id), "game.json"), "{");
         Assert.Equal("first", (await store.GetAsync(first.Id))!.Settings.Style);
         Assert.Equal("second", (await store.GetAsync(second.Id))!.Settings.Style);
@@ -124,7 +124,7 @@ public sealed class GameProjectTests : IDisposable
         await store.SaveAsync(project);
         await store.SaveAsync(removed);
         await LocalFiles.WriteJsonAsync(Path.Combine(store.GetProjectDirectory(orphan.Id), "job.json"),
-            new { orphan.GameDirectory });
+            new { orphan.GameDirectory }, FixtureJson.TypeInfo<object>(FixtureJson.Storage));
         await File.WriteAllTextAsync(Path.Combine(store.GetProjectDirectory(project.Id), "job.json"), "{");
         await File.WriteAllTextAsync(Path.Combine(root, "settings.json"), "{");
         var indexPath = Path.Combine(root, "games", "index.json");

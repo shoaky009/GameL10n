@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization.Metadata;
 
 namespace GameL10n.Core.Storage;
 
@@ -19,19 +20,19 @@ public static class LocalFiles
         return Convert.ToHexString(await SHA256.HashDataAsync(stream, ct)).ToLowerInvariant();
     }
 
-    public static async Task<T?> ReadJsonAsync<T>(string path, CancellationToken ct = default)
+    public static async Task<T?> ReadJsonAsync<T>(string path, JsonTypeInfo<T> typeInfo, CancellationToken ct = default)
     {
         if (!File.Exists(path)) return default;
         await using var stream = File.OpenRead(path);
-        return await JsonSerializer.DeserializeAsync<T>(stream, JsonOptions, ct);
+        return await JsonSerializer.DeserializeAsync(stream, typeInfo, ct);
     }
 
-    public static async Task<T?> ReadRecoverableJsonAsync<T>(string path, CancellationToken ct = default,
+    public static async Task<T?> ReadRecoverableJsonAsync<T>(string path, JsonTypeInfo<T> typeInfo, CancellationToken ct = default,
         Func<T, bool>? validate = null)
     {
         async Task<T?> ReadValidAsync(string candidate)
         {
-            var value = await ReadJsonAsync<T>(candidate, ct);
+            var value = await ReadJsonAsync(candidate, typeInfo, ct);
             if (value is null || (validate is not null && !validate(value)))
                 throw new InvalidDataException("持久化数据校验失败：" + Path.GetFileName(candidate));
             return value;
@@ -43,18 +44,18 @@ public static class LocalFiles
             if (!File.Exists(path + ".bak")) throw;
             var recovered = await ReadValidAsync(path + ".bak");
             // Repair the primary without rotating its damaged bytes over the good backup.
-            await WriteJsonAsync(path, recovered, ct);
+            await WriteJsonAsync(path, recovered!, typeInfo, ct);
             return recovered;
         }
     }
 
-    public static async Task WriteJsonAsync<T>(string path, T value, CancellationToken ct = default)
-        => await WriteAtomicJsonAsync(path, value, false, ct);
+    public static async Task WriteJsonAsync<T>(string path, T value, JsonTypeInfo<T> typeInfo, CancellationToken ct = default)
+        => await WriteAtomicJsonAsync(path, value, typeInfo, false, ct);
 
-    public static async Task WriteRecoverableJsonAsync<T>(string path, T value, CancellationToken ct = default)
-        => await WriteAtomicJsonAsync(path, value, true, ct);
+    public static async Task WriteRecoverableJsonAsync<T>(string path, T value, JsonTypeInfo<T> typeInfo, CancellationToken ct = default)
+        => await WriteAtomicJsonAsync(path, value, typeInfo, true, ct);
 
-    private static async Task WriteAtomicJsonAsync<T>(string path, T value, bool keepBackup, CancellationToken ct)
+    private static async Task WriteAtomicJsonAsync<T>(string path, T value, JsonTypeInfo<T> typeInfo, bool keepBackup, CancellationToken ct)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
         var temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
@@ -63,7 +64,7 @@ public static class LocalFiles
             await using (var stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None,
                 65536, FileOptions.WriteThrough | FileOptions.Asynchronous))
             {
-                await JsonSerializer.SerializeAsync(stream, value, JsonOptions, ct);
+                await JsonSerializer.SerializeAsync(stream, value, typeInfo, ct);
                 await stream.FlushAsync(ct);
                 stream.Flush(true);
             }

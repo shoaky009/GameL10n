@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using GameL10n.Core.Adapters;
 using GameL10n.Core.Isolation;
 using GameL10n.Core.Storage;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Development;
 
@@ -30,7 +31,7 @@ public sealed partial class LocalAdapterPackageStore
                 var name = Path.GetFileName(file);
                 if (name == CompatibilityCatalogFile) continue;
                 var path = WorkspaceFiles.Resolve(directory, name);
-                var record = JsonSerializer.Deserialize<CompatibilityRecord>(ReadDirectMetadata(directory, name, 128 * 1024), Json)
+                var record = JsonSerializer.Deserialize<CompatibilityRecord>(ReadDirectMetadata(directory, name, 128 * 1024), EngineJson.TypeInfo<CompatibilityRecord>(Json))
                     ?? throw new InvalidDataException("兼容记录为空：" + path);
                 ValidateCompatibilityFamily(record.Family, directory);
                 ValidateCompatibilityGame(record.Game);
@@ -46,7 +47,7 @@ public sealed partial class LocalAdapterPackageStore
         if (removal.UpdatedCatalog is { } catalog)
         {
             if (catalog.Games.Count == 0) File.Delete(path);
-            else await LocalFiles.WriteJsonAsync(path, catalog, ct);
+            else await LocalFiles.WriteJsonAsync(path, catalog, EngineJson.TypeInfo<CompatibilityCatalog>(EngineJson.Storage), ct);
         }
         foreach (var legacy in removal.LegacyFiles)
         {
@@ -79,7 +80,7 @@ public sealed partial class LocalAdapterPackageStore
             }
             game = game with { UpdatedAt = DateTimeOffset.UtcNow };
             var games = LatestGames(prior.Where(item => item.GameId != game.GameId).Append(game));
-            await LocalFiles.WriteJsonAsync(path, new CompatibilityCatalog(family, games), cancellationToken);
+            await LocalFiles.WriteJsonAsync(path, new CompatibilityCatalog(family, games), EngineJson.TypeInfo<CompatibilityCatalog>(EngineJson.Storage), cancellationToken);
             await UpdateLibraryIndexAsync(index => ReplaceIndexGames(index, family, games), CancellationToken.None);
 
             // Only remove the exact legacy bytes included in this committed catalog.
@@ -134,7 +135,7 @@ public sealed partial class LocalAdapterPackageStore
     private static CompatibilityCatalog ReadCompatibilityCatalog(string directory)
     {
         var catalog = JsonSerializer.Deserialize<CompatibilityCatalog>(
-            ReadDirectMetadata(directory, CompatibilityCatalogFile, 16 * 1024 * 1024), Json)
+            ReadDirectMetadata(directory, CompatibilityCatalogFile, 16 * 1024 * 1024), EngineJson.TypeInfo<CompatibilityCatalog>(Json))
             ?? throw new InvalidDataException("兼容游戏清单为空。");
         ValidateCompatibilityFamily(catalog.Family, directory);
         if (catalog.Games is null) throw new InvalidDataException("兼容游戏清单缺少游戏列表。");
@@ -162,7 +163,7 @@ public sealed partial class LocalAdapterPackageStore
                 var name = Path.GetFileName(file);
                 var modifiedAt = File.GetLastWriteTimeUtc(file);
                 var contents = ReadDirectMetadata(directory, name, 128 * 1024);
-                var record = JsonSerializer.Deserialize<CompatibilityRecord>(contents, Json)
+                var record = JsonSerializer.Deserialize<CompatibilityRecord>(contents, EngineJson.TypeInfo<CompatibilityRecord>(Json))
                     ?? throw new InvalidDataException("兼容记录为空。");
                 ValidateCompatibilityFamily(record.Family, directory);
                 ValidateCompatibilityGame(record.Game);
@@ -207,8 +208,8 @@ public sealed partial class LocalAdapterPackageStore
             throw new InvalidDataException("兼容记录缺少游戏、版本或状态信息。");
     }
 
-    private sealed record CompatibilityRecord(AdapterFamily Family, GameCompatibility Game);
-    private sealed record CompatibilityCatalog(AdapterFamily Family, IReadOnlyList<GameCompatibility> Games);
+    internal sealed record CompatibilityRecord(AdapterFamily Family, GameCompatibility Game);
+    internal sealed record CompatibilityCatalog(AdapterFamily Family, IReadOnlyList<GameCompatibility> Games);
     private sealed record LegacyCompatibilityFile(string Name, byte[] Sha256, DateTime LastWriteTimeUtc);
     private sealed record CompatibilityVersionRemoval(string Directory, CompatibilityCatalog? UpdatedCatalog,
         IReadOnlyList<string> LegacyFiles);

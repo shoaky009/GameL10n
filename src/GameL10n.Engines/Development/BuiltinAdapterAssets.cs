@@ -3,6 +3,8 @@ using System.Text;
 using System.Text.Json;
 using GameL10n.Core.Adapters;
 using GameL10n.Core.Isolation;
+using System.Text.Json.Nodes;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Development;
 
@@ -25,26 +27,34 @@ public sealed partial class BuiltinAdapterAssets(string? assetsDirectory = null)
         }
         catch (BuiltinAdapterAssetException error) { sourceError = error; }
         var helper = EnginePythonBridge.HelperSource;
-        return new
+        return new JsonObject
         {
-            format = selected.Key, name = selected.Family.Name, parserType = selected.ParserType,
-            upstreamCommit = VnTextPatchFormatCatalog.UpstreamCommit, extensions = selected.Extensions,
-            companionFileNames = selected.CompanionFileNames,
-            operations = new[] { "extract", "build", "validate" },
-            binaryAvailable = File.Exists(Path.Combine(directory, AssemblyFile)),
-            sourceAvailable = sourceError is null,
-            sourceBundleIssue = sourceError is null ? null : new
+            ["format"] = selected.Key,
+            ["name"] = selected.Family.Name,
+            ["parserType"] = selected.ParserType,
+            ["upstreamCommit"] = VnTextPatchFormatCatalog.UpstreamCommit,
+            ["extensions"] = EngineJson.Node((selected.Extensions).ToArray(), EngineJson.Web),
+            ["companionFileNames"] = EngineJson.Node((selected.CompanionFileNames).ToArray(), EngineJson.Web),
+            ["operations"] = EngineJson.Node(new[] { "extract", "build", "validate" }, EngineJson.Web),
+            ["binaryAvailable"] = File.Exists(Path.Combine(directory, AssemblyFile)),
+            ["sourceAvailable"] = sourceError is null,
+            ["sourceBundleIssue"] = EngineJson.Node(sourceError is null ? null : new JsonObject
             {
-                code = sourceError.Code, asset = sourceError.AssetName, message = sourceError.Message,
-                recovery = "源码包故障不代表引擎不受支持。binaryAvailable=true 时，继续用 try_builtin_adapter 验证兼容性，并以 copy_adapter 复用固定解析器；恢复源码包后可读取结构参考，新增逻辑使用 Python。"
-            },
-            sourceFiles = bundledSources.Select(entry => new { path = entry.Path, bytes = entry.Bytes })
-                .Concat(new[] { new { path = EnginePythonBridge.HelperPath, bytes = (long)Utf8.GetByteCount(helper) } })
-                .Concat(References(selected).Select(pair => new { path = pair.Key, bytes = (long)Utf8.GetByteCount(pair.Value) }))
-                .OrderBy(item => item.path, StringComparer.Ordinal).ToArray(),
-            limitations = Limitations(selected), usage = Usage(selected), example = Example(selected),
-            engineGuidance = selected.Key == "Kaguya" ? KaguyaMessage40Guidance.Describe(engineInspection)
-                : KirikiriTextGuidance.AppliesTo(selected.Key) ? KirikiriTextGuidance.Describe() : null
+                ["code"] = sourceError.Code,
+                ["asset"] = sourceError.AssetName,
+                ["message"] = sourceError.Message,
+                ["recovery"] = "源码包故障不代表引擎不受支持。binaryAvailable=true 时，继续用 try_builtin_adapter 验证兼容性，并以 copy_adapter 复用固定解析器；恢复源码包后可读取结构参考，新增逻辑使用 Python。"
+            }, EngineJson.Web),
+            ["sourceFiles"] = new JsonArray(bundledSources.Select(entry => (path: entry.Path, bytes: entry.Bytes))
+                .Concat([(path: EnginePythonBridge.HelperPath, bytes: (long)Utf8.GetByteCount(helper))])
+                .Concat(References(selected).Select(pair => (path: pair.Key, bytes: (long)Utf8.GetByteCount(pair.Value))))
+                .OrderBy(item => item.path, StringComparer.Ordinal)
+                .Select(item => (JsonNode)new JsonObject { ["path"] = item.path, ["bytes"] = item.bytes }).ToArray()),
+            ["limitations"] = EngineJson.Node(Limitations(selected), EngineJson.Web),
+            ["usage"] = Usage(selected),
+            ["example"] = Example(selected),
+            ["engineGuidance"] = EngineJson.Node(selected.Key == "Kaguya" ? KaguyaMessage40Guidance.Describe(engineInspection)
+                : KirikiriTextGuidance.AppliesTo(selected.Key) ? KirikiriTextGuidance.Describe() : null, EngineJson.Web)
         };
     }
 
@@ -71,11 +81,16 @@ public sealed partial class BuiltinAdapterAssets(string? assetsDirectory = null)
         }
         int start = Math.Min(offset, content.Length);
         int count = Math.Min(length, content.Length - start);
-        return new
+        return new JsonObject
         {
-            format = selected.Key, path = normalized, offset = start, length = count,
-            totalLength = content.Length, nextOffset = start + count, truncated = start + count < content.Length,
-            content = content.Substring(start, count)
+            ["format"] = selected.Key,
+            ["path"] = normalized,
+            ["offset"] = start,
+            ["length"] = count,
+            ["totalLength"] = content.Length,
+            ["nextOffset"] = start + count,
+            ["truncated"] = start + count < content.Length,
+            ["content"] = content.Substring(start, count)
         };
     }
 
@@ -113,12 +128,15 @@ public sealed partial class BuiltinAdapterAssets(string? assetsDirectory = null)
         }
         foreach (var path in files.Keys)
             releaseFiles?.Add(new(AdapterReleaseFiles.PackagePath(path), "runtime", "固定版本内置脚本解析器与 Python 调用接口"));
-        return new
+        return new JsonObject
         {
-            format = selected.Key, destination = "src", reused = reused.ToArray(),
-            files = files.Select(pair => new { path = pair.Key, bytes = pair.Value.Length }).OrderBy(item => item.path, StringComparer.Ordinal).ToArray(),
-            limitations = Limitations(selected),
-            analysisUsage = "from tools.gamel10n_host import parser; response = parser(request, format='" + selected.Key
+            ["format"] = selected.Key,
+            ["destination"] = "src",
+            ["reused"] = EngineJson.Node(reused.ToArray(), EngineJson.Web),
+            ["files"] = new JsonArray(files.OrderBy(pair => pair.Key, StringComparer.Ordinal)
+                .Select(pair => (JsonNode)new JsonObject { ["path"] = pair.Key, ["bytes"] = pair.Value.Length }).ToArray()),
+            ["limitations"] = EngineJson.Node(Limitations(selected), EngineJson.Web),
+            ["analysisUsage"] = "from tools.gamel10n_host import parser; response = parser(request, format='" + selected.Key
                 + "')。入口为 src/adapter.py，probe 由 Python 检查文件头或有界范围；解析器修改逻辑也使用 Python，不编译 C#。"
         };
     }
@@ -129,7 +147,7 @@ public sealed partial class BuiltinAdapterAssets(string? assetsDirectory = null)
         return new(StringComparer.OrdinalIgnoreCase)
         {
             ["src/" + EnginePythonBridge.HelperPath] = Utf8.GetBytes(EnginePythonBridge.HelperSource),
-            ["src/" + SharedDependencyPath] = JsonSerializer.SerializeToUtf8Bytes(await SharedDependencyAsync(ct), new JsonSerializerOptions(JsonSerializerDefaults.Web))
+            ["src/" + SharedDependencyPath] = JsonSerializer.SerializeToUtf8Bytes(await SharedDependencyAsync(ct), EngineJson.TypeInfo<BuiltinParserDependency>(new JsonSerializerOptions(EngineJson.Web)))
         };
     }
 
@@ -181,7 +199,8 @@ public sealed partial class BuiltinAdapterAssets(string? assetsDirectory = null)
         string enginePath = separator < 0 ? "vendor/Scripts/" + parser + ".cs"
             : "vendor/Scripts/" + parser[..separator].Replace('.', '/') + "/";
         return archive.Entries.Where(entry => entry.FullName.EndsWith(".cs", StringComparison.Ordinal)
-            && (entry.FullName is "worker/Worker.cs" or "worker/Protocol.cs" or "vendor/Scripts/PlainTextScript.cs" or "vendor/Scripts/Range.cs"
+            && (entry.FullName is "worker/Worker.cs" or "worker/Protocol.cs" or "worker/Serialization/VnTextPatchJson.cs"
+                or "vendor/Scripts/PlainTextScript.cs" or "vendor/Scripts/Range.cs"
                 || entry.FullName.StartsWith("vendor/Util/", StringComparison.Ordinal)
                 || entry.FullName.StartsWith("vendor/", StringComparison.Ordinal) && !entry.FullName[7..].Contains('/')
                 || (separator < 0 ? entry.FullName == enginePath : entry.FullName.StartsWith(enginePath, StringComparison.Ordinal))))
@@ -216,7 +235,7 @@ public sealed partial class BuiltinAdapterAssets(string? assetsDirectory = null)
     private static string Example(VnTextPatchFormat format) => $$"""
         from tools.gamel10n_host import parser, write_response
         # Implement bounded probe separately; this full parser handles extract/build/validate.
-        response = parser(request, {{JsonSerializer.Serialize(format.Key)}}, sourceDirectory=unpacked_scripts_directory,
+        response = parser(request, {{JsonSerializer.Serialize(format.Key, EngineJson.TypeInfo<string>(EngineJson.Default))}}, sourceDirectory=unpacked_scripts_directory,
                           resourceFiles=script_relative_paths, responseFile=None)
         # Build also needs outputDirectory and translationsFile (or translations).
         # Repack into the game's resource format and return final resource paths before write_response.

@@ -18,9 +18,9 @@ public sealed class DataDirectoryTransferTests : IDisposable
         Directory.CreateDirectory(Path.Combine(current, "logs"));
         await WriteAsync(legacy, "settings.json", "{}");
         Assert.Equal(legacy, DataLocation.Resolve(current, legacy));
-        await LocalFiles.WriteJsonAsync(Path.Combine(legacy, "location.json"), new { dataDirectory = Source });
+        await LocalFiles.WriteJsonAsync(Path.Combine(legacy, "location.json"), new { dataDirectory = Source }, FixtureJson.TypeInfo<object>(FixtureJson.Storage));
         Assert.Equal(Source, DataLocation.Resolve(current, legacy));
-        await LocalFiles.WriteJsonAsync(Path.Combine(current, "location.json"), new { dataDirectory = Target });
+        await LocalFiles.WriteJsonAsync(Path.Combine(current, "location.json"), new { dataDirectory = Target }, FixtureJson.TypeInfo<object>(FixtureJson.Storage));
         Assert.Equal(Target, DataLocation.Resolve(current, legacy));
         Assert.Equal(Source, DataLocation.Resolve(current, legacy, Source));
         await WriteAsync(current, "location.json", "invalid-json");
@@ -45,8 +45,8 @@ public sealed class DataDirectoryTransferTests : IDisposable
         await WriteAsync(Source, relative + "/.task.lock", "");
         await WriteAsync(Source, relative + "/memory/.memory.lock", "");
         await WriteAsync(Source, "extensions/packages/template/v1/adapter.dll", "package");
-        await LocalFiles.WriteJsonAsync(Path.Combine(Source, relative, "source.json"), new { directory = Path.Combine(Source, relative, "sources/hash") });
-        await LocalFiles.WriteJsonAsync(Path.Combine(Source, relative, "latest-result.json"), new { patchDirectory = Path.Combine(Source, relative, "patches/hash") });
+        await LocalFiles.WriteJsonAsync(Path.Combine(Source, relative, "source.json"), new { directory = Path.Combine(Source, relative, "sources/hash") }, FixtureJson.TypeInfo<object>(FixtureJson.Storage));
+        await LocalFiles.WriteJsonAsync(Path.Combine(Source, relative, "latest-result.json"), new { patchDirectory = Path.Combine(Source, relative, "patches/hash") }, FixtureJson.TypeInfo<object>(FixtureJson.Storage));
         var hashes = Directory.EnumerateFiles(Source, "*", SearchOption.AllDirectories)
             .Where(file => Path.GetFileName(file) != ".app.lock").ToDictionary(file => file, file => LocalFiles.HashFileAsync(file).GetAwaiter().GetResult());
 
@@ -62,7 +62,7 @@ public sealed class DataDirectoryTransferTests : IDisposable
         Assert.False(File.Exists(Path.Combine(Target, relative, ".task.lock")));
         Assert.False(File.Exists(Path.Combine(Target, relative, "memory/.memory.lock")));
         Assert.False(File.Exists(Path.Combine(Target, ".relocation.json")));
-        var result = await LocalFiles.ReadJsonAsync<JsonElement>(Path.Combine(Target, relative, "latest-result.json"));
+        var result = await LocalFiles.ReadJsonAsync<JsonElement>(Path.Combine(Target, relative, "latest-result.json"), FixtureJson.TypeInfo<global::System.Text.Json.JsonElement>(FixtureJson.Storage));
         Assert.Equal(Path.Combine("patches", "hash"), result.GetProperty("patchDirectory").GetString());
         Assert.Equal(project.GameDirectory, (await new GameProjectStore(Target).GetAsync(project.Id))!.GameDirectory);
     }

@@ -1,13 +1,15 @@
 using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
+using System.Text.Json.Nodes;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Development;
 
 /// <summary>Bounds replayed tool output without altering the persisted history or provider reasoning.</summary>
 internal static class AdaptationHistory
 {
-    private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web)
+    private static readonly JsonSerializerOptions Json = new(EngineJson.Web)
         { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
 
     internal static AgentMessage[] RecentExchanges(IReadOnlyList<AgentMessage> history, int byteBudget)
@@ -27,16 +29,18 @@ internal static class AdaptationHistory
 
     internal static string ArchiveIndex(IReadOnlyList<AgentMessage> history, int start) => JsonSerializer.Serialize(
         history.Select((message, index) => (message, index)).Skip(start)
-            .Where(item => item.message.Role != "user").TakeLast(16).Select(item => new
+            .Where(item => item.message.Role != "user").TakeLast(16).Select(item => new JsonObject
             {
-                messageIndex = item.index, item.message.Role, item.message.ToolCallId,
-                preview = Preview(ReadableMessage(item.message))
-            }), Json);
+                ["messageIndex"] = item.index,
+                ["role"] = item.message.Role,
+                ["toolCallId"] = item.message.ToolCallId,
+                ["preview"] = Preview(ReadableMessage(item.message))
+            }), EngineJson.TypeInfo<IEnumerable<JsonObject>>(Json));
 
     internal static string ReadableMessage(AgentMessage message)
     {
         var text = new StringBuilder(message.Content);
-        if (message.ToolCalls is { Count: > 0 }) text.AppendLine().Append(JsonSerializer.Serialize(message.ToolCalls, Json));
+        if (message.ToolCalls is { Count: > 0 }) text.AppendLine().Append(JsonSerializer.Serialize(message.ToolCalls, EngineJson.TypeInfo<IReadOnlyList<AgentToolCall>>(Json)));
         if (message.ProviderData is { } data) Append(data);
         return text.ToString();
 
@@ -100,19 +104,21 @@ internal static class AdaptationHistory
             // diagnostic; old source reads are explicitly stale after a committed edit.
             if (i < recentStart && bytes > 2048 && (successful && bytes > remaining || repeated is not null || supersededBy is not null))
             {
-                messages[i] = message with { Content = JsonSerializer.Serialize(new
+                messages[i] = message with { Content = JsonSerializer.Serialize(new JsonObject
                 {
-                    success = successful, previousResultOmitted = true, toolCallId = message.ToolCallId,
-                    originalCharacters = message.Content.Length,
-                    identicalTo = repeated,
-                    supersededBy,
-                    preview = message.Content[..Math.Min(384, message.Content.Length)],
-                    readBack = supersededBy is not null
+                    ["success"] = successful,
+                    ["previousResultOmitted"] = true,
+                    ["toolCallId"] = message.ToolCallId,
+                    ["originalCharacters"] = message.Content.Length,
+                    ["identicalTo"] = repeated,
+                    ["supersededBy"] = supersededBy,
+                    ["preview"] = message.Content[..Math.Min(384, message.Content.Length)],
+                    ["readBack"] = supersededBy is not null
                         ? "This file was edited later. Read current file ranges for current code; read_tool_result retrieves this OLD snapshot only."
                         : repeated is not null
                             ? "Exact repeat of identicalTo; use that retained result. read_tool_result retrieves this original without rerunning the operation."
                             : "read_tool_result(toolCallId, offset, length) reads the retained original result. Omitted is not missing or failed."
-                }) };
+                }, EngineJson.TypeInfo<JsonObject>(EngineJson.Default)) };
                 omitted++;
             }
             else

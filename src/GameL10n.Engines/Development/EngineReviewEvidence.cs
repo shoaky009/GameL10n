@@ -1,13 +1,15 @@
 using System.Text;
 using System.Text.Json;
 using GameL10n.Core.Storage;
+using System.Text.Json.Nodes;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Development;
 
 /// <summary>Aggregates project metadata locally; source and diagnostic excerpts are read only on demand.</summary>
 public sealed class EngineReviewEvidence
 {
-    private static readonly JsonSerializerOptions EvidenceJson = new() { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
+    private static readonly JsonSerializerOptions EvidenceJson = new(EngineJson.Default) { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
     private readonly Dictionary<string, string> hashes = new(StringComparer.Ordinal);
     private readonly HashSet<string> inspected = new(StringComparer.Ordinal);
     private string project = "";
@@ -16,7 +18,10 @@ public sealed class EngineReviewEvidence
     private readonly HashSet<string> engineKeys = new(StringComparer.OrdinalIgnoreCase);
     public IReadOnlyCollection<string> EngineKeys => engineKeys;
     public string Fingerprint => LocalFiles.HashText(string.Join('\n', hashes.OrderBy(pair => pair.Key, StringComparer.Ordinal).Select(pair => pair.Key + ":" + pair.Value)));
-    public object Overview { get; private set; } = new { };
+    public object Overview { get; private set; } = new JsonObject
+    {
+
+    };
     public IReadOnlyCollection<string> Files => hashes.Keys;
 
     public static async Task<EngineReviewEvidence> LoadAsync(string projectDirectory, CancellationToken ct)
@@ -41,13 +46,16 @@ public sealed class EngineReviewEvidence
                 {
                     result.engineKeys.Add(Text(candidate, "format", 160)); result.engineKeys.Add(Text(candidate, "adapterId", 160));
                 }
-            sessionSummary = new
+            sessionSummary = new JsonObject
             {
-                summary = Text(session, "summary", 6000), notes = Text(session, "notes", 6000),
-                status = Text(session, "lastStatus", 80), nextAction = Text(session, "nextAction", 1600),
-                verification = Raw(session, "verificationDiagnostics", 8000),
-                coverage = Raw(session, "textCoverage", 6000), candidates = Raw(session, "builtinDiscovery", 8000),
-                family = session.TryGetProperty("verifiedPackage", out var package) && package.ValueKind == JsonValueKind.Object
+                ["summary"] = Text(session, "summary", 6000),
+                ["notes"] = Text(session, "notes", 6000),
+                ["status"] = Text(session, "lastStatus", 80),
+                ["nextAction"] = Text(session, "nextAction", 1600),
+                ["verification"] = Raw(session, "verificationDiagnostics", 8000),
+                ["coverage"] = Raw(session, "textCoverage", 6000),
+                ["candidates"] = Raw(session, "builtinDiscovery", 8000),
+                ["family"] = session.TryGetProperty("verifiedPackage", out var package) && package.ValueKind == JsonValueKind.Object
                     ? Raw(package, "family", 800) : null
             };
         }
@@ -77,7 +85,11 @@ public sealed class EngineReviewEvidence
                 if (size > 512 * 1024) continue;
                 var relative = Path.GetRelativePath(result.project, file).Replace('\\', '/');
                 await result.AddAsync(relative, ct);
-                files.Add(new { path = relative, bytes = size });
+                files.Add(new JsonObject
+                {
+                    ["path"] = relative,
+                    ["bytes"] = size
+                });
             }
         }
         var tools = new Dictionary<string, (int Calls, int Failures, double Ms, long Bytes)>();
@@ -105,8 +117,14 @@ public sealed class EngineReviewEvidence
                     if (!row.TryGetProperty("entry", out var entry)) continue;
                     var operation = Text(entry, "operation", 80);
                     if (operation is "run-start" or "model-start")
-                        runs[Text(row, "runId", 80)] = new { at = Text(row, "at", 80), coreBuild = Text(entry, "coreBuild", 80),
-                            model = Text(entry, "model", 160), instructions = Number(entry, "instructionBytes"), tools = Number(entry, "toolDefinitionBytes") };
+                        runs[Text(row, "runId", 80)] = new JsonObject
+                        {
+                            ["at"] = Text(row, "at", 80),
+                            ["coreBuild"] = Text(entry, "coreBuild", 80),
+                            ["model"] = Text(entry, "model", 160),
+                            ["instructions"] = Number(entry, "instructionBytes"),
+                            ["tools"] = Number(entry, "toolDefinitionBytes")
+                        };
                     if (operation == "model")
                     {
                         calls++; inputTokens += (long)Number(entry, "inputTokens"); outputTokens += (long)Number(entry, "outputTokens");
@@ -119,9 +137,18 @@ public sealed class EngineReviewEvidence
                     if (operation != "tool") continue;
                     var tool = Text(entry, "tool", 80);
                     var failed = Text(entry, "status", 80) == "failed";
-                    var eventInfo = new { path = relative, at = Text(row, "at", 80), runId = Text(row, "runId", 80),
-                        turn = Number(row, "turn"), callId = Text(entry, "callId", 160), tool,
-                        status = Text(entry, "status", 80), result = Raw(entry, "result", 2400), error = Text(entry, "error", 1200) };
+                    var eventInfo = new JsonObject
+                    {
+                        ["path"] = relative,
+                        ["at"] = Text(row, "at", 80),
+                        ["runId"] = Text(row, "runId", 80),
+                        ["turn"] = Number(row, "turn"),
+                        ["callId"] = Text(entry, "callId", 160),
+                        ["tool"] = tool,
+                        ["status"] = Text(entry, "status", 80),
+                        ["result"] = Raw(entry, "result", 2400),
+                        ["error"] = Text(entry, "error", 1200)
+                    };
                     if (tool is "write_file" or "replace_text" && !failed) lastSourceEdit = eventInfo;
                     if (tool == "test_adapter")
                     {
@@ -140,24 +167,50 @@ public sealed class EngineReviewEvidence
                     }
                     if (failed)
                     {
-                        failures.Enqueue(new { at = Text(row, "at", 80), tool, error = Text(entry, "error", 1200) });
+                        failures.Enqueue(new JsonObject
+                        {
+                            ["at"] = Text(row, "at", 80),
+                            ["tool"] = tool,
+                            ["error"] = Text(entry, "error", 1200)
+                        });
                         if (failures.Count > 12) failures.Dequeue();
                     }
                 }
                 catch (JsonException) { incompleteLines++; }
             }
         }
-        result.Overview = new
+        result.Overview = new JsonObject
         {
-            modelCalls = calls, inputTokens, outputTokens, apiSeconds = apiMs / 1000, queueSeconds = queueMs / 1000,
-            tools = tools.OrderByDescending(pair => pair.Value.Ms).Select(pair => new
-            { tool = pair.Key, calls = pair.Value.Calls, failures = pair.Value.Failures, seconds = pair.Value.Ms / 1000, outputBytes = pair.Value.Bytes }),
-            repeatedArguments = repeats.Where(pair => pair.Value > 1).OrderByDescending(pair => pair.Value).Take(12)
-                .Select(pair => new { fingerprint = pair.Key, calls = pair.Value }),
-            recentFailures = failures.ToArray(), recentRuns = runs.TakeLast(12).ToDictionary(), session = sessionSummary,
-            lastSourceEdit, lastVerification, lastSuccessfulVerification,
-            files, logFiles = result.hashes.Keys.Where(path => path.StartsWith("logs/", StringComparison.Ordinal)).ToArray(), partialInventory, incompleteLines,
-            caveat = "相同参数可能因源码或资源变化而需要重跑；累计耗时不是单次耗时；旧日志缺失字段不等于没有问题。静态验收不代表实机显示或完整覆盖。"
+            ["modelCalls"] = calls,
+            ["inputTokens"] = inputTokens,
+            ["outputTokens"] = outputTokens,
+            ["apiSeconds"] = apiMs / 1000,
+            ["queueSeconds"] = queueMs / 1000,
+            ["tools"] = EngineJson.Array(tools.OrderByDescending(pair => pair.Value.Ms).Select(pair => new JsonObject
+            {
+                ["tool"] = pair.Key,
+                ["calls"] = pair.Value.Calls,
+                ["failures"] = pair.Value.Failures,
+                ["seconds"] = pair.Value.Ms / 1000,
+                ["outputBytes"] = pair.Value.Bytes
+            })),
+            ["repeatedArguments"] = EngineJson.Array(repeats.Where(pair => pair.Value > 1).OrderByDescending(pair => pair.Value).Take(12)
+                .Select(pair => new JsonObject
+                {
+                    ["fingerprint"] = pair.Key,
+                    ["calls"] = pair.Value
+                })),
+            ["recentFailures"] = EngineJson.Node(failures.ToArray(), EngineJson.Web),
+            ["recentRuns"] = EngineJson.Node(runs.TakeLast(12).ToDictionary(), EngineJson.Web),
+            ["session"] = EngineJson.Node(sessionSummary, EngineJson.Web),
+            ["lastSourceEdit"] = EngineJson.Node(lastSourceEdit, EngineJson.Web),
+            ["lastVerification"] = EngineJson.Node(lastVerification, EngineJson.Web),
+            ["lastSuccessfulVerification"] = EngineJson.Node(lastSuccessfulVerification, EngineJson.Web),
+            ["files"] = EngineJson.Node((files).ToArray(), EngineJson.Web),
+            ["logFiles"] = EngineJson.Node(result.hashes.Keys.Where(path => path.StartsWith("logs/", StringComparison.Ordinal)).ToArray(), EngineJson.Web),
+            ["partialInventory"] = partialInventory,
+            ["incompleteLines"] = incompleteLines,
+            ["caveat"] = "相同参数可能因源码或资源变化而需要重跑；累计耗时不是单次耗时；旧日志缺失字段不等于没有问题。静态验收不代表实机显示或完整覆盖。"
         };
         return result;
     }
@@ -169,15 +222,27 @@ public sealed class EngineReviewEvidence
         path = path.Replace('\\', '/');
         if (path == "overview.json") path = "overview";
         if (path.EndsWith("session.json", StringComparison.Ordinal)) throw new InvalidDataException("会话摘要已在 overview 中；请读取日志或源码，避免回放全部 API 历史。");
-        var source = path == "overview" ? JsonSerializer.Serialize(Overview, EvidenceJson) : await ReadTextAsync(path, ct);
+        var source = path == "overview" ? JsonSerializer.Serialize(Overview, EngineJson.TypeInfo<object>(EvidenceJson)) : await ReadTextAsync(path, ct);
         inspected.Add(path);
         offset = Math.Min(offset, source.Length);
         var found = string.IsNullOrEmpty(query) ? offset : source.IndexOf(query, offset, StringComparison.OrdinalIgnoreCase);
-        if (found < 0) return new { path, queryFound = false, totalCharacters = source.Length };
+        if (found < 0) return new JsonObject
+        {
+            ["path"] = path,
+            ["queryFound"] = false,
+            ["totalCharacters"] = source.Length
+        };
         offset = found;
         var count = Math.Min(length, source.Length - offset);
-        return new { path, offset, totalCharacters = source.Length, queryFound = true,
-            nextOffset = offset + count, content = source.Substring(offset, count) };
+        return new JsonObject
+        {
+            ["path"] = path,
+            ["offset"] = offset,
+            ["totalCharacters"] = source.Length,
+            ["queryFound"] = true,
+            ["nextOffset"] = offset + count,
+            ["content"] = source.Substring(offset, count)
+        };
     }
 
     public async Task<string> ToolSourceAsync(string path, CancellationToken ct)
@@ -222,17 +287,19 @@ public sealed class EngineReviewEvidence
     }
 
     // Task/UI/API settings change while a summary runs; only game identity and extraction inputs are evidence.
-    private static string GameMetadata(JsonElement game) => JsonSerializer.Serialize(new
+    private static string GameMetadata(JsonElement game) => JsonSerializer.Serialize(new JsonObject
     {
-        id = Text(game, "id", 160), gameDirectory = Text(game, "gameDirectory", 4096),
-        adapterId = Text(game, "adapterId", 160), adapterVersion = Text(game, "adapterVersion", 160),
-        sourceFingerprint = game.TryGetProperty("analysis", out var analysis) && analysis.ValueKind == JsonValueKind.Object
+        ["id"] = Text(game, "id", 160),
+        ["gameDirectory"] = Text(game, "gameDirectory", 4096),
+        ["adapterId"] = Text(game, "adapterId", 160),
+        ["adapterVersion"] = Text(game, "adapterVersion", 160),
+        ["sourceFingerprint"] = game.TryGetProperty("analysis", out var analysis) && analysis.ValueKind == JsonValueKind.Object
             ? Text(analysis, "sourceFingerprint", 256) : null
-    }, EvidenceJson);
+    }, EngineJson.TypeInfo<JsonObject>(EvidenceJson));
 
     private static double Number(JsonElement value, string key) => value.TryGetProperty(key, out var item) && item.ValueKind == JsonValueKind.Number && item.TryGetDouble(out var number) ? number : 0;
     private static string Text(JsonElement value, string key, int limit) => value.TryGetProperty(key, out var item) && item.ValueKind == JsonValueKind.String
         ? Cut(item.GetString()!, limit) : "";
-    private static string? Raw(JsonElement value, string key, int limit) => value.TryGetProperty(key, out var item) ? Cut(JsonSerializer.Serialize(item, EvidenceJson), limit) : null;
+    private static string? Raw(JsonElement value, string key, int limit) => value.TryGetProperty(key, out var item) ? Cut(JsonSerializer.Serialize(item, EngineJson.TypeInfo<JsonElement>(EvidenceJson)), limit) : null;
     private static string Cut(string value, int limit) => value.Length > limit ? value[..limit] + "…" : value;
 }

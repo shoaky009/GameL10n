@@ -117,7 +117,7 @@ public sealed partial class MainWindow : Window
         game.HasSavedAnalysis = game.Project.Analysis is not null || File.Exists(Path.Combine(game.Directory, "source.json"));
         async Task<T?> ReadSummaryAsync<T>(string name)
         {
-            try { return await LocalFiles.ReadRecoverableJsonAsync<T>(Path.Combine(game.Directory, name)); }
+            try { return await LocalFiles.ReadRecoverableJsonAsync<T>(Path.Combine(game.Directory, name), DesktopJson.TypeInfo<T>(DesktopJson.Storage)); }
             catch (Exception error) when (error is IOException or InvalidDataException or JsonException or UnauthorizedAccessException)
             { Program.WriteStartupError(error); report("部分任务记录无法读取，已保存的译文仍可继续使用。"); return default; }
         }
@@ -140,7 +140,7 @@ public sealed partial class MainWindow : Window
             try
             {
                 // Read only UI metadata; do not retain the model conversation for every loaded project.
-                var adaptation = await LocalFiles.ReadJsonAsync<SavedAdaptationSummary>(adaptationPath);
+                var adaptation = await LocalFiles.ReadJsonAsync<SavedAdaptationSummary>(adaptationPath, DesktopJson.TypeInfo<SavedAdaptationSummary>(DesktopJson.Storage));
                 game.AdaptationUsage = adaptation?.Usage;
                 game.AdaptationSummary = adaptation?.Summary;
                 game.AdaptationProgressNote = adaptation?.ProgressNote;
@@ -166,7 +166,7 @@ public sealed partial class MainWindow : Window
             && (state is null || state.Running || (element.TryGetProperty("updatedAt", out var timestamp)
                 && timestamp.TryGetDateTimeOffset(out var updated) && updated > state.UpdatedAt)))
         {
-            try { game.Progress = progress.Deserialize<PipelineProgress>(LocalFiles.JsonOptions); game.Stage = "可继续"; }
+            try { game.Progress = progress.Deserialize<PipelineProgress>(DesktopJson.TypeInfo<PipelineProgress>(DesktopJson.Storage)); game.Stage = "可继续"; }
             catch (JsonException error) { Program.WriteStartupError(error); }
         }
         try { game.Result = await storagePipeline.LoadLatestResultAsync(game.Directory); }
@@ -292,7 +292,7 @@ public sealed partial class MainWindow : Window
             };
             if (persistNavigation && (navigationSettingsDirty || nextGlobal != globalSettings))
             {
-                await LocalFiles.WriteJsonAsync(Path.Combine(dataDirectory, "settings.json"), nextGlobal);
+                await LocalFiles.WriteJsonAsync(Path.Combine(dataDirectory, "settings.json"), nextGlobal, DesktopJson.TypeInfo<DesktopSettings>(DesktopJson.Storage));
                 globalSettings = nextGlobal;
                 navigationSettingsDirty = false;
             }
@@ -325,7 +325,7 @@ public sealed partial class MainWindow : Window
             try
             {
                 globalSettings = globalSettings with { MaximumTranslations = double.IsFinite(ConcurrentGamesBox.Value) ? (int)Math.Clamp(ConcurrentGamesBox.Value, 1, 8) : 2 };
-                await LocalFiles.WriteJsonAsync(Path.Combine(dataDirectory, "settings.json"), globalSettings);
+                await LocalFiles.WriteJsonAsync(Path.Combine(dataDirectory, "settings.json"), globalSettings, DesktopJson.TypeInfo<DesktopSettings>(DesktopJson.Storage));
             }
             finally { settingsWriteLock.Release(); }
             ShowDataStatus("并行翻译数量已保存，下次启动时生效。", InfoBarSeverity.Success);
@@ -536,10 +536,10 @@ public sealed partial class MainWindow : Window
         });
     }
 
-    private sealed record SavedTaskState(string RunId, GameTaskKind Kind, string Stage, bool Running,
+    internal sealed record SavedTaskState(string RunId, GameTaskKind Kind, string Stage, bool Running,
         PipelineProgress? Progress, string? Error, GameTranslationSettings Settings, DateTimeOffset UpdatedAt);
 
-    private sealed record SavedAdaptationSummary(TokenUsage? Usage, string? Summary, AdaptationStatus? LastStatus,
+    internal sealed record SavedAdaptationSummary(TokenUsage? Usage, string? Summary, AdaptationStatus? LastStatus,
         string? NextAction, AdaptationBlocker? Blocker, string? UserInstruction,
         AdaptationProgressNote? ProgressNote = null, AdaptationProgressNote? LastBreakthrough = null,
         TextCoverage? TextCoverage = null, AdaptationObjective? Objective = null);

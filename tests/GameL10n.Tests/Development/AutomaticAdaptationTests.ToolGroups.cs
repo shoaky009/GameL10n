@@ -40,12 +40,12 @@ public sealed partial class AutomaticAdaptationTests
             return new(new("assistant", ToolCalls: [call]), new(100, 20));
         });
         await new AutomaticAdaptationService(model, Runtime(new ScriptedRunner()), store).AdaptAsync(request);
-        var saved = await LocalFiles.ReadJsonAsync<AdaptationSession>(Path.Combine(store.WorkDirectory, "current/session.json"));
+        var saved = await LocalFiles.ReadJsonAsync<AdaptationSession>(Path.Combine(store.WorkDirectory, "current/session.json"), FixtureJson.TypeInfo<global::GameL10n.Core.Development.AdaptationSession>(FixtureJson.Storage));
         Assert.DoesNotContain("native", saved!.EnabledToolGroups);
         // A historical all choice must not return when the same session is reopened with another model.
         saved.ModelIdentity = "previous-model";
         saved.EnabledToolGroups = ["all"];
-        await LocalFiles.WriteJsonAsync(Path.Combine(store.WorkDirectory, "current/session.json"), saved);
+        await LocalFiles.WriteJsonAsync(Path.Combine(store.WorkDirectory, "current/session.json"), saved, FixtureJson.TypeInfo<object>(FixtureJson.Storage));
         var resumed = new FakeModel(context =>
         {
             Assert.Contains(context.Tools, tool => tool.Name == "test_adapter");

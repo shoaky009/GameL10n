@@ -5,13 +5,15 @@ using System.Text.RegularExpressions;
 using GameL10n.Core.Isolation;
 using GameL10n.Core.Adapters;
 using GameL10n.Core.Storage;
+using System.Text.Json.Nodes;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Development;
 
 /// <summary>Packages grouped by engine/template, compatibility records, and per-game version pins.</summary>
 public sealed partial class LocalAdapterPackageStore(string rootDirectory, string? workDirectory = null)
 {
-    private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web) { WriteIndented = true };
+    private static readonly JsonSerializerOptions Json = new(EngineJson.Web) { WriteIndented = true };
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, SemaphoreSlim> PublicationLocks = new(StringComparer.OrdinalIgnoreCase);
     private readonly SemaphoreSlim activationLock = PublicationLocks.GetOrAdd(Path.GetFullPath(rootDirectory), _ => new(1, 1));
     public string RootDirectory { get; } = Path.GetFullPath(rootDirectory);
@@ -40,11 +42,13 @@ public sealed partial class LocalAdapterPackageStore(string rootDirectory, strin
                     foreach (var file in files)
                         await GeneratedAdapterResources.CopyAsync(WorkspaceFiles.Resolve(package.DirectoryPath, file),
                             WorkspaceFiles.Resolve(pending, file), cancellationToken);
-                    await File.WriteAllTextAsync(Path.Combine(pending, "package.json"), JsonSerializer.Serialize(published, Json), cancellationToken);
-                    await File.WriteAllTextAsync(Path.Combine(pending, "verification.json"), JsonSerializer.Serialize(new
+                    await File.WriteAllTextAsync(Path.Combine(pending, "package.json"), JsonSerializer.Serialize(published, EngineJson.TypeInfo<GeneratedAdapterPackage>(Json)), cancellationToken);
+                    await File.WriteAllTextAsync(Path.Combine(pending, "verification.json"), JsonSerializer.Serialize(new JsonObject
                     {
-                        verifiedAt = DateTimeOffset.UtcNow, diagnostics = verificationDiagnostics, runtimeTested = false
-                    }, Json), cancellationToken);
+                        ["verifiedAt"] = DateTimeOffset.UtcNow,
+                        ["diagnostics"] = EngineJson.Node((verificationDiagnostics).ToArray(), Json),
+                        ["runtimeTested"] = false
+                    }, EngineJson.TypeInfo<JsonObject>(Json)), cancellationToken);
                     VerifyPackage(package with { DirectoryPath = pending });
                     Directory.Move(pending, destination);
                 }
@@ -56,7 +60,7 @@ public sealed partial class LocalAdapterPackageStore(string rootDirectory, strin
             var active = Path.Combine(gameDirectory, "active.json");
             if (File.Exists(active))
             {
-                var current = JsonSerializer.Deserialize<Activation>(WorkspaceFiles.ReadBounded(gameDirectory, "active.json", 4096), Json);
+                var current = JsonSerializer.Deserialize<Activation>(WorkspaceFiles.ReadBounded(gameDirectory, "active.json", 4096), EngineJson.TypeInfo<Activation>(Json));
                 if (current?.Id == package.Id && current.Version == package.Version)
                 {
                     await RecordReleaseAsync(current, published, cancellationToken);
@@ -65,7 +69,7 @@ public sealed partial class LocalAdapterPackageStore(string rootDirectory, strin
             }
             var next = Path.Combine(gameDirectory, "active-" + Guid.NewGuid().ToString("N") + ".tmp");
             var activation = new Activation(package.Id, package.Version, DateTimeOffset.UtcNow, gameId);
-            var contents = JsonSerializer.SerializeToUtf8Bytes(activation, Json);
+            var contents = JsonSerializer.SerializeToUtf8Bytes(activation, EngineJson.TypeInfo<Activation>(Json));
             await using (var stream = new FileStream(next, FileMode.CreateNew, FileAccess.Write, FileShare.None))
             {
                 await stream.WriteAsync(contents, cancellationToken);
@@ -85,7 +89,7 @@ public sealed partial class LocalAdapterPackageStore(string rootDirectory, strin
         var directory = GamePath(gameId);
         var active = WorkspaceFiles.Resolve(directory, "active.json");
         if (!File.Exists(active)) return null;
-        var activation = JsonSerializer.Deserialize<Activation>(WorkspaceFiles.ReadBounded(directory, "active.json", 4096), Json)
+        var activation = JsonSerializer.Deserialize<Activation>(WorkspaceFiles.ReadBounded(directory, "active.json", 4096), EngineJson.TypeInfo<Activation>(Json))
             ?? throw new GeneratedAdapterException("The local activation manifest is invalid.");
         if (!Directory.Exists(PackagePath(activation.Id, activation.Version))) return null;
         return LoadPackage(activation);
@@ -141,10 +145,10 @@ public sealed partial class LocalAdapterPackageStore(string rootDirectory, strin
             var previous = WorkspaceFiles.Resolve(directory, "previous.json");
             if (!File.Exists(previous)) return false;
             var contents = WorkspaceFiles.ReadBounded(directory, "previous.json", 4096);
-            var activation = JsonSerializer.Deserialize<Activation>(contents, Json) ?? throw new GeneratedAdapterException("Invalid previous activation.");
+            var activation = JsonSerializer.Deserialize<Activation>(contents, EngineJson.TypeInfo<Activation>(Json)) ?? throw new GeneratedAdapterException("Invalid previous activation.");
             var activeFile = WorkspaceFiles.Resolve(directory, "active.json");
             var current = File.Exists(activeFile)
-                ? JsonSerializer.Deserialize<Activation>(WorkspaceFiles.ReadBounded(directory, "active.json", 4096), Json) : null;
+                ? JsonSerializer.Deserialize<Activation>(WorkspaceFiles.ReadBounded(directory, "active.json", 4096), EngineJson.TypeInfo<Activation>(Json)) : null;
             _ = LoadPackage(activation);
             var state = ReadLibraryState();
             if (current is not null && (current.Id != activation.Id || current.Version != activation.Version))
@@ -187,10 +191,10 @@ public sealed partial class LocalAdapterPackageStore(string rootDirectory, strin
 
     private static GeneratedAdapterPackage? ReadPackage(string directory)
     {
-        return JsonSerializer.Deserialize<GeneratedAdapterPackage>(WorkspaceFiles.ReadBounded(directory, "package.json", 16 * 1024 * 1024), Json);
+        return JsonSerializer.Deserialize<GeneratedAdapterPackage>(WorkspaceFiles.ReadBounded(directory, "package.json", 16 * 1024 * 1024), EngineJson.TypeInfo<GeneratedAdapterPackage>(Json));
     }
 
     [GeneratedRegex("^[a-zA-Z0-9][a-zA-Z0-9._-]{0,95}$")]
     private static partial Regex PackagePart();
-    private sealed record Activation(string Id, string Version, DateTimeOffset ActivatedAt, string? GameId = null);
+    internal sealed record Activation(string Id, string Version, DateTimeOffset ActivatedAt, string? GameId = null);
 }

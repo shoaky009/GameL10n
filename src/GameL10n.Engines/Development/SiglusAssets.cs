@@ -3,6 +3,8 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using GameL10n.Core.Adapters;
+using System.Text.Json.Nodes;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Development;
 
@@ -17,18 +19,20 @@ public static class SiglusAssets
     public static EngineReferencePin Pin { get; } = CreatePin();
     public const string EntryScript = "import sys\nfrom gamel10n_siglus import main\nsys.exit(main())\n";
 
-    public static object Describe() => new
+    public static object Describe() => new JsonObject
     {
-        id = Family.AdapterId, version = Version, name = Family.Name,
-        upstream = "SiglusSceneScriptUtility 0.5.7 (Unlicense OR 0BSD)",
-        capabilities = new[] { "Scene.pck 解包及重封包", "内嵌源码查询", "字节码参数字符串引用", "变长 UTF-16 回填", "GDI 字体检查及 FKDS 图片字库补字", "独立中文启动入口" },
-        templates = new[] { "标准 CD_TEXT/CD_NAME", "FKDS 气泡对白" },
-        sources = new[] { "gamel10n_siglus.py", "siglus_binary.py", "siglus_font.py", "siglus_ssu/pck.py", "siglus_ssu/dat.py", "siglus_ssu/g00.py", "siglus_ssu/disam.py", "siglus_ssu/GEI.py" },
-        usage = "inspect_siglus_game 直接分析当前游戏，返回结构、已识别文本和待处理调用；source/query 按需读取内嵌源码。"
+        ["id"] = Family.AdapterId,
+        ["version"] = Version,
+        ["name"] = Family.Name,
+        ["upstream"] = "SiglusSceneScriptUtility 0.5.7 (Unlicense OR 0BSD)",
+        ["capabilities"] = EngineJson.Node(new[] { "Scene.pck 解包及重封包", "内嵌源码查询", "字节码参数字符串引用", "变长 UTF-16 回填", "GDI 字体检查及 FKDS 图片字库补字", "独立中文启动入口" }, EngineJson.Web),
+        ["templates"] = EngineJson.Node(new[] { "标准 CD_TEXT/CD_NAME", "FKDS 气泡对白" }, EngineJson.Web),
+        ["sources"] = EngineJson.Node(new[] { "gamel10n_siglus.py", "siglus_binary.py", "siglus_font.py", "siglus_ssu/pck.py", "siglus_ssu/dat.py", "siglus_ssu/g00.py", "siglus_ssu/disam.py", "siglus_ssu/GEI.py" }, EngineJson.Web),
+        ["usage"] = "inspect_siglus_game 直接分析当前游戏，返回结构、已识别文本和待处理调用；source/query 按需读取内嵌源码。"
             + "copy_adapter id=engine.siglus/version=1.0.0 生成固定依赖和 JSON 调用桥。规则放在 src/tools/siglus-rules.json，"
             + "commandRules:[{command:'精确函数名',argument:1,kind:'dialogue'}] 的 argument 从 0 开始。"
             + "仅选择源码或已验证语义确认的显示参数；不要按字符串内容猜测引用。test_adapter 仍须通过。",
-        limits = "引擎版本、显示模板和 EXE 补丁特征分别检查；未识别的调用不自动翻译，游戏实际显示需试译确认。"
+        ["limits"] = "引擎版本、显示模板和 EXE 补丁特征分别检查；未识别的调用不自动翻译，游戏实际显示需试译确认。"
     };
 
     public static object ReadSource(string path, int offset, int length)
@@ -41,7 +45,14 @@ public static class SiglusAssets
         var text = reader.ReadToEnd();
         offset = Math.Clamp(offset, 0, text.Length);
         var end = Math.Min(text.Length, offset + Math.Clamp(length, 1, 16000));
-        return new { path, offset, nextOffset = end, more = end < text.Length, content = text[offset..end] };
+        return new JsonObject
+        {
+            ["path"] = path,
+            ["offset"] = offset,
+            ["nextOffset"] = end,
+            ["more"] = end < text.Length,
+            ["content"] = text[offset..end]
+        };
     }
 
     private static EngineReferencePin CreatePin()
@@ -64,7 +75,7 @@ public static class SiglusAssets
         var wheel = Read("upstream.whl");
         if (Convert.ToHexStringLower(SHA256.HashData(wheel)) != UpstreamHash)
             throw new InvalidDataException("内置 Siglus 上游工具校验失败。");
-        var patches = JsonSerializer.Deserialize<Dictionary<string, string[][]>>(Read("upstream-patches.json"))!;
+        var patches = JsonSerializer.Deserialize<Dictionary<string, string[][]>>(Read("upstream-patches.json"), EngineJson.TypeInfo<Dictionary<string, string[][]>>(EngineJson.Default))!;
         using var input = new ZipArchive(new MemoryStream(wheel));
         using var output = new MemoryStream();
         using (var zip = new ZipArchive(output, ZipArchiveMode.Create, true))

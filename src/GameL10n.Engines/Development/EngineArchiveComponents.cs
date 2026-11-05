@@ -1,5 +1,7 @@
 using System.Text.Json;
 using GameL10n.Core.Isolation;
+using System.Text.Json.Nodes;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Development;
 
@@ -24,17 +26,24 @@ public static class EngineArchiveComponents
     public static EngineArchiveComponent Find(string id) => All.FirstOrDefault(item => item.Id == id)
         ?? throw new InvalidDataException("未知引擎组件：" + id);
 
-    public static object Describe(string? id = null) => new
+    public static object Describe(string? id = null) => new JsonObject
     {
-        components = id is null ? All : [Find(id)],
-        dependencies = new[] { "Shared Python " + EngineReferenceToolkit.PythonVersion,
-            "Hash-pinned shared GalTransl library; standard library only, no pip or runtime downloads." },
-        limits = new { archiveMiB = 512, memberMiB = 64, totalDecodedMiB = 256, entries = 10000, memberNamesMiB = 2 },
-        input = "run_engine_component: id, operation, archive (resources/ or work/), output (new work/ directory). "
+        ["components"] = EngineJson.Node((id is null ? All : [Find(id)]).ToArray(), EngineJson.Web),
+        ["dependencies"] = EngineJson.Node(new[] { "Shared Python " + EngineReferenceToolkit.PythonVersion,
+            "Hash-pinned shared GalTransl library; standard library only, no pip or runtime downloads." }, EngineJson.Web),
+        ["limits"] = new JsonObject
+        {
+            ["archiveMiB"] = 512,
+            ["memberMiB"] = 64,
+            ["totalDecodedMiB"] = 256,
+            ["entries"] = 10000,
+            ["memberNamesMiB"] = 2
+        },
+        ["input"] = "run_engine_component: id, operation, archive (resources/ or work/), output (new work/ directory). "
             + "Optional members or lowercase extensions select extraction; rebuild replacements map exact member names to work/ files. XP3 requires filter=none.",
-        output = "Bounded summary plus work/<output>/manifest.json containing every member's name, length and SHA256. "
+        ["output"] = "Bounded summary plus work/<output>/manifest.json containing every member's name, length and SHA256. "
             + "extract writes files/; rebuild writes rebuilt/<original filename>, verifies all members, and preserves original bytes when unchanged.",
-        usage = "Stage a real archive, then call the component directly; no Python wrapper or model-generated parser is needed. "
+        ["usage"] = "Stage a real archive, then call the component directly; no Python wrapper or model-generated parser is needed. "
             + "Use try_builtin_adapter on extracted scripts. Component success is structural evidence, not runtime or adapter acceptance."
     };
 
@@ -72,7 +81,7 @@ public sealed class EngineArchiveComponentClient(IAdapterProcessRunner runner)
             var script = Path.Combine(temporary, "engine_archive.py");
             await File.WriteAllTextAsync(script, EngineArchiveComponents.Source, ct);
             var result = await runner.RunAsync(new(paths.Python, EngineReferenceToolkit.PythonArguments(paths, script, []),
-                temporary, JsonSerializer.Serialize(request, new JsonSerializerOptions(JsonSerializerDefaults.Web)),
+                temporary, JsonSerializer.Serialize(request, EngineJson.TypeInfo<EngineArchiveRequest>(new JsonSerializerOptions(EngineJson.Web))),
                 TimeSpan.FromMinutes(5), 1024 * 1024), ct);
             if (!File.Exists(request.ResponseFile))
                 throw new InvalidDataException($"封包组件未返回结果（退出码 {result.ExitCode}）："

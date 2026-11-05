@@ -15,7 +15,7 @@ public sealed partial class MainWindow
         try
         {
             if (!navigationSettingsDirty) return;
-            await LocalFiles.WriteJsonAsync(Path.Combine(dataDirectory, "settings.json"), globalSettings);
+            await LocalFiles.WriteJsonAsync(Path.Combine(dataDirectory, "settings.json"), globalSettings, DesktopJson.TypeInfo<Settings.DesktopSettings>(DesktopJson.Storage));
             navigationSettingsDirty = false;
         }
         finally { settingsWriteLock.Release(); }

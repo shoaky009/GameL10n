@@ -17,8 +17,8 @@ public sealed class PeImportInspectionTests
         var root = json.RootElement;
         Assert.False(root.GetProperty("partial").GetBoolean());
         var import = Assert.Single(root.GetProperty("imports").EnumerateArray());
-        Assert.Equal("GetGlyphOutlineA", import.GetProperty("Name").GetString());
-        Assert.Equal(0x1180, import.GetProperty("IatRva").GetInt32());
+        Assert.Equal("GetGlyphOutlineA", import.GetProperty("name").GetString());
+        Assert.Equal(0x1180, import.GetProperty("iatRva").GetInt32());
         Assert.Equal(0x380, import.GetProperty("iatFileOffset").GetInt32());
         Assert.Equal(2, import.GetProperty("candidateReferenceCount").GetInt32());
         Assert.Equal(new[] { 0x1000, 0x1010 }, import.GetProperty("candidateReferences").EnumerateArray()

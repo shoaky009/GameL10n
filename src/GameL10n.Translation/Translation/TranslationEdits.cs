@@ -1,6 +1,8 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using GameL10n.Core.Storage;
+using System.Text.Json.Nodes;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Translation;
 
@@ -15,7 +17,13 @@ public sealed record TranslationEdits(int SchemaVersion, IReadOnlyDictionary<str
     IReadOnlyDictionary<string, TranslationEdit>? Candidates = null)
 {
     public static string Signature(TranslationUnit unit) => LocalFiles.HashText(JsonSerializer.Serialize(
-        new { unit.SourceText, unit.Context, unit.Speaker, unit.Kind }) + TextValidation.ProtectionSignature(unit));
+        new JsonObject
+        {
+            ["SourceText"] = unit.SourceText,
+            ["Context"] = unit.Context,
+            ["Speaker"] = unit.Speaker,
+            ["Kind"] = unit.Kind
+        }, TranslationJson.TypeInfo<JsonObject>(TranslationJson.Default)) + TextValidation.ProtectionSignature(unit));
 
     public TranslationEdit? Find(TranslationUnit unit, string language) =>
         Entries.TryGetValue(unit.Id, out var entry) && entry.Language == language
@@ -28,7 +36,7 @@ public sealed record TranslationEdits(int SchemaVersion, IReadOnlyDictionary<str
         // Atomic replacement can proceed while a background task reads the previous snapshot.
         await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read,
             FileShare.ReadWrite | FileShare.Delete, 65536, FileOptions.Asynchronous);
-        var value = await JsonSerializer.DeserializeAsync<TranslationEdits>(stream, LocalFiles.JsonOptions, ct);
+        var value = await JsonSerializer.DeserializeAsync<TranslationEdits>(stream, TranslationJson.TypeInfo<TranslationEdits>(TranslationJson.Storage), ct);
         if (value?.SchemaVersion != 1 || value.Entries is null || value.Entries.Concat(value.Candidates ?? new Dictionary<string, TranslationEdit>()).Any(pair =>
             string.IsNullOrWhiteSpace(pair.Key) || pair.Value is null || pair.Value.Text is null
             || pair.Value.SourceSignature is not { Length: 64 } || string.IsNullOrWhiteSpace(pair.Value.Language)))
@@ -37,5 +45,5 @@ public sealed record TranslationEdits(int SchemaVersion, IReadOnlyDictionary<str
     }
 
     public Task SaveAsync(string projectDirectory, CancellationToken ct = default) =>
-        LocalFiles.WriteJsonAsync(Path.Combine(projectDirectory, "translation-edits.json"), this, ct);
+        LocalFiles.WriteJsonAsync(Path.Combine(projectDirectory, "translation-edits.json"), this, TranslationJson.TypeInfo<TranslationEdits>(TranslationJson.Storage), ct);
 }

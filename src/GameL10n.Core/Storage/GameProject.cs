@@ -3,6 +3,7 @@ using GameL10n.Core.Development;
 using GameL10n.Core.Pipeline;
 using GameL10n.Core.Providers;
 using GameL10n.Core.Isolation;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Storage;
 
@@ -82,7 +83,7 @@ public sealed partial class GameProjectStore(string dataDirectory)
             var index = await ReadIndexAsync(ct, (_, _) => { });
             // Invalidate before committing metadata so cancellation or a failed index write cannot leave stale entries.
             File.Delete(IndexPath);
-            await LocalFiles.WriteJsonAsync(path, project, ct);
+            await LocalFiles.WriteJsonAsync(path, project, CoreJson.TypeInfo<GameProject>(CoreJson.Storage), ct);
             index.Projects.RemoveAll(item => item.Id == project.Id);
             if (!project.IsRemoved) index.Projects.Add(GameProjectSummary.FromProject(project));
             await WriteIndexAsync(index, ct);
@@ -91,7 +92,7 @@ public sealed partial class GameProjectStore(string dataDirectory)
     }
 
     public Task<GameProject?> GetAsync(string id, CancellationToken ct = default) =>
-        LocalFiles.ReadRecoverableJsonAsync<GameProject>(Path.Combine(GetProjectDirectory(id), "game.json"), ct,
+        LocalFiles.ReadRecoverableJsonAsync<GameProject>(Path.Combine(GetProjectDirectory(id), "game.json"), CoreJson.TypeInfo<GameProject>(CoreJson.Storage), ct,
             project => project.SchemaVersion == 2 && project.Id == id && project.Settings is not null
                 && !string.IsNullOrWhiteSpace(project.GameDirectory) && TranslationPipeline.GameId(project.GameDirectory) == id);
 
@@ -140,7 +141,7 @@ public sealed partial class GameProjectStore(string dataDirectory)
         catch (Exception error) when (error is IOException or UnauthorizedAccessException)
         {
             // Retain a visible project for retry if a locked file interrupts deletion after game.json was removed.
-            try { await LocalFiles.WriteJsonAsync(Path.Combine(directory, "game.json"), project, CancellationToken.None); }
+            try { await LocalFiles.WriteJsonAsync(Path.Combine(directory, "game.json"), project, CoreJson.TypeInfo<GameProject>(CoreJson.Storage), CancellationToken.None); }
             catch (Exception restoreError) when (restoreError is IOException or UnauthorizedAccessException)
             { throw new IOException("项目文件未完全删除，且项目记录无法恢复：" + restoreError.Message, error); }
             throw new IOException("项目文件未完全删除，项目已保留，可关闭占用文件的程序后重试。" + error.Message, error);

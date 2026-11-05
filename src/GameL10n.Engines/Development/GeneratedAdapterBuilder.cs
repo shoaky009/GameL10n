@@ -2,6 +2,8 @@ using System.Text;
 using System.Text.Json;
 using GameL10n.Core.Adapters;
 using GameL10n.Core.Isolation;
+using System.Text.Json.Nodes;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Development;
 
@@ -69,5 +71,11 @@ public sealed class GeneratedAdapterBuilder(IAdapterProcessRunner runner)
     private static string LocalVersion(IReadOnlyDictionary<string, string> files, IReadOnlyList<string> patterns,
         AdapterFamily? family, IReadOnlyList<AdapterReleaseFile> selection, AdapterRecognition? recognition) =>
         Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes("python-v4\n"
-            + GeneratedAdapterResources.HashEntries(files) + "\n" + JsonSerializer.Serialize(new { patterns, family, selection, recognition }))))[..16];
+            + GeneratedAdapterResources.HashEntries(files) + "\n" + JsonSerializer.Serialize(new JsonObject
+            {
+                ["patterns"] = EngineJson.Node((patterns).ToArray(), EngineJson.Default),
+                ["family"] = EngineJson.Node(family, EngineJson.Default),
+                ["selection"] = EngineJson.Node((selection).ToArray(), EngineJson.Default),
+                ["recognition"] = EngineJson.Node(recognition, EngineJson.Default)
+            }, EngineJson.TypeInfo<JsonObject>(EngineJson.Default)))))[..16];
 }

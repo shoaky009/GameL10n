@@ -5,6 +5,7 @@ using System.Text.Json.Serialization;
 using GameL10n.Core.Adapters;
 using GameL10n.Core.Isolation;
 using GameL10n.Core.Storage;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Development;
 
@@ -35,7 +36,7 @@ public sealed partial class AdapterDevelopmentWorkflow(AdaptationRequest request
     AdapterRuntime runtime, LocalAdapterPackageStore store, HttpClient? researchClient = null,
     BuiltinAdapterAssets? builtinAssets = null, Action<string, string>? reportProgress = null)
 {
-    private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web)
+    private static readonly JsonSerializerOptions Json = new(EngineJson.Web)
         { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
     internal EngineReferenceToolkit EngineToolkit { get; } = new(Path.Combine(store.RootDirectory, "engine-tools"), researchClient, reportProgress);
     internal BuiltinAdapterAssets BuiltinAssets { get; } = builtinAssets ?? new();
@@ -141,7 +142,7 @@ public sealed partial class AdapterDevelopmentWorkflow(AdaptationRequest request
     }
 
     private string? BaselineFingerprint() => request.BaselineUnits is null ? null
-        : LocalFiles.HashText(JsonSerializer.Serialize(request.BaselineUnits, Json));
+        : LocalFiles.HashText(JsonSerializer.Serialize(request.BaselineUnits, EngineJson.TypeInfo<IReadOnlyList<TranslationUnit>>(Json)));
 
     public async Task<GeneratedGameAdapter> PublishAsync(string summary, bool allowPartial, CancellationToken ct, Func<CancellationToken, Task>? beforePublish = null)
     {

@@ -3,6 +3,8 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using GameL10n.Core.Isolation;
 using GameL10n.Core.Storage;
+using System.Text.Json.Nodes;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Development;
 
@@ -10,7 +12,7 @@ public sealed partial class AdaptationTools
 {
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> DownloadLocks = new(StringComparer.OrdinalIgnoreCase);
     private static readonly TimeSpan ReferenceCacheLifetime = TimeSpan.FromDays(7);
-    private sealed record DownloadReceipt(string Url, string Sha256, long Bytes, DateTimeOffset RetrievedAt, string? MediaType);
+    internal sealed record DownloadReceipt(string Url, string Sha256, long Bytes, DateTimeOffset RetrievedAt, string? MediaType);
     private sealed record PublicDownload(string Path, DownloadReceipt Source, bool Reused, bool Stale = false);
 
     private async Task<object> DownloadAsync(JsonElement args, CancellationToken ct)
@@ -29,7 +31,7 @@ public sealed partial class AdaptationTools
             + Limit(Text(args, "purpose", "分析资料，尚未登记为发布依赖"), 240) + $" · 保存到 {relative}");
         var manifest = WorkspaceFiles.Resolve(SourceDirectory, "tools/sources.json");
         var sources = relative.StartsWith("src/tools/", StringComparison.Ordinal)
-            ? await LocalFiles.ReadJsonAsync<Dictionary<string, ToolSource>>(manifest, ct) ?? [] : null;
+            ? await LocalFiles.ReadJsonAsync<Dictionary<string, ToolSource>>(manifest, EngineJson.TypeInfo<Dictionary<string, ToolSource>>(EngineJson.Storage), ct) ?? [] : null;
         ToolSource? pinned = null;
         sources?.TryGetValue(relative["src/tools/".Length..], out pinned);
         if (pinned?.Url != url) pinned = null;
@@ -62,13 +64,19 @@ public sealed partial class AdaptationTools
         if (sources is not null)
         {
             sources[relative["src/tools/".Length..]] = new(url, sha256);
-            await LocalFiles.WriteJsonAsync(manifest, sources, ct);
+            await LocalFiles.WriteJsonAsync(manifest, sources, EngineJson.TypeInfo<Dictionary<string, ToolSource>>(EngineJson.Storage), ct);
         }
         if (release is not null) Development.RegisterReleaseFiles([release]);
         var bytes = new FileInfo(path).Length;
         reportProgress?.Invoke(reused ? "复用已有工具" : "额外工具已保存", $"{relative} · {bytes / 1048576.0:F2} MiB");
-        return new { path = relative, sha256, bytes, reused,
-            releaseRegistered = session.ReleaseFiles?.Any(file => file.Path == AdapterReleaseFiles.PackagePath(relative)) == true };
+        return new JsonObject
+        {
+            ["path"] = relative,
+            ["sha256"] = sha256,
+            ["bytes"] = bytes,
+            ["reused"] = reused,
+            ["releaseRegistered"] = session.ReleaseFiles?.Any(file => file.Path == AdapterReleaseFiles.PackagePath(relative)) == true
+        };
     }
 
     private async Task<PublicDownload> ReadPublicDownloadAsync(string url, int maximumBytes, bool refresh,
@@ -120,8 +128,8 @@ public sealed partial class AdaptationTools
                     ct.ThrowIfCancellationRequested();
                     // Publish the URL receipt last; cancellation leaves the previous version intact.
                     File.Move(temporary, destination, true);
-                    await LocalFiles.WriteJsonAsync(WorkspaceFiles.Resolve(store.RootDirectory, relative + "/" + receipt.Sha256 + ".json"), receipt, ct);
-                    await LocalFiles.WriteJsonAsync(receiptPath, receipt, ct);
+                    await LocalFiles.WriteJsonAsync(WorkspaceFiles.Resolve(store.RootDirectory, relative + "/" + receipt.Sha256 + ".json"), receipt, EngineJson.TypeInfo<DownloadReceipt>(EngineJson.Storage), ct);
+                    await LocalFiles.WriteJsonAsync(receiptPath, receipt, EngineJson.TypeInfo<DownloadReceipt>(EngineJson.Storage), ct);
                     return new(destination, receipt, false);
                 }
                 finally { if (File.Exists(temporary)) File.Delete(temporary); }
@@ -142,7 +150,7 @@ public sealed partial class AdaptationTools
         try
         {
             var contents = WorkspaceFiles.ReadBounded(store.RootDirectory, relative + "/" + (expectedHash ?? "source") + ".json", 32 * 1024);
-            receipt = JsonSerializer.Deserialize<DownloadReceipt>(contents, Json);
+            receipt = JsonSerializer.Deserialize<DownloadReceipt>(contents, EngineJson.TypeInfo<DownloadReceipt>(Json));
         }
         catch (Exception error) when (error is IOException or JsonException or InvalidDataException) { return null; }
         if (receipt is null || receipt.Url != url || !IsDownloadHash(receipt.Sha256)

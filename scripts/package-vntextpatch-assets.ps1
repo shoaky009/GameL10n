@@ -34,7 +34,7 @@ try {
                 $expectedEntries.Add($entryPath, $file.Length)
                 [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $file.FullName, $entryPath, [IO.Compression.CompressionLevel]::Optimal) | Out-Null
             }
-            foreach ($name in @('Worker.cs', 'Protocol.cs')) {
+            foreach ($name in @('Worker.cs', 'Protocol.cs', 'Serialization/VnTextPatchJson.cs')) {
                 $file = Get-Item -LiteralPath (Join-Path $repoRoot "tools/GameL10n.VnTextPatch/$name")
                 $expectedEntries.Add("worker/$name", $file.Length)
                 [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $file.FullName, "worker/$name", [IO.Compression.CompressionLevel]::Optimal) | Out-Null

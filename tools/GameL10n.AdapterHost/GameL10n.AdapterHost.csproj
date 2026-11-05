@@ -1,5 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
+    <!-- Pinned legacy parser DLLs can still use reflection-based JSON inside this process. -->
+    <JsonSerializerIsReflectionEnabledByDefault>true</JsonSerializerIsReflectionEnabledByDefault>
     <OutputType>Exe</OutputType>
     <TargetFramework>net10.0</TargetFramework>
     <StartupObject>GameL10n.AdapterHost.Program</StartupObject>

@@ -64,7 +64,7 @@ public sealed partial class MainWindow
             try
             {
                 var settings = globalSettings with { AdaptationTokenBudget = budget, AdaptationMaximumTurns = turns };
-                await LocalFiles.WriteJsonAsync(Path.Combine(dataDirectory, "settings.json"), settings);
+                await LocalFiles.WriteJsonAsync(Path.Combine(dataDirectory, "settings.json"), settings, DesktopJson.TypeInfo<Settings.DesktopSettings>(DesktopJson.Storage));
                 globalSettings = settings;
             }
             finally { settingsWriteLock.Release(); }

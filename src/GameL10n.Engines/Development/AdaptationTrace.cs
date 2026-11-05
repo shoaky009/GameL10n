@@ -1,6 +1,8 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Development;
 
@@ -11,7 +13,12 @@ internal static class AdaptationTrace
     {
         try { return CallFields(call); }
         catch (Exception error) when (error is JsonException or InvalidOperationException)
-        { return new { call.Id, argumentFingerprint = Hash(call.Arguments), malformedArguments = true }; }
+        { return new JsonObject
+        {
+            ["id"] = call.Id,
+            ["argumentFingerprint"] = Hash(call.Arguments),
+            ["malformedArguments"] = true
+        }; }
     }
 
     private static object CallFields(AgentToolCall call)
@@ -41,10 +48,18 @@ internal static class AdaptationTrace
                 .Take(8).Select(item => Limit(item.GetString()!, 160)).ToArray();
         if (args.TryGetProperty("ranges", out var ranges) && ranges.ValueKind == JsonValueKind.Array)
             fields["ranges"] = ranges.EnumerateArray().Where(item => item.ValueKind == JsonValueKind.Object).Take(8)
-                .Select(item => new { address = item.TryGetProperty("address", out var address) && address.ValueKind == JsonValueKind.String
+                .Select(item => new JsonObject
+                {
+                    ["address"] = item.TryGetProperty("address", out var address) && address.ValueKind == JsonValueKind.String
                     ? Limit(address.GetString()!, 32) : null,
-                    length = item.TryGetProperty("length", out var length) && length.TryGetInt32(out var count) ? count : (int?)null }).ToArray();
-        return new { call.Id, argumentFingerprint = Hash(call.Arguments), selectors = fields };
+                    ["length"] = item.TryGetProperty("length", out var length) && length.TryGetInt32(out var count) ? count : (int?)null
+                }).ToArray();
+        return new JsonObject
+        {
+            ["id"] = call.Id,
+            ["argumentFingerprint"] = Hash(call.Arguments),
+            ["selectors"] = EngineJson.Node(fields, EngineJson.Web)
+        };
     }
 
     internal static object Result(string output)

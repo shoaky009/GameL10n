@@ -4,6 +4,7 @@ using GameL10n.Core.Development;
 using GameL10n.Core.Pipeline;
 using GameL10n.Core.Storage;
 using GameL10n.Core.Translation;
+using GameL10n.Core.Serialization;
 
 internal sealed record UnitRename(string PreviousId, string CurrentId);
 internal sealed record CoverageUpdateManifest(string AdapterId, string PreviousVersion, string SourceFingerprint,
@@ -151,7 +152,7 @@ internal static class AdapterCoverageUpdate
             var migratedEdits = RenameEdits(edits.Entries, aliases);
             var migratedCandidates = RenameEdits(edits.Candidates ?? new Dictionary<string, TranslationEdit>(), aliases);
             var selectionPath = Path.Combine(projectDirectory, "trial-selection.json");
-            var selection = await LocalFiles.ReadJsonAsync<string[]>(selectionPath);
+            var selection = await LocalFiles.ReadJsonAsync<string[]>(selectionPath, DiagnosticJson.TypeInfo<string[]>(DiagnosticJson.Storage));
             Console.WriteLine($"提取 {old.Units.Count} → {extraction.Units.Count} 条；可复用 {reusable} 条缓存，校正 {aliases.Count} 个字段标识。API 调用为 0。");
             if (!apply)
             {
@@ -166,7 +167,7 @@ internal static class AdapterCoverageUpdate
                 await (edits with { Entries = migratedEdits, Candidates = migratedCandidates }).SaveAsync(projectDirectory);
             var renameIds = aliases.ToDictionary(a => a.Before.Id, a => a.After.Id);
             if (snapshot.AdapterVersion == manifest.PreviousVersion && selection is not null && selection.Any(renameIds.ContainsKey))
-                await LocalFiles.WriteJsonAsync(selectionPath, selection.Select(id => renameIds.GetValueOrDefault(id, id)).Distinct().ToArray());
+                await LocalFiles.WriteJsonAsync(selectionPath, selection.Select(id => renameIds.GetValueOrDefault(id, id)).Distinct().ToArray(), DiagnosticJson.TypeInfo<string[]>(DiagnosticJson.Storage));
             var committedSource = Path.Combine(projectDirectory, "sources", updatedFingerprint);
             foreach (var file in updatedFiles)
                 await CopyVerified(LocalFiles.UnderRoot(updatedSource, file.RelativePath),
@@ -197,10 +198,10 @@ internal static class AdapterCoverageUpdate
                 + "\n新增字段的代表原文见 TextCoverage.Samples；沿用现有 Unicode/TMP 回填，继续处理 TextCoverage.Pending。";
             // The old conversation remains available, but the next continuation must see the reviewed update first.
             state.Messages.Add(new AgentMessage("user", state.Notes));
-            await LocalFiles.WriteJsonAsync(Path.Combine(current, "session.json"), state);
+            await LocalFiles.WriteJsonAsync(Path.Combine(current, "session.json"), state, DiagnosticJson.TypeInfo<AdaptationSession>(DiagnosticJson.Storage));
             await LocalFiles.WriteJsonAsync(Path.Combine(projectDirectory, "source.json"), snapshot with
                 { Directory = Path.GetRelativePath(projectDirectory, committedSource), Files = updatedFiles,
-                    AdapterId = published.Id, AdapterVersion = published.Version, Probe = probe });
+                    AdapterId = published.Id, AdapterVersion = published.Version, Probe = probe }, DiagnosticJson.TypeInfo<SourceSnapshot>(DiagnosticJson.Storage));
             await new GameProjectStore(dataDirectory).SaveAsync(project with
                 { AdapterId = published.Id, AdapterVersion = published.Version, UpdatedAt = DateTimeOffset.UtcNow });
             Console.WriteLine("项目已更新。打开项目即可翻译新增文本，无需重新智能识别；游戏安装目录未修改。");
@@ -209,7 +210,7 @@ internal static class AdapterCoverageUpdate
         catch (Exception error) { Console.Error.WriteLine(error); return 1; }
     }
 
-    private static async Task<T> Read<T>(string path) => await LocalFiles.ReadJsonAsync<T>(path)
+    private static async Task<T> Read<T>(string path) => await LocalFiles.ReadJsonAsync<T>(path, DiagnosticJson.TypeInfo<T>(DiagnosticJson.Storage))
         ?? throw new InvalidDataException("缺少有效记录：" + path);
 
     private static async Task CopyVerified(string original, string target, string hash)

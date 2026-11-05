@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Text;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Development;
 
@@ -67,7 +68,7 @@ public sealed class AdapterProcessRunner : IAdapterProcessRunner
         start.Environment["DOTNET_CLI_TELEMETRY_OPTOUT"] = "1";
         start.Environment["DOTNET_SKIP_FIRST_TIME_EXPERIENCE"] = "1";
         if (request.AdapterHostCommand is { } hostCommand)
-            start.Environment["GAMEL10N_ADAPTER_HOST"] = System.Text.Json.JsonSerializer.Serialize(hostCommand);
+            start.Environment["GAMEL10N_ADAPTER_HOST"] = System.Text.Json.JsonSerializer.Serialize(hostCommand, EngineJson.TypeInfo<IReadOnlyList<string>>(EngineJson.Default));
         if (request.VnTextPatchAssemblyPath is { } parserPath)
         {
             start.Environment["GAMEL10N_VNTEXTPATCH"] = Path.GetFullPath(parserPath);

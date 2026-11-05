@@ -6,6 +6,8 @@ using System.Text.Json;
 using GameL10n.Core.Adapters;
 using GameL10n.Core.Isolation;
 using GameL10n.Core.Storage;
+using System.Text.Json.Nodes;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Development;
 
@@ -17,7 +19,7 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
 {
     private static readonly HttpClient PublicHttp = new(new HttpClientHandler { AllowAutoRedirect = false, UseCookies = false })
         { Timeout = TimeSpan.FromMinutes(3) };
-    private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web)
+    private static readonly JsonSerializerOptions Json = new(EngineJson.Web)
         { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
     private AdapterDevelopmentWorkflow? developmentWorkflow = development;
     internal AdapterDevelopmentWorkflow Development => developmentWorkflow ??= new(request, session, workspace,
@@ -213,20 +215,29 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
             "checkpoint" => Checkpoint(args),
             _ => throw new InvalidDataException("Unknown tool: " + call.Name)
         };
-        return JsonSerializer.Serialize(new { success = true, result }, Json);
+        return JsonSerializer.Serialize(new JsonObject
+        {
+            ["success"] = true,
+            ["result"] = EngineJson.Node(result, Json)
+        }, EngineJson.TypeInfo<JsonObject>(Json));
     }
 
     private object ReportProgress(JsonElement args)
     {
         var changed = session.UpdateProgress(AdaptationProgressNote.FromTool(Text(args, "kind"), Text(args, "message")));
         if (changed) reportProgress?.Invoke("更新适配进展", session.ProgressNote!.Message);
-        return new { changed, note = session.ProgressNote, validation = false };
+        return new JsonObject
+        {
+            ["changed"] = changed,
+            ["note"] = EngineJson.Node(session.ProgressNote, Json),
+            ["validation"] = false
+        };
     }
 
     private async Task<GameLaunchInspection> InspectLaunchAsync(CancellationToken ct)
     {
         var inspection = await GameLaunchInspector.InspectAsync(request.GameDirectory, ct);
-        if (JsonSerializer.Serialize(session.LaunchInspection, Json) != JsonSerializer.Serialize(inspection, Json))
+        if (JsonSerializer.Serialize(session.LaunchInspection, EngineJson.TypeInfo<GameLaunchInspection?>(Json)) != JsonSerializer.Serialize(inspection, EngineJson.TypeInfo<GameLaunchInspection>(Json)))
             session.VerifiedPackage = null;
         session.LaunchInspection = inspection;
         return inspection;
@@ -258,8 +269,12 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
         UpdateCoverage(args);
         session.Checkpoint = summary;
         session.Notes = summary;
-        return new { saved = true, objective = session.Objective?.ToString(),
-            nextAction = "已保存当前目标与验收记录。继续摘要中的下一项；完整验收已通过且目标完成时可直接 finish。" };
+        return new JsonObject
+        {
+            ["saved"] = true,
+            ["objective"] = session.Objective?.ToString(),
+            ["nextAction"] = "已保存当前目标与验收记录。继续摘要中的下一项；完整验收已通过且目标完成时可直接 finish。"
+        };
     }
 
     private void UpdateCoverage(JsonElement args)
@@ -267,14 +282,14 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
         var current = session.TextCoverage;
         if (args.TryGetProperty("coverageSampleCorrections", out var corrections))
         {
-            var items = corrections.Deserialize<TextCoverageSampleCorrection[]>(Json)
+            var items = corrections.Deserialize<TextCoverageSampleCorrection[]>(EngineJson.TypeInfo<TextCoverageSampleCorrection[]>(Json))
                 ?? throw new InvalidDataException("样本纠正不能为空。");
             if (items.Length is < 1 or > 4) throw new InvalidDataException("每次纠正 1 到 4 个明确误标的样本。");
             foreach (var correction in items) current = current.CorrectSample(correction);
         }
         var samples = current.Samples.ToDictionary(s => (s.ResourcePath.Replace('\\', '/'), s.Locator));
         if (args.TryGetProperty("coverageSamples", out var values))
-            foreach (var sample in values.Deserialize<TextCoverageSample[]>(Json) ?? throw new InvalidDataException("原文样本不能为空。"))
+            foreach (var sample in values.Deserialize<TextCoverageSample[]>(EngineJson.TypeInfo<TextCoverageSample[]>(Json)) ?? throw new InvalidDataException("原文样本不能为空。"))
             {
                 new TextCoverage([sample], []).Validate();
                 samples[(sample.ResourcePath.Replace('\\', '/'), sample.Locator)] = sample;
@@ -294,7 +309,10 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
     private object AdapterProtocol()
     {
         session.ProtocolRead = true;
-        return new { protocol = AutomaticAdaptationService.ProtocolDescription };
+        return new JsonObject
+        {
+            ["protocol"] = AutomaticAdaptationService.ProtocolDescription
+        };
     }
 
     private object ReportBlocker(JsonElement args)
@@ -321,14 +339,27 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
                 if (++unresolvedStopReports >= 2)
                 {
                     session.Blocker = blocker with { WorkRemaining = true };
-                    return new { stopped = true, status = "incomplete", reason = "模型连续请求停止，但未提供充分的停止说明。已保存未完成步骤，可继续适配。" };
+                    return new JsonObject
+                    {
+                        ["stopped"] = true,
+                        ["status"] = "incomplete",
+                        ["reason"] = "模型连续请求停止，但未提供充分的停止说明。已保存未完成步骤，可继续适配。"
+                    };
                 }
-                return new { stopped = false, status = "continue", nextAction = blocker.NextAction,
-                    reason = "尚有本地可执行工作，或缺少停止依据。请执行下一项具体工具操作；未验证、未实现、CP932 不支持中文以及未找到现成工具都不是不可适配的结论。确实无法继续时，补充 canContinueLocally=false 和具体尝试及结果 evidence。无需发布未经验证的补丁。" };
+                return new JsonObject
+                {
+                    ["stopped"] = false,
+                    ["status"] = "continue",
+                    ["nextAction"] = blocker.NextAction,
+                    ["reason"] = "尚有本地可执行工作，或缺少停止依据。请执行下一项具体工具操作；未验证、未实现、CP932 不支持中文以及未找到现成工具都不是不可适配的结论。确实无法继续时，补充 canContinueLocally=false 和具体尝试及结果 evidence。无需发布未经验证的补丁。"
+                };
             }
         }
         session.Blocker = blocker;
-        return new { stopped = true };
+        return new JsonObject
+        {
+            ["stopped"] = true
+        };
     }
 
     private object ListFiles(JsonElement args)
@@ -337,15 +368,26 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
         var directory = Text(args, "path", "");
         if (directory.Length > 0 && directory != ".") directory = WorkspaceFiles.Resolve(root, directory);
         else directory = root;
-        if (!Directory.Exists(directory)) return new { files = Array.Empty<object>(), more = false };
+        if (!Directory.Exists(directory)) return new JsonObject
+        {
+            ["files"] = EngineJson.Node(Array.Empty<object>(), Json),
+            ["more"] = false
+        };
         var offset = Number(args, "offset", 0, 0, 1_000_000);
         var limit = Number(args, "limit", 100, 1, 200);
         var files = Directory.EnumerateFiles(directory, "*", new EnumerationOptions
         { RecurseSubdirectories = true, AttributesToSkip = FileAttributes.ReparsePoint, IgnoreInaccessible = true })
             .Skip(offset).Take(limit + 1).ToArray();
-        return new { files = files.Take(limit).Select(path => new
-            { path = Path.GetRelativePath(root, path).Replace('\\', '/'), bytes = new FileInfo(path).Length }).ToArray(),
-            more = files.Length > limit, nextOffset = offset + Math.Min(files.Length, limit) };
+        return new JsonObject
+        {
+            ["files"] = EngineJson.Array(files.Take(limit).Select(path => new JsonObject
+        {
+            ["path"] = Path.GetRelativePath(root, path).Replace('\\', '/'),
+            ["bytes"] = new FileInfo(path).Length
+        }).ToArray()),
+            ["more"] = files.Length > limit,
+            ["nextOffset"] = offset + Math.Min(files.Length, limit)
+        };
     }
 
     private object ReadToolResult(JsonElement args)
@@ -360,12 +402,24 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
         if (query.Length > 0)
         {
             var found = result.IndexOf(query, offset, StringComparison.OrdinalIgnoreCase);
-            if (found < 0) return new { toolCallId = id, found = false, totalCharacters = result.Length };
+            if (found < 0) return new JsonObject
+            {
+                ["toolCallId"] = id,
+                ["found"] = false,
+                ["totalCharacters"] = result.Length
+            };
             offset = Math.Max(offset, found - 160);
         }
         length = Math.Min(length, result.Length - offset);
-        return new { toolCallId = id, offset, length, totalCharacters = result.Length,
-            more = offset + length < result.Length, content = result.Substring(offset, length) };
+        return new JsonObject
+        {
+            ["toolCallId"] = id,
+            ["offset"] = offset,
+            ["length"] = length,
+            ["totalCharacters"] = result.Length,
+            ["more"] = offset + length < result.Length,
+            ["content"] = result.Substring(offset, length)
+        };
     }
 
     private object ReadSessionHistory(JsonElement args)
@@ -381,11 +435,26 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
             if (found < 0) continue;
             var offset = Number(args, "offset", Math.Max(0, found - 160), 0, content.Length);
             var length = Math.Min(Number(args, "length", 4096, 1, 16 * 1024), content.Length - offset);
-            return new { found = true, messageIndex = index, nextMessageIndex = index + 1,
-                message.Role, message.ToolCallId, offset, length, totalCharacters = content.Length,
-                more = offset + length < content.Length, content = content.Substring(offset, length) };
+            return new JsonObject
+            {
+                ["found"] = true,
+                ["messageIndex"] = index,
+                ["nextMessageIndex"] = index + 1,
+                ["role"] = message.Role,
+                ["toolCallId"] = message.ToolCallId,
+                ["offset"] = offset,
+                ["length"] = length,
+                ["totalCharacters"] = content.Length,
+                ["more"] = offset + length < content.Length,
+                ["content"] = content.Substring(offset, length)
+            };
         }
-        return new { found = false, nextMessageIndex = index, totalMessages = session.Messages.Count };
+        return new JsonObject
+        {
+            ["found"] = false,
+            ["nextMessageIndex"] = index,
+            ["totalMessages"] = session.Messages.Count
+        };
     }
 
     private async Task<object> ReadFileAsync(JsonElement args, CancellationToken ct)
@@ -398,8 +467,15 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
         var data = new byte[length];
         await stream.ReadExactlyAsync(data, ct);
         var encoding = Text(args, "encoding", IsWorkspaceText(args, path) ? "utf8" : "hex");
-        return new { bytes = stream.Length, offset, length, encoding, more = offset + length < stream.Length,
-            content = encoding == "hex" ? Convert.ToHexString(data) : EncodingFor(encoding).GetString(data) };
+        return new JsonObject
+        {
+            ["bytes"] = stream.Length,
+            ["offset"] = offset,
+            ["length"] = length,
+            ["encoding"] = encoding,
+            ["more"] = offset + length < stream.Length,
+            ["content"] = encoding == "hex" ? Convert.ToHexString(data) : EncodingFor(encoding).GetString(data)
+        };
     }
 
     private async Task<object> SearchTextAsync(JsonElement args, CancellationToken ct)
@@ -413,7 +489,7 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
             LongNumber(args, "offset", 0, 0, long.MaxValue), 4 * 1024 * 1024, 20, ct);
     }
 
-    private sealed record TextSearchPage(IReadOnlyList<string> Matches, IReadOnlyList<long?> ByteOffsets,
+    internal sealed record TextSearchPage(IReadOnlyList<string> Matches, IReadOnlyList<long?> ByteOffsets,
         string Encoding, int ScannedBytes, long NextOffset, bool More);
 
     private static async Task<TextSearchPage> SearchFileTextAsync(string path, string query, string encodingName,
@@ -470,14 +546,26 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
                 Math.Min(256 * 1024, 4 * 1024 * 1024 - scannedBytes), 20 - matches.Count, ct);
             scannedFiles++;
             scannedBytes += result.ScannedBytes;
-            matches.AddRange(result.Matches.Select((excerpt, index) => (object)new
-                { path = relative, byteOffset = result.ByteOffsets[index], encoding, excerpt }));
+            matches.AddRange(result.Matches.Select((excerpt, index) => (object)new JsonObject
+            {
+                ["path"] = relative,
+                ["byteOffset"] = result.ByteOffsets[index],
+                ["encoding"] = encoding,
+                ["excerpt"] = excerpt
+            }));
             if (result.More) { nextFileByteOffset = result.NextOffset; break; }
             nextOffset++;
             nextFileByteOffset = 0;
         }
-        return new { matches, scannedFiles, scannedBytes, nextOffset, nextFileByteOffset,
-            more = nextFileByteOffset > 0 || nextOffset - offset < files.Length };
+        return new JsonObject
+        {
+            ["matches"] = EngineJson.Node((matches).ToArray(), Json),
+            ["scannedFiles"] = scannedFiles,
+            ["scannedBytes"] = scannedBytes,
+            ["nextOffset"] = nextOffset,
+            ["nextFileByteOffset"] = nextFileByteOffset,
+            ["more"] = nextFileByteOffset > 0 || nextOffset - offset < files.Length
+        };
     }
 
     private bool IsWorkspaceText(JsonElement args, string path) => Path.GetExtension(path).ToLowerInvariant() is
@@ -514,7 +602,11 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
             }
             session.ResourceHashes[relative.Replace('\\', '/')] = hash;
         }
-        return new { staged = files, directory = "resources" };
+        return new JsonObject
+        {
+            ["staged"] = EngineJson.Node((files).ToArray(), Json),
+            ["directory"] = "resources"
+        };
     }
 
     private async Task<object> ReplaceTextAsync(JsonElement args, CancellationToken ct)
@@ -533,7 +625,11 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
         if (content.IndexOf(oldText, start + 1, StringComparison.Ordinal) >= 0)
             throw new InvalidDataException("oldText 匹配多处，文件未修改。请增加上下文，使其仅匹配一次。");
         var updated = (hasBom ? "\uFEFF" : "") + content[..start] + newText + content[(start + oldText.Length)..];
-        return await WriteFileAsync(JsonSerializer.SerializeToElement(new { path = relative, content = updated }), ct);
+        return await WriteFileAsync(JsonSerializer.SerializeToElement(new JsonObject
+        {
+            ["path"] = relative,
+            ["content"] = updated
+        }, EngineJson.TypeInfo<JsonObject>(EngineJson.Default)), ct);
     }
 
     private async Task<object> WriteFileAsync(JsonElement args, CancellationToken ct)
@@ -551,7 +647,12 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
             && (await File.ReadAllBytesAsync(path, ct)).AsSpan().SequenceEqual(bytes))
         {
             if (release is not null) Development.RegisterReleaseFiles([release]);
-            return new { path = Text(args, "path"), bytes = bytes.Length, changed = false };
+            return new JsonObject
+            {
+                ["path"] = Text(args, "path"),
+                ["bytes"] = bytes.Length,
+                ["changed"] = false
+            };
         }
         InvalidateSource(path);
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
@@ -570,7 +671,12 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
             && !relative.StartsWith("src/tools/", StringComparison.OrdinalIgnoreCase)
             && relative.EndsWith(".py", StringComparison.OrdinalIgnoreCase))
             Development.RegisterReleaseFiles([new(relative, "source", "适配器实现")]);
-        return new { path = Text(args, "path"), bytes = bytes.Length, changed = true };
+        return new JsonObject
+        {
+            ["path"] = Text(args, "path"),
+            ["bytes"] = bytes.Length,
+            ["changed"] = true
+        };
     }
 
     private object RemoveFile(JsonElement args)
@@ -580,7 +686,10 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
         File.Delete(path);
         var packagedPath = AdapterReleaseFiles.PackagePath(Text(args, "path").Replace('\\', '/'));
         session.ReleaseFiles = session.ReleaseFiles?.Where(file => !file.Path.Equals(packagedPath, StringComparison.OrdinalIgnoreCase)).ToArray();
-        return new { removed = Text(args, "path") };
+        return new JsonObject
+        {
+            ["removed"] = Text(args, "path")
+        };
     }
 
     private async Task<object> CopyAdapterAsync(JsonElement args, CancellationToken ct)
@@ -638,10 +747,16 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
                 await input.CopyToAsync(output, ct);
             }
         session.ReleaseFiles = package.ReleaseFiles?.ToArray();
-        return new { package.Id, package.Version, destination = "src", package.ReleaseFiles,
-            nextAction = package.IsPython
+        return new JsonObject
+        {
+            ["id"] = package.Id,
+            ["version"] = package.Version,
+            ["destination"] = "src",
+            ["releaseFiles"] = EngineJson.Node((package.ReleaseFiles)?.ToArray(), Json),
+            ["nextAction"] = package.IsPython
                 ? "沿用已声明文件，按本次实现补充或移除；不要将所有 tools 文件默认发布。"
-                : "旧包继续原样运行；新开发入口使用 src/adapter.py，将所需 C# 逻辑迁移为 Python，并从发布清单排除旧源码后重新验收。旧包无 releaseFiles 时显式选择所需文件，不要将所有 tools 文件默认发布。" };
+                : "旧包继续原样运行；新开发入口使用 src/adapter.py，将所需 C# 逻辑迁移为 Python，并从发布清单排除旧源码后重新验收。旧包无 releaseFiles 时显式选择所需文件，不要将所有 tools 文件默认发布。"
+        };
     }
 
     private async Task<object> RunAsync(JsonElement args, CancellationToken ct)
@@ -664,7 +779,12 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
         var result = await runtime.Runner.RunAsync(new(executable, arguments, working,
             Text(args, "stdin", ""), TimeSpan.FromSeconds(Number(args, "timeoutSeconds", 120, 1, 600)), 1024 * 1024,
             VnTextPatchAssemblyPath: await AnalysisParserPathAsync(ct)), ct);
-        return new { result.ExitCode, stdout = Limit(result.StandardOutput, 16_000), stderr = Limit(result.StandardError, 8000) };
+        return new JsonObject
+        {
+            ["exitCode"] = result.ExitCode,
+            ["stdout"] = Limit(result.StandardOutput, 16_000),
+            ["stderr"] = Limit(result.StandardError, 8000)
+        };
     }
 
     private async Task<object> TestAsync(JsonElement args, CancellationToken ct)
@@ -672,9 +792,9 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
         UpdateCoverage(args);
         if (args.TryGetProperty("recognition", out var recognitionDeclaration))
             session.Recognition = recognitionDeclaration.ValueKind == JsonValueKind.Null ? null
-                : recognitionDeclaration.Deserialize<AdapterRecognition>(Json);
+                : recognitionDeclaration.Deserialize<AdapterRecognition>(EngineJson.TypeInfo<AdapterRecognition>(Json));
         var releaseFiles = args.TryGetProperty("releaseFiles", out var declared)
-            ? AdapterReleaseFiles.Validate(declared.Deserialize<AdapterReleaseFile[]>(Json))
+            ? AdapterReleaseFiles.Validate(declared.Deserialize<AdapterReleaseFile[]>(EngineJson.TypeInfo<AdapterReleaseFile[]>(Json)))
             : session.ReleaseFiles;
         session.ReleaseFiles = releaseFiles;
         var result = await Development.TestAsync(new(Text(args, "kind"), Text(args, "key"), Text(args, "name")),
@@ -686,17 +806,37 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
             : session.Objective == AdaptationObjective.Repair
                 ? "本次资源与已有文本验收已通过。若反馈已解决，直接 finish；不要自动开始补全其他文字类别。已知其他覆盖遗漏用 allowPartial=true 并在 summary 披露，运行效果待验证单列 runtimeChecks。长会话可先 checkpoint 保存本阶段。"
                 : "完整资源验收已通过。当前目标完成后直接 finish，披露已知遗漏和 runtimeChecks；长会话可先 checkpoint。不要重复通过的测试或为未调查类别自动增加研究。";
-        return new { result.Passed, result.Stage, result.Diagnostics, result.Id, result.Version, result.Reused,
-            result.CompileMs, result.DiscoveryMs, result.VerificationMs, nextAction, runtimeTested = false,
-            pendingCoverage = session.TextCoverage.Pending, runtimeChecks = session.TextCoverage.RuntimeChecks };
+        return new JsonObject
+        {
+            ["passed"] = result.Passed,
+            ["stage"] = EngineJson.Node(result.Stage, Json),
+            ["diagnostics"] = EngineJson.Node((result.Diagnostics).ToArray(), Json),
+            ["id"] = result.Id,
+            ["version"] = result.Version,
+            ["reused"] = result.Reused,
+            ["compileMs"] = result.CompileMs,
+            ["discoveryMs"] = result.DiscoveryMs,
+            ["verificationMs"] = result.VerificationMs,
+            ["nextAction"] = nextAction,
+            ["runtimeTested"] = false,
+            ["pendingCoverage"] = EngineJson.Node((session.TextCoverage.Pending).ToArray(), Json),
+            ["runtimeChecks"] = EngineJson.Node((session.TextCoverage.RuntimeChecks).ToArray(), Json)
+        };
     }
 
     private async Task<object> FinishAsync(JsonElement args, CancellationToken ct)
     {
         var published = await Development.PublishAsync(Text(args, "summary"), Boolean(args, "allowPartial", false), ct);
-        return new { published.Id, published.Version, summary = session.Summary, runtimeTested = false,
-            coverageStatus = session.TextCoverage.Pending.Count > 0 ? "partial" : session.TextCoverage.Samples.Count > 0 ? "samples-verified" : "not-assessed",
-            pendingCoverage = session.TextCoverage.Pending, runtimeChecks = session.TextCoverage.RuntimeChecks };
+        return new JsonObject
+        {
+            ["id"] = published.Id,
+            ["version"] = published.Version,
+            ["summary"] = session.Summary,
+            ["runtimeTested"] = false,
+            ["coverageStatus"] = session.TextCoverage.Pending.Count > 0 ? "partial" : session.TextCoverage.Samples.Count > 0 ? "samples-verified" : "not-assessed",
+            ["pendingCoverage"] = EngineJson.Node((session.TextCoverage.Pending).ToArray(), Json),
+            ["runtimeChecks"] = EngineJson.Node((session.TextCoverage.RuntimeChecks).ToArray(), Json)
+        };
     }
 
     private async Task<object> SearchRepositoriesAsync(JsonElement args, CancellationToken ct)
@@ -706,14 +846,21 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
         var document = await ReadResearchAsync("https://api.github.com/search/repositories?per_page=8&q=" + Uri.EscapeDataString(query),
             ct, Boolean(args, "refresh", false), 256 * 1024);
         using var json = JsonDocument.Parse(document.Content);
-        var repositories = json.RootElement.GetProperty("items").EnumerateArray().Select(item => new
+        var repositories = json.RootElement.GetProperty("items").EnumerateArray().Select(item => new JsonObject
         {
-            name = item.GetProperty("full_name").GetString(), url = item.GetProperty("html_url").GetString(),
-            description = item.GetProperty("description").GetString(),
-            license = item.TryGetProperty("license", out var license) && license.ValueKind == JsonValueKind.Object
+            ["name"] = item.GetProperty("full_name").GetString(),
+            ["url"] = item.GetProperty("html_url").GetString(),
+            ["description"] = item.GetProperty("description").GetString(),
+            ["license"] = item.TryGetProperty("license", out var license) && license.ValueKind == JsonValueKind.Object
                 ? license.GetProperty("spdx_id").GetString() : null
         }).ToArray();
-        return new { document.RetrievedAt, document.Reused, document.Stale, repositories };
+        return new JsonObject
+        {
+            ["retrievedAt"] = document.RetrievedAt,
+            ["reused"] = document.Reused,
+            ["stale"] = document.Stale,
+            ["repositories"] = EngineJson.Array(repositories)
+        };
     }
 
     private async Task<HttpResponseMessage> GetAsync(Uri uri, CancellationToken ct)
@@ -820,8 +967,14 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
             fields["runtimeChecks"] = System.Text.Json.Nodes.JsonNode.Parse("""{"type":"array","maxItems":24,"items":{"type":"string"},"description":"Replace pending startup/rendering checks, separate from known missing text. Omission retains prior checks. Untested runtime checks alone do not block publication after full resource validation."}""");
         }
         if (name == "finish") fields["allowPartial"] = System.Text.Json.Nodes.JsonNode.Parse("""{"type":"boolean","description":"Explicitly publish usable partial support with known missing coverage, disclosed in summary. Repair may retain unrelated coverage omissions without expanding scope."}""");
-        var schema = JsonSerializer.SerializeToElement(new { type = "object", properties = fields, required, additionalProperties = false });
+        var schema = JsonSerializer.SerializeToElement(new JsonObject
+        {
+            ["type"] = "object",
+            ["properties"] = EngineJson.Node(fields, EngineJson.Default),
+            ["required"] = EngineJson.Node(required, EngineJson.Default),
+            ["additionalProperties"] = false
+        }, EngineJson.TypeInfo<JsonObject>(EngineJson.Default));
         return new(name, description, schema);
     }
-    private sealed record ToolSource(string Url, string Sha256);
+    internal sealed record ToolSource(string Url, string Sha256);
 }

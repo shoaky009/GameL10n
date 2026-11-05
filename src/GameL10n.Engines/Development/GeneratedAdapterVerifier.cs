@@ -2,13 +2,15 @@ using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using GameL10n.Core.Isolation;
+using System.Text.Json.Nodes;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Development;
 
 public sealed class GeneratedAdapterVerifier
 {
     public const int Revision = 4;
-    private static readonly JsonSerializerOptions DiagnosticJson = new() { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
+    private static readonly JsonSerializerOptions DiagnosticJson = new(EngineJson.Default) { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
 
     /// <summary>Checks host-observed bytes and extraction; an extension's validation claim is never sufficient.</summary>
     public async Task<GeneratedAdapterVerification> VerifyAsync(GeneratedGameAdapter adapter, string sampleDirectory,
@@ -54,7 +56,10 @@ public sealed class GeneratedAdapterVerifier
                         return Task.CompletedTask;
                     });
                 }
-            }, new { reused = sourceIsSnapshot });
+            }, new JsonObject
+            {
+                ["reused"] = sourceIsSnapshot
+            });
             var resources = adapter.DiscoverResources(source);
             phase = "initial-extraction";
             var first = await timing.MeasureAsync(phase, () => adapter.ExtractAsync(source, cancellationToken));
@@ -270,5 +275,5 @@ public sealed class GeneratedAdapterVerifier
         + $"sourceText={Sample(unit.SourceText)}, context={Sample(unit.Context)}";
 
     private static string Sample(string? value) =>
-        JsonSerializer.Serialize(value is { Length: > 160 } ? value[..160] + "…" : value, DiagnosticJson);
+        JsonSerializer.Serialize(value is { Length: > 160 } ? value[..160] + "…" : value, EngineJson.TypeInfo<string?>(DiagnosticJson));
 }

@@ -4,6 +4,8 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using GameL10n.Core.Isolation;
 using GameL10n.Core.Adapters;
+using System.Text.Json.Nodes;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Development;
 
@@ -63,9 +65,9 @@ public sealed partial class GeneratedAdapterCompiler(PinnedDotNetToolchain toolc
                 && pair.Key.EndsWith(".cs", StringComparison.OrdinalIgnoreCase)));
             var normalizedPatterns = resourcePatterns.Select(GeneratedAdapterResources.Normalize).Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.Ordinal).ToArray();
             var versionHash = HashText(GeneratedAdapterResources.HashEntries(files) + "\n" + Toolchain.RuntimeVersion + "\n"
-                + JsonSerializer.Serialize(normalizedPatterns) + "\n" + JsonSerializer.Serialize(family)
-                + "\n" + JsonSerializer.Serialize(selection)
-                + (recognition is null ? "" : "\n" + JsonSerializer.Serialize(recognition)));
+                + JsonSerializer.Serialize(normalizedPatterns, EngineJson.TypeInfo<string[]>(EngineJson.Default)) + "\n" + JsonSerializer.Serialize(family, EngineJson.TypeInfo<AdapterFamily?>(EngineJson.Default))
+                + "\n" + JsonSerializer.Serialize(selection, EngineJson.TypeInfo<AdapterReleaseFile[]>(EngineJson.Default))
+                + (recognition is null ? "" : "\n" + JsonSerializer.Serialize(recognition, EngineJson.TypeInfo<AdapterRecognition>(EngineJson.Default))));
             var package = new GeneratedAdapterPackage(family?.AdapterId ?? "unpublished", versionHash[..16], pending, [],
                 sourceHash, files["adapter.dll"], family, normalizedPatterns, files,
                 ManifestVersion: 3, ReleaseFiles: selection, Recognition: recognition);
@@ -135,10 +137,19 @@ public sealed partial class GeneratedAdapterCompiler(PinnedDotNetToolchain toolc
             if (!File.Exists(Path.Combine(build, "adapter.dll"))) throw new GeneratedAdapterException("The compiler produced no executable assembly.");
         }
         finally { File.Delete(responseFile); }
-        await File.WriteAllTextAsync(Path.Combine(build, "adapter.runtimeconfig.json"), JsonSerializer.Serialize(new
+        await File.WriteAllTextAsync(Path.Combine(build, "adapter.runtimeconfig.json"), JsonSerializer.Serialize(new JsonObject
         {
-            runtimeOptions = new { tfm = "net10.0", rollForward = "Disable", framework = new { name = "Microsoft.NETCore.App", version = Toolchain.RuntimeVersion } }
-        }), cancellationToken);
+            ["runtimeOptions"] = new JsonObject
+            {
+                ["tfm"] = "net10.0",
+                ["rollForward"] = "Disable",
+                ["framework"] = new JsonObject
+            {
+                ["name"] = "Microsoft.NETCore.App",
+                ["version"] = Toolchain.RuntimeVersion
+            }
+            }
+        }, EngineJson.TypeInfo<JsonObject>(EngineJson.Default)), cancellationToken);
         return result;
     }
 

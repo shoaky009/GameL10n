@@ -27,7 +27,7 @@ public sealed partial class AutomaticAdaptationTests
         });
         var result = await new AutomaticAdaptationService(model, Runtime(new ScriptedRunner()), store).AdaptAsync(request);
         Assert.Equal(AdaptationStatus.WaitingForUser, result.Status);
-        var saved = await LocalFiles.ReadJsonAsync<AdaptationSession>(Path.Combine(store.WorkDirectory, "current/session.json"));
+        var saved = await LocalFiles.ReadJsonAsync<AdaptationSession>(Path.Combine(store.WorkDirectory, "current/session.json"), FixtureJson.TypeInfo<global::GameL10n.Core.Development.AdaptationSession>(FixtureJson.Storage));
         Assert.Equal(24, saved!.LastImplementationTurn);
         Assert.Equal(0, saved.LastVerificationProgressTurn);
         Assert.Equal(24, saved.LastVerificationReviewTurn);
@@ -82,7 +82,7 @@ public sealed partial class AutomaticAdaptationTests
         {
             GameId = request.GameId, GameDirectory = request.GameDirectory, ModelIdentity = "fake",
             TotalTurns = 80, LastImplementationTurn = 79, Messages = [new("user", "Continue existing implementation.")]
-        });
+        }, FixtureJson.TypeInfo<global::GameL10n.Core.Development.AdaptationSession>(FixtureJson.Storage));
         var model = new FakeModel(context =>
         {
             Assert.Single(context.Messages, message => message.Content.Contains("验证进展检查：", StringComparison.Ordinal));
@@ -91,7 +91,7 @@ public sealed partial class AutomaticAdaptationTests
         var service = new AutomaticAdaptationService(model, Runtime(new ScriptedRunner()), store);
         await service.AdaptAsync(request);
         await service.AdaptAsync(request);
-        var saved = await LocalFiles.ReadJsonAsync<AdaptationSession>(path);
+        var saved = await LocalFiles.ReadJsonAsync<AdaptationSession>(path, FixtureJson.TypeInfo<global::GameL10n.Core.Development.AdaptationSession>(FixtureJson.Storage));
         Assert.Equal(80, saved!.LastVerificationReviewTurn);
         Assert.Equal(80, saved.LastVerificationProgressTurn);
         Assert.Equal(2, model.Calls);

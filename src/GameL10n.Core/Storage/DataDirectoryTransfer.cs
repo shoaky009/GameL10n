@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using GameL10n.Core.Isolation;
 using GameL10n.Core.Translation;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Storage;
 
@@ -13,7 +14,7 @@ public static class DataDirectoryTransfer
 {
     private const string StageName = ".relocation";
     private const string ReceiptName = ".relocation.json";
-    private sealed record Receipt(string Source, string[] Entries);
+    internal sealed record Receipt(string Source, string[] Entries);
 
     public static bool Same(string left, string right) => string.Equals(
         Path.TrimEndingDirectorySeparator(Path.GetFullPath(left)),
@@ -56,7 +57,7 @@ public static class DataDirectoryTransfer
         ValidateDestination(source, destination, []);
         var stage = LocalFiles.UnderRoot(destination, StageName);
         var receiptPath = LocalFiles.UnderRoot(destination, ReceiptName);
-        var receipt = await LocalFiles.ReadJsonAsync<Receipt>(receiptPath, ct);
+        var receipt = await LocalFiles.ReadJsonAsync<Receipt>(receiptPath, CoreJson.TypeInfo<Receipt>(CoreJson.Storage), ct);
         if (receipt is not null)
         {
             if (!Same(source, receipt.Source) || receipt.Entries is null || receipt.Entries.Any(name =>
@@ -69,7 +70,7 @@ public static class DataDirectoryTransfer
         var entries = Directory.EnumerateFileSystemEntries(source).Select(Path.GetFileName)
             .OfType<string>().Where(name => !IsRootControl(name) && name != ".migration").ToArray();
         await LocalFiles.WriteJsonAsync(receiptPath, new Receipt(Path.GetFullPath(source),
-            entries.Concat(receipt?.Entries ?? []).Distinct(StringComparer.OrdinalIgnoreCase).ToArray()), ct);
+            entries.Concat(receipt?.Entries ?? []).Distinct(StringComparer.OrdinalIgnoreCase).ToArray()), CoreJson.TypeInfo<Receipt>(CoreJson.Storage), ct);
         var skipped = await FindRedundantPathsAsync(source, ct);
         var files = 0;
         long bytes = 0;
@@ -194,7 +195,7 @@ public static class DataDirectoryTransfer
                 WorkspaceFiles.RejectLinkAncestors(candidate);
                 try
                 {
-                    var value = await LocalFiles.ReadJsonAsync<T>(candidate, ct);
+                    var value = await LocalFiles.ReadJsonAsync<T>(candidate, CoreJson.TypeInfo<T>(CoreJson.Storage), ct);
                     if (value is not null && validate(value)) return value;
                 }
                 catch (JsonException) { }
@@ -249,7 +250,7 @@ public static class DataDirectoryTransfer
                 && Path.IsPathRooted(path) && Contains(original, path))
             {
                 value[property] = Path.GetRelativePath(original, path);
-                await LocalFiles.WriteJsonAsync(file, value, ct);
+                await LocalFiles.WriteJsonAsync(file, value, CoreJson.TypeInfo<JsonObject>(CoreJson.Storage), ct);
             }
         }
     }

@@ -5,6 +5,7 @@ using GameL10n.Core.Patching;
 using GameL10n.Core.Pipeline;
 using GameL10n.Core.Storage;
 using GameL10n.Core.Translation;
+using GameL10n.Core.Serialization;
 
 // Uses the application's package, cache, verification and installation contracts.
 // No provider is configured: a missing cached translation fails before patch generation.
@@ -17,7 +18,7 @@ internal static class System4Repair
         {
             projectDirectory = Path.GetFullPath(projectDirectory);
             workDirectory = Path.GetFullPath(workDirectory);
-            var project = await LocalFiles.ReadJsonAsync<GameProject>(Path.Combine(projectDirectory, "game.json"))
+            var project = await LocalFiles.ReadJsonAsync<GameProject>(Path.Combine(projectDirectory, "game.json"), DiagnosticJson.TypeInfo<GameProject>(DiagnosticJson.Storage))
                 ?? throw new InvalidDataException("项目不存在。");
             var dataDirectory = Directory.GetParent(projectDirectory)!.Parent!.FullName;
             if (!Path.GetFileName(projectDirectory).Equals(project.Id, StringComparison.OrdinalIgnoreCase))
@@ -35,7 +36,7 @@ internal static class System4Repair
             var adapter = new GeneratedGameAdapter(package, toolchain, runner, Path.Combine(workDirectory, "run"));
             var pipeline = new TranslationPipeline(dataDirectory);
             var session = await pipeline.AnalyzeAsync(project.GameDirectory, adapter, projectId: project.Id);
-            var ids = await LocalFiles.ReadJsonAsync<string[]>(Path.Combine(projectDirectory, "trial-selection.json"))
+            var ids = await LocalFiles.ReadJsonAsync<string[]>(Path.Combine(projectDirectory, "trial-selection.json"), DiagnosticJson.TypeInfo<string[]>(DiagnosticJson.Storage))
                 ?? throw new InvalidDataException("请先在应用中选择已完成翻译的试译文本。");
             var terms = new Dictionary<string, string>(StringComparer.Ordinal);
             foreach (var line in project.Settings.Terminology.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
@@ -72,7 +73,7 @@ internal static class System4Repair
                 foreach (var file in Directory.EnumerateFiles(adapterSource, "*.cs"))
                     File.Copy(file, Path.Combine(adaptation, "src", Path.GetFileName(file)), true);
                 var statePath = Path.Combine(adaptation, "session.json");
-                var state = await LocalFiles.ReadJsonAsync<AdaptationSession>(statePath);
+                var state = await LocalFiles.ReadJsonAsync<AdaptationSession>(statePath, DiagnosticJson.TypeInfo<AdaptationSession>(DiagnosticJson.Storage));
                 if (state is not null)
                 {
                     state.ReleaseFiles = published.ReleaseFiles;
@@ -95,7 +96,7 @@ internal static class System4Repair
                         state.ResourceHashes[resource.RelativePath] = resource.Sha256;
                     }
                     state.Messages.Add(new AgentMessage("user", runtimeNote));
-                    await LocalFiles.WriteJsonAsync(statePath, state);
+                    await LocalFiles.WriteJsonAsync(statePath, state, DiagnosticJson.TypeInfo<AdaptationSession>(DiagnosticJson.Storage));
                 }
             }
             if (install)

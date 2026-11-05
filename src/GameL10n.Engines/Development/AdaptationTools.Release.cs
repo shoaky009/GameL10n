@@ -1,5 +1,7 @@
 using System.Text.Json;
 using GameL10n.Core.Isolation;
+using System.Text.Json.Nodes;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Development;
 
@@ -20,7 +22,7 @@ public sealed partial class AdaptationTools
         var next = (session.ReleaseFiles ?? []).ToDictionary(file => file.Path, StringComparer.OrdinalIgnoreCase);
         if (args.TryGetProperty("files", out var declared))
         {
-            var additions = declared.Deserialize<AdapterReleaseFile[]>(Json)
+            var additions = declared.Deserialize<AdapterReleaseFile[]>(EngineJson.TypeInfo<AdapterReleaseFile[]>(Json))
                 ?? throw new InvalidDataException("files 必须为发布文件数组。");
             if (additions.Length > 0) AdapterReleaseFiles.Validate(additions, requireSource: false);
             foreach (var file in additions)
@@ -43,10 +45,18 @@ public sealed partial class AdaptationTools
             ? GeneratedGameAdapter.EnumerateFiles(SourceDirectory)
                 .Select(path => (Path: AdapterReleaseFiles.PackagePath("src/" + Path.GetRelativePath(SourceDirectory, path).Replace('\\', '/')), Bytes: new FileInfo(path).Length))
                 .Where(file => !selected.Contains(file.Path)).ToArray() : [];
-        return new { releaseFiles = session.ReleaseFiles,
-            unregisteredCount = unregistered.Length, unregisteredBytes = unregistered.Sum(file => file.Bytes),
-            unregistered = unregistered.Take(30).Select(file => new { path = file.Path, bytes = file.Bytes }),
-            nextAction = "未登记文件不会发布；只补充确实需要的依赖。分析脚本与样本保留在工作区即可，不必登记或删除。" };
+        return new JsonObject
+        {
+            ["releaseFiles"] = EngineJson.Node((session.ReleaseFiles)?.ToArray(), EngineJson.Web),
+            ["unregisteredCount"] = unregistered.Length,
+            ["unregisteredBytes"] = unregistered.Sum(file => file.Bytes),
+            ["unregistered"] = EngineJson.Array(unregistered.Take(30).Select(file => new JsonObject
+            {
+                ["path"] = file.Path,
+                ["bytes"] = file.Bytes
+            })),
+            ["nextAction"] = "未登记文件不会发布；只补充确实需要的依赖。分析脚本与样本保留在工作区即可，不必登记或删除。"
+        };
     }
 
 }

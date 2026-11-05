@@ -1,3 +1,5 @@
+using System.Text.Json.Nodes;
+using GameL10n.Core.Serialization;
 namespace GameL10n.Core.Development;
 
 /// <summary>Conditional text-format guidance; it does not establish a game's runtime support.</summary>
@@ -13,23 +15,23 @@ internal static class KirikiriTextGuidance
         || new[] { "kirikiri", "krkr", "xp3", "吉里吉里", "hxv4", "kagex", "psb", "scn" }
             .Any(query.Contains);
 
-    internal static object ScnSupport() => new
+    internal static object ScnSupport() => new JsonObject
     {
-        component = "kirikiri-scn-text",
-        condition = "已解密 PSB v2/v3 的 KAGEX SCN；不能据此认定 XP3 的过滤器相同。Hxv4 与 Adler 等过滤变体分别确认。",
-        next = "inspect_adapter_component(id=kirikiri-scn-text)，copy_adapter_components 后直接 run_engine_python 运行组件的 verify JSON CLI，先验证一个原始解包样本。",
-        semanticLayer = "正文、显示名、选项才是独立译文；朗读/搜索缓存与可见长度由现成 kirikiri_scn writer 同步重算，禁止对它们独立翻译。未知布局要报告具体不兼容项，只扩展该层。",
-        existingApis = new[] { "python.engines.kirikiri_hxv4_text", "python.engines.kirikiri_scn", "python.engines.kirikiri_psb" },
-        moduleEntry = "run_engine_python(module=python.engines.kirikiri_hxv4_text, arguments=[--help]) 可直接查看现成 CLI，无需编写 runpy 脚本。高层 extract/pack 只解决其声明范围；最终整包重建、字体、脚本覆盖顺序仍需验证。"
+        ["component"] = "kirikiri-scn-text",
+        ["condition"] = "已解密 PSB v2/v3 的 KAGEX SCN；不能据此认定 XP3 的过滤器相同。Hxv4 与 Adler 等过滤变体分别确认。",
+        ["next"] = "inspect_adapter_component(id=kirikiri-scn-text)，copy_adapter_components 后直接 run_engine_python 运行组件的 verify JSON CLI，先验证一个原始解包样本。",
+        ["semanticLayer"] = "正文、显示名、选项才是独立译文；朗读/搜索缓存与可见长度由现成 kirikiri_scn writer 同步重算，禁止对它们独立翻译。未知布局要报告具体不兼容项，只扩展该层。",
+        ["existingApis"] = EngineJson.Node(new[] { "python.engines.kirikiri_hxv4_text", "python.engines.kirikiri_scn", "python.engines.kirikiri_psb" }, EngineJson.Web),
+        ["moduleEntry"] = "run_engine_python(module=python.engines.kirikiri_hxv4_text, arguments=[--help]) 可直接查看现成 CLI，无需编写 runpy 脚本。高层 extract/pack 只解决其声明范围；最终整包重建、字体、脚本覆盖顺序仍需验证。"
     };
 
-    internal static object Describe() => new
+    internal static object Describe() => new JsonObject
     {
-        parserReuse = Summary,
-        archiveSupport = "XP3 容器、脚本语义、中文编码和字体是不同能力。现有适配器失败时先检查可复制的源码；容器组件拒绝过滤标记或超出预算，不代表 KS 解析器不可复用。TJS 源码与 TJS2100 编译脚本分别处理。",
-        minimalTrial = "先选一个短 KS 和含姓名/选项的代表样本：原文往返、少量中文及保留符号（如 ♪、・）、局部修改后复提。比较实际译文、ID、位置和所有未修改项；封包重建另核对修改与未修改条目的清单及内容。小样通过后再完整 test_adapter。",
-        runtimeEvidence = "确认脚本字节缓冲实际到达的解码函数及编码选择条件。导入表、宿主 ACP、几种指令字节未命中或自定义 encoder/decoder 往返，都不能证明游戏的脚本编码或显示支持。",
-        referenceSource = ReferencePath
+        ["parserReuse"] = Summary,
+        ["archiveSupport"] = "XP3 容器、脚本语义、中文编码和字体是不同能力。现有适配器失败时先检查可复制的源码；容器组件拒绝过滤标记或超出预算，不代表 KS 解析器不可复用。TJS 源码与 TJS2100 编译脚本分别处理。",
+        ["minimalTrial"] = "先选一个短 KS 和含姓名/选项的代表样本：原文往返、少量中文及保留符号（如 ♪、・）、局部修改后复提。比较实际译文、ID、位置和所有未修改项；封包重建另核对修改与未修改条目的清单及内容。小样通过后再完整 test_adapter。",
+        ["runtimeEvidence"] = "确认脚本字节缓冲实际到达的解码函数及编码选择条件。导入表、宿主 ACP、几种指令字节未命中或自定义 encoder/decoder 往返，都不能证明游戏的脚本编码或显示支持。",
+        ["referenceSource"] = ReferencePath
     };
 
     internal const string Reference = """

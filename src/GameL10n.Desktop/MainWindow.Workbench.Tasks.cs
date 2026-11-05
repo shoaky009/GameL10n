@@ -10,8 +10,8 @@ namespace GameL10n.Desktop;
 
 public sealed partial class MainWindow
 {
-    private sealed record TranslationScope(IReadOnlyList<string>? UnitIds, bool BuildPatchAfter, bool Completed, string? RetranslationId = null);
-    private sealed record RuntimeCheck(string Status, string Note, DateTimeOffset CheckedAt);
+    internal sealed record TranslationScope(IReadOnlyList<string>? UnitIds, bool BuildPatchAfter, bool Completed, string? RetranslationId = null);
+    internal sealed record RuntimeCheck(string Status, string Note, DateTimeOffset CheckedAt);
 
     private Progress<PipelineProgress> TranslationProgress(GameWorkspace game)
     {
@@ -172,9 +172,9 @@ public sealed partial class MainWindow
         game.PatchTextHashes = null; game.RuntimeCheck = null; game.PatchIndexDirectory = patch;
         try
         {
-            var snapshot = patch is null ? null : await LocalFiles.ReadJsonAsync<PatchTranslationSnapshot>(Path.Combine(patch, "translation-snapshot.json"));
+            var snapshot = patch is null ? null : await LocalFiles.ReadJsonAsync<PatchTranslationSnapshot>(Path.Combine(patch, "translation-snapshot.json"), DesktopJson.TypeInfo<PatchTranslationSnapshot>(DesktopJson.Storage));
             game.PatchTextHashes = snapshot?.Texts is null ? null : await Task.Run(() => snapshot.Texts.ToDictionary(pair => pair.Key, pair => LocalFiles.HashText(pair.Value), StringComparer.Ordinal));
-            var runtime = patch is null ? null : await LocalFiles.ReadJsonAsync<RuntimeCheck>(Path.Combine(patch, "runtime-check.json"));
+            var runtime = patch is null ? null : await LocalFiles.ReadJsonAsync<RuntimeCheck>(Path.Combine(patch, "runtime-check.json"), DesktopJson.TypeInfo<RuntimeCheck>(DesktopJson.Storage));
             game.RuntimeCheck = runtime is null ? null : $"用户记录 · {runtime.CheckedAt.ToLocalTime():MM-dd HH:mm} · {(runtime.Status == "passed" ? "显示正常" : "存在问题")}"
                 + (!string.IsNullOrEmpty(runtime.Note) ? "\n" + runtime.Note : "");
         }
@@ -201,7 +201,7 @@ public sealed partial class MainWindow
         if (selectedGame is not { Result: { } result } game) return;
         try
         {
-            var snapshot = await LocalFiles.ReadJsonAsync<PatchTranslationSnapshot>(Path.Combine(result.PatchDirectory, "translation-snapshot.json"));
+            var snapshot = await LocalFiles.ReadJsonAsync<PatchTranslationSnapshot>(Path.Combine(result.PatchDirectory, "translation-snapshot.json"), DesktopJson.TypeInfo<PatchTranslationSnapshot>(DesktopJson.Storage));
             if (snapshot?.Texts is null) return;
             var rows = game.RowsById.ToDictionary(pair => pair.Key, pair => pair.Value.Unit, StringComparer.Ordinal);
             var preview = await Task.Run(() => snapshot.Texts.Select(pair => new PatchTextPreview(rows.TryGetValue(pair.Key, out var unit)
@@ -231,7 +231,7 @@ public sealed partial class MainWindow
             var dialog = new ContentDialog { XamlRoot = RootGrid.XamlRoot, Title = status == "passed" ? "记录游戏内显示正常" : "记录游戏内显示问题",
                 Content = note, PrimaryButtonText = "保存记录", CloseButtonText = "取消" };
             if (await dialog.ShowAsync() != ContentDialogResult.Primary || game.Result != result) return;
-            await LocalFiles.WriteJsonAsync(Path.Combine(result.PatchDirectory, "runtime-check.json"), new RuntimeCheck(status, note.Text.Trim(), DateTimeOffset.UtcNow));
+            await LocalFiles.WriteJsonAsync(Path.Combine(result.PatchDirectory, "runtime-check.json"), new RuntimeCheck(status, note.Text.Trim(), DateTimeOffset.UtcNow), DesktopJson.TypeInfo<RuntimeCheck>(DesktopJson.Storage));
             game.PatchIndexDirectory = null; await LoadPatchIndexAsync(game); if (selectedGame == game) UpdatePatchNotice();
         }
         catch (Exception error) { ShowError(error); }

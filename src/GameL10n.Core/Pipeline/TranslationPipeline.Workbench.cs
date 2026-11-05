@@ -3,6 +3,8 @@ using GameL10n.Core.Patching;
 using GameL10n.Core.Development;
 using GameL10n.Core.Storage;
 using GameL10n.Core.Translation;
+using System.Text.Json.Nodes;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Pipeline;
 
@@ -81,25 +83,29 @@ public sealed partial class TranslationPipeline
         var buildTexts = isTrial
             ? allUnits.ToDictionary(u => u.Id, u => completed.GetValueOrDefault(u.Id, u.SourceText), StringComparer.Ordinal)
             : completed;
-        var buildKey = LocalFiles.HashText(JsonSerializer.Serialize(new
+        var buildKey = LocalFiles.HashText(JsonSerializer.Serialize(new JsonObject
         {
-            SnapshotVersion = 2, session.Adapter.Id, session.Adapter.Version, session.Sources, isTrial,
-            TrialUnitIds = trialIds?.Order(StringComparer.Ordinal).ToArray(),
-            Translations = buildTexts.OrderBy(k => k.Key, StringComparer.Ordinal)
-        }));
+            ["SnapshotVersion"] = 2,
+            ["Id"] = session.Adapter.Id,
+            ["Version"] = session.Adapter.Version,
+            ["Sources"] = CoreJson.Node((session.Sources).ToArray(), CoreJson.Default),
+            ["isTrial"] = isTrial,
+            ["TrialUnitIds"] = CoreJson.Node(trialIds?.Order(StringComparer.Ordinal).ToArray(), CoreJson.Default),
+            ["Translations"] = CoreJson.Node((buildTexts.OrderBy(k => k.Key, StringComparer.Ordinal)).ToArray(), CoreJson.Default)
+        }, CoreJson.TypeInfo<JsonObject>(CoreJson.Default)));
         var patchDirectory = Path.Combine(session.ProjectDirectory, "patches", buildKey);
         var reportPath = Path.Combine(patchDirectory, "translation-report.json");
-        var existing = await LocalFiles.ReadRecoverableJsonAsync<PipelineResult>(reportPath, ct);
+        var existing = await LocalFiles.ReadRecoverableJsonAsync<PipelineResult>(reportPath, CoreJson.TypeInfo<PipelineResult>(CoreJson.Storage), ct);
         if (existing is not null) existing = ResolveResult(session.ProjectDirectory, existing);
         if (existing is not null && await PatchIsIntactAsync(patchDirectory, ct))
         {
-            var manifest = await LocalFiles.ReadJsonAsync<PatchManifest>(Path.Combine(patchDirectory, PatchInstaller.ManifestFilename), ct);
+            var manifest = await LocalFiles.ReadJsonAsync<PatchManifest>(Path.Combine(patchDirectory, PatchInstaller.ManifestFilename), CoreJson.TypeInfo<PatchManifest>(CoreJson.Storage), ct);
             var executableCheck = await ValidateExecutablesAsync(session, patchDirectory, manifest!.Files.Select(file => file.RelativePath).ToArray(), ct);
             if (!executableCheck.Passed)
                 throw new InvalidDataException("已有补丁未通过程序加载检查：" + string.Join("；", executableCheck.Issues.Select(issue => issue.Message)));
             await RecordCompatibilityAsync(session, existing, ct);
             var reused = existing with { CacheHits = cacheHits, TranslationUsage = usage };
-            await LocalFiles.WriteJsonAsync(Path.Combine(session.ProjectDirectory, "latest-result.json"), PersistedResult(session.ProjectDirectory, reused), ct);
+            await LocalFiles.WriteJsonAsync(Path.Combine(session.ProjectDirectory, "latest-result.json"), PersistedResult(session.ProjectDirectory, reused), CoreJson.TypeInfo<PipelineResult>(CoreJson.Storage), ct);
             await ReportAsync(isTrial ? "试译完成" : "完成", isTrial
                 ? "已复用试译补丁。可安装后进入所选片段检查显示效果；其余文本保留原文。"
                 : "译文和补丁均未变化，直接复用已完成结果。", ct);
@@ -122,24 +128,24 @@ public sealed partial class TranslationPipeline
         };
         if (!validationResult.Passed)
         {
-            await LocalFiles.WriteJsonAsync(Path.Combine(staging, "validation-errors.json"), validationResult, ct);
+            await LocalFiles.WriteJsonAsync(Path.Combine(staging, "validation-errors.json"), validationResult, CoreJson.TypeInfo<ValidationResult>(CoreJson.Storage), ct);
             throw new InvalidDataException("补丁未通过结构校验：" + string.Join("；", validationResult.Issues.Select(i => i.Message).Take(5)));
         }
         var patchFiles = new List<PatchFile>();
         foreach (var relative in build.Files)
             patchFiles.Add(new(relative, await LocalFiles.HashFileAsync(LocalFiles.UnderRoot(staging, relative), ct),
                 session.Sources.FirstOrDefault(f => f.RelativePath.Equals(relative, StringComparison.OrdinalIgnoreCase))?.Sha256));
-        await LocalFiles.WriteJsonAsync(Path.Combine(staging, PatchInstaller.ManifestFilename), new PatchManifest(1, patchFiles), ct);
+        await LocalFiles.WriteJsonAsync(Path.Combine(staging, PatchInstaller.ManifestFilename), new PatchManifest(1, patchFiles), CoreJson.TypeInfo<PatchManifest>(CoreJson.Storage), ct);
         var result = new PipelineResult(patchDirectory, build.LaunchExecutable ?? session.Probe.OriginalExecutable,
             allUnits.Count, cacheHits, usage, validationResult,
             session.Extraction.Warnings.Concat(build.Warnings).Distinct().ToArray(), Path.GetFileName(session.SourceDirectory),
             isTrial, completed.Count);
-        await LocalFiles.WriteJsonAsync(Path.Combine(staging, "translation-snapshot.json"), new PatchTranslationSnapshot(1, completed), ct);
-        await LocalFiles.WriteJsonAsync(Path.Combine(staging, "translation-report.json"), PersistedResult(session.ProjectDirectory, result), ct);
+        await LocalFiles.WriteJsonAsync(Path.Combine(staging, "translation-snapshot.json"), new PatchTranslationSnapshot(1, completed), CoreJson.TypeInfo<PatchTranslationSnapshot>(CoreJson.Storage), ct);
+        await LocalFiles.WriteJsonAsync(Path.Combine(staging, "translation-report.json"), PersistedResult(session.ProjectDirectory, result), CoreJson.TypeInfo<PipelineResult>(CoreJson.Storage), ct);
         if (Directory.Exists(patchDirectory))
             Directory.Move(patchDirectory, patchDirectory + ".damaged-" + Guid.NewGuid().ToString("N"));
         Directory.Move(staging, patchDirectory);
-        await LocalFiles.WriteJsonAsync(Path.Combine(session.ProjectDirectory, "latest-result.json"), PersistedResult(session.ProjectDirectory, result), ct);
+        await LocalFiles.WriteJsonAsync(Path.Combine(session.ProjectDirectory, "latest-result.json"), PersistedResult(session.ProjectDirectory, result), CoreJson.TypeInfo<PipelineResult>(CoreJson.Storage), ct);
         await RecordCompatibilityAsync(session, result, ct);
         await ReportAsync(isTrial ? "试译完成" : "完成", isTrial
             ? $"已生成 {completed.Count} 条文本的试译补丁，其余文本保留原文。请在“补丁与验证”安装后进入所选片段验证。"

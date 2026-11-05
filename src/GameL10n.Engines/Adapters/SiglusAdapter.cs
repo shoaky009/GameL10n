@@ -1,6 +1,8 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using GameL10n.Core.Development;
 using GameL10n.Core.Isolation;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Adapters;
 
@@ -47,12 +49,12 @@ public sealed class SiglusAdapter(EngineReferenceToolkit toolkit, IAdapterProces
         text.Any(ch => char.IsSurrogate(ch) || ch == '\0')
             ? [new("siglus-character", "当前 Siglus 方案不支持此译文中的补充平面字符或空字符。", unit.Id)] : [];
 
-    private static T? Read<T>(JsonElement response, string property) => response.GetProperty(property).Deserialize<T>(SiglusClient.Json);
+    private static T? Read<T>(JsonElement response, string property) => response.GetProperty(property).Deserialize<T>(EngineJson.TypeInfo<T>(SiglusClient.Json));
 }
 
 internal sealed class SiglusClient(EngineReferenceToolkit toolkit, IAdapterProcessRunner runner, Action<string, string>? progress = null)
 {
-    internal static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
+    internal static readonly JsonSerializerOptions Json = new(EngineJson.Web);
 
     internal async Task<JsonElement> InvokeAsync(string operation, string sourceDirectory, string? outputDirectory,
         IReadOnlyDictionary<string, string>? translations, JsonElement? inspection, CancellationToken ct)
@@ -78,18 +80,18 @@ internal sealed class SiglusClient(EngineReferenceToolkit toolkit, IAdapterProce
             if (translationsPath is not null)
             {
                 await using var stream = File.Create(translationsPath);
-                await JsonSerializer.SerializeAsync(stream, translations, Json, ct);
+                await JsonSerializer.SerializeAsync(stream, translations, EngineJson.TypeInfo<IReadOnlyDictionary<string, string>?>(Json), ct);
             }
-            var request = new Dictionary<string, object?>
+            var request = new JsonObject
             {
                 ["protocolVersion"] = 1, ["operation"] = operation, ["sourceDirectory"] = source,
                 ["outputDirectory"] = outputDirectory is null ? null : Path.GetFullPath(outputDirectory),
-                ["resourceFiles"] = resources, ["responseFile"] = responsePath,
+                ["resourceFiles"] = EngineJson.Node(resources, Json), ["responseFile"] = responsePath,
                 ["translationsFile"] = translationsPath, ["compactOutput"] = true
             };
             if (inspection is { } options)
                 foreach (var name in new[] { "source", "query", "offset", "length" })
-                    if (options.TryGetProperty(name, out var value)) request[name] = value;
+                    if (options.TryGetProperty(name, out var value)) request[name] = EngineJson.Node(value, Json);
             var stage = operation switch
             {
                 "probe" => "检查 Siglus 资源", "extract" => "提取 Siglus 文本", "build" => "回填脚本和中文字库",
@@ -98,7 +100,7 @@ internal sealed class SiglusClient(EngineReferenceToolkit toolkit, IAdapterProce
             progress?.Invoke(stage, operation == "build" ? "正在回填译文并补充缺少的中文字形。" : "正在使用本地工具检查剧情脚本和显示规则。");
             var process = await runner.RunAsync(new(prepared.Paths.Python,
                 ["-I", "-B", "-X", "utf8", "-c", "import sys;sys.path.insert(0,sys.argv[1]);from gamel10n_siglus import main;sys.exit(main())", prepared.Paths.EngineLibrary],
-                work, JsonSerializer.Serialize(request, Json), TimeSpan.FromMinutes(10), 1024 * 1024), ct);
+                work, request.ToJsonString(Json), TimeSpan.FromMinutes(10), 1024 * 1024), ct);
             if (!File.Exists(responsePath)) throw new InvalidDataException("Siglus 工具未返回结果：" + VnTextPatchClient.Diagnostic(process.StandardError));
             WorkspaceFiles.RejectReparsePoints(responsePath);
             await using var input = File.OpenRead(responsePath);

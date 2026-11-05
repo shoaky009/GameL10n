@@ -1,5 +1,7 @@
 using System.Security.Cryptography;
 using System.Text.Json;
+using System.Text.Json.Nodes;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Storage;
 
@@ -12,7 +14,12 @@ public sealed record ExtractionManifest(int SchemaVersion, string SourceFingerpr
 public sealed class ExtractionStore(string projectDirectory)
 {
     public static string CacheKey(string sourceFingerprint, string adapterId, string adapterVersion) =>
-        LocalFiles.HashText(JsonSerializer.Serialize(new { sourceFingerprint, adapterId, adapterVersion }));
+        LocalFiles.HashText(JsonSerializer.Serialize(new JsonObject
+        {
+            ["sourceFingerprint"] = sourceFingerprint,
+            ["adapterId"] = adapterId,
+            ["adapterVersion"] = adapterVersion
+        }, CoreJson.TypeInfo<JsonObject>(CoreJson.Default)));
 
     public async Task<ExtractionResult?> LoadAsync(string sourceFingerprint, string adapterId, string adapterVersion,
         CancellationToken ct = default)
@@ -25,7 +32,7 @@ public sealed class ExtractionStore(string projectDirectory)
             var manifestBytes = await File.ReadAllBytesAsync(manifestPath, ct);
             if (Convert.ToHexString(SHA256.HashData(manifestBytes)).ToLowerInvariant() !=
                 (await File.ReadAllTextAsync(Path.Combine(directory, "manifest.sha256"), ct)).Trim()) return null;
-            var manifest = JsonSerializer.Deserialize<ExtractionManifest>(manifestBytes, LocalFiles.JsonOptions);
+            var manifest = JsonSerializer.Deserialize<ExtractionManifest>(manifestBytes, CoreJson.TypeInfo<ExtractionManifest>(CoreJson.Storage));
             if (manifest is null) return null;
             if (manifest.SchemaVersion != 1 || manifest.SourceFingerprint != sourceFingerprint ||
                 manifest.AdapterId != adapterId || manifest.AdapterVersion != adapterVersion ||
@@ -40,7 +47,7 @@ public sealed class ExtractionStore(string projectDirectory)
                 var bytes = await File.ReadAllBytesAsync(LocalFiles.UnderRoot(directory, resource.File), token);
                 if (Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant() != resource.Sha256)
                     throw new InvalidDataException("提取资源缓存哈希不一致。");
-                var shard = JsonSerializer.Deserialize<ResourceExtraction>(bytes, LocalFiles.JsonOptions);
+                var shard = JsonSerializer.Deserialize<ResourceExtraction>(bytes, CoreJson.TypeInfo<ResourceExtraction>(CoreJson.Storage));
                 if (shard?.SchemaVersion != 1 || shard.ResourcePath != resource.ResourcePath ||
                     shard.Units is null || shard.Units.Count != resource.UnitCount || shard.Units.Any(unit =>
                         unit.ResourcePath != resource.ResourcePath || string.IsNullOrWhiteSpace(unit.Id) || string.IsNullOrWhiteSpace(unit.SourceText)))
@@ -78,11 +85,11 @@ public sealed class ExtractionStore(string projectDirectory)
             var relative = "resources/" + LocalFiles.HashText(group.Key) + ".json";
             var path = LocalFiles.UnderRoot(staging, relative);
             var units = group.ToArray();
-            await LocalFiles.WriteJsonAsync(path, new ResourceExtraction(1, group.Key, units), ct);
+            await LocalFiles.WriteJsonAsync(path, new ResourceExtraction(1, group.Key, units), CoreJson.TypeInfo<ResourceExtraction>(CoreJson.Storage), ct);
             resources.Add(new(group.Key, relative, await LocalFiles.HashFileAsync(path, ct), units.Length));
         }
         await LocalFiles.WriteJsonAsync(Path.Combine(staging, "manifest.json"), new ExtractionManifest(1, sourceFingerprint,
-            adapterId, adapterVersion, resources, extraction.Units.Select(unit => unit.Id).ToArray(), extraction.Warnings), ct);
+            adapterId, adapterVersion, resources, extraction.Units.Select(unit => unit.Id).ToArray(), extraction.Warnings), CoreJson.TypeInfo<ExtractionManifest>(CoreJson.Storage), ct);
         await File.WriteAllTextAsync(Path.Combine(staging, "manifest.sha256"),
             await LocalFiles.HashFileAsync(Path.Combine(staging, "manifest.json"), ct), ct);
         if (Directory.Exists(directory)) Directory.Move(directory, directory + ".damaged-" + Guid.NewGuid().ToString("N"));
@@ -92,5 +99,5 @@ public sealed class ExtractionStore(string projectDirectory)
     private string CacheDirectory(string fingerprint, string adapterId, string version) =>
         Path.Combine(projectDirectory, "extraction", CacheKey(fingerprint, adapterId, version));
 
-    private sealed record ResourceExtraction(int SchemaVersion, string ResourcePath, IReadOnlyList<TranslationUnit> Units);
+    internal sealed record ResourceExtraction(int SchemaVersion, string ResourcePath, IReadOnlyList<TranslationUnit> Units);
 }

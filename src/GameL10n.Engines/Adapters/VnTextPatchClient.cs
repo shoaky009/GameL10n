@@ -2,6 +2,8 @@ using System.Text.Json;
 using GameL10n.Core.Development;
 using GameL10n.Core.Isolation;
 using GameL10n.Core.Storage;
+using System.Text.Json.Nodes;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Adapters;
 
@@ -15,7 +17,7 @@ public sealed class VnTextPatchException(string message, VnTextPatchDiagnostic? 
 
 internal sealed class VnTextPatchClient(IAdapterProcessRunner runner, string? workerExecutablePath, string? workerAssemblyPath)
 {
-    private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web) { MaxDepth = 64 };
+    private static readonly JsonSerializerOptions Json = new(EngineJson.Web) { MaxDepth = 64 };
     private readonly string executable = Path.GetFullPath(workerExecutablePath
         ?? Path.Combine(AppContext.BaseDirectory, "tools", "vntextpatch", "GameL10n.VnTextPatch.exe"));
     private readonly IReadOnlyList<string> arguments = workerAssemblyPath is null ? [] : [Path.GetFullPath(workerAssemblyPath)];
@@ -28,7 +30,7 @@ internal sealed class VnTextPatchClient(IAdapterProcessRunner runner, string? wo
         if (File.Exists(runtime)) files.Add(runtime);
         var hashes = new List<string>();
         foreach (var file in files) hashes.Add(await LocalFiles.HashFileAsync(file, ct));
-        return LocalFiles.HashText(JsonSerializer.Serialize(hashes));
+        return LocalFiles.HashText(JsonSerializer.Serialize(hashes, EngineJson.TypeInfo<List<string>>(EngineJson.Default)));
     }
 
     internal async Task<Response> InvokeAsync(string operation, string format, string sourceDirectory,
@@ -51,13 +53,19 @@ internal sealed class VnTextPatchClient(IAdapterProcessRunner runner, string? wo
             {
                 translationsPath = Path.Combine(workspace, "translations.json");
                 await using var stream = new FileStream(translationsPath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
-                await JsonSerializer.SerializeAsync(stream, translations, Json, cancellationToken);
+                await JsonSerializer.SerializeAsync(stream, translations, EngineJson.TypeInfo<IReadOnlyDictionary<string, string>>(Json), cancellationToken);
             }
-            var request = JsonSerializer.Serialize(new
+            var request = JsonSerializer.Serialize(new JsonObject
             {
-                protocolVersion = 1, operation, format, sourceDirectory = source, outputDirectory = output,
-                resourceFiles = resources, responseFile = responsePath, translationsFile = translationsPath
-            }, Json);
+                ["protocolVersion"] = 1,
+                ["operation"] = operation,
+                ["format"] = format,
+                ["sourceDirectory"] = source,
+                ["outputDirectory"] = output,
+                ["resourceFiles"] = EngineJson.Node((resources).ToArray(), Json),
+                ["responseFile"] = responsePath,
+                ["translationsFile"] = translationsPath
+            }, EngineJson.TypeInfo<JsonObject>(Json));
             var result = await runner.RunAsync(new AdapterProcessRequest(executable, arguments, workspace, request,
                 Timeout: operation == "probe" ? TimeSpan.FromMinutes(2) : TimeSpan.FromMinutes(10),
                 MaximumOutputBytes: 1024 * 1024), cancellationToken);
@@ -70,7 +78,7 @@ internal sealed class VnTextPatchClient(IAdapterProcessRunner runner, string? wo
             {
                 await using var stream = new FileStream(responsePath, FileMode.Open, FileAccess.Read, FileShare.Read,
                     128 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
-                response = await JsonSerializer.DeserializeAsync<Response>(stream, Json, cancellationToken)
+                response = await JsonSerializer.DeserializeAsync<Response>(stream, EngineJson.TypeInfo<Response>(Json), cancellationToken)
                     ?? throw new JsonException("Empty response.");
             }
             catch (JsonException error)

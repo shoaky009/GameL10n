@@ -1,6 +1,8 @@
 using System.Security.Cryptography;
 using System.Text;
 using GameL10n.Core.Isolation;
+using System.Text.Json.Nodes;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Development;
 
@@ -60,20 +62,33 @@ public sealed class AdapterComponentAssets(string? assetsDirectory = null)
 
     public object[] List(string query = "") => Components.Where(component => string.IsNullOrWhiteSpace(query)
         || (component.Id + " " + component.Name + " " + component.Scope + " " + component.Origin).Contains(query, StringComparison.OrdinalIgnoreCase))
-        .Select(component => (object)new { component.Id, version = Version, component.Name, component.Scope }).ToArray();
+        .Select(component => (object)new JsonObject
+        {
+            ["id"] = component.Id,
+            ["version"] = Version,
+            ["name"] = component.Name,
+            ["scope"] = component.Scope
+        }).ToArray();
 
     public object Describe(string id)
     {
         var component = Find(id);
-        return new
+        return new JsonObject
         {
-            component.Id, version = Version, component.Name, component.Scope, component.Origin, component.Api, component.Example,
-            files = component.Files.Select(file => new
+            ["id"] = component.Id,
+            ["version"] = Version,
+            ["name"] = component.Name,
+            ["scope"] = component.Scope,
+            ["origin"] = component.Origin,
+            ["api"] = component.Api,
+            ["example"] = component.Example,
+            ["files"] = EngineJson.Array(component.Files.Select(file => new JsonObject
             {
-                path = file.Destination, binary = file.Binary,
-                available = !file.Binary || File.Exists(Path.Combine(directory, file.Name))
-            }).ToArray(),
-            usage = "copy_adapter_components 按需复制 Python 调用辅助文件或预编译启动器。编码、字体组件通过 gamel10n_host 调用预编译宿主，不生成或编译 C#；Python 库由固定共享运行库执行。支持的 JSON CLI 可用 run_engine_python 直接运行。组件本身不保证当前游戏兼容，仍需资源回填及运行显示验证。"
+                ["path"] = file.Destination,
+                ["binary"] = file.Binary,
+                ["available"] = !file.Binary || File.Exists(Path.Combine(directory, file.Name))
+            }).ToArray()),
+            ["usage"] = "copy_adapter_components 按需复制 Python 调用辅助文件或预编译启动器。编码、字体组件通过 gamel10n_host 调用预编译宿主，不生成或编译 C#；Python 库由固定共享运行库执行。支持的 JSON CLI 可用 run_engine_python 直接运行。组件本身不保证当前游戏兼容，仍需资源回填及运行显示验证。"
         };
     }
 
@@ -85,8 +100,17 @@ public sealed class AdapterComponentAssets(string? assetsDirectory = null)
         var content = Encoding.UTF8.GetString(ReadSourceBytes(file.Name));
         var start = Math.Min(offset, content.Length);
         var next = Math.Min(content.Length, start + length);
-        return new { id, version = Version, path = file.Destination, offset = start, nextOffset = next,
-            totalLength = content.Length, more = next < content.Length, content = content[start..next] };
+        return new JsonObject
+        {
+            ["id"] = id,
+            ["version"] = Version,
+            ["path"] = file.Destination,
+            ["offset"] = start,
+            ["nextOffset"] = next,
+            ["totalLength"] = content.Length,
+            ["more"] = next < content.Length,
+            ["content"] = content[start..next]
+        };
     }
 
     public async Task<object> CopyAsync(IReadOnlyList<string> ids, string workspace, CancellationToken ct = default, ICollection<AdapterReleaseFile>? releaseFiles = null)
@@ -137,11 +161,15 @@ public sealed class AdapterComponentAssets(string? assetsDirectory = null)
             releaseFiles?.Add(new(AdapterReleaseFiles.PackagePath(path),
                 path.EndsWith(".py", StringComparison.OrdinalIgnoreCase) ? "runtime" : "asset", "内置文本、编码、字体或启动组件"));
         }
-        return new
+        return new JsonObject
         {
-            components = selected.Select(component => Describe(component.Id)).ToArray(),
-            files = files.Select(pair => new { path = pair.Key, reused = reused.Contains(pair.Key),
-                sha256 = Convert.ToHexStringLower(SHA256.HashData(pair.Value)) }).ToArray()
+            ["components"] = EngineJson.Node(selected.Select(component => Describe(component.Id)).ToArray(), EngineJson.Web),
+            ["files"] = EngineJson.Array(files.Select(pair => new JsonObject
+            {
+                ["path"] = pair.Key,
+                ["reused"] = reused.Contains(pair.Key),
+                ["sha256"] = Convert.ToHexStringLower(SHA256.HashData(pair.Value))
+            }).ToArray())
         };
     }
 

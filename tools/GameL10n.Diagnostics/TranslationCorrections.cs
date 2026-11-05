@@ -2,6 +2,7 @@ using System.Text.Json;
 using GameL10n.Core.Pipeline;
 using GameL10n.Core.Storage;
 using GameL10n.Core.Translation;
+using GameL10n.Core.Serialization;
 
 internal sealed record TranslationCorrection(string Id, string SourceText, string Context, string PreviousTranslation, string Translation);
 internal sealed record TranslationCorrectionSet(string TargetLanguage, IReadOnlyList<TranslationCorrection> Corrections);
@@ -15,18 +16,18 @@ internal static class TranslationCorrections
         try
         {
             projectDirectory = Path.GetFullPath(projectDirectory);
-            var correctionSet = await LocalFiles.ReadJsonAsync<TranslationCorrectionSet>(correctionsPath)
+            var correctionSet = await LocalFiles.ReadJsonAsync<TranslationCorrectionSet>(correctionsPath, DiagnosticJson.TypeInfo<TranslationCorrectionSet>(DiagnosticJson.Storage))
                 ?? throw new InvalidDataException("缺少校正记录。");
             var corrections = correctionSet.Corrections;
             if (corrections.Count is < 1 or > 100 || corrections.Select(c => c.Id).Distinct().Count() != corrections.Count)
                 throw new InvalidDataException("校正记录包含重复 ID 或超出单次限制。");
             await using var taskLock = apply ? new FileStream(Path.Combine(projectDirectory, ".task.lock"),
                 FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None) : null;
-            var project = await LocalFiles.ReadJsonAsync<GameProject>(Path.Combine(projectDirectory, "game.json"))
+            var project = await LocalFiles.ReadJsonAsync<GameProject>(Path.Combine(projectDirectory, "game.json"), DiagnosticJson.TypeInfo<GameProject>(DiagnosticJson.Storage))
                 ?? throw new InvalidDataException("项目不存在。");
             if (correctionSet.TargetLanguage != project.Settings.TargetLanguage)
                 throw new InvalidDataException("校正记录的目标语言与项目设置不一致。");
-            var snapshot = await LocalFiles.ReadJsonAsync<SourceSnapshot>(Path.Combine(projectDirectory, "source.json"))
+            var snapshot = await LocalFiles.ReadJsonAsync<SourceSnapshot>(Path.Combine(projectDirectory, "source.json"), DiagnosticJson.TypeInfo<SourceSnapshot>(DiagnosticJson.Storage))
                 ?? throw new InvalidDataException("原文记录不存在。");
             var fingerprint = LocalFiles.HashText(JsonSerializer.Serialize(snapshot.Files.OrderBy(f => f.RelativePath)));
             var extraction = await new ExtractionStore(projectDirectory).LoadAsync(fingerprint, snapshot.AdapterId, snapshot.AdapterVersion)
@@ -51,7 +52,7 @@ internal static class TranslationCorrections
                 var issues = TextValidation.Validate(unit, fix.Translation);
                 if (issues.Count > 0) throw new InvalidDataException(string.Join("；", issues.Select(i => i.Message)));
                 var key = memory.Key(unit, policy);
-                var shard = await LocalFiles.ReadJsonAsync<MemoryShard>(Path.Combine(directory, key[..2] + ".json"));
+                var shard = await LocalFiles.ReadJsonAsync<MemoryShard>(Path.Combine(directory, key[..2] + ".json"), DiagnosticJson.TypeInfo<MemoryShard>(DiagnosticJson.Storage));
                 var existing = shard?.Entries.GetValueOrDefault(key);
                 if (edits.Find(unit, policy.TargetLanguage) is not null
                     || existing is not null && existing.Translation != fix.PreviousTranslation)

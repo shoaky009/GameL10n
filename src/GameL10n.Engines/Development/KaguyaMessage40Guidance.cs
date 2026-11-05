@@ -1,5 +1,7 @@
 using System.Security.Cryptography;
 using GameL10n.Core.Isolation;
+using System.Text.Json.Nodes;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Development;
 
@@ -11,21 +13,21 @@ internal static class KaguyaMessage40Guidance
     internal const string EncodingWarning = "KaGuYa MESSAGE v4.0 内置适配器只提供 CP932 脚本提取和回填；可提取不代表已支持中文运行。CP932 无法表示的译文会报错，中文编码、字节遍历和字体绘制仍需验证。";
     private const int MaximumGraphicsBytes = 16 * 1024 * 1024;
 
-    internal static object Describe(object? inspection) => new
+    internal static object Describe(object? inspection) => new JsonObject
     {
-        scriptFormat = "[SCR-MESSAGE]ver4.0",
-        parserReuse = "优先复用现有 KaguyaScript / BuiltinScriptParser 的提取、回填和复提校验，不重写 MESSAGE 解析器。仅确认版本或结构不兼容时才编辑源码。",
-        translationMemory = "沿用原提取结果的 UnitId（协议 id）、ResourcePath、Locator、Context、Speaker 和 Kind；包装适配器不得重新编号或按显示类型重新分类，以免已有翻译记忆失效。",
-        runtimeSupport = EncodingWarning,
-        nextSteps = new[]
+        ["scriptFormat"] = "[SCR-MESSAGE]ver4.0",
+        ["parserReuse"] = "优先复用现有 KaguyaScript / BuiltinScriptParser 的提取、回填和复提校验，不重写 MESSAGE 解析器。仅确认版本或结构不兼容时才编辑源码。",
+        ["translationMemory"] = "沿用原提取结果的 UnitId（协议 id）、ResourcePath、Locator、Context、Speaker 和 Kind；包装适配器不得重新编号或按显示类型重新分类，以免已有翻译记忆失效。",
+        ["runtimeSupport"] = EncodingWarning,
+        ["nextSteps"] = EngineJson.Node(new[]
         {
             "在补丁生成时对实际输出的 Unicode 文本统计 CP932 不可编码字符和可用码位；没有译文时先用少量代表中文验证方案，不要求用户先全量翻译。数量随译文变化，不能固化样本缺字数，也不能把映射后的占位字符存回翻译记忆。",
             "F040/F041 在已调查运行库中是玩家姓名控制码；不要分配给中文字形。其他 PUA 码位仍须验证字节遍历、控制码冲突和绘制路径。",
             "先确认实际运行库和 GDI 导入，再协调编码、TextOutA 字节解释与字体方案；仅换字体或把 CP932 改成 CP936 不能证明游戏已支持中文。",
             "未知运行库须沿导入和 TextInitialize/绘制调用链重新定位；静态线索和独立 GDI 字宽测量都不等于游戏内验收。"
-        },
-        runtimeInspection = inspection,
-        referenceSource = ReferencePath
+        }, EngineJson.Web),
+        ["runtimeInspection"] = EngineJson.Node(inspection, EngineJson.Web),
+        ["referenceSource"] = ReferencePath
     };
 
     // Only inspect already discovered Kaguya resources and their ancestor directories, never rescan the game tree.
@@ -72,12 +74,22 @@ internal static class KaguyaMessage40Guidance
                 using var stream = File.OpenRead(path);
                 if (stream.Length > MaximumGraphicsBytes)
                 {
-                    libraries.Add(new { path = relative.Replace('\\', '/'), status = "size-limit", sha256 = (string?)null });
+                    libraries.Add(new JsonObject
+                    {
+                        ["path"] = relative.Replace('\\', '/'),
+                        ["status"] = "size-limit",
+                        ["sha256"] = (string?)null
+                    });
                     continue;
                 }
                 string hash = Convert.ToHexString(SHA256.HashData(stream));
                 var profile = MatchRuntime(hash, messages.Count > 0);
-                libraries.Add(new { path = relative.Replace('\\', '/'), status = profile is null ? "unknown-runtime" : "known-runtime", sha256 = hash });
+                libraries.Add(new JsonObject
+                {
+                    ["path"] = relative.Replace('\\', '/'),
+                    ["status"] = profile is null ? "unknown-runtime" : "known-runtime",
+                    ["sha256"] = hash
+                });
                 knownRuntime ??= profile;
             }
             catch (Exception error) when (IsReadError(error))
@@ -85,26 +97,29 @@ internal static class KaguyaMessage40Guidance
                 if (diagnostics.Count < 3) diagnostics.Add("无法检查相邻 Graphics.dll：" + error.Message);
             }
         }
-        return new
+        return new JsonObject
         {
-            status = knownRuntime is not null ? "known-runtime-static-evidence" : messages.Count > 0 ? "message40-only" : "no-confirmed-message40",
-            messageFiles = messages, graphicsLibraries = libraries, knownRuntime, diagnostics,
-            runtimeStatus = "not-tested",
-            scope = "只读取已发现的最多 8 个 Kaguya 样本文件头；在最多 24 个相邻/祖先目录中仅检查 Graphics.dll 和 Lib/Graphics.dll 两个固定路径，不递归搜索，不修改游戏。"
+            ["status"] = knownRuntime is not null ? "known-runtime-static-evidence" : messages.Count > 0 ? "message40-only" : "no-confirmed-message40",
+            ["messageFiles"] = EngineJson.Node((messages).ToArray(), EngineJson.Web),
+            ["graphicsLibraries"] = EngineJson.Node((libraries).ToArray(), EngineJson.Web),
+            ["knownRuntime"] = EngineJson.Node(knownRuntime, EngineJson.Web),
+            ["diagnostics"] = EngineJson.Node((diagnostics).ToArray(), EngineJson.Web),
+            ["runtimeStatus"] = "not-tested",
+            ["scope"] = "只读取已发现的最多 8 个 Kaguya 样本文件头；在最多 24 个相邻/祖先目录中仅检查 Graphics.dll 和 Lib/Graphics.dll 两个固定路径，不递归搜索，不修改游戏。"
         };
     }
 
     internal static object? MatchRuntime(string sha256, bool message40) => message40
-        && sha256.Equals(GraphicsSha256, StringComparison.OrdinalIgnoreCase) ? new
+        && sha256.Equals(GraphicsSha256, StringComparison.OrdinalIgnoreCase) ? new JsonObject
         {
-            profile = "MESSAGE-v4.0/Graphics-sha256-E1292E3D",
-            graphicsSha256 = GraphicsSha256,
-            textInitializeChainRva = new[] { "TextInitialize", "0x3A8E0", "0x3AC20" },
-            crtIsmbbleadCallRva = "0x3AD8A",
-            originalCrtIsmbbleadTargetRva = "0x41248",
-            playerNameControls = new[] { "0xF040", "0xF041" },
-            application = "以上 RVA 仅是该原始 SHA256 对应运行库的静态调查线索，不能作为可直接应用的补丁。修改前核对原指令和调用关系；其他 SHA256 必须重新定位。",
-            runtimeStatus = "not-tested"
+            ["profile"] = "MESSAGE-v4.0/Graphics-sha256-E1292E3D",
+            ["graphicsSha256"] = GraphicsSha256,
+            ["textInitializeChainRva"] = EngineJson.Node(new[] { "TextInitialize", "0x3A8E0", "0x3AC20" }, EngineJson.Web),
+            ["crtIsmbbleadCallRva"] = "0x3AD8A",
+            ["originalCrtIsmbbleadTargetRva"] = "0x41248",
+            ["playerNameControls"] = EngineJson.Node(new[] { "0xF040", "0xF041" }, EngineJson.Web),
+            ["application"] = "以上 RVA 仅是该原始 SHA256 对应运行库的静态调查线索，不能作为可直接应用的补丁。修改前核对原指令和调用关系；其他 SHA256 必须重新定位。",
+            ["runtimeStatus"] = "not-tested"
         } : null;
 
     private static bool IsReadError(Exception error) => error is IOException or UnauthorizedAccessException

@@ -2,6 +2,8 @@ using System.Text.Json;
 using GameL10n.Core.Adapters;
 using GameL10n.Core.Isolation;
 using GameL10n.Core.Storage;
+using System.Text.Json.Nodes;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Development;
 
@@ -83,11 +85,14 @@ public sealed partial class AdaptationTools
                 candidateBudget.CancelAfter(TimeSpan.FromSeconds(20));
                 var token = candidateBudget.Token;
                 var hashes = await AdapterDevelopmentWorkflow.SampleHashesAsync(request.GameDirectory, lengths, token);
-                var fingerprint = LocalFiles.HashText(JsonSerializer.Serialize(new
+                var fingerprint = LocalFiles.HashText(JsonSerializer.Serialize(new JsonObject
                 {
-                    revision = AutomaticTrialRevision, trialRevision = BuiltinAdapterTrial.Revision, format = format.Key,
-                    parserFingerprint, files = hashes.OrderBy(pair => pair.Key, StringComparer.Ordinal)
-                }, Json));
+                    ["revision"] = AutomaticTrialRevision,
+                    ["trialRevision"] = BuiltinAdapterTrial.Revision,
+                    ["format"] = format.Key,
+                    ["parserFingerprint"] = parserFingerprint,
+                    ["files"] = EngineJson.Node((hashes.OrderBy(pair => pair.Key, StringComparer.Ordinal)).ToArray(), Json)
+                }, EngineJson.TypeInfo<JsonObject>(Json)));
                 var cached = session.BuiltinTrials.FirstOrDefault(item => item.Format == format.Key && item.Fingerprint == fingerprint);
                 if (cached is null) session.BuiltinTrials.RemoveAll(item => item.Format == format.Key);
                 await Development.StageAutomaticSamplesAsync(lengths, hashes, token);

@@ -40,8 +40,8 @@ public sealed partial class AutomaticAdaptationTests
         await File.WriteAllTextAsync(Path.Combine(workspace, "work/notes.txt"), "Investigation only.");
         await File.WriteAllTextAsync(Path.Combine(workspace, "src/Unused.py"), "not selected for release");
         var sessionPath = Path.Combine(workspace, "session.json");
-        await LocalFiles.WriteJsonAsync(sessionPath, state);
-        state = (await LocalFiles.ReadJsonAsync<AdaptationSession>(sessionPath))!;
+        await LocalFiles.WriteJsonAsync(sessionPath, state, FixtureJson.TypeInfo<global::GameL10n.Core.Development.AdaptationSession>(FixtureJson.Storage));
+        state = (await LocalFiles.ReadJsonAsync<AdaptationSession>(sessionPath, FixtureJson.TypeInfo<global::GameL10n.Core.Development.AdaptationSession>(FixtureJson.Storage)))!;
         var resumed = new AdaptationTools(request, state, workspace, Runtime(runner), store);
         using var repeated = JsonDocument.Parse(await resumed.ExecuteAsync(new("repeat", "test_adapter", """
             {"kind":"template","key":"line-script","name":"Line script","resourcePatterns":["*.txt"],

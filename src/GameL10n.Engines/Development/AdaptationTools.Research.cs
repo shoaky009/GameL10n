@@ -3,6 +3,8 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using System.Text.Json.Nodes;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Development;
 
@@ -61,9 +63,20 @@ public sealed partial class AdaptationTools
         if (query.Length == 0)
         {
             var nextOffset = Math.Min(content.Length, offset + length);
-            return new { url, document.ContentSha256, document.RetrievedAt, document.UpstreamTruncated, document.Reused, document.Stale,
-                totalCharacters = content.Length, offset, nextOffset, more = nextOffset < content.Length,
-                content = content[offset..nextOffset] };
+            return new JsonObject
+            {
+                ["url"] = url,
+                ["contentSha256"] = document.ContentSha256,
+                ["retrievedAt"] = document.RetrievedAt,
+                ["upstreamTruncated"] = document.UpstreamTruncated,
+                ["reused"] = document.Reused,
+                ["stale"] = document.Stale,
+                ["totalCharacters"] = content.Length,
+                ["offset"] = offset,
+                ["nextOffset"] = nextOffset,
+                ["more"] = nextOffset < content.Length,
+                ["content"] = content[offset..nextOffset]
+            };
         }
         var matches = new List<object>();
         var position = offset;
@@ -74,13 +87,29 @@ public sealed partial class AdaptationTools
             if (found < 0) { position = content.Length; break; }
             var start = Math.Max(0, found - Math.Min(240, (remaining - query.Length) / 4));
             var count = Math.Min(Math.Min(content.Length - start, query.Length + 720), remaining);
-            matches.Add(new { matchOffset = found, offset = start, content = content.Substring(start, count) });
+            matches.Add(new JsonObject
+            {
+                ["matchOffset"] = found,
+                ["offset"] = start,
+                ["content"] = content.Substring(start, count)
+            });
             remaining -= count;
             position = found + query.Length;
         }
-        return new { url, document.ContentSha256, document.RetrievedAt, document.UpstreamTruncated, document.Reused, document.Stale,
-            totalCharacters = content.Length, query, matches, nextOffset = position,
-            more = position < content.Length && content.IndexOf(query, position, StringComparison.OrdinalIgnoreCase) >= 0 };
+        return new JsonObject
+        {
+            ["url"] = url,
+            ["contentSha256"] = document.ContentSha256,
+            ["retrievedAt"] = document.RetrievedAt,
+            ["upstreamTruncated"] = document.UpstreamTruncated,
+            ["reused"] = document.Reused,
+            ["stale"] = document.Stale,
+            ["totalCharacters"] = content.Length,
+            ["query"] = query,
+            ["matches"] = EngineJson.Node((matches).ToArray(), EngineJson.Web),
+            ["nextOffset"] = position,
+            ["more"] = position < content.Length && content.IndexOf(query, position, StringComparison.OrdinalIgnoreCase) >= 0
+        };
     }
 
     private async Task<object> SearchEngineReferencesAsync(JsonElement args, CancellationToken ct)
@@ -89,7 +118,12 @@ public sealed partial class AdaptationTools
         if (query.Length is < 2 or > 128) throw new InvalidDataException("请使用 2 到 128 字符的引擎名称、别名或格式标识查询。");
         var key = NormalizeReferenceQuery(query);
         if (key is "siglus" or "siglusengine" or "scenepck")
-            return new { query, status = "bundled", capability = SiglusAssets.Describe() };
+            return new JsonObject
+            {
+                ["query"] = query,
+                ["status"] = "bundled",
+                ["capability"] = EngineJson.Node(SiglusAssets.Describe(), EngineJson.Web)
+            };
         if (key.Length < 2) throw new InvalidDataException("查询必须包含引擎名称或格式标识。");
         if (key is "system4" or "system40") key = "alicesoft";
         var terms = ReferenceSearchTerms(query).Select(term => term is "system4" or "system40" ? "alicesoft" : term).ToArray();
@@ -121,16 +155,17 @@ public sealed partial class AdaptationTools
                 .ThenByDescending(item => item.Rank.Score).ThenBy(item => Text(item.Engine, "id"), StringComparer.Ordinal)
                 .Select(item => item.Engine).ToArray();
             totalMatches = found.Length;
-            matches = found.Take(6).Select(engine => (object)new
+            matches = found.Take(6).Select(engine => (object)new JsonObject
             {
-                id = Text(engine, "id"), title = Limit(Text(engine, "title"), 300),
-                aliases = ReferenceStrings(engine, "aliases").Take(12).ToArray(),
-                documentUrl = ReferenceUrl(Text(engine, "document"), selectedRoot),
-                sourceUrls = ReferenceStrings(engine, "python_references").Take(16).Select(path => ReferenceUrl(path, selectedRoot)).ToArray(),
-                publicSymbols = engine.TryGetProperty("public_symbols", out var symbols) ? symbols.Clone() : (JsonElement?)null,
-                scope = Limit(Text(engine, "scope", "Read the engine page for version and stage limits."), 1000),
-                evidence = Limit(Text(engine, "evidence", "Reference only; no game verification implied."), 1000),
-                readySupport = Text(engine, "id") == "kirikiri" ? KirikiriTextGuidance.ScnSupport() : null
+                ["id"] = Text(engine, "id"),
+                ["title"] = Limit(Text(engine, "title"), 300),
+                ["aliases"] = EngineJson.Node(ReferenceStrings(engine, "aliases").Take(12).ToArray(), EngineJson.Web),
+                ["documentUrl"] = ReferenceUrl(Text(engine, "document"), selectedRoot),
+                ["sourceUrls"] = EngineJson.Node(ReferenceStrings(engine, "python_references").Take(16).Select(path => ReferenceUrl(path, selectedRoot)).ToArray(), EngineJson.Web),
+                ["publicSymbols"] = EngineJson.Node(engine.TryGetProperty("public_symbols", out var symbols) ? symbols.Clone() : (JsonElement?)null, EngineJson.Web),
+                ["scope"] = Limit(Text(engine, "scope", "Read the engine page for version and stage limits."), 1000),
+                ["evidence"] = Limit(Text(engine, "evidence", "Reference only; no game verification implied."), 1000),
+                ["readySupport"] = EngineJson.Node(Text(engine, "id") == "kirikiri" ? KirikiriTextGuidance.ScnSupport() : null, EngineJson.Web)
             }).ToArray();
         }
         catch (Exception exception) when (exception is HttpRequestException or IOException or JsonException
@@ -138,20 +173,30 @@ public sealed partial class AdaptationTools
         {
             error = Limit(exception.Message, 500);
         }
-        return new
+        return new JsonObject
         {
-            query, status = error is null ? "queried" : "unavailable", error,
-            indexUrl = url, document?.ContentSha256, document?.RetrievedAt, document?.Reused, document?.Stale, totalMatches, matches,
-            more = totalMatches > matches.Length,
-            hint = error is null && totalMatches == 0 ? "请改用具体引擎名、别名或格式标识；archive、engine 等泛词不作为检索依据。未命中不代表不支持。" : null,
-            guidance = ReferenceGuidance(key),
-            furtherResearch = new
+            ["query"] = query,
+            ["status"] = error is null ? "queried" : "unavailable",
+            ["error"] = error,
+            ["indexUrl"] = url,
+            ["contentSha256"] = document?.ContentSha256,
+            ["retrievedAt"] = document?.RetrievedAt,
+            ["reused"] = document?.Reused,
+            ["stale"] = document?.Stale,
+            ["totalMatches"] = totalMatches,
+            ["matches"] = EngineJson.Node(matches, EngineJson.Web),
+            ["more"] = totalMatches > matches.Length,
+            ["hint"] = error is null && totalMatches == 0 ? "请改用具体引擎名、别名或格式标识；archive、engine 等泛词不作为检索依据。未命中不代表不支持。" : null,
+            ["guidance"] = EngineJson.Node((ReferenceGuidance(key)).ToArray(), EngineJson.Web),
+            ["furtherResearch"] = new JsonObject
             {
-                formats = ReferenceRoot + "catalog/formats.json", registrations = ReferenceRoot + "catalog/source-registries.json",
-                formatNotes = ReferenceRoot + "catalog/format-research.md", provenance = ReferenceRoot + "provenance/NOTICE.md",
-                sources = ReferenceRoot + "provenance/sources.json"
+                ["formats"] = ReferenceRoot + "catalog/formats.json",
+                ["registrations"] = ReferenceRoot + "catalog/source-registries.json",
+                ["formatNotes"] = ReferenceRoot + "catalog/format-research.md",
+                ["provenance"] = ReferenceRoot + "provenance/NOTICE.md",
+                ["sources"] = ReferenceRoot + "provenance/sources.json"
             },
-            usage = "资料命中不代表已验证支持。优先 inspect_engine_reference(engine=id) 读取当前引擎指南与 API；固定版本共享源码库随完整发行包提供，所有项目本地复用，不在分析时补下载。"
+            ["usage"] = "资料命中不代表已验证支持。优先 inspect_engine_reference(engine=id) 读取当前引擎指南与 API；固定版本共享源码库随完整发行包提供，所有项目本地复用，不在分析时补下载。"
                 + "用 run_engine_python 调用现成 Python 模块验证样本，避免阅读/改写整套算法；use_engine_reference 可供正式适配器复用。"
                 + "共享库不可用时可按 documentUrl 在线调查。未命中不代表不支持；可按 formats/registrations 继续查实际魔数。"
                 + "按文件核对许可并保留来源；不自动部署 UIF、字体或 hook DLL。"
@@ -208,24 +253,48 @@ public sealed partial class AdaptationTools
     {
         var guidance = new List<object>
         {
-            new { topic = "缺口定位", url = ReferenceRoot + "guides/extending-engines.md",
-                note = "分别确认容器、解码、文本语义、回填、打包、运行显示。缺 writer 或已知算法尚未实现时继续补齐当前层；没有搜索结果不是不支持的证据。" }
+            new JsonObject
+            {
+                ["topic"] = "缺口定位",
+                ["url"] = ReferenceRoot + "guides/extending-engines.md",
+                ["note"] = "分别确认容器、解码、文本语义、回填、打包、运行显示。缺 writer 或已知算法尚未实现时继续补齐当前层；没有搜索结果不是不支持的证据。"
+            }
         };
         if (KirikiriTextGuidance.MatchesReference(query))
-            guidance.Add(new { topic = "Kirikiri 脚本编码", url = ReferenceRoot + "engines/kirikiri.md",
-                note = KirikiriTextGuidance.Summary });
+            guidance.Add(new JsonObject
+            {
+                ["topic"] = "Kirikiri 脚本编码",
+                ["url"] = ReferenceRoot + "engines/kirikiri.md",
+                ["note"] = KirikiriTextGuidance.Summary
+            });
         if (query.Contains("qlie", StringComparison.Ordinal) || query.Contains("imos", StringComparison.Ordinal))
-            guidance.Add(new { topic = "QLIE 方言", url = ReferenceRoot + "engines/qlie.md",
-                note = "先确认 PACK/Hash 版本与脚本方言。核对内部姓名和显示姓名（＠）、多行对白、^select 与跳转命令、^savetext；[pc,...] 可能是布局命令或显示文本，按实际语法判断，不能一律翻译或冻结。" });
+            guidance.Add(new JsonObject
+            {
+                ["topic"] = "QLIE 方言",
+                ["url"] = ReferenceRoot + "engines/qlie.md",
+                ["note"] = "先确认 PACK/Hash 版本与脚本方言。核对内部姓名和显示姓名（＠）、多行对白、^select 与跳转命令、^savetext；[pc,...] 可能是布局命令或显示文本，按实际语法判断，不能一律翻译或冻结。"
+            });
         if (query.Contains("bishop", StringComparison.Ordinal) || query.Contains("bsscript", StringComparison.Ordinal) || query == "bsx")
-            guidance.Add(new { topic = "Bishop 格式区别", url = ReferenceRoot + "engines/bishop.md",
-                note = BuiltinAdapterDiscovery.BsscriptGuidance });
+            guidance.Add(new JsonObject
+            {
+                ["topic"] = "Bishop 格式区别",
+                ["url"] = ReferenceRoot + "engines/bishop.md",
+                ["note"] = BuiltinAdapterDiscovery.BsscriptGuidance
+            });
         if (query.Contains("nekosdk", StringComparison.Ordinal) || query.Contains("nekopack", StringComparison.Ordinal))
-            guidance.Add(new { topic = "NekoSDK 的解析与显示分别验证", url = ReferenceRoot + "engines/nekosdk.md",
-                note = "先调用 python.archives.nekopack 的 open_pak/read_member/build_pak，以及 python.engines.nekosdk 的 extract_fields/replace_fields。字段为空可能是命令记录变体，不代表无文本；用已解包样本确认结构后只补变体。容器和往返通过后集中处理当前显示路径，避免重新搜索已解决的解包算法。若采用 VNTextProxy，固定代理版本，核对映射表索引、过滤字节和实际 EXE 字符遍历边界，再批量测试边界码位及容量；单个字形探针不证明游戏运行兼容。" });
+            guidance.Add(new JsonObject
+            {
+                ["topic"] = "NekoSDK 的解析与显示分别验证",
+                ["url"] = ReferenceRoot + "engines/nekosdk.md",
+                ["note"] = "先调用 python.archives.nekopack 的 open_pak/read_member/build_pak，以及 python.engines.nekosdk 的 extract_fields/replace_fields。字段为空可能是命令记录变体，不代表无文本；用已解包样本确认结构后只补变体。容器和往返通过后集中处理当前显示路径，避免重新搜索已解决的解包算法。若采用 VNTextProxy，固定代理版本，核对映射表索引、过滤字节和实际 EXE 字符遍历边界，再批量测试边界码位及容量；单个字形探针不证明游戏运行兼容。"
+            });
         if (new[] { "cp932", "sjis", "shiftjis", "jis", "字体", "编码", "alicesoft", "ain", "qlie", "imos" }.Any(query.Contains))
-            guidance.Add(new { topic = "中文编码与字符映射", url = ReferenceRoot + "guides/jis-substitution.md",
-                note = "先证明脚本确为 CP932。映射在整个补丁范围统一规划，避开未翻译正文、姓名、界面字及已有映射；译文缓存保留真实中文。重提取实际产物并比对修改与未修改项。编码可逆不证明原引擎接受私用码位或游戏内字形正确；不能默认部署参考项目的 DLL。" });
+            guidance.Add(new JsonObject
+            {
+                ["topic"] = "中文编码与字符映射",
+                ["url"] = ReferenceRoot + "guides/jis-substitution.md",
+                ["note"] = "先证明脚本确为 CP932。映射在整个补丁范围统一规划，避开未翻译正文、姓名、界面字及已有映射；译文缓存保留真实中文。重提取实际产物并比对修改与未修改项。编码可逆不证明原引擎接受私用码位或游戏内字形正确；不能默认部署参考项目的 DLL。"
+            });
         return guidance;
     }
 }

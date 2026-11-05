@@ -56,6 +56,10 @@
 
 翻译使用 `OpenAiCompatibleProvider`，智能适配使用 Engines 中的 `OpenAiCompatibleAgentModel`。两者复用 HTTP 协议处理，并通过各自调度包装共享同一 API 账户的并发限制。现有项目、缓存、校对记录和扩展协议的持久化格式不变。
 
+JSON 序列化与反序列化使用各模块的 `JsonSerializerContext` 生成类型信息，由模块自己的上下文维护数据契约，并按项目依赖组合下层解析器。`LocalFiles` 接收调用方提供的 `JsonTypeInfo<T>`，只负责文件读写、原子替换及备份恢复。动态工具结果和 API 请求使用 `JsonObject`、`JsonArray`；以 `object` 传递的具体数据类型也需要在所属模块登记。新增调用应使用明确的类型信息，避免隐式依赖运行时反射。
+
+存储文件沿用 Web 命名与缩进配置，哈希输入中使用默认大小写的序列化保持独立配置；调整属性顺序、编码或命名规则会影响已有缓存键和适配器版本。桌面应用、数据工具及当前 VNTextPatch 命令行入口关闭 JSON 的默认反射回退。AdapterHost 自身使用生成的类型信息，但在解析器改为独立进程前，仍为其加载的旧版解析器 DLL 保留默认回退。开发诊断与测试输入构造可使用反射，不属于发行应用的数据契约。
+
 ## 资源验证
 
 ```powershell

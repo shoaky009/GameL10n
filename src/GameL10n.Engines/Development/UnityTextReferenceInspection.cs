@@ -2,6 +2,8 @@ using System.Buffers.Binary;
 using System.Reflection.PortableExecutable;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json.Nodes;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Development;
 
@@ -228,21 +230,44 @@ public static class UnityTextReferenceInspection
         {
             var sites = references.GetValueOrDefault(index) ?? [];
             var consumers = sites.Where(r => r.MethodAddress.HasValue).GroupBy(r => r.MethodAddress!.Value)
-                .SelectMany(g => methodNames[g.Key].Select(name => new { name, methodVa = Hex(g.Key), referenceVa = Hex(g.First().Address), slotVa = Hex(g.First().Slot) }))
+                .SelectMany(g => methodNames[g.Key].Select(name => (name, methodVa: Hex(g.Key), referenceVa: Hex(g.First().Address), slotVa: Hex(g.First().Slot))))
                 .OrderBy(c => queryKind == "method" && c.name.Contains(query, StringComparison.OrdinalIgnoreCase) ? 0 : 1).ThenBy(c => c.name, StringComparer.Ordinal).ToArray();
-            return new { index, text = literals[index].Length > 1200 ? literals[index][..1200] : literals[index], textTruncated = literals[index].Length > 1200,
-                candidateReferenceCount = sites.Count, consumerCount = consumers.Length, consumers = consumers.Take(12).ToArray(), consumersTruncated = consumers.Length > 12,
-                unmappedReferenceCount = sites.Count(r => r.MethodAddress is null),
-                unmappedReferenceVas = sites.Where(r => r.MethodAddress is null).Take(3).Select(r => Hex(r.Address)).ToArray() };
+            return new JsonObject
+            {
+                ["index"] = index,
+                ["text"] = literals[index].Length > 1200 ? literals[index][..1200] : literals[index],
+                ["textTruncated"] = literals[index].Length > 1200,
+                ["candidateReferenceCount"] = sites.Count,
+                ["consumerCount"] = consumers.Length,
+                ["consumers"] = new JsonArray(consumers.Take(12).Select(c => (JsonNode)new JsonObject
+                    { ["name"] = c.name, ["methodVa"] = c.methodVa, ["referenceVa"] = c.referenceVa, ["slotVa"] = c.slotVa }).ToArray()),
+                ["consumersTruncated"] = consumers.Length > 12,
+                ["unmappedReferenceCount"] = sites.Count(r => r.MethodAddress is null),
+                ["unmappedReferenceVas"] = EngineJson.Node(sites.Where(r => r.MethodAddress is null).Take(3).Select(r => Hex(r.Address)).ToArray(), EngineJson.Web)
+            };
         }).ToArray();
-        return new { status = "candidate-references", format = "il2cpp", version = 31, architecture = "x64", queryKind,
-            metadataSha256 = Convert.ToHexStringLower(SHA256.HashData(metadata)), assemblySha256 = Convert.ToHexStringLower(SHA256.HashData(assembly)),
-            guidance = UnitySchemaInspection.Guidance,
-            mappedModules = modules.Count(p => p.Value.Count == 1), totalModules = images.Count, mappedMethods = methodNames.Count,
-            matchedMethodAddresses = matchedMethods.Count, matched = matches.Length, offset, more = offset + page.Length < matches.Length,
-            nextOffset = offset + page.Length, literals = page,
-            notice = "仅识别标准 v31 模块注册表及 x64 RIP 相对 mov/lea 候选字节模式；未完整反汇编、未解析全部泛型/间接引用，也未执行游戏。无引用或仅显示方法命中不能证明可安全替换。",
-            nextAction = "用 method 查询检查整组显示函数及其辅助函数，再用 inspect_pe_code 核对调用和用途。检查共用词的其他消费者，区分显示文字与枚举/输入/查找键；未知或截断的引用需继续核实。只将审核过的文字加入对应版本适配器，不改通用翻译规则。" };
+        return new JsonObject
+        {
+            ["status"] = "candidate-references",
+            ["format"] = "il2cpp",
+            ["version"] = 31,
+            ["architecture"] = "x64",
+            ["queryKind"] = queryKind,
+            ["metadataSha256"] = Convert.ToHexStringLower(SHA256.HashData(metadata)),
+            ["assemblySha256"] = Convert.ToHexStringLower(SHA256.HashData(assembly)),
+            ["guidance"] = UnitySchemaInspection.Guidance,
+            ["mappedModules"] = modules.Count(p => p.Value.Count == 1),
+            ["totalModules"] = images.Count,
+            ["mappedMethods"] = methodNames.Count,
+            ["matchedMethodAddresses"] = matchedMethods.Count,
+            ["matched"] = matches.Length,
+            ["offset"] = offset,
+            ["more"] = offset + page.Length < matches.Length,
+            ["nextOffset"] = offset + page.Length,
+            ["literals"] = EngineJson.Array(page),
+            ["notice"] = "仅识别标准 v31 模块注册表及 x64 RIP 相对 mov/lea 候选字节模式；未完整反汇编、未解析全部泛型/间接引用，也未执行游戏。无引用或仅显示方法命中不能证明可安全替换。",
+            ["nextAction"] = "用 method 查询检查整组显示函数及其辅助函数，再用 inspect_pe_code 核对调用和用途。检查共用词的其他消费者，区分显示文字与枚举/输入/查找键；未知或截断的引用需继续核实。只将审核过的文字加入对应版本适配器，不改通用翻译规则。"
+        };
     }
 
     private static int Preceding(ulong[] values, ulong address)

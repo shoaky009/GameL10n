@@ -1,6 +1,8 @@
 using System.Text;
 using System.Text.Json;
 using GameL10n.Core.Isolation;
+using System.Text.Json.Nodes;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Development;
 
@@ -33,15 +35,21 @@ public sealed partial class AdaptationTools
         var found = query.Length == 0 ? offset : content.IndexOf(query, offset, StringComparison.OrdinalIgnoreCase);
         if (found >= 0 && query.Length > 0) offset = Math.Max(offset, found - 240);
         var end = Math.Min(content.Length, offset + length);
-        return new
+        return new JsonObject
         {
-            engine, revision = pin.Revision, path,
-            publicSymbols = selected.TryGetProperty("public_symbols", out var symbols) ? symbols.Clone() : (JsonElement?)null,
-            pythonModules = ReferenceStrings(selected, "python_references").ToArray(),
-            readySupport = engine == "kirikiri" ? KirikiriTextGuidance.ScnSupport() : null,
-            content = found < 0 ? "" : content[offset..end], queryFound = found >= 0,
-            offset, nextOffset = end, more = end < content.Length, totalCharacters = content.Length,
-            usage = "先用现成 CLI（run_engine_python 的 module 参数）或 work/*.py 小样本调用 python.engines / python.archives 的现成函数，工具自动提供共享解释器和库。"
+            ["engine"] = engine,
+            ["revision"] = pin.Revision,
+            ["path"] = path,
+            ["publicSymbols"] = EngineJson.Node(selected.TryGetProperty("public_symbols", out var symbols) ? symbols.Clone() : (JsonElement?)null, EngineJson.Web),
+            ["pythonModules"] = EngineJson.Node(ReferenceStrings(selected, "python_references").ToArray(), EngineJson.Web),
+            ["readySupport"] = EngineJson.Node(engine == "kirikiri" ? KirikiriTextGuidance.ScnSupport() : null, EngineJson.Web),
+            ["content"] = found < 0 ? "" : content[offset..end],
+            ["queryFound"] = found >= 0,
+            ["offset"] = offset,
+            ["nextOffset"] = end,
+            ["more"] = end < content.Length,
+            ["totalCharacters"] = content.Length,
+            ["usage"] = "先用现成 CLI（run_engine_python 的 module 参数）或 work/*.py 小样本调用 python.engines / python.archives 的现成函数，工具自动提供共享解释器和库。"
                 + "模块接口按引擎和版本不同，请按 publicSymbols/指南定位，不要把整个算法改写为 C#。"
                 + "只补资源选择、容器与脚本连接及版本差异。需要正式复用时 use_engine_reference 生成固定版本依赖和 Python 组件接口，"
                 + "将 JSON CLI 入口放到 src/adapter.py，再通过 test_adapter 验收。可选第三方模块不自动安装，缺依赖需明确报告。"
@@ -95,8 +103,13 @@ public sealed partial class AdaptationTools
             throw new AdapterProcessLimitException(error.Message, "run", error.TimedOut,
                 error.StandardOutput, error.StandardError, error);
         }
-        return new { revision = prepared.Dependency.Reference.Revision, result.ExitCode,
-            stdout = Limit(result.StandardOutput, 12000), stderr = Limit(result.StandardError, 6000) };
+        return new JsonObject
+        {
+            ["revision"] = prepared.Dependency.Reference.Revision,
+            ["exitCode"] = result.ExitCode,
+            ["stdout"] = Limit(result.StandardOutput, 12000),
+            ["stderr"] = Limit(result.StandardError, 6000)
+        };
     }
 
     private async Task<object> UseEngineReferenceAsync(JsonElement args, CancellationToken ct)
@@ -104,7 +117,7 @@ public sealed partial class AdaptationTools
         var prepared = await Development.PythonAsync(ct);
         var files = new Dictionary<string, string>
         {
-            ["src/" + EngineReferenceToolkit.DependencyPath] = JsonSerializer.Serialize(prepared.Dependency, Json),
+            ["src/" + EngineReferenceToolkit.DependencyPath] = JsonSerializer.Serialize(prepared.Dependency, EngineJson.TypeInfo<EnginePythonDependency>(Json)),
             ["src/" + EnginePythonBridge.HelperPath] = EnginePythonBridge.HelperSource
         };
         foreach (var (path, content) in files)
@@ -122,11 +135,14 @@ public sealed partial class AdaptationTools
         }
         Development.RegisterReleaseFiles(files.Keys.Select(path => new AdapterReleaseFile(AdapterReleaseFiles.PackagePath(path),
             path.StartsWith("src/tools/", StringComparison.Ordinal) ? "runtime" : "source", "共享引擎工具链连接与规则")));
-        return new { files = files.Keys, prepared.Dependency,
-            example = "src/adapter.py: import json, sys; request = json.load(sys.stdin). Return the standard JSON response through tools.gamel10n_host.write_response(request, response).",
-            composedParserExample = "copy_adapter 复用内置解析器后，from tools.gamel10n_host import parser; "
+        return new JsonObject
+        {
+            ["files"] = EngineJson.Node((files.Keys).ToArray(), EngineJson.Web),
+            ["dependency"] = EngineJson.Node(prepared.Dependency, EngineJson.Web),
+            ["example"] = "src/adapter.py: import json, sys; request = json.load(sys.stdin). Return the standard JSON response through tools.gamel10n_host.write_response(request, response).",
+            ["composedParserExample"] = "copy_adapter 复用内置解析器后，from tools.gamel10n_host import parser; "
                 + "response = parser(request, format='Renpy') 调用固定解析器；自行实现仅使用文件头或有界范围读取的 probe。组件路径由宿主提供，无需 C# 入口。",
-            protocol = "src/adapter.py reads one JSON request from stdin and writes the standard adapter response to request['responseFile']. "
+            ["protocol"] = "src/adapter.py reads one JSON request from stdin and writes the standard adapter response to request['responseFile']. "
                 + "Use from python.engines.<module> import ... and the existing sourceDirectory/resourceFiles/probeRanges. "
                 + "The host supplies pinned paths in toolPaths, including after publication. Never hardcode data paths or download at runtime. "
                 + "Only source/license data and a shared interpreter are provided; engine-specific decoding, fonts and runtime still need verification."

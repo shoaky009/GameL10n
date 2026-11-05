@@ -3,6 +3,8 @@ using System.Text.Json;
 using GameL10n.Core.Isolation;
 using GameL10n.Core.Adapters;
 using GameL10n.Core.Validation;
+using System.Text.Json.Nodes;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Development;
 
@@ -16,7 +18,7 @@ public sealed class GeneratedGameAdapter(
     Action<string, string>? reportProgress = null, GameDiscoverySession? discovery = null) : IGameAdapter
 {
     private const int ProbeHeaderBytes = 64 * 1024;
-    private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web) { MaxDepth = 64 };
+    private static readonly JsonSerializerOptions Json = new(EngineJson.Web) { MaxDepth = 64 };
     private string? originalExecutable;
 
     public string Id => package.Id;
@@ -204,22 +206,29 @@ public sealed class GeneratedGameAdapter(
             {
                 translationsPath = Path.Combine(workspace, "translations.json");
                 await using var stream = new FileStream(translationsPath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
-                await JsonSerializer.SerializeAsync(stream, translations, Json, cancellationToken);
+                await JsonSerializer.SerializeAsync(stream, translations, EngineJson.TypeInfo<IReadOnlyDictionary<string, string>>(Json), cancellationToken);
             }
             CliResponse response;
             while (true)
             {
                 // Each additional round is a local adapter invocation, not a model request.
                 if (File.Exists(responsePath)) File.Delete(responsePath);
-                var request = JsonSerializer.Serialize(new
+                var request = JsonSerializer.Serialize(new JsonObject
                 {
-                    protocolVersion = package.ProtocolVersion, operation, sourceDirectory = source, outputDirectory = output,
-                    adapterDirectory = package.IsPython ? package.DirectoryPath : null,
-                    resourceFiles = resources, probeFiles,
-                    probeRanges = probeReads?.Ranges, probeReadLimits = probeReads is null ? null : GeneratedProbeReads.Limits,
-                    translations = translationsPath is null ? translations : null, translationsFile = translationsPath,
-                    responseFile = responsePath, toolPaths
-                }, Json);
+                    ["protocolVersion"] = package.ProtocolVersion,
+                    ["operation"] = operation,
+                    ["sourceDirectory"] = source,
+                    ["outputDirectory"] = output,
+                    ["adapterDirectory"] = package.IsPython ? package.DirectoryPath : null,
+                    ["resourceFiles"] = EngineJson.Node((resources).ToArray(), Json),
+                    ["probeFiles"] = EngineJson.Node((probeFiles)?.ToArray(), Json),
+                    ["probeRanges"] = EngineJson.Node((probeReads?.Ranges)?.ToArray(), Json),
+                    ["probeReadLimits"] = EngineJson.Node(probeReads is null ? null : GeneratedProbeReads.Limits, Json),
+                    ["translations"] = EngineJson.Node(translationsPath is null ? translations : null, Json),
+                    ["translationsFile"] = translationsPath,
+                    ["responseFile"] = responsePath,
+                    ["toolPaths"] = EngineJson.Node(toolPaths, Json)
+                }, EngineJson.TypeInfo<JsonObject>(Json));
                 var result = await runner.RunAsync(new AdapterProcessRequest(python?.Python ?? toolchain.ExecutablePath,
                     python is null ? [Path.Combine(package.DirectoryPath, "adapter.dll")]
                         : EngineReferenceToolkit.PythonArguments(python, WorkspaceFiles.Resolve(package.DirectoryPath, package.EntryFile), []), workspace, request,
@@ -240,9 +249,9 @@ public sealed class GeneratedGameAdapter(
                         WorkspaceFiles.RejectReparsePoints(responsePath);
                         await using var stream = new FileStream(responsePath, FileMode.Open, FileAccess.Read, FileShare.Read,
                             128 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
-                        response = await JsonSerializer.DeserializeAsync<CliResponse>(stream, Json, cancellationToken) ?? throw new JsonException("Empty JSON.");
+                        response = await JsonSerializer.DeserializeAsync<CliResponse>(stream, EngineJson.TypeInfo<CliResponse>(Json), cancellationToken) ?? throw new JsonException("Empty JSON.");
                     }
-                    else response = JsonSerializer.Deserialize<CliResponse>(result.StandardOutput, Json) ?? throw new JsonException("Empty JSON.");
+                    else response = JsonSerializer.Deserialize<CliResponse>(result.StandardOutput, EngineJson.TypeInfo<CliResponse>(Json)) ?? throw new JsonException("Empty JSON.");
                 }
                 catch (JsonException exception) { throw new GeneratedAdapterException("The adapter returned invalid protocol JSON: " + exception.Message); }
                 if (response.ProtocolVersion != package.ProtocolVersion || !response.Success)
@@ -367,8 +376,8 @@ public sealed class GeneratedGameAdapter(
         }
     }
 
-    private sealed record ProbeFile(string Path, long Length, long HeaderBytes);
-    private sealed record CliResponse(int ProtocolVersion, bool Success, string? Error,
+    internal sealed record ProbeFile(string Path, long Length, long HeaderBytes);
+    internal sealed record CliResponse(int ProtocolVersion, bool Success, string? Error,
         GameProbe? Probe, ExtractionResult? Extraction, AdapterBuildResult? Build, ValidationResult? Validation,
         IReadOnlyList<ProbeRead>? ProbeReads = null);
 }

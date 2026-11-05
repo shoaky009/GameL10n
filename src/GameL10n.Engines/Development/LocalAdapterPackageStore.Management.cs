@@ -2,6 +2,7 @@ using System.Text.Json;
 using GameL10n.Core.Adapters;
 using GameL10n.Core.Isolation;
 using GameL10n.Core.Storage;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Development;
 
@@ -47,7 +48,7 @@ public sealed partial class LocalAdapterPackageStore
             var previous = WorkspaceFiles.Resolve(directory, "previous.json");
             if (File.Exists(active))
             {
-                var activation = JsonSerializer.Deserialize<Activation>(WorkspaceFiles.ReadBounded(directory, "active.json", 4096), Json)
+                var activation = JsonSerializer.Deserialize<Activation>(WorkspaceFiles.ReadBounded(directory, "active.json", 4096), EngineJson.TypeInfo<Activation>(Json))
                     ?? throw new InvalidDataException("无效的引擎激活记录。");
                 ValidateReferenceIdentity(activation.Id, activation.Version);
                 if (Directory.Exists(PackagePath(activation.Id, activation.Version)))
@@ -113,7 +114,7 @@ public sealed partial class LocalAdapterPackageStore
                         && !Directory.Exists(Path.GetDirectoryName(path)!) && !Directory.Exists(compatibility.Directory))
                         state.Families.Remove(adapterId);
                     else state.Families[adapterId] = remaining;
-                    await LocalFiles.WriteJsonAsync(WorkspaceFiles.Resolve(RootDirectory, "library-state.json"), state, CancellationToken.None);
+                    await LocalFiles.WriteJsonAsync(WorkspaceFiles.Resolve(RootDirectory, "library-state.json"), state, EngineJson.TypeInfo<LibraryState>(EngineJson.Storage), CancellationToken.None);
                 }
                 await UpdateLibraryIndexAsync(index =>
                 {
@@ -147,7 +148,7 @@ public sealed partial class LocalAdapterPackageStore
                 if (!File.Exists(path)) continue;
                 var contents = WorkspaceFiles.ReadBounded(directory, name, 4096);
                 if (!System.Text.Encoding.UTF8.GetString(contents).Contains(adapterId, StringComparison.Ordinal)) continue;
-                var activation = JsonSerializer.Deserialize<Activation>(contents, Json)
+                var activation = JsonSerializer.Deserialize<Activation>(contents, EngineJson.TypeInfo<Activation>(Json))
                     ?? throw new InvalidDataException("无效的引擎激活记录：" + path);
                 if (activation.Id == adapterId && activation.Version == version) pins.Add(path);
             }
@@ -165,7 +166,7 @@ public sealed partial class LocalAdapterPackageStore
     {
         var path = WorkspaceFiles.Resolve(RootDirectory, "library-state.json");
         if (!File.Exists(path)) return new();
-        var state = JsonSerializer.Deserialize<LibraryState>(WorkspaceFiles.ReadBounded(RootDirectory, "library-state.json", 16 * 1024 * 1024), Json);
+        var state = JsonSerializer.Deserialize<LibraryState>(WorkspaceFiles.ReadBounded(RootDirectory, "library-state.json", 16 * 1024 * 1024), EngineJson.TypeInfo<LibraryState>(Json));
         if (state is null || state.SchemaVersion != 1 || state.Families is null)
             throw new InvalidDataException("引擎库状态格式无效。");
         foreach (var (id, family) in state.Families)
@@ -186,7 +187,7 @@ public sealed partial class LocalAdapterPackageStore
     private async Task WriteLibraryStateAsync(LibraryState state, CancellationToken cancellationToken,
         GeneratedAdapterPackage? published = null)
     {
-        await LocalFiles.WriteJsonAsync(WorkspaceFiles.Resolve(RootDirectory, "library-state.json"), state, cancellationToken);
+        await LocalFiles.WriteJsonAsync(WorkspaceFiles.Resolve(RootDirectory, "library-state.json"), state, EngineJson.TypeInfo<LibraryState>(EngineJson.Storage), cancellationToken);
         // Complete the metadata commit even if the originating task is cancelled after the authoritative write.
         await UpdateLibraryIndexAsync(index => ApplyIndexState(index, state, published), CancellationToken.None);
     }
@@ -212,7 +213,7 @@ public sealed partial class LocalAdapterPackageStore
             try
             {
                 if (!File.Exists(WorkspaceFiles.Resolve(directory, "active.json"))) continue;
-                var activation = JsonSerializer.Deserialize<Activation>(WorkspaceFiles.ReadBounded(directory, "active.json", 4096), Json)
+                var activation = JsonSerializer.Deserialize<Activation>(WorkspaceFiles.ReadBounded(directory, "active.json", 4096), EngineJson.TypeInfo<Activation>(Json))
                     ?? throw new InvalidDataException("无效的激活记录。");
                 _ = PackagePath(activation.Id, activation.Version);
                 activations.Add(activation);
@@ -309,9 +310,9 @@ public sealed partial class LocalAdapterPackageStore
     private static bool IsLibraryReadError(Exception error) => error is IOException or InvalidDataException
         or UnauthorizedAccessException or JsonException or GeneratedAdapterException or ArgumentException;
 
-    private sealed record FamilyState(bool Enabled = true, IReadOnlyList<Activation>? Releases = null,
+    internal sealed record FamilyState(bool Enabled = true, IReadOnlyList<Activation>? Releases = null,
         IReadOnlyList<string>? ExcludedVersions = null);
-    private sealed record LibraryState
+    internal sealed record LibraryState
     {
         public int SchemaVersion { get; init; } = 1;
         public Dictionary<string, FamilyState> Families { get; init; } = new(StringComparer.Ordinal);

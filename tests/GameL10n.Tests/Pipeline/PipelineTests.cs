@@ -20,7 +20,7 @@ public sealed class PipelineTests : IDisposable
     private static async Task<MemoryEntry> ReadSingleMemoryEntryAsync(GameSession session)
     {
         var shard = await LocalFiles.ReadJsonAsync<MemoryShard>(Assert.Single(Directory.GetFiles(
-            Path.Combine(session.ProjectDirectory, "memory"), "??.json")));
+            Path.Combine(session.ProjectDirectory, "memory"), "??.json")), FixtureJson.TypeInfo<global::GameL10n.Core.Translation.MemoryShard>(FixtureJson.Storage));
         return Assert.Single(shard!.Entries).Value;
     }
 
@@ -119,7 +119,7 @@ public sealed class PipelineTests : IDisposable
         var memory = new TranslationMemory(Path.Combine(session.ProjectDirectory, "memory"));
         var responseDirectory = Path.Combine(session.ProjectDirectory, "responses");
         await LocalFiles.WriteJsonAsync(Path.Combine(responseDirectory, "pending.request.json"),
-            new TranslationIntent("pending", "test-provider", DateTimeOffset.UtcNow, [new("1", memory.Key(session.Extraction.Units[0], policy))]));
+            new TranslationIntent("pending", "test-provider", DateTimeOffset.UtcNow, [new("1", memory.Key(session.Extraction.Units[0], policy))]), FixtureJson.TypeInfo<global::GameL10n.Core.Translation.TranslationIntent>(FixtureJson.Storage));
         var provider = new FakeProvider();
         var result = await CreatePipeline().TranslateOnlyAsync(session, [provider], policy, new(1, RetryUncertainRequests: false));
         Assert.Equal(new TranslationRunSummary(2, 1, 1), result);
@@ -196,8 +196,8 @@ public sealed class PipelineTests : IDisposable
         await WriteGame(("1", "hello"));
         var original = await CreatePipeline().AnalyzeAsync(Game, new JsonGameAdapter());
         var path = Path.Combine(original.ProjectDirectory, "source.json");
-        var snapshot = await LocalFiles.ReadJsonAsync<SourceSnapshot>(path);
-        await LocalFiles.WriteJsonAsync(path, snapshot! with { Probe = null });
+        var snapshot = await LocalFiles.ReadJsonAsync<SourceSnapshot>(path, FixtureJson.TypeInfo<global::GameL10n.Core.Pipeline.SourceSnapshot>(FixtureJson.Storage));
+        await LocalFiles.WriteJsonAsync(path, snapshot! with { Probe = null }, FixtureJson.TypeInfo<object>(FixtureJson.Storage));
         var before = await File.ReadAllTextAsync(path);
         var adapter = new JsonGameAdapter { FailIfProbed = true };
         var messages = new List<string>();
@@ -314,10 +314,10 @@ public sealed class PipelineTests : IDisposable
         Assert.Equal(1, adapter.Extractions);
         Assert.Equal(first.Extraction.Units, second.Extraction.Units);
         Assert.False(File.Exists(Path.Combine(first.ProjectDirectory, "extraction.json")));
-        var snapshot = await LocalFiles.ReadJsonAsync<SourceSnapshot>(Path.Combine(first.ProjectDirectory, "source.json"));
+        var snapshot = await LocalFiles.ReadJsonAsync<SourceSnapshot>(Path.Combine(first.ProjectDirectory, "source.json"), FixtureJson.TypeInfo<global::GameL10n.Core.Pipeline.SourceSnapshot>(FixtureJson.Storage));
         Assert.False(Path.IsPathRooted(snapshot!.Directory));
         var result = await CreatePipeline().RunAsync(second, new FakeProvider(), policy);
-        var stored = await LocalFiles.ReadJsonAsync<PipelineResult>(Path.Combine(first.ProjectDirectory, "latest-result.json"));
+        var stored = await LocalFiles.ReadJsonAsync<PipelineResult>(Path.Combine(first.ProjectDirectory, "latest-result.json"), FixtureJson.TypeInfo<global::GameL10n.Core.Pipeline.PipelineResult>(FixtureJson.Storage));
         Assert.False(Path.IsPathRooted(stored!.PatchDirectory));
         Assert.Equal(result.PatchDirectory, (await CreatePipeline().LoadLatestResultAsync(first.ProjectDirectory))!.PatchDirectory);
         Assert.Single(Directory.GetDirectories(Path.Combine(first.ProjectDirectory, "tasks")));
@@ -345,7 +345,7 @@ public sealed class PipelineTests : IDisposable
         await WriteGame(("1", "old text"));
         var adapter = new JsonGameAdapter();
         var old = await CreatePipeline().AnalyzeAsync(Game, adapter);
-        await LocalFiles.WriteJsonAsync(Path.Combine(old.ProjectDirectory, "extraction.json"), old.Extraction);
+        await LocalFiles.WriteJsonAsync(Path.Combine(old.ProjectDirectory, "extraction.json"), old.Extraction, FixtureJson.TypeInfo<global::GameL10n.Core.ExtractionResult>(FixtureJson.Storage));
         await WriteGame(("1", "updated text"), ("2", "new text"));
         var updated = await CreatePipeline().AnalyzeAsync(Game, adapter);
         var cacheKey = ExtractionStore.CacheKey(Path.GetFileName(updated.SourceDirectory), adapter.Id, adapter.Version);
@@ -451,7 +451,7 @@ public sealed class PipelineTests : IDisposable
         Assert.Equal("2", feedback.Key);
         Assert.Contains("{name}", Assert.Single(feedback.Value));
         Assert.Contains("原文 1 次，译文 0 次", feedback.Value[0]);
-        Assert.Empty((await LocalFiles.ReadJsonAsync<ValidationIssue[]>(Path.Combine(session.ProjectDirectory, "translation-errors.json")))!);
+        Assert.Empty((await LocalFiles.ReadJsonAsync<ValidationIssue[]>(Path.Combine(session.ProjectDirectory, "translation-errors.json"), FixtureJson.TypeInfo<global::GameL10n.Core.ValidationIssue[]>(FixtureJson.Storage)))!);
     }
 
     [Theory]
@@ -484,7 +484,7 @@ public sealed class PipelineTests : IDisposable
         var session = await CreatePipeline().AnalyzeAsync(Game, new JsonGameAdapter());
         var path = Path.Combine(session.ProjectDirectory, "translation-errors.json");
         if (damaged) await File.WriteAllTextAsync(path, "{truncated");
-        else await LocalFiles.WriteJsonAsync(path, new[] { new ValidationIssue("placeholder-mismatch", "缺少{name}", "1") });
+        else await LocalFiles.WriteJsonAsync(path, new[] { new ValidationIssue("placeholder-mismatch", "缺少{name}", "1") }, FixtureJson.TypeInfo<global::GameL10n.Core.ValidationIssue[]>(FixtureJson.Storage));
         var provider = new FakeProvider();
         await CreatePipeline().RunAsync(session, provider, policy);
         var feedback = Assert.Single(provider.Requests).ValidationFeedback;
@@ -550,7 +550,7 @@ public sealed class PipelineTests : IDisposable
     }
 
     private Task WriteGame(params (string Id, string Text)[] lines) => LocalFiles.WriteJsonAsync(Path.Combine(Game, "story.json"),
-        lines.Select(line => new Line(line.Id, line.Text)).ToArray());
+        lines.Select(line => new Line(line.Id, line.Text)).ToArray(), FixtureJson.TypeInfo<global::GameL10n.Tests.Pipeline.PipelineTests.Line[]>(FixtureJson.Storage));
 
     [Fact]
     public async Task RetryProgressShowsFailureCategoryWhileKeepingDeveloperDetailsInSavedError()
@@ -630,7 +630,7 @@ public sealed class PipelineTests : IDisposable
         await Assert.ThrowsAsync<TranslationRefusedException>(() => CreatePipeline().RunAsync(session, resumed, policy));
         Assert.Equal(0, resumed.Calls);
         var record = await LocalFiles.ReadJsonAsync<TranslationRefusal>(Assert.Single(Directory.GetFiles(
-            Path.Combine(session.ProjectDirectory, "responses"), "*.refusal.json")));
+            Path.Combine(session.ProjectDirectory, "responses"), "*.refusal.json")), FixtureJson.TypeInfo<global::GameL10n.Core.Translation.TranslationRefusal>(FixtureJson.Storage));
         Assert.Equal("model-refusal", record!.Diagnostic!.Code);
         Assert.Equal(content, record.Diagnostic.ResponsePreview);
     }
@@ -806,11 +806,11 @@ public sealed class PipelineTests : IDisposable
         }).SaveAsync(session.ProjectDirectory);
         await CreatePipeline().TranslateOnlyAsync(session, [new FakeProvider { FailIfCalled = true }], policy);
         var patch = await CreatePipeline().BuildFromSavedAsync(session, policy, reviewedOnly: true);
-        var output = await LocalFiles.ReadJsonAsync<Line[]>(Path.Combine(patch.PatchDirectory, "story.json"));
+        var output = await LocalFiles.ReadJsonAsync<Line[]>(Path.Combine(patch.PatchDirectory, "story.json"), FixtureJson.TypeInfo<global::GameL10n.Tests.Pipeline.PipelineTests.Line[]>(FixtureJson.Storage));
         Assert.Equal("人工校对", output![0].Text);
         Assert.Equal("goodbye", output[1].Text);
         Assert.Equal("翻译 hello", await new TranslationMemory(Path.Combine(session.ProjectDirectory, "memory")).FindAsync(unit, policy));
-        var index = await LocalFiles.ReadJsonAsync<PatchTranslationSnapshot>(Path.Combine(patch.PatchDirectory, "translation-snapshot.json"));
+        var index = await LocalFiles.ReadJsonAsync<PatchTranslationSnapshot>(Path.Combine(patch.PatchDirectory, "translation-snapshot.json"), FixtureJson.TypeInfo<global::GameL10n.Core.Pipeline.PatchTranslationSnapshot>(FixtureJson.Storage));
         Assert.Equal("人工校对", Assert.Single(index!.Texts).Value);
     }
 
@@ -846,8 +846,8 @@ public sealed class PipelineTests : IDisposable
         // An interrupted candidate receipt must never become an accepted model translation.
         var responses = Path.Combine(session.ProjectDirectory, "responses");
         await LocalFiles.WriteJsonAsync(Path.Combine(responses, "candidate.request.json"), new TranslationIntent("candidate", "test", DateTimeOffset.UtcNow,
-            [new(unit.Id, memory.Key(unit, policy with { Style = "other" }))], CandidateOnly: true));
-        await LocalFiles.WriteJsonAsync(Path.Combine(responses, "candidate.json"), new TranslationResponse(new Dictionary<string, string> { [unit.Id] = "未采用候选" }, new(0, 0)));
+            [new(unit.Id, memory.Key(unit, policy with { Style = "other" }))], CandidateOnly: true), FixtureJson.TypeInfo<global::GameL10n.Core.Translation.TranslationIntent>(FixtureJson.Storage));
+        await LocalFiles.WriteJsonAsync(Path.Combine(responses, "candidate.json"), new TranslationResponse(new Dictionary<string, string> { [unit.Id] = "未采用候选" }, new(0, 0)), FixtureJson.TypeInfo<global::GameL10n.Core.TranslationResponse>(FixtureJson.Storage));
         var provider = new FakeProvider();
         await CreatePipeline().TranslateOnlyAsync(session, [provider], policy with { Style = "other" });
         Assert.Equal(1, provider.Calls);
@@ -866,8 +866,8 @@ public sealed class PipelineTests : IDisposable
         await SaveEdit("第二稿");
         var second = await CreatePipeline().BuildFromSavedAsync(session, policy, [unit.Id]);
         Assert.NotEqual(first.PatchDirectory, second.PatchDirectory);
-        Assert.Equal("第一稿", (await LocalFiles.ReadJsonAsync<Line[]>(Path.Combine(first.PatchDirectory, "story.json")))![0].Text);
-        var output = (await LocalFiles.ReadJsonAsync<Line[]>(Path.Combine(second.PatchDirectory, "story.json")))!;
+        Assert.Equal("第一稿", (await LocalFiles.ReadJsonAsync<Line[]>(Path.Combine(first.PatchDirectory, "story.json"), FixtureJson.TypeInfo<global::GameL10n.Tests.Pipeline.PipelineTests.Line[]>(FixtureJson.Storage)))![0].Text);
+        var output = (await LocalFiles.ReadJsonAsync<Line[]>(Path.Combine(second.PatchDirectory, "story.json"), FixtureJson.TypeInfo<global::GameL10n.Tests.Pipeline.PipelineTests.Line[]>(FixtureJson.Storage)))!;
         Assert.Equal("第二稿", output[0].Text); Assert.Equal("goodbye", output[1].Text);
     }
 
@@ -925,7 +925,7 @@ public sealed class PipelineTests : IDisposable
         Assert.Equal("新译文", edit.Text); Assert.False(edit.Reviewed); Assert.True(edit.IsGenerated);
         Assert.Equal(options.RetranslationId, edit.RetranslationId);
         var patch = await CreatePipeline().BuildFromSavedAsync(session, policy);
-        var output = (await LocalFiles.ReadJsonAsync<Line[]>(Path.Combine(patch.PatchDirectory, "story.json")))!;
+        var output = (await LocalFiles.ReadJsonAsync<Line[]>(Path.Combine(patch.PatchDirectory, "story.json"), FixtureJson.TypeInfo<global::GameL10n.Tests.Pipeline.PipelineTests.Line[]>(FixtureJson.Storage)))!;
         Assert.Equal(new[] { "新译文", "翻译 same", "翻译 other" }, output.Select(line => line.Text));
         await CreatePipeline().TranslateOnlyAsync(session, [new FakeProvider { FailIfCalled = true }], policy, options);
         var fresh = new FakeProvider { Translate = _ => "下一轮" };
@@ -973,8 +973,8 @@ public sealed class PipelineTests : IDisposable
         }) + "\nretranslate:" + operation);
         var responses = Path.Combine(session.ProjectDirectory, "responses");
         await LocalFiles.WriteJsonAsync(Path.Combine(responses, key + ".request.json"), new TranslationIntent(key, provider.Identity, DateTimeOffset.UtcNow,
-            [new(unit.Id, memory.Key(unit, policy))], RetranslationId: operation));
-        await LocalFiles.WriteJsonAsync(Path.Combine(responses, key + ".json"), new TranslationResponse(new Dictionary<string, string> { [unit.Id] = "已返回新译文" }, new(20, 10)));
+            [new(unit.Id, memory.Key(unit, policy))], RetranslationId: operation), FixtureJson.TypeInfo<global::GameL10n.Core.Translation.TranslationIntent>(FixtureJson.Storage));
+        await LocalFiles.WriteJsonAsync(Path.Combine(responses, key + ".json"), new TranslationResponse(new Dictionary<string, string> { [unit.Id] = "已返回新译文" }, new(20, 10)), FixtureJson.TypeInfo<global::GameL10n.Core.TranslationResponse>(FixtureJson.Storage));
         await CreatePipeline().TranslateOnlyAsync(session, [provider], policy);
         Assert.True(File.Exists(Path.Combine(responses, key + ".json")));
         await CreatePipeline().TranslateOnlyAsync(session, [provider], policy,
@@ -1004,7 +1004,7 @@ public sealed class PipelineTests : IDisposable
         public async Task<ExtractionResult> ExtractAsync(string directory, CancellationToken cancellationToken = default)
         {
             Extractions++;
-            var lines = await LocalFiles.ReadJsonAsync<Line[]>(Path.Combine(directory, "story.json"), cancellationToken);
+            var lines = await LocalFiles.ReadJsonAsync<Line[]>(Path.Combine(directory, "story.json"), FixtureJson.TypeInfo<global::GameL10n.Tests.Pipeline.PipelineTests.Line[]>(FixtureJson.Storage), cancellationToken);
             return new ExtractionResult(lines!.Select(line => new TranslationUnit(line.Id, "story.json", line.Id, line.Text, "scene")).ToArray(), []);
         }
         public async Task<AdapterBuildResult> BuildPatchAsync(string sourceDirectory, IReadOnlyDictionary<string, string> translations,
@@ -1012,7 +1012,7 @@ public sealed class PipelineTests : IDisposable
         {
             Builds++;
             var source = await ExtractAsync(sourceDirectory, cancellationToken);
-            await LocalFiles.WriteJsonAsync(Path.Combine(patchDirectory, "story.json"), source.Units.Select(u => new Line(u.Id, translations[u.Id])).ToArray(), cancellationToken);
+            await LocalFiles.WriteJsonAsync(Path.Combine(patchDirectory, "story.json"), source.Units.Select(u => new Line(u.Id, translations[u.Id])).ToArray(), FixtureJson.TypeInfo<global::GameL10n.Tests.Pipeline.PipelineTests.Line[]>(FixtureJson.Storage), cancellationToken);
             return new AdapterBuildResult(["story.json"], []);
         }
         public async Task<ValidationResult> ValidatePatchAsync(string sourceDirectory, string patchDirectory, CancellationToken cancellationToken = default)

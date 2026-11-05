@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Patching;
 
@@ -10,7 +11,7 @@ namespace GameL10n.Core.Patching;
 public sealed class PatchInstaller
 {
     public const string ManifestFilename = "patch-manifest.json";
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = true };
+    private static readonly JsonSerializerOptions JsonOptions = new(CoreJson.Web) { WriteIndented = true };
     private readonly string projectDirectory;
     private readonly string sourceSnapshotsDirectory;
 
@@ -525,7 +526,7 @@ public sealed class PatchInstaller
         if (File.Exists(legacyPath))
         {
             var legacy = await ReadJournalAsync(legacyPath, gameRoot, cancellationToken);
-            if (journal is not null && JsonSerializer.Serialize(journal, JsonOptions) != JsonSerializer.Serialize(legacy, JsonOptions))
+            if (journal is not null && JsonSerializer.Serialize(journal, CoreJson.TypeInfo<Journal>(JsonOptions)) != JsonSerializer.Serialize(legacy, CoreJson.TypeInfo<Journal>(JsonOptions)))
                 throw new InvalidDataException("项目与游戏目录的安装记录不一致，已保留两份记录，请确认使用的是对应项目数据。");
             journal ??= legacy;
             if (migrateLegacy)
@@ -677,7 +678,7 @@ public sealed class PatchInstaller
         {
             await using (var stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, FileOptions.Asynchronous))
             {
-                await JsonSerializer.SerializeAsync(stream, journal, JsonOptions);
+                await JsonSerializer.SerializeAsync(stream, journal, CoreJson.TypeInfo<Journal>(JsonOptions));
                 await stream.FlushAsync();
                 stream.Flush(flushToDisk: true);
             }
@@ -694,7 +695,7 @@ public sealed class PatchInstaller
     {
         PatchFileSafety.CheckPath(path);
         await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.Asynchronous);
-        return await JsonSerializer.DeserializeAsync<T>(stream, JsonOptions, cancellationToken)
+        return await JsonSerializer.DeserializeAsync<T>(stream, CoreJson.TypeInfo<T>(JsonOptions), cancellationToken)
             ?? throw new InvalidDataException($"Empty JSON document: {path}");
     }
 
@@ -732,7 +733,7 @@ public sealed class PatchInstaller
         first.StartsWith(second + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ||
         second.StartsWith(first + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
 
-    private sealed class Journal
+    internal sealed class Journal
     {
         public Journal() { }
         public int SchemaVersion { get; set; } = 1;
@@ -740,7 +741,7 @@ public sealed class PatchInstaller
         public List<Entry> Entries { get; set; } = [];
     }
 
-    private sealed class Entry
+    internal sealed class Entry
     {
         public Entry() { }
         public string RelativePath { get; set; } = "";

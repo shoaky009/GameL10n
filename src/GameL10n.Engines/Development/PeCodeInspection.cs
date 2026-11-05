@@ -2,6 +2,8 @@ using System.Globalization;
 using System.Reflection.PortableExecutable;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using System.Text.Json.Nodes;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Development;
 
@@ -73,39 +75,58 @@ internal static class PeCodeInspection
                 // Range bases retain all address mappings; repeating them for every instruction crowds out useful context.
                 object instructions = compact
                     ? string.Join('\n', decoded.Select(line => $"{Hex(line.Address)} {line.Bytes} {line.Mnemonic} {line.Operands}".TrimEnd()))
-                    : decoded.Select(line => new
+                    : decoded.Select(line => new JsonObject
                     {
-                        va = Hex(line.Address), rva = Hex(line.Address - header.ImageBase), fileOffset = offset + (long)(line.Address - address),
-                        line.Bytes, instruction = line.Mnemonic + (line.Operands.Length == 0 ? "" : " " + line.Operands),
-                        branchTarget = (line.Mnemonic is "call" or "jmp" || line.Mnemonic.StartsWith('j'))
+                        ["va"] = Hex(line.Address),
+                        ["rva"] = Hex(line.Address - header.ImageBase),
+                        ["fileOffset"] = offset + (long)(line.Address - address),
+                        ["bytes"] = line.Bytes,
+                        ["instruction"] = line.Mnemonic + (line.Operands.Length == 0 ? "" : " " + line.Operands),
+                        ["branchTarget"] = (line.Mnemonic is "call" or "jmp" || line.Mnemonic.StartsWith('j'))
                             && line.Operands.StartsWith("0x", StringComparison.Ordinal)
                             && ulong.TryParse(line.Operands.AsSpan(2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var target) ? Hex(target) : null
                     }).ToArray();
-                output.Add(new
+                output.Add(new JsonObject
                 {
-                    requestedAddress = Hex(range.Address), addressKind, section = section.Name, va = Hex(address), rva = Hex(rva), fileOffset = offset,
-                    requestedBytes = range.Length, availableBytes = available, decodedBytes = consumed,
-                    stopped = consumed == available ? "range-end" : decoded.Count >= instructionLimit ? "instruction-limit" : "undecodable-or-truncated",
-                    nextAddress = Hex(address + (ulong)consumed),
-                    instructions
+                    ["requestedAddress"] = Hex(range.Address),
+                    ["addressKind"] = addressKind,
+                    ["section"] = section.Name,
+                    ["va"] = Hex(address),
+                    ["rva"] = Hex(rva),
+                    ["fileOffset"] = offset,
+                    ["requestedBytes"] = range.Length,
+                    ["availableBytes"] = available,
+                    ["decodedBytes"] = consumed,
+                    ["stopped"] = consumed == available ? "range-end" : decoded.Count >= instructionLimit ? "instruction-limit" : "undecodable-or-truncated",
+                    ["nextAddress"] = Hex(address + (ulong)consumed),
+                    ["instructions"] = EngineJson.Node(instructions, EngineJson.Web)
                 });
             }
             catch (Exception error) when (error is InvalidDataException or OverflowException)
             {
                 failedRanges++;
-                output.Add(new { requestedAddress = Hex(range.Address), addressKind, error = error.Message });
+                output.Add(new JsonObject
+                {
+                    ["requestedAddress"] = Hex(range.Address),
+                    ["addressKind"] = addressKind,
+                    ["error"] = error.Message
+                });
             }
         }
-        return new
+        return new JsonObject
         {
-            architecture = bitness == 32 ? "x86" : "x64", imageBase = Hex(header.ImageBase),
-            sha256 = Convert.ToHexStringLower(SHA256.HashData(bytes)), decoder = "Capstone 5.0.6", ranges = output,
-            instructionFormat = compact
+            ["architecture"] = bitness == 32 ? "x86" : "x64",
+            ["imageBase"] = Hex(header.ImageBase),
+            ["sha256"] = Convert.ToHexStringLower(SHA256.HashData(bytes)),
+            ["decoder"] = "Capstone 5.0.6",
+            ["ranges"] = EngineJson.Node((output).ToArray(), EngineJson.Web),
+            ["instructionFormat"] = compact
                 ? "Each line: VA HEX_BYTES INSTRUCTION. Branch targets are in operands. RVA = VA - imageBase; file offset = range.fileOffset + (VA - range.va). nextAddress is always VA."
                 : "Per-instruction VA, RVA, file offset, bytes, instruction and direct branch target.",
-            status = failedRanges == ranges.Count ? "failed" : "completed", failedRanges,
-            error = failedRanges == ranges.Count ? "所选代码范围均无法分析，请核对地址类型及各范围的错误。" : null,
-            scope = "从给定起点线性反汇编，正确处理 PE 地址映射；起点仍须有调用目标或其他证据支持。分支目标不代表可达性，未运行游戏，也未验证函数参数、动态调用或中文显示。"
+            ["status"] = failedRanges == ranges.Count ? "failed" : "completed",
+            ["failedRanges"] = failedRanges,
+            ["error"] = failedRanges == ranges.Count ? "所选代码范围均无法分析，请核对地址类型及各范围的错误。" : null,
+            ["scope"] = "从给定起点线性反汇编，正确处理 PE 地址映射；起点仍须有调用目标或其他证据支持。分支目标不代表可达性，未运行游戏，也未验证函数参数、动态调用或中文显示。"
         };
     }
 

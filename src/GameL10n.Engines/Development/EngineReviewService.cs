@@ -4,6 +4,8 @@ using System.Text.Encodings.Web;
 using System.Text.Json;
 using GameL10n.Core.Adapters;
 using GameL10n.Core.Storage;
+using System.Text.Json.Nodes;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Development;
 
@@ -15,7 +17,7 @@ public sealed record EngineReviewProgress(string Stage, string Message, TokenUsa
 /// <summary>Reviews one project's evidence to improve shared engine references, without reopening adaptation.</summary>
 public sealed class EngineReviewService(IAdaptationAgentModel model, EngineKnowledgeStore store)
 {
-    private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web) { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
+    private static readonly JsonSerializerOptions Json = new(EngineJson.Web) { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
     public async Task<EngineReviewResult> ReviewAsync(string projectDirectory, string gameId, string title,
         CancellationToken ct = default, IProgress<EngineReviewProgress>? progress = null, AdaptationLimits? limits = null)
     {
@@ -32,7 +34,7 @@ public sealed class EngineReviewService(IAdaptationAgentModel model, EngineKnowl
         var libraryFingerprint = LibraryFingerprint(entries);
         var reportPath = LocalFiles.UnderRoot(projectDirectory, "engine-review.json");
         EngineReviewResult? previous = null;
-        try { previous = await LocalFiles.ReadJsonAsync<EngineReviewResult>(reportPath, ct); }
+        try { previous = await LocalFiles.ReadJsonAsync<EngineReviewResult>(reportPath, EngineJson.TypeInfo<EngineReviewResult>(EngineJson.Storage), ct); }
         catch (Exception error) when (error is JsonException or InvalidDataException)
         { Report("汇总项目证据", "上次总结记录无法读取，将根据现有证据重新总结。"); }
         var previousEntry = entries.FirstOrDefault(entry => entry.Id == previous?.EntryId);
@@ -46,20 +48,26 @@ public sealed class EngineReviewService(IAdaptationAgentModel model, EngineKnowl
         var trace = new EngineReviewTrace(projectDirectory);
         var messages = new List<AgentMessage>
         {
-            new("user", JsonSerializer.Serialize(new
+            new("user", JsonSerializer.Serialize(new JsonObject
             {
-                task = "总结这个项目对后续同引擎游戏有价值的经验。没有新的可靠优化时明确结束，不必产生条目。",
-                evidence = evidence.Overview,
-                existingKnowledge = EngineKnowledgeStore.Match(entries, evidence.EngineKeys).Take(12)
-                    .Select(entry => new { entry.Id, entry.Revision, entry.Family,
-                        conditions = entry.Conditions[..Math.Min(240, entry.Conditions.Length)],
-                        summary = entry.Summary[..Math.Min(200, entry.Summary.Length)], entry.Enabled }),
-                libraryEntries = entries.Count,
-                previousReview = previous?.Summary
-            }, Json))
+                ["task"] = "总结这个项目对后续同引擎游戏有价值的经验。没有新的可靠优化时明确结束，不必产生条目。",
+                ["evidence"] = EngineJson.Node(evidence.Overview, Json),
+                ["existingKnowledge"] = EngineJson.Array(EngineKnowledgeStore.Match(entries, evidence.EngineKeys).Take(12)
+                    .Select(entry => new JsonObject
+                    {
+                        ["id"] = entry.Id,
+                        ["revision"] = entry.Revision,
+                        ["family"] = EngineJson.Node(entry.Family, Json),
+                        ["conditions"] = entry.Conditions[..Math.Min(240, entry.Conditions.Length)],
+                        ["summary"] = entry.Summary[..Math.Min(200, entry.Summary.Length)],
+                        ["enabled"] = entry.Enabled
+                    })),
+                ["libraryEntries"] = entries.Count,
+                ["previousReview"] = previous?.Summary
+            }, EngineJson.TypeInfo<JsonObject>(Json)))
         };
         var instructionBytes = Encoding.UTF8.GetByteCount(Instructions);
-        var toolDefinitionBytes = Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(Definitions));
+        var toolDefinitionBytes = Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(Definitions, EngineJson.TypeInfo<IReadOnlyList<AgentToolDefinition>>(EngineJson.Default)));
         for (var turn = 0; turn < limits.MaximumTurns; turn++)
         {
             ct.ThrowIfCancellationRequested();
@@ -78,21 +86,43 @@ public sealed class EngineReviewService(IAdaptationAgentModel model, EngineKnowl
             }
             catch (Exception error)
             {
-                await trace.WriteAsync(new { operation = "model", turn = turn + 1, status = "failed",
-                    elapsedMs = watch.ElapsedMilliseconds, errorType = error.GetType().Name,
-                    usage = (error as Providers.TranslationProviderException)?.Usage, visibleHistoryBytes = historyBytes,
-                    instructionBytes, toolDefinitionBytes, maximumOutputTokens });
+                await trace.WriteAsync(new JsonObject
+                {
+                    ["operation"] = "model",
+                    ["turn"] = turn + 1,
+                    ["status"] = "failed",
+                    ["elapsedMs"] = watch.ElapsedMilliseconds,
+                    ["errorType"] = error.GetType().Name,
+                    ["usage"] = EngineJson.Node((error as Providers.TranslationProviderException)?.Usage, Json),
+                    ["visibleHistoryBytes"] = historyBytes,
+                    ["instructionBytes"] = instructionBytes,
+                    ["toolDefinitionBytes"] = toolDefinitionBytes,
+                    ["maximumOutputTokens"] = maximumOutputTokens
+                });
                 throw;
             }
-            await trace.WriteAsync(new { operation = "model", turn = turn + 1, status = "completed",
-                model = model.AnalysisModelName ?? model.DisplayName, reasoningEffort = model.AnalysisReasoningEffort,
-                elapsedMs = watch.ElapsedMilliseconds, reply.QueueMilliseconds, reply.Usage.InputTokens, reply.Usage.OutputTokens,
-                reply.Usage.Estimated, visibleHistoryBytes = historyBytes, replay.OmittedResults,
-                instructionBytes, toolDefinitionBytes, maximumOutputTokens,
-                tools = reply.Message.ToolCalls?.Select(call => call.Name).ToArray() ?? [] });
+            await trace.WriteAsync(new JsonObject
+            {
+                ["operation"] = "model",
+                ["turn"] = turn + 1,
+                ["status"] = "completed",
+                ["model"] = model.AnalysisModelName ?? model.DisplayName,
+                ["reasoningEffort"] = model.AnalysisReasoningEffort,
+                ["elapsedMs"] = watch.ElapsedMilliseconds,
+                ["queueMilliseconds"] = reply.QueueMilliseconds,
+                ["inputTokens"] = reply.Usage.InputTokens,
+                ["outputTokens"] = reply.Usage.OutputTokens,
+                ["estimated"] = reply.Usage.Estimated,
+                ["visibleHistoryBytes"] = historyBytes,
+                ["omittedResults"] = replay.OmittedResults,
+                ["instructionBytes"] = instructionBytes,
+                ["toolDefinitionBytes"] = toolDefinitionBytes,
+                ["maximumOutputTokens"] = maximumOutputTokens,
+                ["tools"] = EngineJson.Node(reply.Message.ToolCalls?.Select(call => call.Name).ToArray() ?? [], Json)
+            });
             if (reply.Usage.InputTokens < 0 || reply.Usage.OutputTokens < 0) throw new InvalidDataException("总结 API 返回了无效的 Token 统计。");
             usage = new(usage.InputTokens + (reply.Usage.InputTokens > 0 ? reply.Usage.InputTokens : estimatedInput),
-                usage.OutputTokens + (reply.Usage.OutputTokens > 0 ? reply.Usage.OutputTokens : Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(reply.Message)) / 3 + 1),
+                usage.OutputTokens + (reply.Usage.OutputTokens > 0 ? reply.Usage.OutputTokens : Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(reply.Message, EngineJson.TypeInfo<AgentMessage>(EngineJson.Default))) / 3 + 1),
                 usage.Estimated || reply.Usage.Estimated || reply.Usage.InputTokens == 0 || reply.Usage.OutputTokens == 0);
             messages.Add(reply.Message.ProviderData.HasValue ? reply.Message with { Content = "", ToolCalls = null } : reply.Message);
             if (reply.Message.ToolCalls is not { Count: > 0 } calls)
@@ -113,14 +143,14 @@ public sealed class EngineReviewService(IAdaptationAgentModel model, EngineKnowl
                         if (calls.Count != 1) throw new InvalidDataException("finish_review 必须单独调用。");
                         var summary = Required(args, "summary", 4000);
                         var suggestions = args.TryGetProperty("mainProgramSuggestions", out var advice)
-                            ? advice.Deserialize<string[]>(Json) ?? [] : [];
+                            ? advice.Deserialize<string[]>(EngineJson.TypeInfo<string[]>(Json)) ?? [] : [];
                         if (suggestions.Length > 8 || suggestions.Any(text => text is null || text.Length > 1600))
                             throw new InvalidDataException("主程序建议过多或过长。");
                         EngineKnowledgeEntry? saved = null;
                         string changeKind = "none";
                         if (args.TryGetProperty("improvement", out var improvement) && improvement.ValueKind != JsonValueKind.Null)
                         {
-                            var draft = improvement.Deserialize<ReviewDraft>(Json) ?? throw new InvalidDataException("缺少经验内容。");
+                            var draft = improvement.Deserialize<ReviewDraft>(EngineJson.TypeInfo<ReviewDraft>(Json)) ?? throw new InvalidDataException("缺少经验内容。");
                             var origins = draft.Evidence ?? [];
                             if (origins.Length is < 1 or > 8 || origins.Any(path => !evidence.IsEvidence(path)))
                                 throw new InvalidDataException("经验必须引用 overview 或本次已读取的证据路径。");
@@ -152,9 +182,17 @@ public sealed class EngineReviewService(IAdaptationAgentModel model, EngineKnowl
                         else await evidence.EnsureUnchangedAsync(ct);
                         var result = new EngineReviewResult(evidence.Fingerprint, LibraryFingerprint(store.ReadAll()), summary,
                             saved?.Id, saved?.Revision, usage, DateTimeOffset.UtcNow, suggestions, ChangeKind: changeKind);
-                        await LocalFiles.WriteJsonAsync(reportPath, result, ct);
-                        await trace.WriteAsync(new { operation = "finish", turn = turn + 1, changeKind,
-                            result.EntryId, result.Revision, usage.TotalTokens, tools = saved?.Tools.Count ?? 0 });
+                        await LocalFiles.WriteJsonAsync(reportPath, result, EngineJson.TypeInfo<EngineReviewResult>(EngineJson.Storage), ct);
+                        await trace.WriteAsync(new JsonObject
+                        {
+                            ["operation"] = "finish",
+                            ["turn"] = turn + 1,
+                            ["changeKind"] = changeKind,
+                            ["entryId"] = result.EntryId,
+                            ["revision"] = result.Revision,
+                            ["totalTokens"] = usage.TotalTokens,
+                            ["tools"] = saved?.Tools.Count ?? 0
+                        });
                         Report(saved is null ? "总结完成" : "已更新全局引擎经验", saved is null
                             ? "本次没有新增可应用的引擎优化，已保留总结结论。" : "经验已全局保存，后续智能识别会按引擎匹配并核对适用条件。");
                         return result;
@@ -176,30 +214,79 @@ public sealed class EngineReviewService(IAdaptationAgentModel model, EngineKnowl
                             var query = Required(args, "query", 160);
                             var matching = entries.Where(entry => new[] { entry.Id, entry.Family.Name }.Concat(entry.Aliases)
                                 .Any(text => text.Contains(query, StringComparison.OrdinalIgnoreCase))).ToArray();
-                            output = new { entries = matching.Take(12).Select(entry => new
-                                { entry.Id, entry.Revision, entry.Family, entry.Conditions, entry.Summary, entry.Enabled }), more = matching.Length > 12 };
+                            output = new JsonObject
+                            {
+                                ["entries"] = EngineJson.Array(matching.Take(12).Select(entry => new JsonObject
+                            {
+                                ["id"] = entry.Id,
+                                ["revision"] = entry.Revision,
+                                ["family"] = EngineJson.Node(entry.Family, Json),
+                                ["conditions"] = entry.Conditions,
+                                ["summary"] = entry.Summary,
+                                ["enabled"] = entry.Enabled
+                            })),
+                                ["more"] = matching.Length > 12
+                            };
                         }
                         else
                         {
                             var entry = entries.FirstOrDefault(item => item.Id == id) ?? throw new InvalidDataException("经验不存在。");
                             inspectedEntries.Add(id);
-                            output = new { entry.Id, entry.Revision, entry.Family, entry.Aliases, entry.Conditions, entry.Summary, entry.Guidance,
-                                tools = entry.Tools.Select(tool => new { tool.Name, tool.Description, tool.Usage, files = tool.Files.Keys }), entry.Origins };
+                            output = new JsonObject
+                            {
+                                ["id"] = entry.Id,
+                                ["revision"] = entry.Revision,
+                                ["family"] = EngineJson.Node(entry.Family, Json),
+                                ["aliases"] = EngineJson.Node((entry.Aliases).ToArray(), Json),
+                                ["conditions"] = entry.Conditions,
+                                ["summary"] = entry.Summary,
+                                ["guidance"] = entry.Guidance,
+                                ["tools"] = EngineJson.Array(entry.Tools.Select(tool => new JsonObject
+                                {
+                                    ["name"] = tool.Name,
+                                    ["description"] = tool.Description,
+                                    ["usage"] = tool.Usage,
+                                    ["files"] = EngineJson.Node((tool.Files.Keys).ToArray(), Json)
+                                })),
+                                ["origins"] = EngineJson.Node((entry.Origins).ToArray(), Json)
+                            };
                         }
                     }
                     else throw new InvalidDataException("总结只支持读取证据、读取经验与提交结论。");
-                    var response = JsonSerializer.Serialize(new { success = true, result = output }, Json);
+                    var response = JsonSerializer.Serialize(new JsonObject
+                    {
+                        ["success"] = true,
+                        ["result"] = EngineJson.Node(output, Json)
+                    }, EngineJson.TypeInfo<JsonObject>(Json));
                     messages.Add(new("tool", response, ToolCallId: call.Id));
-                    await trace.WriteAsync(new { operation = "tool", turn = turn + 1, tool = call.Name, status = "completed",
-                        elapsedMs = toolWatch.ElapsedMilliseconds, call = AdaptationTrace.Call(call),
-                        outputBytes = Encoding.UTF8.GetByteCount(response) });
+                    await trace.WriteAsync(new JsonObject
+                    {
+                        ["operation"] = "tool",
+                        ["turn"] = turn + 1,
+                        ["tool"] = call.Name,
+                        ["status"] = "completed",
+                        ["elapsedMs"] = toolWatch.ElapsedMilliseconds,
+                        ["call"] = EngineJson.Node(AdaptationTrace.Call(call), Json),
+                        ["outputBytes"] = Encoding.UTF8.GetByteCount(response)
+                    });
                 }
                 catch (Exception error) when (error is JsonException or InvalidDataException or ArgumentException or KeyNotFoundException or InvalidOperationException)
                 {
-                    messages.Add(new("tool", JsonSerializer.Serialize(new { success = false, error = GeneratedGameAdapter.LimitDiagnostic(error.Message) }, Json), ToolCallId: call.Id));
-                    await trace.WriteAsync(new { operation = "tool", turn = turn + 1, tool = call.Name, status = "failed",
-                        elapsedMs = toolWatch.ElapsedMilliseconds, call = AdaptationTrace.Call(call),
-                        error = GeneratedGameAdapter.LimitDiagnostic(error.Message) });
+                    messages.Add(new("tool", JsonSerializer.Serialize(new JsonObject
+                    {
+                        ["success"] = false,
+                        ["error"] = GeneratedGameAdapter.LimitDiagnostic(error.Message)
+                    }, EngineJson.TypeInfo<JsonObject>(Json)), ToolCallId: call.Id));
+                    await trace.WriteAsync(new JsonObject
+                    {
+                        ["operation"] = "tool",
+                        ["turn"] = turn + 1,
+                        ["tool"] = call.Name,
+                        ["status"] = "failed",
+                        ["elapsedMs"] = toolWatch.ElapsedMilliseconds,
+                        ["call"] = EngineJson.Node(AdaptationTrace.Call(call), Json),
+                        ["error"] = GeneratedGameAdapter.LimitDiagnostic(error.Message)
+                    });
                 }
             }
         }
@@ -220,11 +307,16 @@ public sealed class EngineReviewService(IAdaptationAgentModel model, EngineKnowl
         var length = args.TryGetProperty("length", out var count) ? count.GetInt32() : 6000;
         if (offset < 0 || length is < 1 or > 12000) throw new InvalidDataException("读取范围无效；每次最多 12000 字符。");
         offset = Math.Min(offset, source.Length);
-        return new { toolCallId = id, offset, totalCharacters = source.Length,
-            content = source.Substring(offset, Math.Min(length, source.Length - offset)) };
+        return new JsonObject
+        {
+            ["toolCallId"] = id,
+            ["offset"] = offset,
+            ["totalCharacters"] = source.Length,
+            ["content"] = source.Substring(offset, Math.Min(length, source.Length - offset))
+        };
     }
-    private sealed record ReviewTool(string Name, string Description, string Usage, string[] SourceFiles);
-    private sealed record ReviewDraft(string Key, AdapterFamily Family, string[] Aliases, string Conditions, string Summary,
+    internal sealed record ReviewTool(string Name, string Description, string Usage, string[] SourceFiles);
+    internal sealed record ReviewDraft(string Key, AdapterFamily Family, string[] Aliases, string Conditions, string Summary,
         string Guidance, string[] Evidence, ReviewTool[] Tools);
 
     private const string Instructions = """
@@ -272,5 +364,11 @@ public sealed class EngineReviewService(IAdaptationAgentModel model, EngineKnowl
     ];
 
     private static AgentToolDefinition Tool(string name, string description, string properties, string[] required) =>
-        new(name, description, JsonSerializer.SerializeToElement(new { type = "object", properties = JsonSerializer.Deserialize<JsonElement>(properties), required, additionalProperties = false }));
+        new(name, description, JsonSerializer.SerializeToElement(new JsonObject
+        {
+            ["type"] = "object",
+            ["properties"] = EngineJson.Node(JsonSerializer.Deserialize<JsonElement>(properties, EngineJson.TypeInfo<JsonElement>(EngineJson.Default)), EngineJson.Default),
+            ["required"] = EngineJson.Node(required, EngineJson.Default),
+            ["additionalProperties"] = false
+        }, EngineJson.TypeInfo<JsonObject>(EngineJson.Default)));
 }

@@ -8,7 +8,7 @@ namespace GameL10n.AdapterHost;
 /// <summary>Fixed parser/template/font operations used by Python adapters; never compiles adapter sources.</summary>
 public static class Program
 {
-    private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
+    private static readonly JsonSerializerOptions Json = new(AdapterHostJson.Web);
 
     public static int Main(string[] args)
     {
@@ -53,26 +53,38 @@ public static class Program
     private static JsonNode? Component(JsonObject request)
     {
         var operation = request["operation"]!.GetValue<string>();
-        var map = request["map"]?.Deserialize<Dictionary<int, int>>(Json) ?? [];
-        object result;
+        var map = request["map"]?.Deserialize<Dictionary<int, int>>(AdapterHostJson.TypeInfo<Dictionary<int, int>>(Json)) ?? [];
+        JsonObject result;
         switch (operation)
         {
             case "glyph_plan":
-                var codec = Cp932GlyphEncoding.Plan(request["texts"]!.Deserialize<string[]>(Json)!,
-                    request["allowedSlots"]!.Deserialize<int[]>(Json)!, request["preservedTexts"]!.Deserialize<string[]>(Json)!, map);
-                result = new { map = codec.SlotToUnicode };
+                var codec = Cp932GlyphEncoding.Plan(request["texts"]!.Deserialize<string[]>(AdapterHostJson.TypeInfo<string[]>(Json))!,
+                    request["allowedSlots"]!.Deserialize<int[]>(AdapterHostJson.TypeInfo<int[]>(Json))!, request["preservedTexts"]!.Deserialize<string[]>(AdapterHostJson.TypeInfo<string[]>(Json))!, map);
+                result = new JsonObject
+                {
+                    ["map"] = AdapterHostJson.Node(codec.SlotToUnicode, Json)
+                };
                 break;
             case "glyph_encode":
                 var encoder = new Cp932GlyphEncoding(map);
-                result = new { values = request["texts"]!.Deserialize<string[]>(Json)!.Select(text => Convert.ToBase64String(encoder.GetBytes(text))).ToArray() };
+                result = new JsonObject
+                {
+                    ["values"] = AdapterHostJson.Node(request["texts"]!.Deserialize<string[]>(AdapterHostJson.TypeInfo<string[]>(Json))!.Select(text => Convert.ToBase64String(encoder.GetBytes(text))).ToArray(), Json)
+                };
                 break;
             case "glyph_decode":
                 var decoder = new Cp932GlyphEncoding(map);
-                result = new { texts = request["values"]!.Deserialize<string[]>(Json)!.Select(value => decoder.GetString(Convert.FromBase64String(value))).ToArray() };
+                result = new JsonObject
+                {
+                    ["texts"] = AdapterHostJson.Node(request["values"]!.Deserialize<string[]>(AdapterHostJson.TypeInfo<string[]>(Json))!.Select(value => decoder.GetString(Convert.FromBase64String(value))).ToArray(), Json)
+                };
                 break;
             case "qlie_font":
                 QlieFont.Create(Text(request, "input"), Text(request, "output"), Text(request, "family"), map);
-                result = new { output = Text(request, "output") };
+                result = new JsonObject
+                {
+                    ["output"] = Text(request, "output")
+                };
                 break;
             case "render_glyphs":
                 if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("FNL 字形栅格化需要 Windows GDI 和宋体。");
@@ -86,12 +98,15 @@ public static class Program
                         values.Add(Convert.ToBase64String(raster.Render(text[0], item!["width"]!.GetValue<int>(),
                             item["height"]!.GetValue<int>(), Convert.FromBase64String(Text(item, "reference")))));
                     }
-                    result = new { values };
+                    result = new JsonObject
+                    {
+                        ["values"] = AdapterHostJson.Node((values).ToArray(), Json)
+                    };
                 }
                 break;
             default: throw new InvalidDataException("未知编码或字体组件操作：" + operation);
         }
-        return JsonSerializer.SerializeToNode(result, Json);
+        return result;
     }
 
     private static string Text(JsonNode node, string key) => node[key]?.GetValue<string>()

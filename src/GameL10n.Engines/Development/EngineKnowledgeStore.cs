@@ -3,6 +3,8 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using GameL10n.Core.Adapters;
 using GameL10n.Core.Storage;
+using System.Text.Json.Nodes;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Development;
 
@@ -35,7 +37,7 @@ public sealed class EngineKnowledgeStore(string directory)
             try
             {
                 var summary = JsonSerializer.Deserialize<KnowledgeMetadata>(
-                    ReadKnowledgeBytes(Path.GetFileName(path)), LocalFiles.JsonOptions)
+                    ReadKnowledgeBytes(Path.GetFileName(path)), EngineJson.TypeInfo<KnowledgeMetadata>(EngineJson.Storage))
                     ?? throw new InvalidDataException("经验文件为空。");
                 if (summary.Family is null) throw new InvalidDataException("缺少引擎分类。");
                 summary.Family.Validate();
@@ -61,7 +63,7 @@ public sealed class EngineKnowledgeStore(string directory)
         var path = Isolation.WorkspaceFiles.Resolve(DirectoryPath, id + ".json");
         if (!File.Exists(path)) return null;
         var entry = JsonSerializer.Deserialize<EngineKnowledgeEntry>(
-            ReadKnowledgeBytes(id + ".json"), LocalFiles.JsonOptions)
+            ReadKnowledgeBytes(id + ".json"), EngineJson.TypeInfo<EngineKnowledgeEntry>(EngineJson.Storage))
             ?? throw new InvalidDataException("经验文件为空。");
         Validate(entry);
         if (entry.Id != id || entry.Revision != ContentRevision(entry))
@@ -80,10 +82,10 @@ public sealed class EngineKnowledgeStore(string directory)
     }
 
     // Unknown properties are skipped by the serializer, including embedded helper source files.
-    private sealed record KnowledgeMetadata(string Key, AdapterFamily Family, IReadOnlyList<string> Aliases,
+    internal sealed record KnowledgeMetadata(string Key, AdapterFamily Family, IReadOnlyList<string> Aliases,
         string Conditions, string Summary, IReadOnlyList<EngineKnowledgeOrigin> Origins, ToolMetadata[] Tools,
         string Revision = "", bool Enabled = true);
-    private sealed record ToolMetadata();
+    internal sealed record ToolMetadata();
 
     public IReadOnlyList<EngineKnowledgeEntry> ReadAll(Action<string>? warning = null)
     {
@@ -177,8 +179,8 @@ public sealed class EngineKnowledgeStore(string directory)
             var origins = (current?.Origins ?? []).Concat(entry.Origins).GroupBy(origin => origin.GameId, StringComparer.Ordinal)
                 .Select(group => group.Last()).ToArray();
             entry = entry with { Origins = origins, Enabled = current?.Enabled ?? entry.Enabled, Revision = ContentRevision(entry) };
-            if (current is null || JsonSerializer.Serialize(current) != JsonSerializer.Serialize(entry))
-                await LocalFiles.WriteJsonAsync(LocalFiles.UnderRoot(DirectoryPath, entry.Id + ".json"), entry, ct);
+            if (current is null || JsonSerializer.Serialize(current, EngineJson.TypeInfo<EngineKnowledgeEntry>(EngineJson.Default)) != JsonSerializer.Serialize(entry, EngineJson.TypeInfo<EngineKnowledgeEntry>(EngineJson.Default)))
+                await LocalFiles.WriteJsonAsync(LocalFiles.UnderRoot(DirectoryPath, entry.Id + ".json"), entry, EngineJson.TypeInfo<EngineKnowledgeEntry>(EngineJson.Storage), ct);
             await UpdateSummaryIndexAsync(entry, CancellationToken.None);
             return entry;
         }
@@ -193,7 +195,7 @@ public sealed class EngineKnowledgeStore(string directory)
         {
             var current = ReadEntry(id) ?? throw new InvalidDataException("引擎经验已不存在，请刷新列表。");
             var updated = current with { Enabled = enabled };
-            await LocalFiles.WriteJsonAsync(LocalFiles.UnderRoot(DirectoryPath, current.Id + ".json"), updated, ct);
+            await LocalFiles.WriteJsonAsync(LocalFiles.UnderRoot(DirectoryPath, current.Id + ".json"), updated, EngineJson.TypeInfo<EngineKnowledgeEntry>(EngineJson.Storage), ct);
             await UpdateSummaryIndexAsync(updated, CancellationToken.None);
         }
         finally { gate.Release(); }
@@ -243,10 +245,20 @@ public sealed class EngineKnowledgeStore(string directory)
         if (string.IsNullOrWhiteSpace(value) || value.Length > maximum) throw new InvalidDataException(name + "为空或过长。");
     }
 
-    private static string ContentRevision(EngineKnowledgeEntry entry) => LocalFiles.HashText(JsonSerializer.Serialize(new
+    private static string ContentRevision(EngineKnowledgeEntry entry) => LocalFiles.HashText(JsonSerializer.Serialize(new JsonObject
     {
-        entry.Key, entry.Family, aliases = entry.Aliases.Order(StringComparer.Ordinal), entry.Conditions, entry.Summary, entry.Guidance,
-        tools = entry.Tools.OrderBy(tool => tool.Name, StringComparer.Ordinal).Select(tool => new
-        { tool.Name, tool.Description, tool.Usage, files = tool.Files.OrderBy(pair => pair.Key, StringComparer.Ordinal) })
-    }));
+        ["Key"] = entry.Key,
+        ["Family"] = EngineJson.Node(entry.Family, EngineJson.Default),
+        ["aliases"] = EngineJson.Node((entry.Aliases.Order(StringComparer.Ordinal)).ToArray(), EngineJson.Default),
+        ["Conditions"] = entry.Conditions,
+        ["Summary"] = entry.Summary,
+        ["Guidance"] = entry.Guidance,
+        ["tools"] = EngineJson.Array(entry.Tools.OrderBy(tool => tool.Name, StringComparer.Ordinal).Select(tool => new JsonObject
+        {
+            ["Name"] = tool.Name,
+            ["Description"] = tool.Description,
+            ["Usage"] = tool.Usage,
+            ["files"] = EngineJson.Node((tool.Files.OrderBy(pair => pair.Key, StringComparer.Ordinal)).ToArray(), EngineJson.Default)
+        }))
+    }, EngineJson.TypeInfo<JsonObject>(EngineJson.Default)));
 }

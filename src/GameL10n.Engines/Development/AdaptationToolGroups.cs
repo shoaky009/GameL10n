@@ -1,4 +1,6 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Development;
 
@@ -29,12 +31,26 @@ internal static class AdaptationToolGroups
         .SelectMany(group => group.Tools.Select(tool => (Tool: tool, Group: group.Name)))
         .ToDictionary(item => item.Tool, item => item.Group, StringComparer.Ordinal);
 
-    internal static string Parameters { get; } = JsonSerializer.Serialize(new
+    internal static string Parameters { get; } = JsonSerializer.Serialize(new JsonObject
     {
-        groups = new { type = "array", minItems = 0, maxItems = Groups.Length + 1,
-            items = new { type = "string", @enum = Groups.Select(group => group.Name).Append("all") } },
-        mode = new { type = "string", @enum = new[] { "add", "replace" }, @default = "add" }
-    });
+        ["groups"] = new JsonObject
+        {
+            ["type"] = "array",
+            ["minItems"] = 0,
+            ["maxItems"] = Groups.Length + 1,
+            ["items"] = new JsonObject
+            {
+                ["type"] = "string",
+                ["enum"] = EngineJson.Node((Groups.Select(group => group.Name).Append("all")).ToArray(), EngineJson.Default)
+            }
+        },
+        ["mode"] = new JsonObject
+        {
+            ["type"] = "string",
+            ["enum"] = EngineJson.Node(new[] { "add", "replace" }, EngineJson.Default),
+            ["default"] = "add"
+        }
+    }, EngineJson.TypeInfo<JsonObject>(EngineJson.Default));
 
     internal static string Context { get; } = """
         Tools are loaded in groups to reduce request size. Basic file/history/staging/progress/checkpoint/blocker tools remain available.
@@ -96,7 +112,11 @@ internal static class AdaptationToolGroups
             throw new InvalidDataException("未知工具组。可用组：" + string.Join(", ", Groups.Select(group => group.Name).Append("all")));
         if (mode == "replace") session.EnabledToolGroups.Clear();
         Enable(session, names.Select(name => name!));
-        return new { enabledGroups = session.EnabledToolGroups.ToArray(), availableToolCount = ForRequest(session).Count };
+        return new JsonObject
+        {
+            ["enabledGroups"] = EngineJson.Node(session.EnabledToolGroups.ToArray(), EngineJson.Web),
+            ["availableToolCount"] = ForRequest(session).Count
+        };
     }
 
     internal static void Restore(AdaptationSession session)

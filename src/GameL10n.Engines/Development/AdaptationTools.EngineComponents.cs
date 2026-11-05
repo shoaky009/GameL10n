@@ -1,5 +1,7 @@
 using System.Text.Json;
 using GameL10n.Core.Isolation;
+using System.Text.Json.Nodes;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Development;
 
@@ -51,18 +53,22 @@ public sealed partial class AdaptationTools
             new(1, id, operation, archive, Path.Combine(output, "manifest.json"), Path.Combine(output, "files"),
                 Path.Combine(output, "rebuilt", Path.GetFileName(archive)), filter, members, extensions, replacements), workspace, ct);
         var success = response.GetProperty("success").GetBoolean();
-        return new
+        return new JsonObject
         {
-            success, status = success ? "passed" : "failed", component = id, version = component.Version, revision = prepared.Dependency.Reference.Revision,
-            manifest = outputRelative + "/manifest.json",
-            error = success ? null : response.GetProperty("error").GetString(),
-            entryCount = success ? response.GetProperty("entryCount").GetInt32() : (int?)null,
-            selectedCount = success ? response.GetProperty("selectedCount").GetInt32() : (int?)null,
-            entries = success ? response.GetProperty("entries").EnumerateArray().Take(12).Select(item => item.Clone()).ToArray() : [],
-            extractedDirectory = success && operation == "extract" ? outputRelative + "/files" : null,
-            rebuiltArchive = success && operation == "rebuild" ? outputRelative + "/rebuilt/" + Path.GetFileName(archive) : null,
-            byteIdentical = success && operation == "rebuild" ? response.GetProperty("byteIdentical").GetBoolean() : (bool?)null,
-            runtimeStatus = "not-tested"
+            ["success"] = success,
+            ["status"] = success ? "passed" : "failed",
+            ["component"] = id,
+            ["version"] = component.Version,
+            ["revision"] = prepared.Dependency.Reference.Revision,
+            ["manifest"] = outputRelative + "/manifest.json",
+            ["error"] = success ? null : response.GetProperty("error").GetString(),
+            ["entryCount"] = success ? response.GetProperty("entryCount").GetInt32() : (int?)null,
+            ["selectedCount"] = success ? response.GetProperty("selectedCount").GetInt32() : (int?)null,
+            ["entries"] = EngineJson.Node(success ? response.GetProperty("entries").EnumerateArray().Take(12).Select(item => item.Clone()).ToArray() : [], EngineJson.Web),
+            ["extractedDirectory"] = success && operation == "extract" ? outputRelative + "/files" : null,
+            ["rebuiltArchive"] = success && operation == "rebuild" ? outputRelative + "/rebuilt/" + Path.GetFileName(archive) : null,
+            ["byteIdentical"] = success && operation == "rebuild" ? response.GetProperty("byteIdentical").GetBoolean() : (bool?)null,
+            ["runtimeStatus"] = "not-tested"
         };
     }
 }

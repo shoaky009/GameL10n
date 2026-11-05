@@ -1,6 +1,7 @@
 using System.Text.Json;
 using GameL10n.Core.Development;
 using GameL10n.Core.Storage;
+using GameL10n.Core.Serialization;
 
 internal static class EngineToolsPackage
 {
@@ -32,7 +33,7 @@ internal static class EngineToolsPackage
                 Directory.CreateDirectory(Path.GetDirectoryName(target)!);
                 File.Copy(LocalFiles.UnderRoot(runtime, file), target, true);
             }
-            await LocalFiles.WriteJsonAsync(Path.Combine(output, "current.json"), pin);
+            await LocalFiles.WriteJsonAsync(Path.Combine(output, "current.json"), pin, DiagnosticJson.TypeInfo<EngineReferencePin>(DiagnosticJson.Storage));
             var verification = new EngineReferenceToolkit(output, bundledDirectory: Path.Combine(output, ".no-bundle"));
             await verification.EnsureReferenceAsync(pin, default);
             await verification.EnsurePythonAsync(pin, python.Dependency, default);

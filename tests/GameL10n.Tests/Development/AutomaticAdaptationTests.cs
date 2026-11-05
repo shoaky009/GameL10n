@@ -118,7 +118,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         Assert.NotNull(result.BaselineFingerprint);
         Assert.Equal(originalHash, Hash(Path.Combine(package.DirectoryPath, "adapter.dll")));
         Assert.Empty(Directory.GetFileSystemEntries(Path.Combine(root, "verification")));
-        var saved = await LocalFiles.ReadJsonAsync<PublishedPackageVerification>(Path.Combine(project, "package-verification.json"));
+        var saved = await LocalFiles.ReadJsonAsync<PublishedPackageVerification>(Path.Combine(project, "package-verification.json"), FixtureJson.TypeInfo<global::GameL10n.Core.Development.PublishedPackageVerification>(FixtureJson.Storage));
         Assert.Equal(result.Status, saved!.Status);
     }
 
@@ -159,7 +159,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         Assert.False(result.Passed);
         Assert.Contains("fixture timeout", result.Diagnostics);
         Assert.Empty(Directory.GetFileSystemEntries(Path.Combine(root, "verification")));
-        Assert.False((await LocalFiles.ReadJsonAsync<PublishedPackageVerification>(Path.Combine(project, "package-verification.json")))!.Passed);
+        Assert.False((await LocalFiles.ReadJsonAsync<PublishedPackageVerification>(Path.Combine(project, "package-verification.json"), FixtureJson.TypeInfo<global::GameL10n.Core.Development.PublishedPackageVerification>(FixtureJson.Storage)))!.Passed);
     }
 
     private async Task<(GeneratedAdapterPackage Package, string Project, string Source)> PackageVerificationFixtureAsync()
@@ -172,7 +172,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         var source = Directory.CreateDirectory(Path.Combine(project, "sources", fingerprint)).FullName;
         File.Copy(Path.Combine(game, "script.txt"), Path.Combine(source, "script.txt"));
         await LocalFiles.WriteJsonAsync(Path.Combine(project, "source.json"),
-            new SourceSnapshot(Path.GetRelativePath(project, source), package.Id, package.Version, files));
+            new SourceSnapshot(Path.GetRelativePath(project, source), package.Id, package.Version, files), FixtureJson.TypeInfo<global::GameL10n.Core.Pipeline.SourceSnapshot>(FixtureJson.Storage));
         var baseline = await new GeneratedGameAdapter(package, Toolchain(), new ScriptedRunner(), Path.Combine(root, "baseline-run")).ExtractAsync(source);
         await new ExtractionStore(project).StoreAsync(fingerprint, package.Id, package.Version, baseline);
         return (package, project, source);
@@ -375,11 +375,11 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         var request = Request();
         await new AutomaticAdaptationService(model, Runtime(runner), store).AdaptAsync(request);
         Assert.Equal(1, runs);
-        var state = await GameL10n.Core.Storage.LocalFiles.ReadJsonAsync<AdaptationSession>(Path.Combine(workspace, "session.json"));
+        var state = await GameL10n.Core.Storage.LocalFiles.ReadJsonAsync<AdaptationSession>(Path.Combine(workspace, "session.json"), FixtureJson.TypeInfo<global::GameL10n.Core.Development.AdaptationSession>(FixtureJson.Storage));
         Assert.Equal(arguments, Assert.Single(state!.SuccessfulProbes).Arguments);
         Assert.Contains("development", state.EnabledToolGroups);
         state.SuccessfulProbes.Add(new("run_csharp", "{\"sourceFiles\":[\"work/legacy.cs\"]}", 0));
-        await GameL10n.Core.Storage.LocalFiles.WriteJsonAsync(Path.Combine(workspace, "session.json"), state);
+        await GameL10n.Core.Storage.LocalFiles.WriteJsonAsync(Path.Combine(workspace, "session.json"), state, FixtureJson.TypeInfo<object>(FixtureJson.Storage));
         await new AutomaticAdaptationService(new FakeModel(CheckContext), Runtime(runner), store).AdaptAsync(request);
         Assert.Equal(1, runs);
     }
@@ -420,7 +420,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         Assert.Equal(2, model.Calls);
         Assert.Equal(AdaptationStatus.Failed, result.Status);
         Assert.Equal(20_200, result.Usage.TotalTokens);
-        var state = await GameL10n.Core.Storage.LocalFiles.ReadJsonAsync<AdaptationSession>(Path.Combine(store.WorkDirectory, "current/session.json"));
+        var state = await GameL10n.Core.Storage.LocalFiles.ReadJsonAsync<AdaptationSession>(Path.Combine(store.WorkDirectory, "current/session.json"), FixtureJson.TypeInfo<global::GameL10n.Core.Development.AdaptationSession>(FixtureJson.Storage));
         Assert.Empty(state!.PendingCalls);
         Assert.DoesNotContain(state.Messages, message => message.Role == "assistant");
     }
@@ -498,7 +498,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         await new AutomaticAdaptationService(continuation, Runtime(new ScriptedRunner()), store)
             .AdaptAsync(request with { ImproveExisting = false, UserInstruction = null });
         var saved = await GameL10n.Core.Storage.LocalFiles.ReadJsonAsync<AdaptationSession>(
-            Path.Combine(store.WorkDirectory, "current", "session.json"));
+            Path.Combine(store.WorkDirectory, "current", "session.json"), FixtureJson.TypeInfo<global::GameL10n.Core.Development.AdaptationSession>(FixtureJson.Storage));
         Assert.Equal(objective, saved!.Objective);
         Assert.Equal(1, continuation.Calls);
     }
@@ -972,7 +972,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         var store = new LocalAdapterPackageStore(Path.Combine(root, "store"));
         await GameL10n.Core.Storage.LocalFiles.WriteJsonAsync(Path.Combine(store.WorkDirectory, "current", "session.json"),
             new AdaptationSession { GameId = request.GameId, GameDirectory = request.GameDirectory, ModelIdentity = "fake",
-                Messages = [new("user", "develop"), new("assistant", ToolCalls: [pending])], PendingCalls = [pending] });
+                Messages = [new("user", "develop"), new("assistant", ToolCalls: [pending])], PendingCalls = [pending] }, FixtureJson.TypeInfo<global::GameL10n.Core.Development.AdaptationSession>(FixtureJson.Storage));
         var model = new FakeModel(context =>
         {
             var messages = context.Messages.ToList();
@@ -1034,7 +1034,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         Assert.Equal(result.ProgressNote, result.LastBreakthrough);
         Assert.Contains(updates.Updates, update => update.ProgressNote == result.ProgressNote);
         Assert.Equal(2, model.Calls);
-        var saved = await GameL10n.Core.Storage.LocalFiles.ReadJsonAsync<AdaptationSession>(Path.Combine(store.WorkDirectory, "current/session.json"));
+        var saved = await GameL10n.Core.Storage.LocalFiles.ReadJsonAsync<AdaptationSession>(Path.Combine(store.WorkDirectory, "current/session.json"), FixtureJson.TypeInfo<global::GameL10n.Core.Development.AdaptationSession>(FixtureJson.Storage));
         Assert.Equal(result.ProgressNote, saved!.ProgressNote);
         Assert.Contains("Index understood", saved.Notes);
         Assert.Null(saved.VerifiedPackage);
@@ -1082,7 +1082,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         Assert.Equal("breakthrough", result.LastBreakthrough!.Kind);
         Assert.Contains(updates.Updates, update => update.ProgressNote?.Kind == "breakthrough");
         Assert.Equal(result.ProgressNote, updates.Updates.Last().ProgressNote);
-        var saved = await GameL10n.Core.Storage.LocalFiles.ReadJsonAsync<AdaptationSession>(Path.Combine(store.WorkDirectory, "current", "session.json"));
+        var saved = await GameL10n.Core.Storage.LocalFiles.ReadJsonAsync<AdaptationSession>(Path.Combine(store.WorkDirectory, "current", "session.json"), FixtureJson.TypeInfo<global::GameL10n.Core.Development.AdaptationSession>(FixtureJson.Storage));
         Assert.Equal(result.ProgressNote, saved!.ProgressNote);
         Assert.Equal(result.LastBreakthrough, saved.LastBreakthrough);
 
@@ -1117,7 +1117,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         Assert.Equal("correction", corrected.ProgressNote!.Kind);
         Assert.Null(corrected.LastBreakthrough);
         Assert.Null(corrected.Adapter);
-        var saved = await GameL10n.Core.Storage.LocalFiles.ReadJsonAsync<AdaptationSession>(Path.Combine(store.WorkDirectory, "current", "session.json"));
+        var saved = await GameL10n.Core.Storage.LocalFiles.ReadJsonAsync<AdaptationSession>(Path.Combine(store.WorkDirectory, "current", "session.json"), FixtureJson.TypeInfo<global::GameL10n.Core.Development.AdaptationSession>(FixtureJson.Storage));
         Assert.Null(saved!.LastBreakthrough);
         Assert.Equal(corrected.ProgressNote, saved.ProgressNote);
     }
@@ -1238,7 +1238,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         Assert.Null(result.Adapter);
         Assert.Null(store.LoadActive("game"));
         Assert.True(File.Exists(Path.Combine(store.WorkDirectory, "current", "work", "next.txt")));
-        var saved = await GameL10n.Core.Storage.LocalFiles.ReadJsonAsync<AdaptationSession>(Path.Combine(store.WorkDirectory, "current", "session.json"));
+        var saved = await GameL10n.Core.Storage.LocalFiles.ReadJsonAsync<AdaptationSession>(Path.Combine(store.WorkDirectory, "current", "session.json"), FixtureJson.TypeInfo<global::GameL10n.Core.Development.AdaptationSession>(FixtureJson.Storage));
         Assert.Equal(result.Status, saved!.LastStatus);
         Assert.Equal(result.Blocker, saved.Blocker);
         Assert.Equal(result.NextAction, saved.NextAction);
@@ -1324,7 +1324,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
             .AdaptAsync(request with { UserInstruction = feedback });
         Assert.Equal(AdaptationStatus.Unsupported, result.Status);
         Assert.False(result.Blocker!.RequiresUserInput);
-        var saved = await GameL10n.Core.Storage.LocalFiles.ReadJsonAsync<AdaptationSession>(Path.Combine(store.WorkDirectory, "current", "session.json"));
+        var saved = await GameL10n.Core.Storage.LocalFiles.ReadJsonAsync<AdaptationSession>(Path.Combine(store.WorkDirectory, "current", "session.json"), FixtureJson.TypeInfo<global::GameL10n.Core.Development.AdaptationSession>(FixtureJson.Storage));
         Assert.Equal(feedback, saved!.UserInstruction);
     }
 
@@ -1365,7 +1365,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
                 GameId = request.GameId, GameDirectory = request.GameDirectory, ModelIdentity = "fake",
                 LastStatus = AdaptationStatus.Activated, Summary = "对话表已通过验证。", Notes = "物品文字位于序列化对象字段。",
                 Messages = [new("user", "implement adapter"), new("assistant", "原有对话表已完成。")]
-            });
+            }, FixtureJson.TypeInfo<global::GameL10n.Core.Development.AdaptationSession>(FixtureJson.Storage));
         var model = new FakeModel(context =>
         {
             var continuation = context.Messages.Last(item => item.Role == "user").Content;
@@ -1389,7 +1389,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         var queued = new AgentToolCall("old-write", "write_file", """{"path":"src/obsolete.cs","content":"obsolete"}""");
         await GameL10n.Core.Storage.LocalFiles.WriteJsonAsync(Path.Combine(store.WorkDirectory, "current", "session.json"),
             new AdaptationSession { GameId = request.GameId, GameDirectory = request.GameDirectory, ModelIdentity = "fake",
-                Messages = [new("user", "develop"), new("assistant", ToolCalls: [queued])], PendingCalls = [queued] });
+                Messages = [new("user", "develop"), new("assistant", ToolCalls: [queued])], PendingCalls = [queued] }, FixtureJson.TypeInfo<global::GameL10n.Core.Development.AdaptationSession>(FixtureJson.Storage));
         var model = new FakeModel(context =>
         {
             var skipped = Assert.Single(context.Messages, item => item.Role == "tool" && item.ToolCallId == queued.Id);
@@ -1429,7 +1429,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
             HistoryStart = 3,
             Summary = "Parsing complete; fonts unresolved.", ResourceHashes = new() { ["script.txt"] = "existing-hash" },
             VerificationDiagnostics = ["Byte roundtrip passed", "CP932 cannot encode Chinese"]
-        });
+        }, FixtureJson.TypeInfo<global::GameL10n.Core.Development.AdaptationSession>(FixtureJson.Storage));
         var model = new FakeModel(context =>
         {
             var restored = Assert.Single(context.Messages, item => item.Role == "user" && item.Content.Contains("恢复快照", StringComparison.Ordinal));
@@ -1459,7 +1459,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         {
             GameId = request.GameId, GameDirectory = request.GameDirectory, ModelIdentity = "fake",
             Messages = [new("user", "develop"), new("assistant", new string('x', 210_000))]
-        });
+        }, FixtureJson.TypeInfo<global::GameL10n.Core.Development.AdaptationSession>(FixtureJson.Storage));
         var turn = 0;
         var model = new FakeModel(context =>
         {
@@ -1476,7 +1476,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         var result = await new AutomaticAdaptationService(model, Runtime(new ScriptedRunner()), store).AdaptAsync(request);
         Assert.Equal(2, model.Calls);
         Assert.Equal(AdaptationStatus.WaitingForUser, result.Status);
-        var saved = await GameL10n.Core.Storage.LocalFiles.ReadJsonAsync<AdaptationSession>(Path.Combine(store.WorkDirectory, "current", "session.json"));
+        var saved = await GameL10n.Core.Storage.LocalFiles.ReadJsonAsync<AdaptationSession>(Path.Combine(store.WorkDirectory, "current", "session.json"), FixtureJson.TypeInfo<global::GameL10n.Core.Development.AdaptationSession>(FixtureJson.Storage));
         Assert.Contains("font support pending", saved!.Notes);
     }
 
@@ -1499,7 +1499,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
             Messages = [new("user", "repair"), new("assistant", original + new string('x', 210_000)),
                 new("assistant", ToolCalls: [new("old-failure", "test_adapter", "{}")]),
                 new("tool", oldResult, ToolCallId: "old-failure")]
-        });
+        }, FixtureJson.TypeInfo<global::GameL10n.Core.Development.AdaptationSession>(FixtureJson.Storage));
         AgentToolCall[] calls = [new("recent-a", "read_file", """{"root":"game","path":"script.txt","length":6,"encoding":"utf8"}"""),
             new("recent-b", "list_files", """{"root":"game"}""")];
         var provider = responses
@@ -1534,7 +1534,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         var result = await new AutomaticAdaptationService(model, Runtime(new ScriptedRunner()), store).AdaptAsync(request);
         Assert.True(result.Status == AdaptationStatus.WaitingForUser, string.Join("\n", result.Diagnostics));
         Assert.Equal(4, model.Calls);
-        var saved = (await LocalFiles.ReadJsonAsync<AdaptationSession>(path))!;
+        var saved = (await LocalFiles.ReadJsonAsync<AdaptationSession>(path, FixtureJson.TypeInfo<global::GameL10n.Core.Development.AdaptationSession>(FixtureJson.Storage)))!;
         Assert.True(saved.HistoryStart > 0);
         Assert.StartsWith(original, saved.Messages[1].Content);
         Assert.Equal(oldResult, Assert.Single(saved.Messages, message => message.ToolCallId == "old-failure").Content);
@@ -1599,7 +1599,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         Assert.Equal(AdaptationStatus.WaitingForUser, result.Status);
         Assert.Equal(2, model.Calls);
         Assert.Equal(1, runs);
-        var saved = await GameL10n.Core.Storage.LocalFiles.ReadJsonAsync<AdaptationSession>(Path.Combine(workspace, "session.json"));
+        var saved = await GameL10n.Core.Storage.LocalFiles.ReadJsonAsync<AdaptationSession>(Path.Combine(workspace, "session.json"), FixtureJson.TypeInfo<global::GameL10n.Core.Development.AdaptationSession>(FixtureJson.Storage));
         Assert.False(saved!.PendingCallsAreSequential);
         Assert.Equal(new[] { "one", "two", "run" }, saved.Messages.Where(message => message.Role == "tool").Take(3).Select(message => message.ToolCallId));
     }
@@ -1643,7 +1643,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         };
         if (!interrupted) state.Messages.Add(new("tool", """{"success":true,"result":{"changed":true}}""", ToolCallId: write.Id));
         var path = Path.Combine(store.WorkDirectory, "current/session.json");
-        await GameL10n.Core.Storage.LocalFiles.WriteJsonAsync(path, state);
+        await GameL10n.Core.Storage.LocalFiles.WriteJsonAsync(path, state, FixtureJson.TypeInfo<global::GameL10n.Core.Development.AdaptationSession>(FixtureJson.Storage));
         var runs = 0;
         var model = new FakeModel(context =>
         {
@@ -1654,7 +1654,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         });
         await new AutomaticAdaptationService(model, Runtime(new ProbeRunner(_ => runs++)), store).AdaptAsync(request);
         Assert.Equal(interrupted ? 0 : 1, runs);
-        var saved = await GameL10n.Core.Storage.LocalFiles.ReadJsonAsync<AdaptationSession>(path);
+        var saved = await GameL10n.Core.Storage.LocalFiles.ReadJsonAsync<AdaptationSession>(path, FixtureJson.TypeInfo<global::GameL10n.Core.Development.AdaptationSession>(FixtureJson.Storage));
         Assert.False(saved!.PendingCallsAreSequential);
         Assert.Empty(saved.PendingCalls);
     }
@@ -1679,7 +1679,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         });
         var result = await new AutomaticAdaptationService(model, Runtime(new ScriptedRunner()), store).AdaptAsync(request);
         Assert.Equal(AdaptationStatus.WaitingForUser, result.Status);
-        var saved = await GameL10n.Core.Storage.LocalFiles.ReadJsonAsync<AdaptationSession>(Path.Combine(store.WorkDirectory, "current/session.json"));
+        var saved = await GameL10n.Core.Storage.LocalFiles.ReadJsonAsync<AdaptationSession>(Path.Combine(store.WorkDirectory, "current/session.json"), FixtureJson.TypeInfo<global::GameL10n.Core.Development.AdaptationSession>(FixtureJson.Storage));
         Assert.Equal(24, saved!.LastEfficiencyReviewTurn);
         Assert.Equal(25, saved.LastImplementationTurn);
     }
@@ -1873,7 +1873,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
             messages.Add(new("tool", payload, ToolCallId: "read" + i));
         }
         await GameL10n.Core.Storage.LocalFiles.WriteJsonAsync(Path.Combine(store.WorkDirectory, "current/session.json"),
-            new AdaptationSession { GameId = request.GameId, GameDirectory = request.GameDirectory, ModelIdentity = "fake", Messages = messages });
+            new AdaptationSession { GameId = request.GameId, GameDirectory = request.GameDirectory, ModelIdentity = "fake", Messages = messages }, FixtureJson.TypeInfo<global::GameL10n.Core.Development.AdaptationSession>(FixtureJson.Storage));
         var model = new FakeModel(context =>
         {
             Assert.Single(context.Messages, message => message.Content == payload);
@@ -1911,7 +1911,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         var messages = Enumerable.Range(0, 70).Select(i => new AgentMessage("user", "context " + i)).ToList();
         messages.Add(new("assistant", new string('x', 70_000)));
         await GameL10n.Core.Storage.LocalFiles.WriteJsonAsync(Path.Combine(store.WorkDirectory, "current", "session.json"),
-            new AdaptationSession { GameId = request.GameId, GameDirectory = request.GameDirectory, ModelIdentity = "fake", Messages = messages });
+            new AdaptationSession { GameId = request.GameId, GameDirectory = request.GameDirectory, ModelIdentity = "fake", Messages = messages }, FixtureJson.TypeInfo<global::GameL10n.Core.Development.AdaptationSession>(FixtureJson.Storage));
         var model = new FakeModel(context =>
         {
             Assert.DoesNotContain(context.Messages, message => message.Content.StartsWith("当前会话较长。下一步先调用 checkpoint"));
@@ -1936,7 +1936,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         {
             GameId = request.GameId, GameDirectory = request.GameDirectory, ModelIdentity = "fake",
             Messages = [new("user", "continue existing parser"), new("assistant", ProviderData: original)]
-        });
+        }, FixtureJson.TypeInfo<global::GameL10n.Core.Development.AdaptationSession>(FixtureJson.Storage));
         var model = new FakeModel(context =>
         {
             Assert.DoesNotContain(context.Messages, item => item.Content.StartsWith("当前会话较长。下一步先调用 checkpoint", StringComparison.Ordinal));
@@ -1967,7 +1967,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         await GameL10n.Core.Storage.LocalFiles.WriteJsonAsync(path, new AdaptationSession
         {
             GameId = request.GameId, GameDirectory = request.GameDirectory, ModelIdentity = "fake", Messages = messages
-        });
+        }, FixtureJson.TypeInfo<global::GameL10n.Core.Development.AdaptationSession>(FixtureJson.Storage));
         var round = 0;
         var model = new FakeModel(context =>
         {
@@ -1987,7 +1987,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         var result = await new AutomaticAdaptationService(model, Runtime(new ScriptedRunner()), store).AdaptAsync(request);
         Assert.Equal(AdaptationStatus.WaitingForUser, result.Status);
         Assert.Equal(2, model.Calls);
-        var saved = await GameL10n.Core.Storage.LocalFiles.ReadJsonAsync<AdaptationSession>(path);
+        var saved = await GameL10n.Core.Storage.LocalFiles.ReadJsonAsync<AdaptationSession>(path, FixtureJson.TypeInfo<global::GameL10n.Core.Development.AdaptationSession>(FixtureJson.Storage));
         Assert.Equal(original, Assert.Single(saved!.Messages, message => message.ToolCallId == "read0").Content);
     }
 
@@ -2038,7 +2038,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         await GameL10n.Core.Storage.LocalFiles.WriteJsonAsync(Path.Combine(store.WorkDirectory, "current", "session.json"),
             new AdaptationSession { GameId = request.GameId, GameDirectory = request.GameDirectory, ModelIdentity = previousModel,
                 Messages = [new("user", "develop adapter"), new("assistant", ToolCalls: [call])],
-                PendingCalls = [call], RunningToolId = call.Id, VerifiedPackage = CreatePackage() });
+                PendingCalls = [call], RunningToolId = call.Id, VerifiedPackage = CreatePackage() }, FixtureJson.TypeInfo<global::GameL10n.Core.Development.AdaptationSession>(FixtureJson.Storage));
         var model = new FakeModel(context =>
         {
             if (previousModel == "fake")
@@ -2053,7 +2053,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         var result = await new AutomaticAdaptationService(model, Runtime(new ScriptedRunner()), store).AdaptAsync(request);
         Assert.Equal(AdaptationStatus.Incomplete, result.Status);
         Assert.False(File.Exists(Path.Combine(store.WorkDirectory, "current", "src", "should-not-run.cs")));
-        var saved = await GameL10n.Core.Storage.LocalFiles.ReadJsonAsync<AdaptationSession>(Path.Combine(store.WorkDirectory, "current", "session.json"));
+        var saved = await GameL10n.Core.Storage.LocalFiles.ReadJsonAsync<AdaptationSession>(Path.Combine(store.WorkDirectory, "current", "session.json"), FixtureJson.TypeInfo<global::GameL10n.Core.Development.AdaptationSession>(FixtureJson.Storage));
         Assert.Null(saved!.VerifiedPackage);
         Assert.Null(saved.RunningToolId);
     }
@@ -2357,7 +2357,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         Assert.Equal(AdaptationStatus.WaitingForUser, result.Status);
         Assert.Equal(2, model.Calls);
         Assert.Equal(previousBuilds, builds);
-        var saved = await LocalFiles.ReadJsonAsync<AdaptationSession>(Path.Combine(store.WorkDirectory, "current", "session.json"));
+        var saved = await LocalFiles.ReadJsonAsync<AdaptationSession>(Path.Combine(store.WorkDirectory, "current", "session.json"), FixtureJson.TypeInfo<global::GameL10n.Core.Development.AdaptationSession>(FixtureJson.Storage));
         var failure = Assert.Single(saved!.ReuseFailures);
         Assert.Equal("partial-translation-re-extraction", failure.FailedStage);
         Assert.True(failure.OriginalRoundtripPassed);

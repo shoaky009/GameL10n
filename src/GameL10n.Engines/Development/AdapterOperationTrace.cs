@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Text.Json.Nodes;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Development;
 
@@ -11,17 +13,33 @@ public sealed class AdapterOperationTrace(Func<object, Task>? write, string oper
     public async Task<T> MeasureAsync<T>(string phase, Func<Task<T>> action, object? detail = null, bool record = true)
     {
         if (write is null || !record) return await action();
-        await WriteAsync(new { operation, adapterId, version, phase, status = "started", detail });
+        await WriteAsync(new JsonObject
+        {
+            ["operation"] = operation,
+            ["adapterId"] = adapterId,
+            ["version"] = version,
+            ["phase"] = phase,
+            ["status"] = "started",
+            ["detail"] = EngineJson.Node(detail, EngineJson.Web)
+        });
         var watch = Stopwatch.StartNew();
         Exception? failure = null;
         try { return await action(); }
         catch (Exception error) { failure = error; throw; }
         finally
         {
-            await WriteAsync(new { operation, adapterId, version, phase,
-                status = failure is OperationCanceledException ? "cancelled" : failure is null ? "completed" : "failed",
-                elapsedMs = watch.ElapsedMilliseconds, errorType = failure?.GetType().Name,
-                error = failure?.Message[..Math.Min(failure.Message.Length, 1500)], detail });
+            await WriteAsync(new JsonObject
+            {
+                ["operation"] = operation,
+                ["adapterId"] = adapterId,
+                ["version"] = version,
+                ["phase"] = phase,
+                ["status"] = failure is OperationCanceledException ? "cancelled" : failure is null ? "completed" : "failed",
+                ["elapsedMs"] = watch.ElapsedMilliseconds,
+                ["errorType"] = failure?.GetType().Name,
+                ["error"] = failure?.Message[..Math.Min(failure.Message.Length, 1500)],
+                ["detail"] = EngineJson.Node(detail, EngineJson.Web)
+            });
         }
     }
 
@@ -36,7 +54,11 @@ public sealed class AdapterOperationTrace(Func<object, Task>? write, string oper
             try { bytes = new FileInfo(path).Length; }
             catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
         }
-        return MeasureAsync(phase, action, new { path = relativePath, bytes }, record: bytes >= LargeFileBytes);
+        return MeasureAsync(phase, action, new JsonObject
+        {
+            ["path"] = relativePath,
+            ["bytes"] = bytes
+        }, record: bytes >= LargeFileBytes);
     }
 
     public Task FileAsync(string phase, string relativePath, string path, Func<Task> action) =>

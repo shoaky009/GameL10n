@@ -19,7 +19,7 @@ public sealed class TranslationMemoryTests : IDisposable
         var unit = new TranslationUnit("1", "story", "1", "hello", "scene");
         var key = memory.Key(unit, policy);
         await LocalFiles.WriteJsonAsync(Path.Combine(legacy, key + ".json"), new MemoryEntry(key, unit.SourceText,
-            unit.Context, "你好", "test", DateTimeOffset.UtcNow));
+            unit.Context, "你好", "test", DateTimeOffset.UtcNow), FixtureJson.TypeInfo<global::GameL10n.Core.Translation.MemoryEntry>(FixtureJson.Storage));
         Assert.Equal("你好", await memory.FindAsync(unit, policy));
         Assert.True(File.Exists(Path.Combine(destination, key[..2] + ".json")));
         await File.WriteAllTextAsync(Path.Combine(legacy, key + ".json"), "damaged legacy data must never be read again");

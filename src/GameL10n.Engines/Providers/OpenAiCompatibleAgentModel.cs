@@ -2,11 +2,15 @@ using System.Text;
 using System.Text.Json;
 using GameL10n.Core.Development;
 using GameL10n.Core.Translation;
+using System.Text.Json.Nodes;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Providers;
 
 public sealed class OpenAiCompatibleAgentModel : OpenAiCompatibleClient, IAdaptationAgentModel
 {
+    private static readonly JsonSerializerOptions AgentJson = new(Json) { TypeInfoResolver = EngineJson.Resolver };
+
     public OpenAiCompatibleAgentModel(HttpClient httpClient, ProviderSettings settings, string? diagnosticDirectory = null)
         : base(httpClient, settings, diagnosticDirectory) { }
 
@@ -39,11 +43,11 @@ public sealed class OpenAiCompatibleAgentModel : OpenAiCompatibleClient, IAdapta
         }
         catch (TranslationProviderException error)
         {
-            await WriteFailureLogAsync("adaptation", error, new
+            await WriteFailureLogAsync("adaptation", error, new JsonObject
             {
-                maximumOutputTokens = request.MaximumOutputTokens,
-                reasoningEffort = _settings.AnalysisReasoningEffort,
-                response = responseDetails
+                ["maximumOutputTokens"] = request.MaximumOutputTokens,
+                ["reasoningEffort"] = _settings.AnalysisReasoningEffort,
+                ["response"] = EngineJson.Node(responseDetails, EngineJson.Web)
             });
             throw;
         }
@@ -64,21 +68,21 @@ public sealed class OpenAiCompatibleAgentModel : OpenAiCompatibleClient, IAdapta
         var usage = Property(root, "usage");
         var usageDetails = Property(usage, _settings.Protocol == ProviderApiProtocol.Responses
             ? "output_tokens_details" : "completion_tokens_details");
-        return new
+        return new JsonObject
         {
-            status = String(Property(root, "status")),
-            finishReason = String(Property(choice, "finish_reason")),
-            incompleteReason = String(Property(Property(root, "incomplete_details"), "reason")),
-            reasoningTokens = usageDetails.ValueKind == JsonValueKind.Object ? TokenCount(usageDetails, "reasoning_tokens") : null,
-            toolCallCount = calls.Count(),
+            ["status"] = String(Property(root, "status")),
+            ["finishReason"] = String(Property(choice, "finish_reason")),
+            ["incompleteReason"] = String(Property(Property(root, "incomplete_details"), "reason")),
+            ["reasoningTokens"] = usageDetails.ValueKind == JsonValueKind.Object ? TokenCount(usageDetails, "reasoning_tokens") : null,
+            ["toolCallCount"] = calls.Count(),
             // Metadata only: never retain generated code, arguments or opaque reasoning in failure diagnostics.
-            tools = calls.Take(8).Select(call => new
+            ["tools"] = EngineJson.Array(calls.Take(8).Select(call => new JsonObject
             {
-                name = RedactCredential(Limit(String(Property(call, "name")), 80)),
-                status = String(Property(call, "status")),
-                argumentBytes = Encoding.UTF8.GetByteCount(String(Property(call, "arguments")) ?? ""),
-                argumentsComplete = ValidToolArguments(String(Property(call, "arguments")))
-            }).ToArray()
+                ["name"] = RedactCredential(Limit(String(Property(call, "name")), 80)),
+                ["status"] = String(Property(call, "status")),
+                ["argumentBytes"] = Encoding.UTF8.GetByteCount(String(Property(call, "arguments")) ?? ""),
+                ["argumentsComplete"] = ValidToolArguments(String(Property(call, "arguments")))
+            }).ToArray())
         };
     }
 
@@ -122,41 +126,77 @@ public sealed class OpenAiCompatibleAgentModel : OpenAiCompatibleClient, IAdapta
 
     private byte[] BuildAgentPayload(AgentRequest request)
     {
-        var messages = new List<object>();
+        var messages = new JsonArray();
         if (_settings.Protocol == ProviderApiProtocol.ChatCompletions)
-            messages.Add(new { role = "system", content = request.Instructions });
+            messages.Add(new JsonObject
+            {
+                ["role"] = "system",
+                ["content"] = request.Instructions
+            });
         foreach (var message in request.Messages)
         {
             if (message.Role == "assistant" && message.ProviderData is JsonElement original)
             {
                 if (_settings.Protocol == ProviderApiProtocol.Responses)
-                    messages.AddRange(original.EnumerateArray().Select(item => (object)item));
-                else messages.Add(original);
+                    foreach (var item in original.EnumerateArray()) messages.Add(JsonNode.Parse(item.GetRawText()));
+                else messages.Add(JsonNode.Parse(original.GetRawText()));
             }
             else if (message.Role == "tool")
             {
                 messages.Add(_settings.Protocol == ProviderApiProtocol.Responses
-                    ? new { type = "function_call_output", call_id = message.ToolCallId, output = message.Content }
-                    : (object)new { role = "tool", tool_call_id = message.ToolCallId, content = message.Content });
+                    ? new JsonObject
+                    {
+                        ["type"] = "function_call_output",
+                        ["call_id"] = message.ToolCallId,
+                        ["output"] = message.Content
+                    }
+                    : new JsonObject
+                    {
+                        ["role"] = "tool",
+                        ["tool_call_id"] = message.ToolCallId,
+                        ["content"] = message.Content
+                    });
             }
             else if (message.Role == "assistant" && message.ToolCalls is { Count: > 0 })
             {
                 if (_settings.Protocol == ProviderApiProtocol.Responses)
                 {
-                    if (!string.IsNullOrEmpty(message.Content)) messages.Add(new { role = "assistant", content = message.Content });
-                    messages.AddRange(message.ToolCalls.Select(call => (object)new
-                        { type = "function_call", call_id = call.Id, name = call.Name, arguments = call.Arguments }));
+                    if (!string.IsNullOrEmpty(message.Content)) messages.Add(new JsonObject
+                    {
+                        ["role"] = "assistant",
+                        ["content"] = message.Content
+                    });
+                    foreach (var call in message.ToolCalls) messages.Add(new JsonObject
+                    {
+                        ["type"] = "function_call",
+                        ["call_id"] = call.Id,
+                        ["name"] = call.Name,
+                        ["arguments"] = call.Arguments
+                    });
                 }
-                else messages.Add(new
+                else messages.Add(new JsonObject
                 {
-                    role = "assistant", content = string.IsNullOrEmpty(message.Content) ? null : message.Content,
-                    tool_calls = message.ToolCalls.Select(call => new
-                        { id = call.Id, type = "function", function = new { name = call.Name, arguments = call.Arguments } })
+                    ["role"] = "assistant",
+                    ["content"] = string.IsNullOrEmpty(message.Content) ? null : message.Content,
+                    ["tool_calls"] = EngineJson.Array(message.ToolCalls.Select(call => new JsonObject
+                    {
+                        ["id"] = call.Id,
+                        ["type"] = "function",
+                        ["function"] = new JsonObject
+                        {
+                            ["name"] = call.Name,
+                            ["arguments"] = call.Arguments
+                        }
+                    }))
                 });
             }
-            else messages.Add(new { role = message.Role, content = message.Content });
+            else messages.Add(new JsonObject
+            {
+                ["role"] = message.Role,
+                ["content"] = message.Content
+            });
         }
-        var payload = new Dictionary<string, object>
+        var payload = new JsonObject
         {
             ["model"] = _settings.Model, ["tool_choice"] = "auto", ["parallel_tool_calls"] = true, ["stream"] = false
         };
@@ -164,22 +204,40 @@ public sealed class OpenAiCompatibleAgentModel : OpenAiCompatibleClient, IAdapta
         {
             payload["instructions"] = request.Instructions;
             payload["input"] = messages;
-            payload["tools"] = request.Tools.Select(tool => new
-                { type = "function", name = tool.Name, description = tool.Description, parameters = tool.Parameters, strict = false });
+            payload["tools"] = EngineJson.Array(request.Tools.Select(tool => new JsonObject
+            {
+                ["type"] = "function",
+                ["name"] = tool.Name,
+                ["description"] = tool.Description,
+                ["parameters"] = EngineJson.Node(tool.Parameters, EngineJson.Web),
+                ["strict"] = false
+            }));
             payload["max_output_tokens"] = request.MaximumOutputTokens;
             payload["store"] = false;
-            payload["include"] = new[] { "reasoning.encrypted_content" };
-            if (_settings.AnalysisReasoningEffort is { } effort) payload["reasoning"] = new { effort };
+            payload["include"] = new JsonArray { "reasoning.encrypted_content" };
+            if (_settings.AnalysisReasoningEffort is { } effort) payload["reasoning"] = new JsonObject
+            {
+                ["effort"] = effort
+            };
         }
         else
         {
             payload["messages"] = messages;
-            payload["tools"] = request.Tools.Select(tool => new { type = "function", function = new
-                { name = tool.Name, description = tool.Description, parameters = tool.Parameters, strict = false } });
+            payload["tools"] = EngineJson.Array(request.Tools.Select(tool => new JsonObject
+            {
+                ["type"] = "function",
+                ["function"] = new JsonObject
+                {
+                    ["name"] = tool.Name,
+                    ["description"] = tool.Description,
+                    ["parameters"] = EngineJson.Node(tool.Parameters, EngineJson.Web),
+                    ["strict"] = false
+                }
+            }));
             payload["max_completion_tokens"] = request.MaximumOutputTokens;
             if (_settings.AnalysisReasoningEffort is { } effort) payload["reasoning_effort"] = effort;
         }
-        return JsonSerializer.SerializeToUtf8Bytes(payload, Json);
+        return JsonSerializer.SerializeToUtf8Bytes(payload, EngineJson.TypeInfo<JsonObject>(AgentJson));
     }
 
     private AgentTurn ReadChatTurn(JsonElement root, TokenUsage usage, string? requestId, HashSet<string> toolNames)

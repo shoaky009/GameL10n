@@ -9,6 +9,7 @@ using GameL10n.Core.Patching;
 using GameL10n.Core.Pipeline;
 using GameL10n.Core.Storage;
 using GameL10n.Core.Translation;
+using GameL10n.Core.Serialization;
 
 // Repairs the generated launch entry with the application's original-source, cache and installer contracts.
 internal static class QlieRepair
@@ -24,7 +25,7 @@ internal static class QlieRepair
             projectDirectory = Path.GetFullPath(projectDirectory);
             workDirectory = Path.GetFullPath(workDirectory);
             adapterSource = Path.GetFullPath(adapterSource);
-            var project = await LocalFiles.ReadJsonAsync<GameProject>(Path.Combine(projectDirectory, "game.json"))
+            var project = await LocalFiles.ReadJsonAsync<GameProject>(Path.Combine(projectDirectory, "game.json"), DiagnosticJson.TypeInfo<GameProject>(DiagnosticJson.Storage))
                 ?? throw new InvalidDataException("项目不存在。");
             if (project.AdapterId != AdapterId)
                 throw new InvalidDataException("此修复仅支持 engine.qlie-filepack3-systemfont 适配器项目。");
@@ -34,7 +35,7 @@ internal static class QlieRepair
             var dataDirectory = Directory.GetParent(projectDirectory)!.Parent!.FullName;
             var adaptation = Path.Combine(projectDirectory, "adaptation", "current");
             var statePath = Path.Combine(adaptation, "session.json");
-            var previousState = await LocalFiles.ReadJsonAsync<AdaptationSession>(statePath);
+            var previousState = await LocalFiles.ReadJsonAsync<AdaptationSession>(statePath, DiagnosticJson.TypeInfo<AdaptationSession>(DiagnosticJson.Storage));
             if (previousState?.VerifiedPackage is { } previous
                 && (previous.Id != AdapterId || previous.Family?.AdapterId != AdapterId))
                 throw new InvalidDataException("开发记录不属于 QLIE systemfont 适配器。");
@@ -62,7 +63,7 @@ internal static class QlieRepair
             var adapter = new GeneratedGameAdapter(package, toolchain, runner, Path.Combine(workDirectory, "run"));
             var pipeline = new TranslationPipeline(dataDirectory);
             // The engine can rewrite live config.txt after a failed launch. Reuse verified originals instead of promoting it to source.
-            var snapshot = await LocalFiles.ReadJsonAsync<SourceSnapshot>(Path.Combine(projectDirectory, "source.json"))
+            var snapshot = await LocalFiles.ReadJsonAsync<SourceSnapshot>(Path.Combine(projectDirectory, "source.json"), DiagnosticJson.TypeInfo<SourceSnapshot>(DiagnosticJson.Storage))
                 ?? throw new InvalidDataException("未找到项目的原始资源快照。");
             if (snapshot.AdapterId != AdapterId || snapshot.Files.Count == 0)
                 throw new InvalidDataException("原始资源快照不属于 QLIE systemfont 适配器。");
@@ -79,7 +80,7 @@ internal static class QlieRepair
             var extraction = await adapter.ExtractAsync(sourceDirectory);
             var session = new GameSession(project.Id, project.GameDirectory, projectDirectory, sourceDirectory,
                 probe, snapshot.Files, extraction, adapter);
-            var ids = await LocalFiles.ReadJsonAsync<string[]>(Path.Combine(projectDirectory, "trial-selection.json"))
+            var ids = await LocalFiles.ReadJsonAsync<string[]>(Path.Combine(projectDirectory, "trial-selection.json"), DiagnosticJson.TypeInfo<string[]>(DiagnosticJson.Storage))
                 ?? throw new InvalidDataException("请先在应用中选择已完成翻译的试译文本。");
             if (ids.Length == 0 || ids.Distinct(StringComparer.Ordinal).Count() != ids.Length)
                 throw new InvalidDataException("试译选区为空或包含重复文本。");
@@ -146,12 +147,12 @@ internal static class QlieRepair
         var journalPath = installer.JournalPath;
         if (!File.Exists(journalPath)) return;
         var journalHash = await LocalFiles.HashFileAsync(journalPath);
-        var journal = await LocalFiles.ReadJsonAsync<InstalledJournal>(journalPath)
+        var journal = await LocalFiles.ReadJsonAsync<InstalledJournal>(journalPath, DiagnosticJson.TypeInfo<InstalledJournal>(DiagnosticJson.Storage))
             ?? throw new InvalidDataException("安装记录为空，本次修复未安装。");
         if (journal.SchemaVersion != 1 || journal.Entries is null)
             throw new InvalidDataException("安装记录无效，本次修复未安装。");
         var entries = journal.Entries.ToDictionary(entry => entry.RelativePath.Replace('\\', '/'), StringComparer.OrdinalIgnoreCase);
-        var manifest = await LocalFiles.ReadJsonAsync<PatchManifest>(Path.Combine(patchDirectory, PatchInstaller.ManifestFilename))
+        var manifest = await LocalFiles.ReadJsonAsync<PatchManifest>(Path.Combine(patchDirectory, PatchInstaller.ManifestFilename), DiagnosticJson.TypeInfo<PatchManifest>(DiagnosticJson.Storage))
             ?? throw new InvalidDataException("修复补丁缺少清单。");
         if (manifest.SchemaVersion != 1 || manifest.Files is null)
             throw new InvalidDataException("修复补丁清单无效。");
@@ -288,7 +289,7 @@ internal static class QlieRepair
         }
 
         var statePath = Path.Combine(adaptation, "session.json");
-        var state = await LocalFiles.ReadJsonAsync<AdaptationSession>(statePath)
+        var state = await LocalFiles.ReadJsonAsync<AdaptationSession>(statePath, DiagnosticJson.TypeInfo<AdaptationSession>(DiagnosticJson.Storage))
             ?? new AdaptationSession { GameId = project.Id, GameDirectory = Path.GetFullPath(project.GameDirectory) };
         const string summary = "已统一汉化字体内部名称与游戏配置，并将字号度量对齐原字体。原文、中文回填和程序结构检查通过，试译完全复用缓存；实际游戏排版尚待确认。";
         const string correction = "当前 QLIE 适配器保留原 EXE，输出独立 启动汉化.exe 并声明 build.launchExecutable，通过本机 Locale Emulator 沿用原 EXE 的日语配置，临时字体保留到游戏退出。system_fix 排除比例字体，七个非外字槽改成 system；槽5独立外字不变。引擎按 elfFullName 匹配配置，Windows 为变体 Regular 实例附加后缀，但 Locale Emulator 的 AdjustFontDataInternal 从 name 表 ID4 重新读取日语完整名称（缺失时用英语）。旧字体 ID4 误写为族名，导致宿主探针通过而转区游戏回退；实际游戏内存与 Locale Emulator 开源实现均印证此差异。生成字体的 ID4 现在与 config.txt、launch.xml 一致为族名加 Regular，ID1/16 保持族名，字体指纹包含元数据版本。启动器检查 name 表及原生枚举，不代表已运行游戏。参考 VNTextPatch-net8 的 QlieScript/SjisTunnelEncoding 及 VNTranslationTools 的 VNTextProxy，可提供脚本复用与另一种运行时字符转换方案，但不能只接入提取器就认为显示可用。原始快照位于 resources/，源码和工具在 src/，不要把游戏回退后的配置提升为原始资源。试译复用缓存且 API 调用为0；真实游戏内显示尚待确认。";
@@ -313,7 +314,7 @@ internal static class QlieRepair
         state.Messages.Add(new AgentMessage("user", checkpoint));
         Directory.CreateDirectory(Path.Combine(adaptation, "work"));
         await File.WriteAllTextAsync(Path.Combine(adaptation, "work", "status.md"), checkpoint);
-        await LocalFiles.WriteJsonAsync(statePath, state);
+        await LocalFiles.WriteJsonAsync(statePath, state, DiagnosticJson.TypeInfo<AdaptationSession>(DiagnosticJson.Storage));
     }
 
     private static void EnsureDesktopClosed()

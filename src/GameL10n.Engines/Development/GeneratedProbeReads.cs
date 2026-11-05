@@ -1,4 +1,6 @@
 using GameL10n.Core.Isolation;
+using System.Text.Json.Nodes;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Development;
 
@@ -8,8 +10,13 @@ internal sealed record ProbeRange(string Path, long Offset, int Length, string D
 /// <summary>Supplies only explicitly requested candidate ranges; media payloads remain at the source.</summary>
 internal sealed class GeneratedProbeReads(string sourceDirectory, IReadOnlyList<string> candidates, string workspace)
 {
-    internal static readonly object Limits = new { maximumRounds = 4, maximumRanges = 64,
-        maximumRangeBytes = 1024 * 1024, maximumTotalBytes = 8 * 1024 * 1024 };
+    internal static readonly object Limits = new JsonObject
+    {
+        ["maximumRounds"] = 4,
+        ["maximumRanges"] = 64,
+        ["maximumRangeBytes"] = 1024 * 1024,
+        ["maximumTotalBytes"] = 8 * 1024 * 1024
+    };
     private readonly HashSet<string> allowed = new(candidates.Select(GeneratedAdapterResources.Normalize), StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, (long Length, DateTime LastWrite)> versions = candidates.ToDictionary(
         GeneratedAdapterResources.Normalize, path => Version(WorkspaceFiles.Resolve(sourceDirectory, path)), StringComparer.OrdinalIgnoreCase);

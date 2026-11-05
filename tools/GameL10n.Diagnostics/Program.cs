@@ -7,6 +7,7 @@ using GameL10n.Core.Adapters;
 using GameL10n.Core.Development;
 using GameL10n.Core.Isolation;
 using GameL10n.Core.Storage;
+using GameL10n.Core.Serialization;
 
 if (args.Length == 3 && args[0] == "prepare-engine-tools")
     return await EngineToolsPackage.RunAsync(args[1], args[2]);
@@ -68,7 +69,7 @@ if (args[0] == "verify-darkblue")
         roundtripIdentical = unchanged, validation, textRecovered, cp936Substitutions = substitutions,
         note = "Synthetic Chinese test text only; this is not a translated game or a runtime display test."
     };
-    await LocalFiles.WriteJsonAsync(Path.Combine(output, "darkblue-report.json"), report);
+    await LocalFiles.WriteJsonAsync(Path.Combine(output, "darkblue-report.json"), report, DiagnosticJson.TypeInfo<object>(DiagnosticJson.Storage));
     Console.WriteLine(JsonSerializer.Serialize(report, LocalFiles.JsonOptions));
     return validation.Passed && textRecovered ? 0 : 1;
 }

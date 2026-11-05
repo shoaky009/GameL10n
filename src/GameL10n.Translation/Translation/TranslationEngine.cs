@@ -1,6 +1,8 @@
 using System.Text.Json;
 using GameL10n.Core.Providers;
 using GameL10n.Core.Storage;
+using System.Text.Json.Nodes;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Translation;
 
@@ -82,7 +84,7 @@ public sealed class TranslationEngine(string workingDirectory, string? diagnosti
             previousIssues.RemoveAll(issue => issue.UnitId is { } id && ids.Contains(id));
             previousIssues.AddRange(failed.Select(unit => new RecordedTranslationIssue(code, reason, unit.Id, memory.Key(unit, policy))));
             failedIds.UnionWith(ids);
-            await LocalFiles.WriteJsonAsync(validationFeedbackPath, previousIssues, CancellationToken.None);
+            await LocalFiles.WriteJsonAsync(validationFeedbackPath, previousIssues, TranslationJson.TypeInfo<List<RecordedTranslationIssue>>(TranslationJson.Storage), CancellationToken.None);
             options.FailureUpdates?.Report(failed.ToDictionary(unit => unit.Id, _ => (string?)reason, StringComparer.Ordinal));
             await ReportAsync("翻译", $"{failed.Length} 条文本翻译失败：{reason} 已标记失败，继续后续文本。", ct);
         }
@@ -94,14 +96,13 @@ public sealed class TranslationEngine(string workingDirectory, string? diagnosti
         async Task<(TranslationResponse Response, ITranslationProvider Provider, string ResponsePath, string IntentPath)>
             TranslateBatchAsync(TranslationUnit[] representatives)
         {
-            var feedback = representatives.Select(unit => new
-            {
+            var feedback = representatives.Select(unit => (
                 unit.Id,
-                Messages = (IReadOnlyList<string>)previousIssues.Where(issue => issue.UnitId == unit.Id
+                Messages: (IReadOnlyList<string>)previousIssues.Where(issue => issue.UnitId == unit.Id
                     && (issue.MemoryKey is null || issue.MemoryKey == memory.Key(unit, policy))
                     && issue.Code is not ("provider-refusal" or "provider-request-failed" or "request-outcome-unknown"))
                     .Select(issue => issue.Message).Distinct(StringComparer.Ordinal).ToArray()
-            }).Where(item => item.Messages.Count > 0).ToDictionary(item => item.Id, item => item.Messages, StringComparer.Ordinal);
+            )).Where(item => item.Messages.Count > 0).ToDictionary(item => item.Id, item => item.Messages, StringComparer.Ordinal);
             var request = new TranslationRequest(representatives, policy.TargetLanguage, policy.Terminology, policy.Style)
             { ValidationFeedback = feedback.Count > 0 ? feedback : null };
             var anyNewRefusal = false;
@@ -110,17 +111,21 @@ public sealed class TranslationEngine(string workingDirectory, string? diagnosti
                 ct.ThrowIfCancellationRequested();
                 var provider = providers[index];
                 var providerLabel = ApiLabel(index);
-                var requestKey = LocalFiles.HashText(JsonSerializer.Serialize(new
+                var requestKey = LocalFiles.HashText(JsonSerializer.Serialize(new JsonObject
                 {
-                    Provider = provider.Identity,
-                    Units = representatives.Select(u => new { u.Id, Key = memory.Key(u, policy) })
-                }) + (options.CandidateOnly ? "\ncandidate" : "")
+                    ["Provider"] = provider.Identity,
+                    ["Units"] = TranslationJson.Array(representatives.Select(u => new JsonObject
+                    {
+                        ["Id"] = u.Id,
+                        ["Key"] = memory.Key(u, policy)
+                    }))
+                }, TranslationJson.TypeInfo<JsonObject>(TranslationJson.Default)) + (options.CandidateOnly ? "\ncandidate" : "")
                     + (retranslating ? "\nretranslate:" + options.RetranslationId : ""));
                 var responsePath = Path.Combine(responseDirectory, requestKey + ".json");
                 var intentPath = Path.Combine(responseDirectory, requestKey + ".request.json");
                 var intent = new TranslationIntent(requestKey, provider.Identity, DateTimeOffset.UtcNow,
                     representatives.Select(u => new PendingTranslation(u.Id, memory.Key(u, policy))).ToArray(), options.CandidateOnly, options.RetranslationId);
-                var response = await LocalFiles.ReadRecoverableJsonAsync<TranslationResponse>(responsePath, ct);
+                var response = await LocalFiles.ReadRecoverableJsonAsync<TranslationResponse>(responsePath, TranslationJson.TypeInfo<TranslationResponse>(TranslationJson.Storage), ct);
                 if (response is not null) return (response, provider, responsePath, intentPath);
                 var recordedRefusal = await FindRecordedRefusalAsync(responseDirectory, intent, ct);
                 if (recordedRefusal is null)
@@ -128,7 +133,7 @@ public sealed class TranslationEngine(string workingDirectory, string? diagnosti
                     if (File.Exists(intentPath) && !options.RetryUncertainRequests)
                         throw new UncertainRequestException("上次翻译请求未记录到响应，服务商可能已处理或计费。请确认是否重新发送这批文本；已保存译文不会重发。");
                     await ReportAsync("翻译", $"正在使用 {providerLabel} 翻译 {representatives.Length} 条新文本。", ct);
-                    await LocalFiles.WriteJsonAsync(intentPath, intent, ct);
+                    await LocalFiles.WriteJsonAsync(intentPath, intent, TranslationJson.TypeInfo<TranslationIntent>(TranslationJson.Storage), ct);
                     const int maximumRetries = 5;
                     for (var attempt = 0; ; attempt++)
                     {
@@ -146,12 +151,21 @@ public sealed class TranslationEngine(string workingDirectory, string? diagnosti
                                 estimated |= error.Usage.Estimated;
                             }
                             await LocalFiles.WriteJsonAsync(Path.Combine(responseDirectory, requestKey + ".error-" + Guid.NewGuid().ToString("N") + ".json"),
-                                new { attempt = attempt + 1, error.Message, error.FailureSummary, error.Usage, error.OutcomeUnknown, error.StatusCode, error.Diagnostic,
-                                    failedAt = DateTimeOffset.UtcNow }, CancellationToken.None);
+                                new JsonObject
+                                {
+                                    ["attempt"] = attempt + 1,
+                                    ["message"] = error.Message,
+                                    ["failureSummary"] = error.FailureSummary,
+                                    ["usage"] = TranslationJson.Node(error.Usage, TranslationJson.Storage),
+                                    ["outcomeUnknown"] = error.OutcomeUnknown,
+                                    ["statusCode"] = TranslationJson.Node(error.StatusCode, TranslationJson.Storage),
+                                    ["diagnostic"] = TranslationJson.Node(error.Diagnostic, TranslationJson.Storage),
+                                    ["failedAt"] = DateTimeOffset.UtcNow
+                                }, TranslationJson.TypeInfo<JsonObject>(TranslationJson.Storage), CancellationToken.None);
                             if (error.IsModelRefusal)
                             {
                                 await LocalFiles.WriteJsonAsync(Path.Combine(responseDirectory, requestKey + ".refusal.json"),
-                                    new TranslationRefusal(intent, DateTimeOffset.UtcNow, error.Diagnostic), CancellationToken.None);
+                                    new TranslationRefusal(intent, DateTimeOffset.UtcNow, error.Diagnostic), TranslationJson.TypeInfo<TranslationRefusal>(TranslationJson.Storage), CancellationToken.None);
                                 DeleteReceipt(intentPath);
                                 anyNewRefusal = true;
                                 break;
@@ -170,7 +184,7 @@ public sealed class TranslationEngine(string workingDirectory, string? diagnosti
                     if (response is not null)
                     {
                         // Persist before committing entries so a restart can recover without another API call.
-                        await LocalFiles.WriteJsonAsync(responsePath, response, CancellationToken.None);
+                        await LocalFiles.WriteJsonAsync(responsePath, response, TranslationJson.TypeInfo<TranslationResponse>(TranslationJson.Storage), CancellationToken.None);
                         return (response, provider, responsePath, intentPath);
                     }
                 }
@@ -206,7 +220,7 @@ public sealed class TranslationEngine(string workingDirectory, string? diagnosti
                 }
             }
             if (previousIssues.RemoveAll(issue => issue.UnitId is { } id && completed.ContainsKey(id)) > 0)
-                await LocalFiles.WriteJsonAsync(validationFeedbackPath, previousIssues, CancellationToken.None);
+                await LocalFiles.WriteJsonAsync(validationFeedbackPath, previousIssues, TranslationJson.TypeInfo<List<RecordedTranslationIssue>>(TranslationJson.Storage), CancellationToken.None);
             options.FailureUpdates?.Report(completed.Keys.ToDictionary(id => id, _ => (string?)null, StringComparer.Ordinal));
             options.TranslationUpdates?.Report(units.Where(unit => completed.ContainsKey(unit.Id)
                 && (retranslating || edits.Find(unit, policy.TargetLanguage) is null)).ToDictionary(unit => unit.Id, unit => completed[unit.Id]));
@@ -222,7 +236,7 @@ public sealed class TranslationEngine(string workingDirectory, string? diagnosti
                 var uncertainKeys = new HashSet<string>(StringComparer.Ordinal);
                 foreach (var intentFile in Directory.EnumerateFiles(responseDirectory, "*.request.json"))
                 {
-                    var intent = await LocalFiles.ReadJsonAsync<TranslationIntent>(intentFile, ct);
+                    var intent = await LocalFiles.ReadJsonAsync<TranslationIntent>(intentFile, TranslationJson.TypeInfo<TranslationIntent>(TranslationJson.Storage), ct);
                     var receipt = intentFile[..^".request.json".Length] + ".json";
                     if (!File.Exists(receipt) && !File.Exists(intentFile[..^".request.json".Length] + ".refusal.json") &&
                         intent?.CandidateOnly == options.CandidateOnly && intent.RetranslationId == options.RetranslationId
@@ -322,7 +336,7 @@ public sealed class TranslationEngine(string workingDirectory, string? diagnosti
                 failedIds.UnionWith(batchIds.Where(id => !completed.ContainsKey(id)));
                 options.FailureUpdates?.Report(failureUpdates);
                 if (feedbackChanged || issues.Count > 0)
-                    await LocalFiles.WriteJsonAsync(validationFeedbackPath, previousIssues, CancellationToken.None);
+                    await LocalFiles.WriteJsonAsync(validationFeedbackPath, previousIssues, TranslationJson.TypeInfo<List<RecordedTranslationIssue>>(TranslationJson.Storage), CancellationToken.None);
                 if (issues.Count != 0)
                 {
                     if (logDirectory is not null)
@@ -330,15 +344,20 @@ public sealed class TranslationEngine(string workingDirectory, string? diagnosti
                         try
                         {
                             await LocalFiles.WriteJsonAsync(Path.Combine(logDirectory, $"validation-{DateTime.UtcNow:yyyyMMdd-HHmmssfff}-{Guid.NewGuid():N}.json"),
-                                new
+                                new JsonObject
                                 {
-                                    timestamp = DateTimeOffset.UtcNow, workId = Path.GetFileName(workingDirectory),
-                                    issues,
-                                    texts = representatives.Where(unit => issues.Any(issue => issue.UnitId == unit.Id)).Select(unit => new
+                                    ["timestamp"] = DateTimeOffset.UtcNow,
+                                    ["workId"] = Path.GetFileName(workingDirectory),
+                                    ["issues"] = TranslationJson.Node(issues, TranslationJson.Storage),
+                                    ["texts"] = TranslationJson.Array(representatives.Where(unit => issues.Any(issue => issue.UnitId == unit.Id)).Select(unit => new JsonObject
                                     {
-                                        unit.Id, unit.ResourcePath, unit.Locator, unit.SourceText, translation = response.Translations.GetValueOrDefault(unit.Id)
-                                    })
-                                }, CancellationToken.None);
+                                        ["id"] = unit.Id,
+                                        ["resourcePath"] = unit.ResourcePath,
+                                        ["locator"] = unit.Locator,
+                                        ["sourceText"] = unit.SourceText,
+                                        ["translation"] = response.Translations.GetValueOrDefault(unit.Id)
+                                    }))
+                                }, TranslationJson.TypeInfo<JsonObject>(TranslationJson.Storage), CancellationToken.None);
                         }
                         catch (Exception logError) when (logError is IOException or UnauthorizedAccessException)
                         {
@@ -390,7 +409,7 @@ public sealed class TranslationEngine(string workingDirectory, string? diagnosti
                 if (resolved.Count > 0)
                 {
                     previousIssues.RemoveAll(issue => issue.UnitId is { } id && resolved.ContainsKey(id));
-                    await LocalFiles.WriteJsonAsync(validationFeedbackPath, previousIssues, CancellationToken.None);
+                    await LocalFiles.WriteJsonAsync(validationFeedbackPath, previousIssues, TranslationJson.TypeInfo<List<RecordedTranslationIssue>>(TranslationJson.Storage), CancellationToken.None);
                     options.FailureUpdates?.Report(resolved);
                 }
             }
@@ -429,13 +448,13 @@ public sealed class TranslationEngine(string workingDirectory, string? diagnosti
         }
     }
 
-    private sealed record RecordedTranslationIssue(string Code, string Message, string? UnitId, string? MemoryKey = null);
+    internal sealed record RecordedTranslationIssue(string Code, string Message, string? UnitId, string? MemoryKey = null);
 
     private static async Task<List<RecordedTranslationIssue>> ReadTranslationIssuesAsync(string path, CancellationToken ct)
     {
         try
         {
-            var issues = await LocalFiles.ReadJsonAsync<List<RecordedTranslationIssue>>(path, ct);
+            var issues = await LocalFiles.ReadJsonAsync<List<RecordedTranslationIssue>>(path, TranslationJson.TypeInfo<List<RecordedTranslationIssue>>(TranslationJson.Storage), ct);
             return issues?.Where(issue => issue is not null && !string.IsNullOrWhiteSpace(issue.Message)).ToList() ?? [];
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException)
@@ -449,7 +468,7 @@ public sealed class TranslationEngine(string workingDirectory, string? diagnosti
     private static async Task<TranslationRefusal?> FindRecordedRefusalAsync(string directory, TranslationIntent request, CancellationToken ct)
     {
         string path = Path.Combine(directory, request.RequestKey + ".refusal.json");
-        var record = await LocalFiles.ReadJsonAsync<TranslationRefusal>(path, ct);
+        var record = await LocalFiles.ReadJsonAsync<TranslationRefusal>(path, TranslationJson.TypeInfo<TranslationRefusal>(TranslationJson.Storage), ct);
         if (record is not null)
         {
             if (record.Request.RequestKey != request.RequestKey || record.Request.Provider != request.Provider ||
@@ -461,19 +480,19 @@ public sealed class TranslationEngine(string workingDirectory, string? diagnosti
         // The request hash binds provider, unit IDs, source, context and translation policy.
         foreach (var file in new DirectoryInfo(directory).EnumerateFiles(request.RequestKey + ".error-*.json").OrderByDescending(file => file.LastWriteTimeUtc))
         {
-            var failure = await LocalFiles.ReadJsonAsync<RecordedProviderFailure>(file.FullName, ct);
+            var failure = await LocalFiles.ReadJsonAsync<RecordedProviderFailure>(file.FullName, TranslationJson.TypeInfo<RecordedProviderFailure>(TranslationJson.Storage), ct);
             if (!ModelRefusal.IsRecordedRefusal(failure?.Diagnostic, request.Units.Select(unit => unit.Id))) continue;
             record = new TranslationRefusal(request, DateTimeOffset.UtcNow, failure!.Diagnostic! with
             {
                 Code = "model-refusal", Detail = "Recognized refusal from a previously recorded failed response."
             });
-            await LocalFiles.WriteJsonAsync(path, record, CancellationToken.None);
+            await LocalFiles.WriteJsonAsync(path, record, TranslationJson.TypeInfo<TranslationRefusal>(TranslationJson.Storage), CancellationToken.None);
             return record;
         }
         return null;
     }
 
-    private sealed record RecordedProviderFailure(ProviderResponseDiagnostic? Diagnostic);
+    internal sealed record RecordedProviderFailure(ProviderResponseDiagnostic? Diagnostic);
 
     private static async Task RecoverResponsesAsync(string directory, TranslationMemory memory,
         IReadOnlyList<TranslationUnit> units, TranslationPolicy policy, Func<TranslationUnit, string, IReadOnlyList<ValidationIssue>> validate, CancellationToken ct)
@@ -485,11 +504,11 @@ public sealed class TranslationEngine(string workingDirectory, string? diagnosti
         var recovered = new Dictionary<string, MemoryEntry>(StringComparer.Ordinal);
         foreach (var intentPath in Directory.EnumerateFiles(directory, "*.request.json"))
         {
-            var intent = await LocalFiles.ReadRecoverableJsonAsync<TranslationIntent>(intentPath, ct);
+            var intent = await LocalFiles.ReadRecoverableJsonAsync<TranslationIntent>(intentPath, TranslationJson.TypeInfo<TranslationIntent>(TranslationJson.Storage), ct);
             if (intent?.Units is null || intent.CandidateOnly || intent.RetranslationId is not null) continue;
             if (!intent.Units.Any(unit => byKey.ContainsKey(unit.MemoryKey))) continue;
             var responsePath = intentPath[..^".request.json".Length] + ".json";
-            var response = await LocalFiles.ReadRecoverableJsonAsync<TranslationResponse>(responsePath, ct);
+            var response = await LocalFiles.ReadRecoverableJsonAsync<TranslationResponse>(responsePath, TranslationJson.TypeInfo<TranslationResponse>(TranslationJson.Storage), ct);
             if (response is null) continue;
             foreach (var requested in intent.Units)
             {
@@ -527,11 +546,11 @@ public sealed class TranslationEngine(string workingDirectory, string? diagnosti
             {
                 var key = Path.GetFileName(intentPath)[..^".request.json".Length];
                 if (key.Length != 64 || !key.All(Uri.IsHexDigit)) continue;
-                var intent = await LocalFiles.ReadJsonAsync<TranslationIntent>(intentPath, ct);
+                var intent = await LocalFiles.ReadJsonAsync<TranslationIntent>(intentPath, TranslationJson.TypeInfo<TranslationIntent>(TranslationJson.Storage), ct);
                 if (intent?.RequestKey != key || intent.CandidateOnly || intent.RetranslationId is not null || intent.Units is not { Count: > 0 } ||
                     intent.Units.Any(unit => unit is null || unit.Id is null || unit.MemoryKey is null || !entries.ContainsKey(unit.MemoryKey))) continue;
                 var responsePath = Path.Combine(directory, key + ".json");
-                var response = await LocalFiles.ReadJsonAsync<TranslationResponse>(responsePath, ct);
+                var response = await LocalFiles.ReadJsonAsync<TranslationResponse>(responsePath, TranslationJson.TypeInfo<TranslationResponse>(TranslationJson.Storage), ct);
                 // Only discard confirmed successes. Failed, incomplete or unrecognizable records stay available.
                 if (response?.Translations is null || response.Translations.Count != intent.Units.Count ||
                     intent.Units.Select(unit => unit.Id).Distinct(StringComparer.Ordinal).Count() != intent.Units.Count ||

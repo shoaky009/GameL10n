@@ -6,12 +6,13 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using GameL10n.AdapterHost;
 
 // Standalone protocol entry point. Source algorithms stay in the pinned components.
 internal static class ScriptComponentAdapter
 {
     private const string Warning = "仅处理配置选中的源脚本；编译脚本、游戏启动、字体及中文显示尚未实机验证。";
-    private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
+    private static readonly JsonSerializerOptions Json = new(AdapterHostJson.Web);
 
     public static int Main()
     {
@@ -34,7 +35,7 @@ internal static class ScriptComponentAdapter
         {
             request = JsonNode.Parse(input)!.AsObject();
             if (request["protocolVersion"]?.GetValue<int>() != 1) throw new InvalidDataException("不支持的协议版本。");
-            var config = JsonSerializer.Deserialize<Config>(File.ReadAllText(Path.Combine(adapterDirectory, "tools", "adapter-template.json")), Json)
+            var config = JsonSerializer.Deserialize<Config>(File.ReadAllText(Path.Combine(adapterDirectory, "tools", "adapter-template.json")), AdapterHostJson.TypeInfo<Config>(Json))
                 ?? throw new InvalidDataException("缺少模板配置。");
             if (config.SchemaVersion != 1 || config.TemplateVersion != 1 || config.Format != BuiltinScriptParser.Format
                 || config.ScriptExtensions.Length == 0) throw new InvalidDataException("模板与组件配置版本不一致。");
@@ -53,7 +54,7 @@ internal static class ScriptComponentAdapter
         return response.ToJsonString();
     }
 
-    private sealed record Config(int SchemaVersion, string TemplateId, int TemplateVersion, string Format,
+    internal sealed record Config(int SchemaVersion, string TemplateId, int TemplateVersion, string Format,
         string? ArchiveComponent, string? Filter, string[] ScriptExtensions, string[] ResourcePatterns);
     private sealed record Container(string Resource, string Directory, string[] Files, JsonArray Members, JsonArray Units);
 
@@ -82,7 +83,11 @@ internal static class ScriptComponentAdapter
             var original = Load(source, files, "original");
             return operation switch
             {
-                "extract" => Success("extraction", new { units = original.SelectMany(container => ExternalUnits(container)), warnings = new[] { Warning } }),
+                "extract" => Success("extraction", new JsonObject
+                {
+                    ["units"] = AdapterHostJson.Node((original.SelectMany(container => ExternalUnits(container))).ToArray(), AdapterHostJson.Web),
+                    ["warnings"] = AdapterHostJson.Node(new[] { Warning }, AdapterHostJson.Web)
+                }),
                 "build" => Build(source, files, original),
                 "validate" => Validate(files, original),
                 _ => throw new InvalidDataException("不支持的适配操作。")
@@ -111,8 +116,15 @@ internal static class ScriptComponentAdapter
                 };
                 if (!match) return Success("probe", null);
             }
-            return Success("probe", new { engineId = config.TemplateId, adapterId = config.TemplateId, adapterVersion = "1",
-                description = "组件模板 · " + config.TemplateId, requiredFiles = files, warnings = new[] { Warning } });
+            return Success("probe", new JsonObject
+            {
+                ["engineId"] = config.TemplateId,
+                ["adapterId"] = config.TemplateId,
+                ["adapterVersion"] = "1",
+                ["description"] = "组件模板 · " + config.TemplateId,
+                ["requiredFiles"] = AdapterHostJson.Node(files, AdapterHostJson.Web),
+                ["warnings"] = AdapterHostJson.Node(new[] { Warning }, AdapterHostJson.Web)
+            });
         }
 
         private List<Container> Load(string source, string[] files, string phase)
@@ -136,7 +148,7 @@ internal static class ScriptComponentAdapter
             {
                 var unit = item!.DeepClone().AsObject();
                 unit["id"] = ExternalId(container.Resource, Text(unit, "id"));
-                unit["locator"] = "member:" + JsonSerializer.Serialize(new[] { Text(unit, "resourcePath"), Text(unit, "locator") });
+                unit["locator"] = "member:" + JsonSerializer.Serialize(new[] { Text(unit, "resourcePath"), Text(unit, "locator") },AdapterHostJson.TypeInfo<string[]>(AdapterHostJson.Default));
                 unit["resourcePath"] = container.Resource;
                 unit["context"] = container.Resource + " → " + Text(unit, "context");
                 yield return unit;
@@ -146,8 +158,8 @@ internal static class ScriptComponentAdapter
         private JsonObject Build(string source, string[] files, List<Container> containers)
         {
             var translations = request["translationsFile"]?.GetValue<string>() is { } path
-                ? JsonSerializer.Deserialize<Dictionary<string, string>>(File.ReadAllText(path), Json)!
-                : request["translations"]?.Deserialize<Dictionary<string, string>>(Json) ?? new();
+                ? JsonSerializer.Deserialize<Dictionary<string, string>>(File.ReadAllText(path), AdapterHostJson.TypeInfo<Dictionary<string, string>>(Json))!
+                : request["translations"]?.Deserialize<Dictionary<string, string>>(AdapterHostJson.TypeInfo<Dictionary<string, string>>(Json)) ?? new();
             var ids = containers.SelectMany(container => container.Units.Select(unit => ExternalId(container.Resource, Text(unit!, "id")))).ToHashSet(StringComparer.Ordinal);
             if (translations.Keys.Any(id => !ids.Contains(id))) throw new InvalidDataException("部分译文无法对应当前脚本，请重新提取。");
             var output = Text(request, "outputDirectory");
@@ -180,7 +192,11 @@ internal static class ScriptComponentAdapter
                 }
                 else Archive("rebuild", Resolve(source, container.Resource), null, target, replacements);
             }
-            return Success("build", new { files, warnings = new[] { Warning } });
+            return Success("build", new JsonObject
+            {
+                ["files"] = AdapterHostJson.Node(files, AdapterHostJson.Web),
+                ["warnings"] = AdapterHostJson.Node(new[] { Warning }, AdapterHostJson.Web)
+            });
         }
 
         private JsonObject Validate(string[] files, List<Container> original)
@@ -205,15 +221,30 @@ internal static class ScriptComponentAdapter
                 if (!validation["passed"]!.GetValue<bool>() && validation["issues"]!.AsArray().Count == 0)
                     issues.Add(new JsonObject { ["code"] = "script-validation", ["message"] = "脚本结构未通过验证：" + before.Resource });
             }
-            return Success("validation", new { passed = issues.Count == 0, issues, runtimeStatus = "not-tested" });
+            return Success("validation", new JsonObject
+            {
+                ["passed"] = issues.Count == 0,
+                ["issues"] = AdapterHostJson.Node((issues).ToArray(), AdapterHostJson.Web),
+                ["runtimeStatus"] = "not-tested"
+            });
         }
 
         private JsonObject Archive(string operation, string archive, string? directory, string? output, Dictionary<string, string>? replacements)
         {
             var responsePath = Path.Combine(scratch, "component-" + componentCalls++ + ".json");
-            var input = JsonSerializer.SerializeToNode(new { protocolVersion = 1, component = config.ArchiveComponent,
-                operation, archive, responseFile = responsePath, outputDirectory = directory, outputFile = output,
-                filter = config.Filter, extensions = config.ScriptExtensions, replacements }, Json)!.AsObject();
+            var input = JsonSerializer.SerializeToNode(new JsonObject
+            {
+                ["protocolVersion"] = 1,
+                ["component"] = config.ArchiveComponent,
+                ["operation"] = operation,
+                ["archive"] = archive,
+                ["responseFile"] = responsePath,
+                ["outputDirectory"] = directory,
+                ["outputFile"] = output,
+                ["filter"] = config.Filter,
+                ["extensions"] = AdapterHostJson.Node(config.ScriptExtensions, Json),
+                ["replacements"] = AdapterHostJson.Node(replacements, Json)
+            }, AdapterHostJson.TypeInfo<JsonObject>(Json))!.AsObject();
             input["toolPaths"] = request["toolPaths"]!.DeepClone();
             input["adapterDirectory"] = request["adapterDirectory"]?.DeepClone();
             var exit = EngineReferencePython.Run("tools/engine_archive.py", input.ToJsonString(), forwardOutput: false);
@@ -226,8 +257,15 @@ internal static class ScriptComponentAdapter
 
         private static JsonObject Parser(string operation, string source, string[] files, string? output = null, Dictionary<string, string>? translations = null)
         {
-            var input = JsonSerializer.Serialize(new { protocolVersion = 1, operation, sourceDirectory = source, resourceFiles = files,
-                outputDirectory = output, translations }, Json);
+            var input = JsonSerializer.Serialize(new JsonObject
+            {
+                ["protocolVersion"] = 1,
+                ["operation"] = operation,
+                ["sourceDirectory"] = source,
+                ["resourceFiles"] = AdapterHostJson.Node(files, Json),
+                ["outputDirectory"] = output,
+                ["translations"] = AdapterHostJson.Node(translations, Json)
+            }, AdapterHostJson.TypeInfo<JsonObject>(Json));
             var response = JsonNode.Parse(BuiltinScriptParser.ExecuteJson(input))!.AsObject();
             if (response["success"]?.GetValue<bool>() != true) throw new InvalidDataException(response["error"]?.GetValue<string>() ?? "脚本组件未返回成功结果。");
             return response;
@@ -237,7 +275,7 @@ internal static class ScriptComponentAdapter
     }
 
     private static JsonObject Success(string property, object? value) => new()
-        { ["protocolVersion"] = 1, ["success"] = true, [property] = JsonSerializer.SerializeToNode(value, Json) };
+        { ["protocolVersion"] = 1, ["success"] = true, [property] = JsonSerializer.SerializeToNode(value, AdapterHostJson.TypeInfo<object?>(Json)) };
     private static string Text(JsonNode node, string key) => node[key]!.GetValue<string>();
     private static string Hash(string file) { using var stream = File.OpenRead(file); return Convert.ToHexStringLower(SHA256.HashData(stream)); }
     private static string ExternalId(string archive, string id) => "component:" + Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(archive + "\0" + id)));

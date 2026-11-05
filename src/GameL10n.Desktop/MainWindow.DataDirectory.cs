@@ -14,7 +14,7 @@ public sealed partial class MainWindow
 
     private async Task<LoadedData> ReadDataDirectoryAsync(string directory)
     {
-        var settings = await LocalFiles.ReadRecoverableJsonAsync<DesktopSettings>(Path.Combine(directory, "settings.json")) ?? new();
+        var settings = await LocalFiles.ReadRecoverableJsonAsync<DesktopSettings>(Path.Combine(directory, "settings.json"), DesktopJson.TypeInfo<DesktopSettings>(DesktopJson.Storage)) ?? new();
         var projectStore = new GameProjectStore(directory);
         var storagePipeline = new TranslationPipeline(directory);
         var errors = new List<string>();

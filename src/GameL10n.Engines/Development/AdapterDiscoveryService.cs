@@ -3,6 +3,8 @@ using System.Text.Json;
 using GameL10n.Core.Adapters;
 using GameL10n.Core.Isolation;
 using GameL10n.Core.Storage;
+using System.Text.Json.Nodes;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Development;
 
@@ -71,9 +73,19 @@ public sealed class AdapterDiscoveryService(LocalAdapterPackageStore store, Func
         if (analysis)
             foreach (var adapter in VnTextPatchAdapters.CreateAll(discoverySession: inventory)) AddAdapter(adapter, "builtin-format");
         progress?.Invoke("筛选引擎候选", $"已扫描 {inventory.FileCount:N0} 个文件，外置适配器由 {indexed.Count:N0} 个版本筛选为 {reusable.Count:N0} 个候选。");
-        await TraceAsync(new { operation = "discovery-selection", stage = "selection", elapsedMs = watch.ElapsedMilliseconds, files = inventory.FileCount,
-            indexedVersions = indexed.Count, candidates = reusable.Count, totalCandidates = candidates.Count, complete = inventory.Complete,
-            signatureReads = inventory.RangeReads, signatureBytes = inventory.BytesRead });
+        await TraceAsync(new JsonObject
+        {
+            ["operation"] = "discovery-selection",
+            ["stage"] = "selection",
+            ["elapsedMs"] = watch.ElapsedMilliseconds,
+            ["files"] = inventory.FileCount,
+            ["indexedVersions"] = indexed.Count,
+            ["candidates"] = reusable.Count,
+            ["totalCandidates"] = candidates.Count,
+            ["complete"] = inventory.Complete,
+            ["signatureReads"] = inventory.RangeReads,
+            ["signatureBytes"] = inventory.BytesRead
+        });
 
         foreach (var candidate in candidates)
         {
@@ -91,8 +103,14 @@ public sealed class AdapterDiscoveryService(LocalAdapterPackageStore store, Func
             try
             {
                 if (trace is not null)
-                    await TraceAsync(new { operation = "candidate-start", adapterId = candidate.Id, version = candidate.Version,
-                        name = candidate.Name, selection = SelectionDetail(candidate, inventory, ct) });
+                    await TraceAsync(new JsonObject
+                    {
+                        ["operation"] = "candidate-start",
+                        ["adapterId"] = candidate.Id,
+                        ["version"] = candidate.Version,
+                        ["name"] = candidate.Name,
+                        ["selection"] = EngineJson.Node(SelectionDetail(candidate, inventory, ct), EngineJson.Web)
+                    });
                 adapter = await candidateTrace.MeasureAsync(phase, () => Task.FromResult(candidate.Load()));
                 if (adapter is GeneratedGameAdapter loaded)
                     source = Directory.Exists(Path.Combine(loaded.Package.DirectoryPath, "src"))
@@ -101,18 +119,30 @@ public sealed class AdapterDiscoveryService(LocalAdapterPackageStore store, Func
                 var rangeReads = inventory.RangeReads;
                 var bytesRead = inventory.BytesRead;
                 var probe = await candidateTrace.MeasureAsync(phase, () => adapter is VnTextPatchAdapter loose
-                    ? loose.ProbeAsync(request.GameDirectory, trace is null ? null : (format, resources) => TraceAsync(new
+                    ? loose.ProbeAsync(request.GameDirectory, trace is null ? null : (format, resources) => TraceAsync(new JsonObject
                     {
-                        operation = "probe-resources", adapterId = candidate.Id, version = candidate.Version, format = loose.FormatKey,
-                        reason = "filename-extension-or-companion", extensions = format.Extensions, companionFileNames = format.CompanionFileNames,
-                        resources = ResourceSummary(inventory, resources)
+                        ["operation"] = "probe-resources",
+                        ["adapterId"] = candidate.Id,
+                        ["version"] = candidate.Version,
+                        ["format"] = loose.FormatKey,
+                        ["reason"] = "filename-extension-or-companion",
+                        ["extensions"] = EngineJson.Node((format.Extensions).ToArray(), EngineJson.Web),
+                        ["companionFileNames"] = EngineJson.Node((format.CompanionFileNames).ToArray(), EngineJson.Web),
+                        ["resources"] = EngineJson.Node(ResourceSummary(inventory, resources), EngineJson.Web)
                     }), ct)
                     : adapter.ProbeAsync(request.GameDirectory, ct));
                 if (trace is not null)
-                    await TraceAsync(new { operation = "probe-result", adapterId = candidate.Id, version = candidate.Version,
-                        matched = probe is not null, diagnostic = (adapter as VnTextPatchAdapter)?.LastProbeDiagnostic,
-                        resources = probe is null ? null : ResourceSummary(inventory, probe.RequiredFiles),
-                        signatureReads = inventory.RangeReads - rangeReads, signatureBytes = inventory.BytesRead - bytesRead });
+                    await TraceAsync(new JsonObject
+                    {
+                        ["operation"] = "probe-result",
+                        ["adapterId"] = candidate.Id,
+                        ["version"] = candidate.Version,
+                        ["matched"] = probe is not null,
+                        ["diagnostic"] = (adapter as VnTextPatchAdapter)?.LastProbeDiagnostic,
+                        ["resources"] = EngineJson.Node(probe is null ? null : ResourceSummary(inventory, probe.RequiredFiles), EngineJson.Web),
+                        ["signatureReads"] = inventory.RangeReads - rangeReads,
+                        ["signatureBytes"] = inventory.BytesRead - bytesRead
+                    });
                 if (adapter is VnTextPatchAdapter builtin && (probe is not null || builtin.LastProbeDiagnostic is not null))
                     probes.Add(new(builtin.FormatKey, probe is null ? "failed" : "script-probe-passed",
                         probe?.RequiredFiles.Take(8).ToArray() ?? [], builtin.LastProbeDiagnostic, DateTimeOffset.UtcNow));
@@ -144,9 +174,15 @@ public sealed class AdapterDiscoveryService(LocalAdapterPackageStore store, Func
                     GeneratedGameAdapter.DeleteStagedTree(verificationDirectory);
                     var verification = await candidateTrace.MeasureAsync(phase, () => new GeneratedAdapterVerifier()
                         .VerifyAsync(generated, sourceDirectory, verificationDirectory, ct, trace: trace));
-                    await TraceAsync(new { operation = "verification-result", adapterId = candidate.Id, version = candidate.Version,
-                        passed = verification.Passed, originalRoundtripPassed = verification.OriginalRoundtripPassed,
-                        diagnostic = verification.Passed ? null : verification.Diagnostics.LastOrDefault() });
+                    await TraceAsync(new JsonObject
+                    {
+                        ["operation"] = "verification-result",
+                        ["adapterId"] = candidate.Id,
+                        ["version"] = candidate.Version,
+                        ["passed"] = verification.Passed,
+                        ["originalRoundtripPassed"] = verification.OriginalRoundtripPassed,
+                        ["diagnostic"] = verification.Passed ? null : verification.Diagnostics.LastOrDefault()
+                    });
                     if (!verification.Passed)
                     {
                         foreach (var item in verification.Diagnostics) Diagnose(item);
@@ -200,8 +236,19 @@ public sealed class AdapterDiscoveryService(LocalAdapterPackageStore store, Func
             }
             finally
             {
-                await TraceAsync(new { operation = "reuse-candidate", stage = "candidate", adapterId = candidate.Id, version = candidate.Version,
-                    phase, matched = recognized, accepted, reusedFailure, outcome, elapsedMs = timer.ElapsedMilliseconds });
+                await TraceAsync(new JsonObject
+                {
+                    ["operation"] = "reuse-candidate",
+                    ["stage"] = "candidate",
+                    ["adapterId"] = candidate.Id,
+                    ["version"] = candidate.Version,
+                    ["phase"] = phase,
+                    ["matched"] = recognized,
+                    ["accepted"] = accepted,
+                    ["reusedFailure"] = reusedFailure,
+                    ["outcome"] = outcome,
+                    ["elapsedMs"] = timer.ElapsedMilliseconds
+                });
             }
         }
         return Result();
@@ -224,12 +271,20 @@ public sealed class AdapterDiscoveryService(LocalAdapterPackageStore store, Func
                 var path = WorkspaceFiles.Resolve(sourceDirectory, file);
                 hashes[file] = await timing.FileAsync("fingerprint-file-hash", file, path, () => LocalFiles.HashFileAsync(path, ct));
             }
-            return LocalFiles.HashText(JsonSerializer.Serialize(new
+            return LocalFiles.HashText(JsonSerializer.Serialize(new JsonObject
             {
-                host = typeof(AdapterDiscoveryService).Module.ModuleVersionId, GeneratedAdapterVerifier.Revision,
-                toolchain = toolchain(), package.Id, package.Version, package.AssemblySha256, package.PackageFiles,
-                package.ResourcePatterns, package.Recognition, probe, hashes
-            }));
+                ["host"] = typeof(AdapterDiscoveryService).Module.ModuleVersionId,
+                ["Revision"] = GeneratedAdapterVerifier.Revision,
+                ["toolchain"] = EngineJson.Node(toolchain(), EngineJson.Default),
+                ["Id"] = package.Id,
+                ["Version"] = package.Version,
+                ["AssemblySha256"] = package.AssemblySha256,
+                ["PackageFiles"] = EngineJson.Node(package.PackageFiles, EngineJson.Default),
+                ["ResourcePatterns"] = EngineJson.Node((package.ResourcePatterns)?.ToArray(), EngineJson.Default),
+                ["Recognition"] = EngineJson.Node(package.Recognition, EngineJson.Default),
+                ["probe"] = EngineJson.Node(probe, EngineJson.Default),
+                ["hashes"] = EngineJson.Node(hashes, EngineJson.Default)
+            }, EngineJson.TypeInfo<JsonObject>(EngineJson.Default)));
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidDataException or GeneratedAdapterException)
         { return null; }
@@ -243,30 +298,44 @@ public sealed class AdapterDiscoveryService(LocalAdapterPackageStore store, Func
     {
         try
         {
-            return new { origin = candidate.Origin, recognitionStatus = candidate.Match?.Status.ToString(),
-                evidence = candidate.RecognitionEvidence, reason = candidate.Origin == "index"
+            return new JsonObject
+            {
+                ["origin"] = candidate.Origin,
+                ["recognitionStatus"] = candidate.Match?.Status.ToString(),
+                ["evidence"] = candidate.RecognitionEvidence,
+                ["reason"] = candidate.Origin == "index"
                     ? candidate.Match?.Status == RecognitionStatus.Match ? "declared-rules-matched" : "unknown-kept-for-probe"
                     : candidate.Origin == "project-active" ? "project-pinned-version" : "adapter-self-check",
-                resourcePatterns = candidate.Descriptor?.ResourcePatterns?.Take(16).ToArray(),
-                resourceFiles = candidate.Descriptor?.ResourcePatterns is not { Count: > 0 }
-                    ? candidate.Descriptor?.ResourceFiles?.Take(16).ToArray() : null,
-                requiredRules = candidate.Descriptor?.Recognition?.Required?.Count ?? 0,
-                hintRules = candidate.Descriptor?.Recognition?.Hints?.Count ?? 0,
-                resources = candidate.Descriptor is null ? null : ResourceSummary(inventory, inventory.Resources(candidate.Descriptor, ct)) };
+                ["resourcePatterns"] = EngineJson.Node(candidate.Descriptor?.ResourcePatterns?.Take(16).ToArray(), EngineJson.Web),
+                ["resourceFiles"] = EngineJson.Node(candidate.Descriptor?.ResourcePatterns is not { Count: > 0 }
+                    ? candidate.Descriptor?.ResourceFiles?.Take(16).ToArray() : null, EngineJson.Web),
+                ["requiredRules"] = candidate.Descriptor?.Recognition?.Required?.Count ?? 0,
+                ["hintRules"] = candidate.Descriptor?.Recognition?.Hints?.Count ?? 0,
+                ["resources"] = EngineJson.Node(candidate.Descriptor is null ? null : ResourceSummary(inventory, inventory.Resources(candidate.Descriptor, ct)), EngineJson.Web)
+            };
         }
         catch (Exception error) when (error is InvalidDataException or ArgumentException or GeneratedAdapterException
             or System.Text.RegularExpressions.RegexMatchTimeoutException)
-        { return new { origin = candidate.Origin, diagnostic = Limit(error.Message) }; }
+        { return new JsonObject
+        {
+            ["origin"] = candidate.Origin,
+            ["diagnostic"] = Limit(error.Message)
+        }; }
     }
 
     private static object ResourceSummary(GameDiscoverySession inventory, IEnumerable<string> paths)
     {
         var resources = paths.Distinct(StringComparer.OrdinalIgnoreCase)
-            .Select(path => new { path, bytes = inventory.FileLength(path) }).ToArray();
-        return new { files = resources.Length, totalBytes = resources.Sum(file => file.bytes ?? 0),
-            complete = inventory.Complete && resources.All(file => file.bytes.HasValue),
-            largestFiles = resources.Where(file => file.bytes.HasValue).OrderByDescending(file => file.bytes).Take(5).ToArray(),
-            missingFiles = resources.Where(file => !file.bytes.HasValue).Take(5).Select(file => file.path).ToArray() };
+            .Select(path => (path, bytes: inventory.FileLength(path))).ToArray();
+        return new JsonObject
+        {
+            ["files"] = resources.Length,
+            ["totalBytes"] = resources.Sum(file => file.bytes ?? 0),
+            ["complete"] = inventory.Complete && resources.All(file => file.bytes.HasValue),
+            ["largestFiles"] = new JsonArray(resources.Where(file => file.bytes.HasValue).OrderByDescending(file => file.bytes).Take(5)
+                .Select(file => (JsonNode)new JsonObject { ["path"] = file.path, ["bytes"] = file.bytes }).ToArray()),
+            ["missingFiles"] = EngineJson.Node(resources.Where(file => !file.bytes.HasValue).Take(5).Select(file => file.path).ToArray(), EngineJson.Web)
+        };
     }
 
     private sealed record Candidate(string Id, string Version, string Name, Func<IGameAdapter> Load,

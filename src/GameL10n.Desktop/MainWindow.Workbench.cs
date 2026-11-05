@@ -10,6 +10,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
+using System.Text.Json.Nodes;
 
 namespace GameL10n.Desktop;
 
@@ -66,8 +67,12 @@ public sealed partial class MainWindow
         RootGrid.KeyboardAccelerators.Add(shortcut);
     }
 
-    private static string WorkbenchPolicy(GameWorkspace game) => JsonSerializer.Serialize(new
-    { game.Project.Settings.TargetLanguage, game.Project.Settings.Style, game.Project.Settings.Terminology });
+    private static string WorkbenchPolicy(GameWorkspace game) => JsonSerializer.Serialize(new JsonObject
+    {
+        ["TargetLanguage"] = game.Project.Settings.TargetLanguage,
+        ["Style"] = game.Project.Settings.Style,
+        ["Terminology"] = game.Project.Settings.Terminology
+    }, DesktopJson.TypeInfo<JsonObject>(DesktopJson.Default));
 
     private async Task EnsureWorkbenchAsync(GameWorkspace game)
     {
@@ -114,7 +119,7 @@ public sealed partial class MainWindow
                     await memory.InitializeAsync();
                     var edits = await TranslationEdits.LoadAsync(game.Directory);
                     var failures = await pipeline.LoadTranslationFailuresAsync(captured, policy);
-                    var selection = await LocalFiles.ReadRecoverableJsonAsync<string[]>(Path.Combine(game.Directory, "trial-selection.json"));
+                    var selection = await LocalFiles.ReadRecoverableJsonAsync<string[]>(Path.Combine(game.Directory, "trial-selection.json"), DesktopJson.TypeInfo<string[]>(DesktopJson.Storage));
                     var rows = new TranslationRow[captured.Extraction.Units.Count];
                     for (var i = 0; i < rows.Length; i++)
                     {
@@ -656,7 +661,7 @@ public sealed partial class MainWindow
             {
                 var revision = game.SelectionRevision;
                 var ids = game.SelectedTexts.ToArray();
-                await game.EnqueueWrite(() => LocalFiles.WriteJsonAsync(Path.Combine(game.Directory, "trial-selection.json"), ids));
+                await game.EnqueueWrite(() => LocalFiles.WriteJsonAsync(Path.Combine(game.Directory, "trial-selection.json"), ids, DesktopJson.TypeInfo<string[]>(DesktopJson.Storage)));
                 if (game.SelectionRevision == revision) game.SelectionDirty = false;
             }
         }

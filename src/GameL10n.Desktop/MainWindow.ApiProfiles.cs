@@ -317,7 +317,7 @@ public sealed partial class MainWindow
         {
             var shared = change(globalSettings.ReadApiConfiguration());
             var settings = globalSettings with { ApiConfiguration = shared };
-            await LocalFiles.WriteJsonAsync(Path.Combine(dataDirectory, "settings.json"), settings);
+            await LocalFiles.WriteJsonAsync(Path.Combine(dataDirectory, "settings.json"), settings, DesktopJson.TypeInfo<DesktopSettings>(DesktopJson.Storage));
             globalSettings = settings;
             apiConfiguration = selectedGame is { } game ? ResolveGameApi(game) : shared;
         }

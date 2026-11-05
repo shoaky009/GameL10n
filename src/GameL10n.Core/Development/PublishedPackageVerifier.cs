@@ -2,6 +2,8 @@ using System.Text.Json;
 using GameL10n.Core.Isolation;
 using GameL10n.Core.Pipeline;
 using GameL10n.Core.Storage;
+using System.Text.Json.Nodes;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Development;
 
@@ -41,9 +43,12 @@ public sealed class PublishedPackageVerifier(PinnedDotNetToolchain toolchain, IA
             var packageHashes = new SortedDictionary<string, string>(StringComparer.Ordinal);
             foreach (var file in files)
                 packageHashes.Add(file, await LocalFiles.HashFileAsync(WorkspaceFiles.Resolve(package.DirectoryPath, file), ct));
-            packageFingerprint = LocalFiles.HashText(JsonSerializer.Serialize(new
-                { package = package with { DirectoryPath = "" }, files = packageHashes }));
-            var snapshot = await LocalFiles.ReadJsonAsync<SourceSnapshot>(Path.Combine(projectDirectory, "source.json"), ct)
+            packageFingerprint = LocalFiles.HashText(JsonSerializer.Serialize(new JsonObject
+            {
+                ["package"] = CoreJson.Node(package with { DirectoryPath = "" }, CoreJson.Default),
+                ["files"] = CoreJson.Node(packageHashes, CoreJson.Default)
+            }, CoreJson.TypeInfo<JsonObject>(CoreJson.Default)));
+            var snapshot = await LocalFiles.ReadJsonAsync<SourceSnapshot>(Path.Combine(projectDirectory, "source.json"), CoreJson.TypeInfo<SourceSnapshot>(CoreJson.Storage), ct)
                 ?? throw new InvalidDataException("项目缺少原文快照，无法验证；请先完成识别和提取。");
             if (snapshot.AdapterId != package.Id || snapshot.Files is not { Count: > 0 })
                 throw new InvalidDataException("项目的原文快照不属于此引擎，或没有资源记录。");
@@ -51,7 +56,7 @@ public sealed class PublishedPackageVerifier(PinnedDotNetToolchain toolchain, IA
                 || string.IsNullOrWhiteSpace(file.RelativePath) || file.Sha256 is not { Length: 64 }
                 || file.Sha256.Any(character => !Uri.IsHexDigit(character))))
                 throw new InvalidDataException("原文快照记录的路径或校验值无效。");
-            sourceFingerprint = LocalFiles.HashText(JsonSerializer.Serialize(snapshot.Files.OrderBy(file => file.RelativePath)));
+            sourceFingerprint = LocalFiles.HashText(JsonSerializer.Serialize(snapshot.Files.OrderBy(file => file.RelativePath), CoreJson.TypeInfo<IOrderedEnumerable<SourceFile>>(CoreJson.Default)));
             var source = LocalFiles.UnderRoot(projectDirectory, snapshot.Directory);
             if (Path.GetFileName(source) != sourceFingerprint)
                 throw new InvalidDataException("原文快照路径与资源指纹不一致。");
@@ -59,7 +64,7 @@ public sealed class PublishedPackageVerifier(PinnedDotNetToolchain toolchain, IA
                 snapshot.AdapterId, snapshot.AdapterVersion, ct);
             if (baseline?.Units is not { Count: > 0 })
                 throw new InvalidDataException("已有提取记录缺失或损坏，无法比较遗漏；本次不会重新生成基线。");
-            baselineFingerprint = LocalFiles.HashText(JsonSerializer.Serialize(baseline.Units));
+            baselineFingerprint = LocalFiles.HashText(JsonSerializer.Serialize(baseline.Units, CoreJson.TypeInfo<IReadOnlyList<TranslationUnit>>(CoreJson.Default)));
 
             var relocated = Path.Combine(temporary, "package");
             foreach (var (file, hash) in packageHashes)
@@ -115,7 +120,7 @@ public sealed class PublishedPackageVerifier(PinnedDotNetToolchain toolchain, IA
             packageFingerprint, sourceFingerprint, baselineFingerprint, $"SDK {toolchain.SdkVersion}; Runtime {toolchain.RuntimeVersion}",
             GeneratedAdapterVerifier.Revision, diagnostics, references);
         // One latest report per project. It is evidence for these exact inputs, never a reusable execution permission.
-        await LocalFiles.WriteJsonAsync(Path.Combine(projectDirectory, "package-verification.json"), result, CancellationToken.None);
+        await LocalFiles.WriteJsonAsync(Path.Combine(projectDirectory, "package-verification.json"), result, CoreJson.TypeInfo<PublishedPackageVerification>(CoreJson.Storage), CancellationToken.None);
         return result;
     }
 }

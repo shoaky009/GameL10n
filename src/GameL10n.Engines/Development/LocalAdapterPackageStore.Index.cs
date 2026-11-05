@@ -3,13 +3,14 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using GameL10n.Core.Adapters;
 using GameL10n.Core.Isolation;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Development;
 
 public sealed partial class LocalAdapterPackageStore
 {
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> IndexLocks = new(StringComparer.OrdinalIgnoreCase);
-    private static readonly JsonSerializerOptions IndexJson = new(JsonSerializerDefaults.Web);
+    private static readonly JsonSerializerOptions IndexJson = new(EngineJson.Web);
     private const string IndexFile = "library-index.json";
 
     /// <summary>One display index; browsing never opens projects, packages or their payloads.</summary>
@@ -116,7 +117,7 @@ public sealed partial class LocalAdapterPackageStore
         {
             try
             {
-                var index = JsonSerializer.Deserialize<LibraryIndex>(ReadDirectMetadata(RootDirectory, IndexFile, 64 * 1024 * 1024), IndexJson)
+                var index = JsonSerializer.Deserialize<LibraryIndex>(ReadDirectMetadata(RootDirectory, IndexFile, 64 * 1024 * 1024), EngineJson.TypeInfo<LibraryIndex>(IndexJson))
                     ?? throw new InvalidDataException("引擎索引为空。");
                 ValidateIndex(index);
                 var changed = false;
@@ -170,7 +171,7 @@ public sealed partial class LocalAdapterPackageStore
                 if (namedFamilies.Contains(id) && family.Versions.GetValueOrDefault(version) is { Source: EngineLibrarySource.External }) continue;
                 try
                 {
-                    var package = JsonSerializer.Deserialize<IndexPackage>(ReadDirectMetadata(directory, "package.json", 16 * 1024 * 1024), IndexJson)
+                    var package = JsonSerializer.Deserialize<IndexPackage>(ReadDirectMetadata(directory, "package.json", 16 * 1024 * 1024), EngineJson.TypeInfo<IndexPackage>(IndexJson))
                         ?? throw new InvalidDataException("包清单为空。");
                     if (package.Family is null || package.Id != id || package.Version != version || package.Family.AdapterId != id)
                         throw new InvalidDataException("包清单与目录不一致。");
@@ -198,7 +199,7 @@ public sealed partial class LocalAdapterPackageStore
         {
             await using (var stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None, 65536, FileOptions.Asynchronous))
             {
-                await JsonSerializer.SerializeAsync(stream, index, IndexJson, ct);
+                await JsonSerializer.SerializeAsync(stream, index, EngineJson.TypeInfo<LibraryIndex>(IndexJson), ct);
                 await stream.FlushAsync(ct);
             }
             ct.ThrowIfCancellationRequested();
@@ -288,8 +289,8 @@ public sealed partial class LocalAdapterPackageStore
         }
     }
 
-    private sealed record IndexPackage(string Id, string Version, AdapterFamily? Family);
-    private sealed record IndexGame(string GameId, string Title, string Variant, string AdapterVersion,
+    internal sealed record IndexPackage(string Id, string Version, AdapterFamily? Family);
+    internal sealed record IndexGame(string GameId, string Title, string Variant, string AdapterVersion,
         string StructureStatus, string RuntimeStatus = "not-tested", DateTimeOffset? UpdatedAt = null)
     {
         public GameCompatibility ToCompatibility() => new(GameId, Title, Variant, AdapterVersion,
@@ -297,16 +298,16 @@ public sealed partial class LocalAdapterPackageStore
         public static IndexGame From(GameCompatibility game) => new(game.GameId, game.Title, game.Variant, game.AdapterVersion,
             game.StructureStatus, game.RuntimeStatus, game.UpdatedAt);
     }
-    private sealed record IndexVersion(string Version, EngineLibrarySource Source, bool Exists, DateTimeOffset? PublishedAt = null,
+    internal sealed record IndexVersion(string Version, EngineLibrarySource Source, bool Exists, DateTimeOffset? PublishedAt = null,
         bool IsCandidate = false, AdapterDiscoveryDescriptor? Discovery = null, bool DiscoveryLoaded = false);
-    private sealed class IndexFamily
+    internal sealed class IndexFamily
     {
         public required AdapterFamily Family { get; set; }
         [JsonRequired] public bool Enabled { get; set; } = true;
         [JsonRequired] public Dictionary<string, IndexVersion> Versions { get; init; } = new(StringComparer.Ordinal);
         [JsonRequired] public List<IndexGame> Games { get; init; } = [];
     }
-    private sealed class LibraryIndex
+    internal sealed class LibraryIndex
     {
         [JsonRequired] public int SchemaVersion { get; init; } = 1;
         public bool DiscoveryInitialized { get; set; }

@@ -2,6 +2,8 @@ using System.Text.Json;
 using GameL10n.Core.Adapters;
 using GameL10n.Core.Isolation;
 using GameL10n.Core.Storage;
+using System.Text.Json.Nodes;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Development;
 
@@ -55,18 +57,27 @@ public sealed partial class AdapterDevelopmentWorkflow
         foreach (var (relative, hash) in session.ResourceHashes)
             if (gameHashes[relative] != hash || stagedHashes[relative] != hash)
                 throw new InvalidDataException("原资源或工作副本发生变化，请重新 stage_resources 并验证：" + relative);
-        return LocalFiles.HashText(JsonSerializer.Serialize(new
+        return LocalFiles.HashText(JsonSerializer.Serialize(new JsonObject
         {
-            cacheSchema = 1, verifierRevision = GeneratedAdapterVerifier.Revision,
-            hostBuild = typeof(AdapterDevelopmentWorkflow).Module.ModuleVersionId,
-            runtime.Toolchain, gameDirectory = Path.GetFullPath(request.GameDirectory),
-            family, patterns = patterns.Select(GeneratedAdapterResources.Normalize).Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.Ordinal),
-            releaseFiles, sources, discoveryOnly, session.Recognition, session.Objective, session.LaunchInspection,
-            coverage = session.TextCoverage.Fingerprint(),
-            baseline = session.Objective == AdaptationObjective.Repair ? BaselineFingerprint() : null,
-            gameResources = gameHashes, stagedResources = stagedHashes,
-            approvedResources = session.ResourceHashes.OrderBy(pair => pair.Key, StringComparer.Ordinal)
-        }, Json));
+            ["cacheSchema"] = 1,
+            ["verifierRevision"] = GeneratedAdapterVerifier.Revision,
+            ["hostBuild"] = typeof(AdapterDevelopmentWorkflow).Module.ModuleVersionId,
+            ["toolchain"] = EngineJson.Node(runtime.Toolchain, Json),
+            ["gameDirectory"] = Path.GetFullPath(request.GameDirectory),
+            ["family"] = EngineJson.Node(family, Json),
+            ["patterns"] = EngineJson.Node((patterns.Select(GeneratedAdapterResources.Normalize).Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.Ordinal)).ToArray(), Json),
+            ["releaseFiles"] = EngineJson.Node((releaseFiles).ToArray(), Json),
+            ["sources"] = EngineJson.Node(sources, Json),
+            ["discoveryOnly"] = discoveryOnly,
+            ["recognition"] = EngineJson.Node(session.Recognition, Json),
+            ["objective"] = EngineJson.Node(session.Objective, Json),
+            ["launchInspection"] = EngineJson.Node(session.LaunchInspection, Json),
+            ["coverage"] = session.TextCoverage.Fingerprint(),
+            ["baseline"] = session.Objective == AdaptationObjective.Repair ? BaselineFingerprint() : null,
+            ["gameResources"] = EngineJson.Node(gameHashes, Json),
+            ["stagedResources"] = EngineJson.Node(stagedHashes, Json),
+            ["approvedResources"] = EngineJson.Node((session.ResourceHashes.OrderBy(pair => pair.Key, StringComparer.Ordinal)).ToArray(), Json)
+        }, EngineJson.TypeInfo<JsonObject>(Json)));
     }
 
     private async Task<AdapterTestResult?> ReuseVerificationAsync(string? fingerprint, CancellationToken ct)

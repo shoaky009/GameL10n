@@ -118,7 +118,7 @@ public sealed partial class MainWindow
                     || string.Equals(game.GameDirectory, globalSettings.GameDirectory, StringComparison.OrdinalIgnoreCase)))
                 {
                     globalSettings = globalSettings with { LastGameId = null, GameDirectory = "" };
-                    await GameL10n.Core.Storage.LocalFiles.WriteJsonAsync(Path.Combine(dataDirectory, "settings.json"), globalSettings);
+                    await GameL10n.Core.Storage.LocalFiles.WriteJsonAsync(Path.Combine(dataDirectory, "settings.json"), globalSettings, DesktopJson.TypeInfo<Settings.DesktopSettings>(DesktopJson.Storage));
                 }
             }
             finally { settingsWriteLock.Release(); }

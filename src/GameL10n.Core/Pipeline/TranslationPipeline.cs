@@ -6,6 +6,8 @@ using GameL10n.Core.Providers;
 using GameL10n.Core.Adapters;
 using GameL10n.Core.Development;
 using GameL10n.Core.Validation;
+using System.Text.Json.Nodes;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Pipeline;
 
@@ -50,7 +52,7 @@ public sealed partial class TranslationPipeline(string dataDirectory, string? di
         try
         {
             var snapshotPath = Path.Combine(project, "source.json");
-            var snapshot = await LocalFiles.ReadJsonAsync<SourceSnapshot>(snapshotPath, ct);
+            var snapshot = await LocalFiles.ReadJsonAsync<SourceSnapshot>(snapshotPath, CoreJson.TypeInfo<SourceSnapshot>(CoreJson.Storage), ct);
             if (snapshot is null) return NeedsAnalysis("项目缺少已保存的原文快照记录。");
             if (snapshot.AdapterId != adapter.Id || snapshot.AdapterVersion != adapter.Version)
                 return NeedsAnalysis("已保存识别结果的 Adapter 或版本与当前项目不一致。");
@@ -63,7 +65,7 @@ public sealed partial class TranslationPipeline(string dataDirectory, string? di
             if (probe is null)
                 return NeedsAnalysis("旧版识别记录缺少引擎和启动信息，需要重新识别补充。");
             var source = LocalFiles.UnderRoot(project, snapshot.Directory);
-            var fingerprint = LocalFiles.HashText(JsonSerializer.Serialize(snapshot.Files.OrderBy(file => file.RelativePath)));
+            var fingerprint = LocalFiles.HashText(JsonSerializer.Serialize(snapshot.Files.OrderBy(file => file.RelativePath), CoreJson.TypeInfo<IOrderedEnumerable<SourceFile>>(CoreJson.Default)));
             if (Path.GetFileName(source) != fingerprint)
                 return NeedsAnalysis("已保存的原文快照目录与资源指纹不一致。");
             var resources = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -129,9 +131,12 @@ public sealed partial class TranslationPipeline(string dataDirectory, string? di
                 var hash = await timing.FileAsync("source-file-hash", relative, sourcePath, () => LocalFiles.HashFileAsync(sourcePath, ct));
                 sourceFiles.Add((new SourceFile(relative, hash), sourcePath));
             }
-        }, new { files = probe.RequiredFiles.Count });
+        }, new JsonObject
+        {
+            ["files"] = probe.RequiredFiles.Count
+        });
         if (sourceFiles.Count == 0) throw new InvalidDataException("Adapter 未声明需要处理的资源文件。");
-        var fingerprint = LocalFiles.HashText(JsonSerializer.Serialize(sourceFiles.Select(f => f.File).OrderBy(f => f.RelativePath)));
+        var fingerprint = LocalFiles.HashText(JsonSerializer.Serialize(sourceFiles.Select(f => f.File).OrderBy(f => f.RelativePath), CoreJson.TypeInfo<IOrderedEnumerable<SourceFile>>(CoreJson.Default)));
         var snapshotDirectory = Path.Combine(project, "sources", fingerprint);
         var reusedSnapshot = Directory.Exists(snapshotDirectory);
         await timing.MeasureAsync("source-snapshot", async () =>
@@ -157,7 +162,10 @@ public sealed partial class TranslationPipeline(string dataDirectory, string? di
                 });
             }
             Directory.Move(staging, snapshotDirectory);
-        }, new { reused = reusedSnapshot });
+        }, new JsonObject
+        {
+            ["reused"] = reusedSnapshot
+        });
         var files = sourceFiles.Select(f => f.File).ToArray();
         reportProgress?.Invoke("校验原文快照", "正在确认已保存资源完整，文件较大时需要一些时间。");
         await timing.MeasureAsync("snapshot-verify", () => VerifySourcesAsync(snapshotDirectory, files, ct, timing));
@@ -167,7 +175,7 @@ public sealed partial class TranslationPipeline(string dataDirectory, string? di
             foreach (var file in files.Where(file => file.RelativePath.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)))
                 executableAnalysis.Add(ExecutableChecks.Analyze(file.RelativePath,
                     await File.ReadAllBytesAsync(LocalFiles.UnderRoot(snapshotDirectory, file.RelativePath), ct)));
-            await LocalFiles.WriteJsonAsync(Path.Combine(project, "executable-analysis.json"), executableAnalysis, ct);
+            await LocalFiles.WriteJsonAsync(Path.Combine(project, "executable-analysis.json"), executableAnalysis, CoreJson.TypeInfo<List<ExecutableAnalysis>>(CoreJson.Storage), ct);
         });
         var store = new ExtractionStore(project);
         reportProgress?.Invoke("加载文本缓存", "正在读取已有的提取结果。");
@@ -185,8 +193,14 @@ public sealed partial class TranslationPipeline(string dataDirectory, string? di
             extraction.Units.Select(u => u.Id).Distinct(StringComparer.Ordinal).Count() != extraction.Units.Count)
             throw new InvalidDataException("提取结果包含空文本或重复的文本 ID。");
         reportProgress?.Invoke("整理项目文本", $"已读取 {extraction.Units.Count:N0} 条文本，正在保存项目记录。");
-        if (trace is not null) await trace(new { operation = "extraction-result", adapterId = adapter.Id,
-            version = adapter.Version, cached = cachedExtraction, units = extraction.Units.Count });
+        if (trace is not null) await trace(new JsonObject
+        {
+            ["operation"] = "extraction-result",
+            ["adapterId"] = adapter.Id,
+            ["version"] = adapter.Version,
+            ["cached"] = cachedExtraction,
+            ["units"] = extraction.Units.Count
+        });
         if (!cachedExtraction) await timing.MeasureAsync("extraction-store", () => store.StoreAsync(fingerprint, adapter.Id, adapter.Version, extraction, ct));
         if (Directory.Exists(Path.Combine(project, "memory")))
         {
@@ -215,12 +229,12 @@ public sealed partial class TranslationPipeline(string dataDirectory, string? di
         ct.ThrowIfCancellationRequested();
         var snapshot = new SourceSnapshot(Path.GetRelativePath(session.ProjectDirectory, session.SourceDirectory),
             session.Probe.AdapterId, session.Probe.AdapterVersion, session.Sources, session.Probe);
-        return LocalFiles.WriteJsonAsync(Path.Combine(session.ProjectDirectory, "source.json"), snapshot, ct);
+        return LocalFiles.WriteJsonAsync(Path.Combine(session.ProjectDirectory, "source.json"), snapshot, CoreJson.TypeInfo<SourceSnapshot>(CoreJson.Storage), ct);
     }
 
     public async Task<PipelineResult?> LoadLatestResultAsync(string projectDirectory, CancellationToken ct = default)
     {
-        var result = await LocalFiles.ReadRecoverableJsonAsync<PipelineResult>(Path.Combine(projectDirectory, "latest-result.json"), ct);
+        var result = await LocalFiles.ReadRecoverableJsonAsync<PipelineResult>(Path.Combine(projectDirectory, "latest-result.json"), CoreJson.TypeInfo<PipelineResult>(CoreJson.Storage), ct);
         return result is null ? null : ResolveResult(projectDirectory, result);
     }
 
@@ -267,14 +281,21 @@ public sealed partial class TranslationPipeline(string dataDirectory, string? di
         {
             var local = new PipelineProgress(update.Stage, update.Completed, update.Total, update.CacheHits,
                 update.Usage.TotalTokens, update.Message, update.Failed);
-            var state = new
+            var state = new JsonObject
             {
-                runId, started, updatedAt = DateTimeOffset.UtcNow, session.GameDirectory,
-                adapterId = session.Adapter.Id, adapterVersion = session.Adapter.Version,
-                sourceHashes = session.Sources, isTrial = trialIds is not null, trialUnitIds = trialIds, progress = local
+                ["runId"] = runId,
+                ["started"] = started,
+                ["updatedAt"] = DateTimeOffset.UtcNow,
+                ["gameDirectory"] = session.GameDirectory,
+                ["adapterId"] = session.Adapter.Id,
+                ["adapterVersion"] = session.Adapter.Version,
+                ["sourceHashes"] = CoreJson.Node((session.Sources).ToArray(), CoreJson.Web),
+                ["isTrial"] = trialIds is not null,
+                ["trialUnitIds"] = CoreJson.Node((trialIds)?.ToArray(), CoreJson.Web),
+                ["progress"] = CoreJson.Node(local, CoreJson.Web)
             };
-            await LocalFiles.WriteJsonAsync(Path.Combine(taskDirectory, "job.json"), state, token);
-            await LocalFiles.WriteJsonAsync(Path.Combine(session.ProjectDirectory, "job.json"), state, token);
+            await LocalFiles.WriteJsonAsync(Path.Combine(taskDirectory, "job.json"), state, CoreJson.TypeInfo<JsonObject>(CoreJson.Storage), token);
+            await LocalFiles.WriteJsonAsync(Path.Combine(session.ProjectDirectory, "job.json"), state, CoreJson.TypeInfo<JsonObject>(CoreJson.Storage), token);
             progress?.Report(local);
         }
         try
@@ -285,7 +306,7 @@ public sealed partial class TranslationPipeline(string dataDirectory, string? di
                 if (trialIds.Count == 0 || !trialIds.IsSubsetOf(session.Extraction.Units.Select(unit => unit.Id)))
                     throw new ArgumentException("请重新选择试译文本：选区为空或包含不属于当前游戏的文本。", nameof(options));
                 await LocalFiles.WriteJsonAsync(Path.Combine(session.ProjectDirectory, "trial-selection.json"),
-                    session.Extraction.Units.Where(unit => trialIds.Contains(unit.Id)).Select(unit => unit.Id).ToArray(), ct);
+                    session.Extraction.Units.Where(unit => trialIds.Contains(unit.Id)).Select(unit => unit.Id).ToArray(), CoreJson.TypeInfo<string[]>(CoreJson.Storage), ct);
             }
         }
         catch (Exception error)
@@ -334,11 +355,17 @@ public sealed partial class TranslationPipeline(string dataDirectory, string? di
             var output = await File.ReadAllBytesAsync(LocalFiles.UnderRoot(directory, file), ct);
             var validation = ExecutableChecks.Validate(original, output);
             issues.AddRange(validation.Issues.Select(issue => issue with { Message = file + ": " + issue.Message }));
-            reports.Add(new { file, originalFile = source, validation, coverage = source is null
-                ? "PE structure only; no matching original executable" : "PE structure and native x86 relocation hazards" });
+            reports.Add(new JsonObject
+            {
+                ["file"] = file,
+                ["originalFile"] = source,
+                ["validation"] = CoreJson.Node(validation, CoreJson.Web),
+                ["coverage"] = source is null
+                ? "PE structure only; no matching original executable" : "PE structure and native x86 relocation hazards"
+            });
         }
         if (reports.Count != 0)
-            await LocalFiles.WriteJsonAsync(Path.Combine(directory, "executable-validation.json"), reports, ct);
+            await LocalFiles.WriteJsonAsync(Path.Combine(directory, "executable-validation.json"), reports, CoreJson.TypeInfo<List<object>>(CoreJson.Storage), ct);
         return new(issues.Count == 0, issues);
     }
 
@@ -375,7 +402,7 @@ public sealed partial class TranslationPipeline(string dataDirectory, string? di
 
     private static async Task<bool> PatchIsIntactAsync(string directory, CancellationToken ct)
     {
-        var manifest = await LocalFiles.ReadJsonAsync<PatchManifest>(Path.Combine(directory, PatchInstaller.ManifestFilename), ct);
+        var manifest = await LocalFiles.ReadJsonAsync<PatchManifest>(Path.Combine(directory, PatchInstaller.ManifestFilename), CoreJson.TypeInfo<PatchManifest>(CoreJson.Storage), ct);
         if (manifest?.SchemaVersion != 1 || manifest.Files.Count == 0) return false;
         foreach (var file in manifest.Files)
         {

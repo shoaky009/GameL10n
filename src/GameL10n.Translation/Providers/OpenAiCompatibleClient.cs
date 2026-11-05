@@ -6,6 +6,8 @@ using System.Text.Encodings.Web;
 using System.Text.Json;
 using GameL10n.Core.Translation;
 using GameL10n.Core.Storage;
+using System.Text.Json.Nodes;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Providers;
 
@@ -20,7 +22,7 @@ public abstract class OpenAiCompatibleClient
     protected readonly ProviderSettings _settings;
     private readonly Uri _requestEndpoint;
     private readonly string? _diagnosticDirectory;
-    protected static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web)
+    protected static readonly JsonSerializerOptions Json = new(TranslationJson.Web)
     {
         Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
         MaxDepth = 32
@@ -189,8 +191,8 @@ public abstract class OpenAiCompatibleClient
     {
         if (_settings.ApiKey.Length == 0) return text;
         // Model content may echo a key as plain text or as a JSON-escaped string.
-        foreach (string secret in new[] { _settings.ApiKey, JsonSerializer.Serialize(_settings.ApiKey)[1..^1],
-                     JsonSerializer.Serialize(_settings.ApiKey, Json)[1..^1] }.Distinct().OrderByDescending(value => value.Length))
+        foreach (string secret in new[] { _settings.ApiKey, JsonSerializer.Serialize(_settings.ApiKey, TranslationJson.TypeInfo<string>(TranslationJson.Default))[1..^1],
+                     JsonSerializer.Serialize(_settings.ApiKey, TranslationJson.TypeInfo<string>(Json))[1..^1] }.Distinct().OrderByDescending(value => value.Length))
             text = text.Replace(secret, "[redacted]", StringComparison.Ordinal);
         return text;
     }
@@ -198,11 +200,21 @@ public abstract class OpenAiCompatibleClient
     protected async Task WriteFailureLogAsync(string operation, TranslationProviderException error, object? requestDetails = null)
     {
         if (_diagnosticDirectory is null) return;
-        var record = new
+        var record = new JsonObject
         {
-            timestamp = DateTimeOffset.UtcNow, operation, protocol = _settings.Protocol, translationFormat = _settings.TranslationFormat,
-            model = RedactCredential(_settings.Model), error.Message, error.FailureSummary, error.StatusCode, error.OutcomeUnknown,
-            error.Usage, error.Diagnostic, requestDetails, error.StackTrace
+            ["timestamp"] = DateTimeOffset.UtcNow,
+            ["operation"] = operation,
+            ["protocol"] = TranslationJson.Node(_settings.Protocol, Json),
+            ["translationFormat"] = TranslationJson.Node(_settings.TranslationFormat, Json),
+            ["model"] = RedactCredential(_settings.Model),
+            ["message"] = error.Message,
+            ["failureSummary"] = error.FailureSummary,
+            ["statusCode"] = TranslationJson.Node(error.StatusCode, Json),
+            ["outcomeUnknown"] = error.OutcomeUnknown,
+            ["usage"] = TranslationJson.Node(error.Usage, Json),
+            ["diagnostic"] = TranslationJson.Node(error.Diagnostic, Json),
+            ["requestDetails"] = TranslationJson.Node(requestDetails, Json),
+            ["stackTrace"] = error.StackTrace
         };
         string name = $"api-{DateTime.UtcNow:yyyyMMdd-HHmmssfff}-{Guid.NewGuid():N}.json";
         string fallback = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "GameL10n", "logs");
@@ -210,7 +222,7 @@ public abstract class OpenAiCompatibleClient
         {
             try
             {
-                await LocalFiles.WriteJsonAsync(Path.Combine(directory, name), record, CancellationToken.None);
+                await LocalFiles.WriteJsonAsync(Path.Combine(directory, name), record, TranslationJson.TypeInfo<JsonObject>(TranslationJson.Storage), CancellationToken.None);
                 return;
             }
             catch (Exception logError) when (logError is IOException or UnauthorizedAccessException)

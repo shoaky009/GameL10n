@@ -5,6 +5,7 @@ using System.Text.Json;
 using System.Diagnostics;
 using GameL10n.Core.Isolation;
 using GameL10n.Core.Storage;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Development;
 
@@ -25,7 +26,7 @@ public sealed class EngineReferenceToolkit(string rootDirectory, HttpClient? htt
     private const int MaximumDownload = 96 * 1024 * 1024;
     private static readonly HttpClient Http = new(new HttpClientHandler { UseCookies = false }) { Timeout = TimeSpan.FromMinutes(3) };
     private static readonly SemaphoreSlim Preparation = new(1, 1);
-    private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
+    private static readonly JsonSerializerOptions Json = new(EngineJson.Web);
     private readonly string root = Path.GetFullPath(rootDirectory);
     private readonly string bundle = Path.GetFullPath(bundledDirectory ?? Path.Combine(AppContext.BaseDirectory, "tools", "engine-tools"));
     private string Current => Path.Combine(root, "current.json");
@@ -33,7 +34,7 @@ public sealed class EngineReferenceToolkit(string rootDirectory, HttpClient? htt
     public EngineReferencePin? CurrentReference()
     {
         var path = File.Exists(Current) ? Current : Path.Combine(bundle, "current.json");
-        return File.Exists(path) ? JsonSerializer.Deserialize<EngineReferencePin>(File.ReadAllText(path), Json) : null;
+        return File.Exists(path) ? JsonSerializer.Deserialize<EngineReferencePin>(File.ReadAllText(path), EngineJson.TypeInfo<EngineReferencePin>(Json)) : null;
     }
 
     public string LibraryPath(EngineReferencePin pin)
@@ -109,7 +110,7 @@ public sealed class EngineReferenceToolkit(string rootDirectory, HttpClient? htt
             var result = new EngineReferencePin(revision!, sourceHash, Hash(library));
             if (pin is not null && pin != result) throw new InvalidDataException("引擎工具库内容与已验证版本不一致。");
             await WriteAtomicAsync(LibraryPath(result), library, ct);
-            if (!File.Exists(Current)) await LocalFiles.WriteJsonAsync(Current, result, ct);
+            if (!File.Exists(Current)) await LocalFiles.WriteJsonAsync(Current, result, EngineJson.TypeInfo<EngineReferencePin>(EngineJson.Storage), ct);
             return result;
         }
         finally { Preparation.Release(); }
@@ -184,7 +185,7 @@ public sealed class EngineReferenceToolkit(string rootDirectory, HttpClient? htt
                     Directory.CreateDirectory(Path.GetDirectoryName(target)!);
                     File.Move(WorkspaceFiles.Resolve(pending, file), target);
                 }
-                await LocalFiles.WriteJsonAsync(Path.Combine(directory, "runtime.json"), new PythonReceipt(archiveHash, files), ct);
+                await LocalFiles.WriteJsonAsync(Path.Combine(directory, "runtime.json"), new PythonReceipt(archiveHash, files), EngineJson.TypeInfo<PythonReceipt>(EngineJson.Storage), ct);
             }
             finally { if (Directory.Exists(pending)) GeneratedGameAdapter.DeleteStagedTree(pending); }
             return (new(pin, PythonVersion, archiveHash), new(Path.Combine(directory, "python.exe"), LibraryPath(pin)));
@@ -199,7 +200,7 @@ public sealed class EngineReferenceToolkit(string rootDirectory, HttpClient? htt
         if (!File.Exists(Path.Combine(directory, "runtime.json"))) directory = WorkspaceFiles.Resolve(bundle, "python/" + PythonVersion);
         var receiptPath = Path.Combine(directory, "runtime.json");
         if (!File.Exists(receiptPath)) return null;
-        var receipt = JsonSerializer.Deserialize<PythonReceipt>(await File.ReadAllTextAsync(receiptPath, ct), Json)
+        var receipt = JsonSerializer.Deserialize<PythonReceipt>(await File.ReadAllTextAsync(receiptPath, ct), EngineJson.TypeInfo<PythonReceipt>(Json))
             ?? throw new InvalidDataException("Python 工具记录无效。");
         if (!IsHex(receipt.ArchiveSha256, 64) || dependency is not null && dependency.PythonSha256 != receipt.ArchiveSha256)
             throw new InvalidDataException("共享 Python 与适配器固定版本不一致。");
@@ -219,7 +220,7 @@ public sealed class EngineReferenceToolkit(string rootDirectory, HttpClient? htt
     {
         var path = WorkspaceFiles.Resolve(packageDirectory, BuiltinAdapterAssets.SharedDependencyPath);
         if (!File.Exists(path)) return null;
-        var dependency = await LocalFiles.ReadJsonAsync<BuiltinParserDependency>(path, ct)
+        var dependency = await LocalFiles.ReadJsonAsync<BuiltinParserDependency>(path, EngineJson.TypeInfo<BuiltinParserDependency>(EngineJson.Storage), ct)
             ?? throw new InvalidDataException("共享 VNTextPatch 依赖记录无效。");
         return await (assets ?? parserAssets ?? new BuiltinAdapterAssets()).ResolveSharedAsync(root, dependency, ct);
     }
@@ -229,7 +230,7 @@ public sealed class EngineReferenceToolkit(string rootDirectory, HttpClient? htt
         var parser = await ResolveVnTextPatchAsync(packageDirectory, ct);
         var path = WorkspaceFiles.Resolve(packageDirectory, DependencyPath);
         if (!File.Exists(path)) return parser is null ? null : new(null, null, parser);
-        var dependency = await LocalFiles.ReadJsonAsync<EnginePythonDependency>(path, ct)
+        var dependency = await LocalFiles.ReadJsonAsync<EnginePythonDependency>(path, EngineJson.TypeInfo<EnginePythonDependency>(EngineJson.Storage), ct)
             ?? throw new InvalidDataException("引擎工具依赖记录无效。");
         await EnsureReferenceAsync(dependency.Reference, ct);
         var paths = (await EnsurePythonAsync(dependency.Reference, dependency, ct)).Paths;
@@ -374,5 +375,5 @@ public sealed class EngineReferenceToolkit(string rootDirectory, HttpClient? htt
         }
         finally { if (File.Exists(temporary)) File.Delete(temporary); }
     }
-    private sealed record PythonReceipt(string ArchiveSha256, Dictionary<string, string> Files);
+    internal sealed record PythonReceipt(string ArchiveSha256, Dictionary<string, string> Files);
 }

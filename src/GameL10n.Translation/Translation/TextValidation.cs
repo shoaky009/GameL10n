@@ -1,4 +1,5 @@
 using System.Text.RegularExpressions;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Translation;
 
@@ -78,7 +79,7 @@ public static partial class TextValidation
     }
 
     internal static string ProtectionSignature(TranslationUnit unit) => unit.ProtectedTokens is not { Count: > 0 } ? ""
-        : "\nprotected:" + System.Text.Json.JsonSerializer.Serialize(unit.ProtectedTokens.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal));
+        : "\nprotected:" + System.Text.Json.JsonSerializer.Serialize(unit.ProtectedTokens.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal), TranslationJson.TypeInfo<IOrderedEnumerable<string>>(TranslationJson.Default));
 
     public static IReadOnlyList<string> ProtectedMarkers(string source) => CommonMarkers(source)
         .Concat(SquareGroups().Matches(source).Select(group => group.Value).Where(group => !IsBracketProse(group)))

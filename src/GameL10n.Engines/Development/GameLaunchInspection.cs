@@ -2,6 +2,8 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Xml;
 using GameL10n.Core.Isolation;
+using System.Text.Json.Nodes;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Development;
 
@@ -80,8 +82,14 @@ public static class GameLaunchInspector
             if (matches.Count == 20) { partial = true; break; }
             matches.Add(path);
         }
-        return new { requested = normalized, exactPathExists = File.Exists(exact), matches, partial,
-            note = "文件存在不代表游戏进程能够按相同路径访问；还需核对工作目录、转区环境与脚本引用的原始字节。" };
+        return new JsonObject
+        {
+            ["requested"] = normalized,
+            ["exactPathExists"] = File.Exists(exact),
+            ["matches"] = EngineJson.Node((matches).ToArray(), EngineJson.Web),
+            ["partial"] = partial,
+            ["note"] = "文件存在不代表游戏进程能够按相同路径访问；还需核对工作目录、转区环境与脚本引用的原始字节。"
+        };
     }
 
     private static IEnumerable<string> Enumerate(string root, CancellationToken ct)

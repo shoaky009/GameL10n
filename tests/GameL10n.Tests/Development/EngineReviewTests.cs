@@ -148,7 +148,7 @@ public sealed partial class EngineReviewTests : IDisposable
         Assert.Equal(1, summary.ToolCount);
         var path = Path.Combine(Store.DirectoryPath, saved.Id + ".json");
         var altered = saved with { Guidance = "未经过版本校验的修改" };
-        await LocalFiles.WriteJsonAsync(path, altered);
+        await LocalFiles.WriteJsonAsync(path, altered, FixtureJson.TypeInfo<global::GameL10n.Core.Development.EngineKnowledgeEntry>(FixtureJson.Storage));
         Assert.Single(Store.ReadSummaries());
         Assert.Throws<InvalidDataException>(() => Store.ReadEntry(saved.Id));
         Assert.Empty(Store.ReadAll());

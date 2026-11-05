@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using GameL10n.Core.Pipeline;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Storage;
 
@@ -62,7 +63,7 @@ public sealed partial class GameProjectStore
     {
         try
         {
-            if (await LocalFiles.ReadJsonAsync<ProjectIndex>(IndexPath, ct) is { } index)
+            if (await LocalFiles.ReadJsonAsync<ProjectIndex>(IndexPath, CoreJson.TypeInfo<ProjectIndex>(CoreJson.Storage), ct) is { } index)
             {
                 if (index.SchemaVersion != 1 || index.Projects is null
                     || index.Projects.Any(project => project is null || project.Name is null
@@ -99,12 +100,12 @@ public sealed partial class GameProjectStore
         return rebuilt;
     }
 
-    private Task WriteIndexAsync(ProjectIndex index, CancellationToken ct) => LocalFiles.WriteJsonAsync(IndexPath, index, ct);
+    private Task WriteIndexAsync(ProjectIndex index, CancellationToken ct) => LocalFiles.WriteJsonAsync(IndexPath, index, CoreJson.TypeInfo<ProjectIndex>(CoreJson.Storage), ct);
 
     private static bool IsMetadataReadError(Exception error) =>
         error is IOException or InvalidDataException or JsonException or UnauthorizedAccessException or ArgumentException;
 
-    private sealed class ProjectIndex
+    internal sealed class ProjectIndex
     {
         [JsonRequired] public int SchemaVersion { get; init; } = 1;
         [JsonRequired] public List<GameProjectSummary> Projects { get; init; } = [];

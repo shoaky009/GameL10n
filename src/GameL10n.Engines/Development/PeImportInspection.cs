@@ -2,6 +2,8 @@ using System.Buffers.Binary;
 using System.Reflection.PortableExecutable;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json.Nodes;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Development;
 
@@ -134,20 +136,39 @@ internal static class PeImportInspection
                     if (references.Count >= 4) continue;
                     var start = Math.Max(0, index - 8);
                     var end = Math.Min(size, index + 16);
-                    references.Add(new { rva, fileOffset = position, kind = bytes[position + 1] == 0x15 ? "call-pattern" : "jump-pattern",
-                        contextRva = (long)section.VirtualAddress + start,
-                        contextHex = Convert.ToHexString(bytes.AsSpan(section.PointerToRawData + start, end - start)) });
+                    references.Add(new JsonObject
+                    {
+                        ["rva"] = rva,
+                        ["fileOffset"] = position,
+                        ["kind"] = bytes[position + 1] == 0x15 ? "call-pattern" : "jump-pattern",
+                        ["contextRva"] = (long)section.VirtualAddress + start,
+                        ["contextHex"] = Convert.ToHexString(bytes.AsSpan(section.PointerToRawData + start, end - start))
+                    });
                 }
             }
         }
-        return new
+        return new JsonObject
         {
-            architecture = image.CoffHeader.Machine.ToString(), imageBase = header.ImageBase, sha256 = Convert.ToHexStringLower(SHA256.HashData(bytes)),
-            totalImports = imports.Count, totalMatches = matches.Length, offset, more = offset + selected.Length < matches.Length,
-            nextOffset = offset + selected.Length < matches.Length ? (int?)(offset + selected.Length) : null, partial,
-            imports = selected.Select(item => new { item.Library, item.Name, item.IatRva, iatFileOffset = FileOffset(item.IatRva, pointerSize),
-                candidateReferences = sites[item.IatRva], candidateReferenceCount = counts[item.IatRva] }), warnings,
-            scope = "普通 PE 导入表为结构证据；调用位置仅匹配可执行节中的 x86/x64 FF15/FF25 字节模式，尚未确认指令边界、可达性和实际执行。其他寻址方式及动态解析不在引用扫描范围内；零命中不代表函数未使用。请围绕候选位置做有界反汇编，验证参数、字符遍历和字体路径，不能据此宣称游戏中文显示通过。"
+            ["architecture"] = image.CoffHeader.Machine.ToString(),
+            ["imageBase"] = header.ImageBase,
+            ["sha256"] = Convert.ToHexStringLower(SHA256.HashData(bytes)),
+            ["totalImports"] = imports.Count,
+            ["totalMatches"] = matches.Length,
+            ["offset"] = offset,
+            ["more"] = offset + selected.Length < matches.Length,
+            ["nextOffset"] = offset + selected.Length < matches.Length ? (int?)(offset + selected.Length) : null,
+            ["partial"] = partial,
+            ["imports"] = EngineJson.Array(selected.Select(item => new JsonObject
+            {
+                ["library"] = item.Library,
+                ["name"] = item.Name,
+                ["iatRva"] = item.IatRva,
+                ["iatFileOffset"] = FileOffset(item.IatRva, pointerSize),
+                ["candidateReferences"] = EngineJson.Node((sites[item.IatRva]).ToArray(), EngineJson.Web),
+                ["candidateReferenceCount"] = counts[item.IatRva]
+            })),
+            ["warnings"] = EngineJson.Node((warnings).ToArray(), EngineJson.Web),
+            ["scope"] = "普通 PE 导入表为结构证据；调用位置仅匹配可执行节中的 x86/x64 FF15/FF25 字节模式，尚未确认指令边界、可达性和实际执行。其他寻址方式及动态解析不在引用扫描范围内；零命中不代表函数未使用。请围绕候选位置做有界反汇编，验证参数、字符遍历和字体路径，不能据此宣称游戏中文显示通过。"
         };
     }
 }

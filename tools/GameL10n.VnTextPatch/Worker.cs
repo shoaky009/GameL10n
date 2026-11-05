@@ -8,7 +8,7 @@ namespace GameL10n.VnTextPatch;
 
 public static class Worker
 {
-    internal static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
+    internal static readonly JsonSerializerOptions Json = new(VnTextPatchJson.Web);
     private static readonly object Gate = new();
     private const string RuntimeWarning = "脚本已由内置解析器处理；游戏启动、字体及中文显示尚未实机验证。";
     public static IReadOnlyList<string> SupportedFormats { get; } = Array.AsReadOnly(Format.All.Select(f => f.Key).ToArray());
@@ -19,12 +19,12 @@ public static class Worker
         {
             try
             {
-                var request = JsonSerializer.Deserialize<Request>(requestJson, Json) ?? throw new InvalidDataException("请求内容为空。");
-                return JsonSerializer.Serialize(Execute(request), Json);
+                var request = JsonSerializer.Deserialize<Request>(requestJson, VnTextPatchJson.TypeInfo<Request>(Json)) ?? throw new InvalidDataException("请求内容为空。");
+                return JsonSerializer.Serialize(Execute(request), VnTextPatchJson.TypeInfo<Response>(Json));
             }
             catch (Exception error)
             {
-                return JsonSerializer.Serialize(Failure(error), Json);
+                return JsonSerializer.Serialize(Failure(error), VnTextPatchJson.TypeInfo<Response>(Json));
             }
         }
     }
@@ -134,7 +134,7 @@ public static class Worker
         if (request.TranslationsFile is { } translationsFile)
         {
             using var input = File.OpenRead(translationsFile);
-            translations = JsonSerializer.Deserialize<Dictionary<string, string>>(input, Json) ?? [];
+            translations = JsonSerializer.Deserialize<Dictionary<string, string>>(input, VnTextPatchJson.TypeInfo<Dictionary<string, string>>(Json)) ?? [];
         }
         else translations = request.Translations ?? [];
         var unseen = new HashSet<string>(translations.Keys, StringComparer.Ordinal);

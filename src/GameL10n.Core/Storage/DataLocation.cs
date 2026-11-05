@@ -1,4 +1,6 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Storage;
 
@@ -51,6 +53,9 @@ public static class DataLocation
             Environment.SetEnvironmentVariable("GAMEL10N_DATA", directory);
             return Task.CompletedTask;
         }
-        return LocalFiles.WriteJsonAsync(LocationFile, new { dataDirectory = directory });
+        return LocalFiles.WriteJsonAsync(LocationFile, new JsonObject
+        {
+            ["dataDirectory"] = directory
+        }, CoreJson.TypeInfo<JsonObject>(CoreJson.Storage));
     }
 }

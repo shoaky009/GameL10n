@@ -1,4 +1,6 @@
 using GameL10n.Core.Development;
+using System.Text.Json.Nodes;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Pipeline;
 
@@ -23,5 +25,9 @@ public sealed class GameAnalysisService(TranslationPipeline pipeline, AdapterDis
             await new AdapterOperationTrace(trace, "analysis-phase", result.Adapter.Id, result.Adapter.Version)
                 .MeasureAsync("commit", () => pipeline.CommitAnalysisAsync(prepared!, ct));
             return new(prepared, result);
-        }, new { gameId = request.GameId, coreBuild = typeof(GameAnalysisService).Module.ModuleVersionId.ToString("N") });
+        }, new JsonObject
+        {
+            ["gameId"] = request.GameId,
+            ["coreBuild"] = typeof(GameAnalysisService).Module.ModuleVersionId.ToString("N")
+        });
 }

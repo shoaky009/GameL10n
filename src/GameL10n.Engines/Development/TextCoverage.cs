@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Encodings.Web;
 using GameL10n.Core.Storage;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Development;
 
@@ -25,10 +26,10 @@ public sealed record TextCoverage(IReadOnlyList<TextCoverageSample> Samples, IRe
 {
     public IReadOnlyList<string> RuntimeChecks { get; init; } = [];
     public IReadOnlyList<TextCoverageSampleCorrection> Corrections { get; init; } = [];
-    private static readonly JsonSerializerOptions ContextJson = new(JsonSerializerDefaults.Web)
+    private static readonly JsonSerializerOptions ContextJson = new(EngineJson.Web)
         { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
     public static TextCoverage Empty { get; } = new([], []);
-    public string Fingerprint() => LocalFiles.HashText(JsonSerializer.Serialize(Samples));
+    public string Fingerprint() => LocalFiles.HashText(JsonSerializer.Serialize(Samples, EngineJson.TypeInfo<IReadOnlyList<TextCoverageSample>>(EngineJson.Default)));
 
     public void Validate()
     {
@@ -84,7 +85,7 @@ public sealed record TextCoverage(IReadOnlyList<TextCoverageSample> Samples, IRe
         : "\n独立保留的验收记录（checkpoint 不会清除）：pending 是已知漏提文字；runtimeChecks 是尚未完成的启动或显示验证，不能据此认定漏提文字。"
             + "旧 pending 不会自动删除，请按已有证据显式分类；已知遗漏必须披露，具体处理范围遵循当前任务目标。\n"
             + "样本必须来自实际资源的独立定位，不能把游戏名称或说明书标题猜作脚本文本。确认样本误标后，提供原样本、真实替代样本、原因与证据进行 coverageSampleCorrections；不能仅因适配器未命中而纠正。\n"
-            + JsonSerializer.Serialize(this, ContextJson);
+            + JsonSerializer.Serialize(this, EngineJson.TypeInfo<TextCoverage>(ContextJson));
 
     private static string Normalize(string value) => value.Replace('\\', '/');
 }

@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using GameL10n.Core.Isolation;
 using GameL10n.Core.Storage;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Development;
 
@@ -41,7 +42,7 @@ public sealed partial class AdapterDevelopmentWorkflow
 
     private Task<EnginePythonDependency?> SourceDependencyAsync(CancellationToken ct) =>
         GameL10n.Core.Storage.LocalFiles.ReadJsonAsync<EnginePythonDependency>(
-            WorkspaceFiles.Resolve(SourceDirectory, EngineReferenceToolkit.DependencyPath), ct);
+            WorkspaceFiles.Resolve(SourceDirectory, EngineReferenceToolkit.DependencyPath), EngineJson.TypeInfo<EnginePythonDependency>(EngineJson.Storage), ct);
 
     private async Task<EnginePythonPaths> PreparePythonReleaseAsync(CancellationToken ct)
     {
@@ -50,7 +51,7 @@ public sealed partial class AdapterDevelopmentWorkflow
         if (!File.Exists(path))
         {
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-            await LocalFiles.WriteJsonAsync(path, prepared.Dependency, ct);
+            await LocalFiles.WriteJsonAsync(path, prepared.Dependency, EngineJson.TypeInfo<EnginePythonDependency>(EngineJson.Storage), ct);
         }
         RegisterReleaseFiles([new(EngineReferenceToolkit.DependencyPath, "runtime", "固定版本 Python 解释器及引擎库")]);
         return prepared.Paths;

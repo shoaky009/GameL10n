@@ -64,7 +64,7 @@ public sealed class EngineLibraryTests : IDisposable
             "job.json", "job.json.bak", "tasks/saved/job.json", "extraction/cache/manifest.json" })
         {
             var file = Path.Combine(project, relativePath.Replace('/', Path.DirectorySeparatorChar));
-            await LocalFiles.WriteJsonAsync(file, new { id = GameId, adapterId = Family.AdapterId, adapterVersion = "one" });
+            await LocalFiles.WriteJsonAsync(file, new { id = GameId, adapterId = Family.AdapterId, adapterVersion = "one" }, FixtureJson.TypeInfo<object>(FixtureJson.Storage));
         }
         await File.WriteAllTextAsync(Path.Combine(project, "source.json.bak"), "{damaged");
         await File.WriteAllTextAsync(Path.Combine(project, "extraction", "cache", "units.jsonl"), "original text");
@@ -232,13 +232,13 @@ public sealed class EngineLibraryTests : IDisposable
             Path.Combine(games, "previous-target", "previous.json")
         };
         foreach (var pin in deletedPins)
-            await LocalFiles.WriteJsonAsync(pin, new { id = Family.AdapterId, version = "two", activatedAt = DateTimeOffset.UtcNow });
+            await LocalFiles.WriteJsonAsync(pin, new { id = Family.AdapterId, version = "two", activatedAt = DateTimeOffset.UtcNow }, FixtureJson.TypeInfo<object>(FixtureJson.Storage));
         await LocalFiles.WriteJsonAsync(Path.Combine(games, "active-target", "previous.json"),
-            new { id = Family.AdapterId, version = "one", activatedAt = DateTimeOffset.UtcNow });
+            new { id = Family.AdapterId, version = "one", activatedAt = DateTimeOffset.UtcNow }, FixtureJson.TypeInfo<object>(FixtureJson.Storage));
         await LocalFiles.WriteJsonAsync(Path.Combine(games, "previous-target", "active.json"),
-            new { id = Family.AdapterId, version = "three", activatedAt = DateTimeOffset.UtcNow });
+            new { id = Family.AdapterId, version = "three", activatedAt = DateTimeOffset.UtcNow }, FixtureJson.TypeInfo<object>(FixtureJson.Storage));
         await LocalFiles.WriteJsonAsync(Path.Combine(games, "other-family", "active.json"),
-            new { id = "engine.other", version = "two", activatedAt = DateTimeOffset.UtcNow });
+            new { id = "engine.other", version = "two", activatedAt = DateTimeOffset.UtcNow }, FixtureJson.TypeInfo<object>(FixtureJson.Storage));
         var unrelatedDamagedPin = Path.Combine(games, "damaged-other-family", "previous.json");
         Directory.CreateDirectory(Path.GetDirectoryName(unrelatedDamagedPin)!);
         await File.WriteAllTextAsync(unrelatedDamagedPin, "{damaged-unrelated-family");
@@ -481,7 +481,7 @@ public sealed class EngineLibraryTests : IDisposable
         var older = first with { Variant = "older", AdapterVersion = "two", UpdatedAt = epoch.AddHours(-1) };
         var last = first with { Variant = "last", AdapterVersion = "three", StructureStatus = "failed" };
         await LocalFiles.WriteJsonAsync(Path.Combine(store.RootDirectory, "catalog", Family.AdapterId, "games.json"),
-            new { family = Family, games = new[] { first, older, last } });
+            new { family = Family, games = new[] { first, older, last } }, FixtureJson.TypeInfo<object>(FixtureJson.Storage));
         Assert.Equal(last, Assert.Single(Assert.Single(store.ReadCatalog([])).Games));
         var family = Assert.Single((await store.ReadEngineLibraryAsync([], Data)).Families);
         Assert.Equal(last, Assert.Single(family.Games));
@@ -625,7 +625,7 @@ public sealed class EngineLibraryTests : IDisposable
                 sourceHashes = new Dictionary<string, string> { ["script.dat"] = "original-resource-hash" },
                 patchDirectory = "old-patch-path"
             }
-        });
+        }, FixtureJson.TypeInfo<object>(FixtureJson.Storage));
         File.SetLastWriteTimeUtc(path, modifiedAt.UtcDateTime);
         return path;
     }

@@ -4,6 +4,8 @@ using System.Reflection.Metadata;
 using System.Reflection.Metadata.Ecma335;
 using System.Reflection.PortableExecutable;
 using System.Text;
+using System.Text.Json.Nodes;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Development;
 
@@ -25,9 +27,9 @@ public static class UnitySchemaInspection
         Put display-format rules in the adapter, not generic translation validation. Record representative beginning/continuation/variant samples
         and concrete pendingCoverage. Roundtrip checks validate selected text only; they never prove complete runtime UI coverage.
         """;
-    private sealed record Field(string Name, string? Type, int? TypeIndex, int DeclarationIndex,
+    internal sealed record Field(string Name, string? Type, int? TypeIndex, int DeclarationIndex,
         bool? IsStatic = null, bool? NotSerialized = null);
-    private sealed record TextMethod(string Name, int Token);
+    internal sealed record TextMethod(string Name, int Token);
     private sealed record Definition(int Index, string Name, string Kind, string? BaseType, int? BaseTypeIndex,
         IReadOnlyList<Field> Fields, int MethodCount, IReadOnlyList<TextMethod> TextMethods, int? MetadataOffset = null);
 
@@ -49,8 +51,13 @@ public static class UnitySchemaInspection
             version = BinaryPrimitives.ReadInt32LittleEndian(magic.AsSpan(4));
             // These table offsets and row sizes are specific to v31. Other layouts must be
             // handled by a version-aware upstream parser, not silently interpreted as v31.
-            if (version != 31) return new { status = "unsupported-version", format = "il2cpp", version,
-                nextAction = "内置元数据查询目前支持 v31。使用对应版本的 IL2CPP 工具或匹配的托管/dummy DLL；不要套用 v31 表偏移。" };
+            if (version != 31) return new JsonObject
+            {
+                ["status"] = "unsupported-version",
+                ["format"] = "il2cpp",
+                ["version"] = version,
+                ["nextAction"] = "内置元数据查询目前支持 v31。使用对应版本的 IL2CPP 工具或匹配的托管/dummy DLL；不要套用 v31 表偏移。"
+            };
             var bytes = new byte[(int)stream.Length];
             await stream.ReadExactlyAsync(bytes, ct);
             if (mode == "literals") return InspectLiterals(bytes, query, offset, limit, ct);
@@ -82,16 +89,23 @@ public static class UnitySchemaInspection
             foreach (var type in page) AddRelated(type);
         // Include the base's own base/struct dependencies, bounded independently of file size.
         for (var i = 0; i < related.Count && i < 6; i++) AddRelated(related[i]);
-        return new
+        return new JsonObject
         {
-            status = "inspected", format, version, guidance = Guidance, totalTypes = types.Count, totalMatches = selected.Count,
-            offset, nextOffset = offset + page.Length, more = offset + page.Length < selected.Count,
-            types = page.Select(type => View(type, detail ? 64 : 0)).ToArray(),
-            relatedTypes = related.Select(type => View(type, 24)).ToArray(),
-            interpretation = format == "il2cpp"
+            ["status"] = "inspected",
+            ["format"] = format,
+            ["version"] = version,
+            ["guidance"] = Guidance,
+            ["totalTypes"] = types.Count,
+            ["totalMatches"] = selected.Count,
+            ["offset"] = offset,
+            ["nextOffset"] = offset + page.Length,
+            ["more"] = offset + page.Length < selected.Count,
+            ["types"] = EngineJson.Node(page.Select(type => View(type, detail ? 64 : 0)).ToArray(), EngineJson.Web),
+            ["relatedTypes"] = EngineJson.Node(related.Select(type => View(type, 24)).ToArray(), EngineJson.Web),
+            ["interpretation"] = format == "il2cpp"
                 ? "字段按声明顺序排列；typeIndex 是运行时类型表索引，不是类型定义行号。已解析名称只来自 byvalTypeIndex 的精确匹配。数组/泛型索引可能未解析，需对应 GameAssembly 注册表或匹配 dummy DLL。元数据本身不提供序列化偏移或字段 static/NonSerialized 属性。"
                 : "字段包含声明类型和 static/NotSerialized 标志。外部程序集类型未自动解析。dummy DLL 必须与游戏版本匹配；托管字段声明或 FieldOffset 均不能直接当作 Unity 资源序列化偏移。",
-            nextAction = detail
+            ["nextAction"] = detail
                 ? "结合资源 type tree 或真实对象验证继承、字段条件、长度与对齐。结构数组应核对元素成员，并选长度 0/1/多项的样本验证步长；未知类型不可默认按 4 字节跳过。textMethods 仅是按名称筛选的声明线索，不是调用关系或实际显示证据；描述字段为空但存在效果引用或 Description/Tooltip 方法时，追踪其关联对象及生成文本。"
                 : "用 query 指定相关类型（可逗号分隔）查看字段及关联结构。分别检查对话、静态 UI、物品/技能说明和已知遗漏，避免全文扫描报告。"
         };
@@ -134,25 +148,48 @@ public static class UnitySchemaInspection
             var text = utf8.GetString(data, pool + at, length);
             if (!text.Contains(query, StringComparison.OrdinalIgnoreCase)) continue;
             if (matched >= offset && matches.Count < limit)
-                matches.Add(new { index, byteOffset = pool + at, byteLength = length,
-                    text = text.Length > 2048 ? text[..2048] : text, truncated = text.Length > 2048 });
+                matches.Add(new JsonObject
+                {
+                    ["index"] = index,
+                    ["byteOffset"] = pool + at,
+                    ["byteLength"] = length,
+                    ["text"] = text.Length > 2048 ? text[..2048] : text,
+                    ["truncated"] = text.Length > 2048
+                });
             matched++;
         }
-        return new { status = "ok", format = "il2cpp", version = 31, mode = "literals", total = tableBytes / 8,
-            matched, offset, nextOffset = offset + matches.Count < matched ? (int?)(offset + matches.Count) : null,
-            literals = matches, guidance = Guidance,
-            notice = "字面量同时包含显示文案、查找键和诊断信息。匹配文字不能证明它仅用于显示；结合截图/消费者逐项审核，不要整表翻译。" };
+        return new JsonObject
+        {
+            ["status"] = "ok",
+            ["format"] = "il2cpp",
+            ["version"] = 31,
+            ["mode"] = "literals",
+            ["total"] = tableBytes / 8,
+            ["matched"] = matched,
+            ["offset"] = offset,
+            ["nextOffset"] = offset + matches.Count < matched ? (int?)(offset + matches.Count) : null,
+            ["literals"] = EngineJson.Node((matches).ToArray(), EngineJson.Web),
+            ["guidance"] = Guidance,
+            ["notice"] = "字面量同时包含显示文案、查找键和诊断信息。匹配文字不能证明它仅用于显示；结合截图/消费者逐项审核，不要整表翻译。"
+        };
     }
 
-    private static object View(Definition type, int fieldLimit) => new
+    private static object View(Definition type, int fieldLimit) => new JsonObject
     {
-        type.Index, type.Name, type.Kind, type.BaseType, type.BaseTypeIndex, type.MetadataOffset,
-        fieldCount = type.Fields.Count, fields = type.Fields.Take(fieldLimit).ToArray(),
-        fieldsTruncated = type.Fields.Count > fieldLimit,
-        unresolvedFieldTypes = type.Fields.Count(field => field.Type is null),
-        type.MethodCount, textMethodCount = type.TextMethods.Count,
-        textMethods = type.TextMethods.Take(fieldLimit > 0 ? 16 : 0).ToArray(),
-        textMethodsTruncated = type.TextMethods.Count > (fieldLimit > 0 ? 16 : 0)
+        ["index"] = type.Index,
+        ["name"] = type.Name,
+        ["kind"] = type.Kind,
+        ["baseType"] = type.BaseType,
+        ["baseTypeIndex"] = type.BaseTypeIndex,
+        ["metadataOffset"] = type.MetadataOffset,
+        ["fieldCount"] = type.Fields.Count,
+        ["fields"] = EngineJson.Node(type.Fields.Take(fieldLimit).ToArray(), EngineJson.Web),
+        ["fieldsTruncated"] = type.Fields.Count > fieldLimit,
+        ["unresolvedFieldTypes"] = type.Fields.Count(field => field.Type is null),
+        ["methodCount"] = type.MethodCount,
+        ["textMethodCount"] = type.TextMethods.Count,
+        ["textMethods"] = EngineJson.Node(type.TextMethods.Take(fieldLimit > 0 ? 16 : 0).ToArray(), EngineJson.Web),
+        ["textMethodsTruncated"] = type.TextMethods.Count > (fieldLimit > 0 ? 16 : 0)
     };
 
     private static bool IsTextMethod(string name) =>

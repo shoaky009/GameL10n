@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using GameL10n.Core.Isolation;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Development;
 
@@ -21,10 +22,10 @@ public sealed partial class AdapterDevelopmentWorkflow
             template.ArchiveComponent, template.ArchiveComponent == "archive.xp3" ? filter : null, template.ScriptExtensions, patterns);
         var files = await BuiltinAssets.PrepareSharedFilesAsync(template.Format, ct);
         files.Add("src/adapter.py", Encoding.UTF8.GetBytes(AdapterTemplates.PythonEntry));
-        files.Add("src/" + AdapterTemplates.ConfigurationPath, JsonSerializer.SerializeToUtf8Bytes(config, Json));
+        files.Add("src/" + AdapterTemplates.ConfigurationPath, JsonSerializer.SerializeToUtf8Bytes(config, EngineJson.TypeInfo<AdapterTemplateConfiguration>(Json)));
         var prepared = await PythonAsync(ct);
         if (prepared.Dependency.Reference.Kind != "galtransl") throw new InvalidDataException("此模板需要 GalTransl 共享工具库。");
-        files.Add("src/" + EngineReferenceToolkit.DependencyPath, JsonSerializer.SerializeToUtf8Bytes(prepared.Dependency, Json));
+        files.Add("src/" + EngineReferenceToolkit.DependencyPath, JsonSerializer.SerializeToUtf8Bytes(prepared.Dependency, EngineJson.TypeInfo<EnginePythonDependency>(Json)));
         if (template.ArchiveComponent is not null)
             files.Add("src/" + EngineArchiveComponents.ScriptPath, Encoding.UTF8.GetBytes(EngineArchiveComponents.Source));
         // Check the complete composition before writing any parser, entry point or dependency.
@@ -38,7 +39,7 @@ public sealed partial class AdapterDevelopmentWorkflow
             if (File.Exists(target) && !(await File.ReadAllBytesAsync(target, ct)).AsSpan().SequenceEqual(content))
                 throw new IOException("保留已有修改，未写入任何文件：" + path + "。可继续修改现有实现，或在新工作区组合模板。");
         }
-        var parser = JsonSerializer.Deserialize<BuiltinParserDependency>(files["src/" + BuiltinAdapterAssets.SharedDependencyPath], Json)!;
+        var parser = JsonSerializer.Deserialize<BuiltinParserDependency>(files["src/" + BuiltinAdapterAssets.SharedDependencyPath], EngineJson.TypeInfo<BuiltinParserDependency>(Json))!;
         await BuiltinAssets.ResolveSharedAsync(Path.Combine(store.RootDirectory, "engine-tools"), parser, ct);
         session.VerifiedPackage = null;
         foreach (var (path, content) in files)

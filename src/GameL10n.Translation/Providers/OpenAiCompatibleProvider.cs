@@ -1,6 +1,8 @@
 using System.Text;
 using System.Text.Json;
 using GameL10n.Core.Translation;
+using System.Text.Json.Nodes;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Providers;
 
@@ -68,19 +70,26 @@ public sealed partial class OpenAiCompatibleProvider : OpenAiCompatibleClient, I
             Preserve actual newline structure. Do not add explanations, markdown, extra IDs or omit IDs.
             Return exactly one JSON object mapping every input unit ID directly to its translated string.
             """;
-        string data = JsonSerializer.Serialize(new
+        string data = JsonSerializer.Serialize(new JsonObject
         {
-            targetLanguage = request.TargetLanguage,
-            terminology = request.Terminology,
-            style = request.Style,
-            units = request.Units.Select(unit => new
+            ["targetLanguage"] = request.TargetLanguage,
+            ["terminology"] = TranslationJson.Node(request.Terminology, Json),
+            ["style"] = request.Style,
+            ["units"] = TranslationJson.Array(request.Units.Select(unit => new JsonObject
             {
-                id = wireIds[unit.Id], sourceText = protectedTexts[unit.Id].Text, context = unit.Context,
-                speaker = unit.Speaker, kind = unit.Kind,
-                protectedMarkers = protectedTexts[unit.Id].Counts.Select(pair => new { text = pair.Key, count = pair.Value }),
-                validationFeedback = request.ValidationFeedback?.GetValueOrDefault(unit.Id)?.Select(protectedTexts[unit.Id].EncodeFeedback)
-            })
-        }, Json);
+                ["id"] = wireIds[unit.Id],
+                ["sourceText"] = protectedTexts[unit.Id].Text,
+                ["context"] = unit.Context,
+                ["speaker"] = unit.Speaker,
+                ["kind"] = unit.Kind,
+                ["protectedMarkers"] = TranslationJson.Array(protectedTexts[unit.Id].Counts.Select(pair => new JsonObject
+                {
+                    ["text"] = pair.Key,
+                    ["count"] = pair.Value
+                })),
+                ["validationFeedback"] = TranslationJson.Node((request.ValidationFeedback?.GetValueOrDefault(unit.Id)?.Select(protectedTexts[unit.Id].EncodeFeedback))?.ToArray(), Json)
+            }))
+        }, TranslationJson.TypeInfo<JsonObject>(Json));
         // The translation pipeline owns retries and persists each failed attempt.
         Completion completion = await CompleteAsync(system, data, 4096, cancellationToken, retryRateLimits: false);
         string content = UnwrapTranslationJson(completion.Content);
@@ -122,28 +131,44 @@ public sealed partial class OpenAiCompatibleProvider : OpenAiCompatibleClient, I
     private async Task<Completion> CompleteAsync(string system, string data, int maximumOutputTokens, CancellationToken cancellationToken,
         bool retryRateLimits = true)
     {
-        byte[] payload = _settings.Protocol == ProviderApiProtocol.Responses ? JsonSerializer.SerializeToUtf8Bytes(new
+        byte[] payload = _settings.Protocol == ProviderApiProtocol.Responses ? JsonSerializer.SerializeToUtf8Bytes(new JsonObject
         {
-            model = _settings.Model,
-            instructions = system,
-            input = data,
-            max_output_tokens = maximumOutputTokens,
-            store = false,
-            stream = false
-        }, Json) : _settings.TranslationFormat == TranslationInputFormat.PlainText ? JsonSerializer.SerializeToUtf8Bytes(new
+            ["model"] = _settings.Model,
+            ["instructions"] = system,
+            ["input"] = data,
+            ["max_output_tokens"] = maximumOutputTokens,
+            ["store"] = false,
+            ["stream"] = false
+        }, TranslationJson.TypeInfo<JsonObject>(Json)) : _settings.TranslationFormat == TranslationInputFormat.PlainText ? JsonSerializer.SerializeToUtf8Bytes(new JsonObject
         {
-            model = _settings.Model,
-            messages = new[] { new { role = "system", content = system }, new { role = "user", content = data } },
-            max_tokens = maximumOutputTokens,
-            temperature = 0.2,
-            stream = false
-        }, Json) : JsonSerializer.SerializeToUtf8Bytes(new
+            ["model"] = _settings.Model,
+            ["messages"] = TranslationJson.Array(new[] { new JsonObject
+            {
+                ["role"] = "system",
+                ["content"] = system
+            }, new JsonObject
+            {
+                ["role"] = "user",
+                ["content"] = data
+            } }),
+            ["max_tokens"] = maximumOutputTokens,
+            ["temperature"] = 0.2,
+            ["stream"] = false
+        }, TranslationJson.TypeInfo<JsonObject>(Json)) : JsonSerializer.SerializeToUtf8Bytes(new JsonObject
         {
-            model = _settings.Model,
-            messages = new[] { new { role = "system", content = system }, new { role = "user", content = data } },
-            max_completion_tokens = maximumOutputTokens,
-            stream = false
-        }, Json);
+            ["model"] = _settings.Model,
+            ["messages"] = TranslationJson.Array(new[] { new JsonObject
+            {
+                ["role"] = "system",
+                ["content"] = system
+            }, new JsonObject
+            {
+                ["role"] = "user",
+                ["content"] = data
+            } }),
+            ["max_completion_tokens"] = maximumOutputTokens,
+            ["stream"] = false
+        }, TranslationJson.TypeInfo<JsonObject>(Json));
         return await SendAsync(payload, cancellationToken, (root, usage, requestId) =>
         {
             string text = _settings.Protocol == ProviderApiProtocol.Responses

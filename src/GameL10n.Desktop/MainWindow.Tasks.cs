@@ -12,6 +12,7 @@ using GameL10n.Core.Translation;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
+using System.Text.Json.Nodes;
 
 namespace GameL10n.Desktop;
 
@@ -61,7 +62,13 @@ public sealed partial class MainWindow
     private static async Task LogDiscoveryDiagnostic(GameWorkspace game, string? runId, object detail)
     {
         var line = $"[{DateTime.Now:HH:mm:ss.fff}] [识别诊断] "
-            + JsonSerializer.Serialize(new { schemaVersion = 1, runId, at = DateTimeOffset.UtcNow, entry = detail }) + "\n";
+            + JsonSerializer.Serialize(new JsonObject
+            {
+                ["schemaVersion"] = 1,
+                ["runId"] = runId,
+                ["at"] = DateTimeOffset.UtcNow,
+                ["entry"] = DesktopJson.Node(detail, DesktopJson.Default)
+            }, DesktopJson.TypeInfo<JsonObject>(DesktopJson.Default)) + "\n";
         var path = Path.Combine(game.Directory, "logs", $"{DateTime.Now:yyyyMMdd}.log");
         try
         {
@@ -78,7 +85,7 @@ public sealed partial class MainWindow
         EngineReferenceToolkit toolkit, Action<string, string> report, TranslationPipeline storagePipeline, CancellationToken token)
     {
         SourceSnapshot? snapshot;
-        try { snapshot = await LocalFiles.ReadRecoverableJsonAsync<SourceSnapshot>(Path.Combine(game.Directory, "source.json"), token); }
+        try { snapshot = await LocalFiles.ReadRecoverableJsonAsync<SourceSnapshot>(Path.Combine(game.Directory, "source.json"), DesktopJson.TypeInfo<SourceSnapshot>(DesktopJson.Storage), token); }
         catch (Exception error) when (error is System.Text.Json.JsonException or InvalidDataException)
         { report("读取已有结果", "保存的识别记录无法读取，请点击重新识别。已保存译文仍会保留。"); return null; }
         if (snapshot is null) return null;
@@ -103,9 +110,9 @@ public sealed partial class MainWindow
     {
         if (game.Session is { } loaded) return loaded.Extraction.Units;
         SetStage(game, "读取已有文本", "正在读取已保存的文本身份，用于保留译文和校对记录。");
-        var snapshot = await LocalFiles.ReadRecoverableJsonAsync<SourceSnapshot>(Path.Combine(game.Directory, "source.json"), token);
+        var snapshot = await LocalFiles.ReadRecoverableJsonAsync<SourceSnapshot>(Path.Combine(game.Directory, "source.json"), DesktopJson.TypeInfo<SourceSnapshot>(DesktopJson.Storage), token);
         if (snapshot is null) return null;
-        var fingerprint = LocalFiles.HashText(JsonSerializer.Serialize(snapshot.Files.OrderBy(file => file.RelativePath)));
+        var fingerprint = LocalFiles.HashText(JsonSerializer.Serialize(snapshot.Files.OrderBy(file => file.RelativePath), DesktopJson.TypeInfo<IOrderedEnumerable<SourceFile>>(DesktopJson.Default)));
         var extraction = await Task.Run(() => new ExtractionStore(game.Directory)
             .LoadAsync(fingerprint, snapshot.AdapterId, snapshot.AdapterVersion, token), token);
         if (extraction is null)
@@ -132,7 +139,7 @@ public sealed partial class MainWindow
         if (selectedGame is not { } game) return;
         try
         {
-            var scope = await LocalFiles.ReadJsonAsync<TranslationScope>(Path.Combine(game.Directory, "translation-scope.json"));
+            var scope = await LocalFiles.ReadJsonAsync<TranslationScope>(Path.Combine(game.Directory, "translation-scope.json"), DesktopJson.TypeInfo<TranslationScope>(DesktopJson.Storage));
             var resumeWithoutPatch = scope is { Completed: false, BuildPatchAfter: true }
                 && game.Session?.Adapter is UnavailableGameAdapter;
             if (scope is { Completed: false, UnitIds: { } ids })
@@ -184,7 +191,7 @@ public sealed partial class MainWindow
             {
                 Log(game, "文本翻译 API 链：" + string.Join(" → ", providers.Select(provider => provider.DisplayName)));
                 var scope = new TranslationScope(trialUnitIds, buildPatchAfter, false, retranslationId);
-                await LocalFiles.WriteJsonAsync(Path.Combine(game.Directory, "translation-scope.json"), scope, token);
+                await LocalFiles.WriteJsonAsync(Path.Combine(game.Directory, "translation-scope.json"), scope, DesktopJson.TypeInfo<TranslationScope>(DesktopJson.Storage), token);
                 game.HasPendingTranslation = true;
                 var progress = TranslationProgress(game);
                 var options = new TranslationOptions(settings.BatchSize, UnitIds: trialUnitIds)
@@ -199,7 +206,7 @@ public sealed partial class MainWindow
                     await LoadPatchIndexAsync(game);
                     foreach (var warning in game.Result.Warnings.Distinct(StringComparer.Ordinal)) Log(game, warning);
                 }
-                await LocalFiles.WriteJsonAsync(Path.Combine(game.Directory, "translation-scope.json"), scope with { Completed = summary.Failed == 0 });
+                await LocalFiles.WriteJsonAsync(Path.Combine(game.Directory, "translation-scope.json"), scope with { Completed = summary.Failed == 0 }, DesktopJson.TypeInfo<TranslationScope>(DesktopJson.Storage));
                 game.HasPendingTranslation = summary.Failed > 0;
                 SetStage(game, summary.Failed > 0 ? $"翻译结束，{summary.Failed} 条失败，可继续重试"
                     : buildPatchAfter ? "试译补丁已生成" : "翻译完成，可继续校对");
@@ -365,7 +372,14 @@ public sealed partial class MainWindow
                 {
                     if (adaptation.Diagnostics.Count > 0)
                         await LocalFiles.WriteJsonAsync(Path.Combine(game.Directory, "logs", "adaptation-" + game.RunId + ".json"),
-                            new { timestamp = DateTimeOffset.UtcNow, status = adaptation.Status.ToString(), adaptation.Summary, adaptation.Diagnostics, adaptation.Usage });
+                            new JsonObject
+                            {
+                                ["timestamp"] = DateTimeOffset.UtcNow,
+                                ["status"] = adaptation.Status.ToString(),
+                                ["summary"] = adaptation.Summary,
+                                ["diagnostics"] = DesktopJson.Node((adaptation.Diagnostics).ToArray(), DesktopJson.Storage),
+                                ["usage"] = DesktopJson.Node(adaptation.Usage, DesktopJson.Storage)
+                            }, DesktopJson.TypeInfo<JsonObject>(DesktopJson.Storage));
                     game.Error = adaptation.Status is AdaptationStatus.Failed or AdaptationStatus.Unavailable ? game.AdaptationSummary : null;
                     SetStage(game, AdaptationStage(adaptation.Status));
                     Log(game, game.Stage + "。" + adaptation.NextAction);
@@ -473,7 +487,12 @@ public sealed partial class MainWindow
                     kind == GameTaskKind.Analysis && game.HasSavedAnalysis ? "上一次成功提取的结果仍可使用。" : "");
                 if (error is not TranslationRetriesExhaustedException and not TranslationRefusedException) Log(game, error.Message);
                 string diagnostic = Path.Combine(game.Directory, "logs", "error-" + game.RunId + ".json");
-                try { await LocalFiles.WriteJsonAsync(diagnostic, new { timestamp = DateTimeOffset.UtcNow, operation = label, error = error.ToString() }); }
+                try { await LocalFiles.WriteJsonAsync(diagnostic, new JsonObject
+                {
+                    ["timestamp"] = DateTimeOffset.UtcNow,
+                    ["operation"] = label,
+                    ["error"] = error.ToString()
+                }, DesktopJson.TypeInfo<JsonObject>(DesktopJson.Storage)); }
                 catch (Exception logError) when (logError is IOException or UnauthorizedAccessException) { Program.WriteStartupError(logError); }
             }
             finally
@@ -504,7 +523,7 @@ public sealed partial class MainWindow
         var projectStore = projects;
         return game.EnqueueWrite(async () =>
         {
-            await LocalFiles.WriteJsonAsync(Path.Combine(game.Directory, "task-state.json"), state);
+            await LocalFiles.WriteJsonAsync(Path.Combine(game.Directory, "task-state.json"), state, DesktopJson.TypeInfo<SavedTaskState>(DesktopJson.Storage));
             await projectStore.SaveAsync(project);
         });
     }

@@ -1,6 +1,8 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using GameL10n.Core.Storage;
+using System.Text.Json.Nodes;
+using GameL10n.Core.Serialization;
 
 namespace GameL10n.Core.Translation;
 
@@ -17,11 +19,13 @@ public sealed record MemoryShard(int SchemaVersion, IReadOnlyDictionary<string, 
 // but persist it only once. Version 1 shards and legacy individual entries remain readable.
 internal sealed class MemoryShardConverter : JsonConverter<MemoryShard>
 {
-    private sealed record StoredShard(int SchemaVersion, Dictionary<string, MemoryEntry> Entries);
+    internal sealed record StoredShard(int SchemaVersion, Dictionary<string, MemoryEntry> Entries);
+    internal sealed record WriteShard(int SchemaVersion, IReadOnlyDictionary<string, StoredEntry> Entries);
+    internal sealed record StoredEntry(string SourceText, string Context, string Translation, string Provider, DateTimeOffset CreatedAt);
 
     public override MemoryShard Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
     {
-        var stored = JsonSerializer.Deserialize<StoredShard>(ref reader, options)
+        var stored = JsonSerializer.Deserialize<StoredShard>(ref reader, TranslationJson.TypeInfo<StoredShard>(options))
             ?? throw new JsonException("翻译缓存分片为空。");
         if (stored.SchemaVersion is not (1 or 2) || stored.Entries is null)
             throw new JsonException("不支持的翻译缓存格式。");
@@ -33,14 +37,9 @@ internal sealed class MemoryShardConverter : JsonConverter<MemoryShard>
     }
 
     public override void Write(Utf8JsonWriter writer, MemoryShard value, JsonSerializerOptions options) =>
-        JsonSerializer.Serialize(writer, new
-        {
-            SchemaVersion = 2,
-            Entries = value.Entries.ToDictionary(pair => pair.Key, pair => new
-            {
-                pair.Value.SourceText, pair.Value.Context, pair.Value.Translation, pair.Value.Provider, pair.Value.CreatedAt
-            }, StringComparer.Ordinal)
-        }, options);
+        JsonSerializer.Serialize(writer, new WriteShard(2, value.Entries.ToDictionary(pair => pair.Key,
+            pair => new StoredEntry(pair.Value.SourceText, pair.Value.Context, pair.Value.Translation,
+                pair.Value.Provider, pair.Value.CreatedAt), StringComparer.Ordinal)), TranslationJson.TypeInfo<WriteShard>(options));
 }
 
 public sealed class TranslationMemory(string directory, string? legacyDirectory = null)
@@ -88,7 +87,7 @@ public sealed class TranslationMemory(string directory, string? legacyDirectory 
     private async Task<int> ImportLegacyLockedAsync(string sourceDirectory, CancellationToken ct)
     {
         var markerPath = Path.Combine(directory, ".legacy-import.json");
-        var marker = await LocalFiles.ReadRecoverableJsonAsync<LegacyImport>(markerPath, ct,
+        var marker = await LocalFiles.ReadRecoverableJsonAsync<LegacyImport>(markerPath, TranslationJson.TypeInfo<LegacyImport>(TranslationJson.Storage), ct,
             value => value.SchemaVersion == 1 && value.EntryCount >= 0);
         if (marker is not null) return marker.EntryCount;
         var imported = new Dictionary<string, MemoryEntry>(StringComparer.Ordinal);
@@ -98,7 +97,7 @@ public sealed class TranslationMemory(string directory, string? legacyDirectory 
             {
                 var key = Path.GetFileNameWithoutExtension(path);
                 if (!IsKey(key)) return;
-                var entry = await LocalFiles.ReadJsonAsync<MemoryEntry>(path, token);
+                var entry = await LocalFiles.ReadJsonAsync<MemoryEntry>(path, TranslationJson.TypeInfo<MemoryEntry>(TranslationJson.Storage), token);
                 if (entry is null || entry.Key != key || !IsValidEntry(entry))
                     throw new InvalidDataException("旧版翻译缓存内容校验失败。");
                 lock (imported) imported[key] = entry;
@@ -106,11 +105,11 @@ public sealed class TranslationMemory(string directory, string? legacyDirectory 
         // Existing game-local entries take precedence when a migration is resumed.
         foreach (var pair in entries) imported[pair.Key] = pair.Value;
         await StoreLockedAsync(imported.Values, ct);
-        await LocalFiles.WriteRecoverableJsonAsync(markerPath, new LegacyImport(1, imported.Count), ct);
+        await LocalFiles.WriteRecoverableJsonAsync(markerPath, new LegacyImport(1, imported.Count), TranslationJson.TypeInfo<LegacyImport>(TranslationJson.Storage), ct);
         return imported.Count;
     }
 
-    private sealed record LegacyImport(int SchemaVersion, int EntryCount);
+    internal sealed record LegacyImport(int SchemaVersion, int EntryCount);
 
     public string Key(TranslationUnit unit, TranslationPolicy policy) =>
         Key(unit, policy, SingleWordEmphasisGroups(unit.SourceText).Count > 0);
@@ -126,11 +125,17 @@ public sealed class TranslationMemory(string directory, string? legacyDirectory 
         var terms = policy.Terminology.Where(t => unit.SourceText.Contains(t.Key, StringComparison.Ordinal) ||
             unit.Context.Contains(t.Key, StringComparison.Ordinal) || (unit.Speaker?.Contains(t.Key, StringComparison.Ordinal) ?? false))
             .OrderBy(t => t.Key, StringComparer.Ordinal).Select(t => new[] { t.Key, t.Value });
-        return LocalFiles.HashText(JsonSerializer.Serialize(new
+        return LocalFiles.HashText(JsonSerializer.Serialize(new JsonObject
         {
-            unit.SourceText, unit.Context, unit.Speaker, unit.Kind,
-            policy.TargetLanguage, policy.Style, Version = policy.Version + (bracketEmphasis ? "\nbracket-emphasis-1" : ""), Terms = terms
-        }) + TextValidation.ProtectionSignature(unit));
+            ["SourceText"] = unit.SourceText,
+            ["Context"] = unit.Context,
+            ["Speaker"] = unit.Speaker,
+            ["Kind"] = unit.Kind,
+            ["TargetLanguage"] = policy.TargetLanguage,
+            ["Style"] = policy.Style,
+            ["Version"] = policy.Version + (bracketEmphasis ? "\nbracket-emphasis-1" : ""),
+            ["Terms"] = TranslationJson.Node((terms).ToArray(), TranslationJson.Default)
+        }, TranslationJson.TypeInfo<JsonObject>(TranslationJson.Default)) + TextValidation.ProtectionSignature(unit));
     }
 
     public async Task<string?> FindAsync(TranslationUnit unit, TranslationPolicy policy, CancellationToken ct = default)
@@ -188,7 +193,7 @@ public sealed class TranslationMemory(string directory, string? legacyDirectory 
                 changed = true;
             }
             if (changed)
-                await LocalFiles.WriteRecoverableJsonAsync(Path.Combine(directory, group.Key + ".json"), new MemoryShard(2, shard), ct);
+                await LocalFiles.WriteRecoverableJsonAsync(Path.Combine(directory, group.Key + ".json"), new MemoryShard(2, shard), TranslationJson.TypeInfo<MemoryShard>(TranslationJson.Storage), ct);
             foreach (var pair in shard) entries[pair.Key] = pair.Value;
         }
     }
@@ -196,11 +201,11 @@ public sealed class TranslationMemory(string directory, string? legacyDirectory 
     private async Task<Dictionary<string, MemoryEntry>> ReadShardAsync(string prefix, CancellationToken ct)
     {
         var path = Path.Combine(directory, prefix + ".json");
-        var shard = await LocalFiles.ReadRecoverableJsonAsync<MemoryShard>(path, ct,
+        var shard = await LocalFiles.ReadRecoverableJsonAsync<MemoryShard>(path, TranslationJson.TypeInfo<MemoryShard>(TranslationJson.Storage), ct,
             value => value.SchemaVersion is 1 or 2 && value.Entries is not null && value.Entries.All(pair =>
                 IsValidEntry(pair.Value) && pair.Key.StartsWith(prefix, StringComparison.Ordinal) && pair.Key == pair.Value.Key));
         if (shard?.SchemaVersion == 1)
-            await LocalFiles.WriteJsonAsync(path, shard with { SchemaVersion = 2 }, ct);
+            await LocalFiles.WriteJsonAsync(path, shard with { SchemaVersion = 2 }, TranslationJson.TypeInfo<MemoryShard>(TranslationJson.Storage), ct);
         return shard is null ? new(StringComparer.Ordinal) : new(shard.Entries, StringComparer.Ordinal);
     }
 

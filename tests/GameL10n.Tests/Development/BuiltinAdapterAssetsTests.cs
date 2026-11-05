@@ -66,7 +66,7 @@ public sealed class BuiltinAdapterAssetsTests : IDisposable
         Assert.Empty(Directory.EnumerateFiles(first, "*.dll", SearchOption.AllDirectories));
         Assert.Empty(Directory.EnumerateFiles(second, "*.dll", SearchOption.AllDirectories));
         var dependency = (await GameL10n.Core.Storage.LocalFiles.ReadJsonAsync<BuiltinParserDependency>(
-            Path.Combine(first, "src", BuiltinAdapterAssets.SharedDependencyPath)))!;
+            Path.Combine(first, "src", BuiltinAdapterAssets.SharedDependencyPath), FixtureJson.TypeInfo<global::GameL10n.Core.Development.BuiltinParserDependency>(FixtureJson.Storage)))!;
         var legacyFiles = dependency.Files.ToDictionary(pair => pair.Key.Replace("GameL10n.VnTextPatch.dll", "AvgTranslator.VnTextPatch.dll"), pair => pair.Value);
         var legacyDirectory = Path.Combine(shared, "vntextpatch", GeneratedAdapterResources.HashEntries(legacyFiles));
         Directory.CreateDirectory(legacyDirectory);
@@ -254,7 +254,7 @@ public sealed class BuiltinAdapterAssetsTests : IDisposable
         using var archive = ZipFile.Open(Path.Combine(assets, "sources.zip"), ZipArchiveMode.Create);
         foreach (string path in Directory.EnumerateFiles(vendor, "*.cs", SearchOption.AllDirectories))
             archive.CreateEntryFromFile(path, "vendor/" + Path.GetRelativePath(vendor, path).Replace('\\', '/'));
-        foreach (string name in new[] { "Worker.cs", "Protocol.cs" })
+        foreach (string name in new[] { "Worker.cs", "Protocol.cs", "Serialization/VnTextPatchJson.cs" })
             archive.CreateEntryFromFile(Path.Combine(Repository(), "tools/GameL10n.VnTextPatch", name), "worker/" + name);
         return new(assets);
     }

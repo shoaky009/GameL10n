@@ -1,3 +1,4 @@
+using GameL10n.Core.Serialization;
 using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -78,7 +79,13 @@ internal static class DataTool
         foreach (var path in paths) reports.Add(await MigrateAsync(path, perGame));
         if (options.ContainsKey("activate"))
             await ActivateAsync(Path.GetFullPath(options.GetValueOrDefault("bootstrap-root") ?? DataLocation.DefaultDirectory), destination);
-        return new { status = "migrated-all", gameCount = reports.Count, dataRoot = destination, games = reports };
+        return new JsonObject
+        {
+            ["status"] = "migrated-all",
+            ["gameCount"] = reports.Count,
+            ["dataRoot"] = destination,
+            ["games"] = CoreJson.Node((reports).ToArray(), CoreJson.Web)
+        };
     }
 
     private static async Task<object> MigrateAsync(string gameDirectory, Dictionary<string, string?> options)
@@ -107,7 +114,11 @@ internal static class DataTool
         {
             var existing = await VerifyAsync(destination, gameDirectory);
             if (options.ContainsKey("activate")) await ActivateAsync(bootstrap, destination);
-            return new { status = "already-migrated", verification = existing };
+            return new JsonObject
+            {
+                ["status"] = "already-migrated",
+                ["verification"] = CoreJson.Node(existing, CoreJson.Web)
+            };
         }
 
         // A process interruption between the two directory renames leaves the verified stage and backup.
@@ -145,11 +156,15 @@ internal static class DataTool
             projectLock?.Dispose();
             CommitProject(stage, project, backup);
             if (options.ContainsKey("activate")) await ActivateAsync(bootstrap, destination);
-            return new
+            return new JsonObject
             {
-                status = "copied-current", gameId = id, dataRoot = destination,
-                copiedFiles = currentCopy.Files, copiedBytes = currentCopy.Bytes,
-                elapsedMilliseconds = timer.ElapsedMilliseconds, verification = currentVerification
+                ["status"] = "copied-current",
+                ["gameId"] = id,
+                ["dataRoot"] = destination,
+                ["copiedFiles"] = currentCopy.Files,
+                ["copiedBytes"] = currentCopy.Bytes,
+                ["elapsedMilliseconds"] = timer.ElapsedMilliseconds,
+                ["verification"] = CoreJson.Node(currentVerification, CoreJson.Web)
             };
         }
         var copied = await CopyTreeAsync(sourceProject, stage, replaceStaging: true,
@@ -157,7 +172,7 @@ internal static class DataTool
                 && relative != "memory/.memory.lock"
                 && !relative.StartsWith("extraction/", StringComparison.Ordinal));
 
-        var snapshot = await LocalFiles.ReadJsonAsync<SourceSnapshot>(Path.Combine(stage, "source.json"))
+        var snapshot = await LocalFiles.ReadJsonAsync<SourceSnapshot>(Path.Combine(stage, "source.json"), CoreJson.TypeInfo<SourceSnapshot>(CoreJson.Storage))
             ?? throw new InvalidDataException("The legacy source snapshot is missing.");
         var relativeSources = ProjectRelative(sourceProject, stage, snapshot.Directory, "sources");
         foreach (var file in snapshot.Files)
@@ -167,14 +182,14 @@ internal static class DataTool
                 throw new InvalidDataException("A source snapshot failed its SHA-256 check.");
         }
         var fingerprint = Path.GetFileName(relativeSources);
-        var extraction = await LocalFiles.ReadJsonAsync<ExtractionResult>(Path.Combine(stage, "extraction.json"))
+        var extraction = await LocalFiles.ReadJsonAsync<ExtractionResult>(Path.Combine(stage, "extraction.json"), CoreJson.TypeInfo<ExtractionResult>(CoreJson.Storage))
             ?? throw new InvalidDataException("The legacy extraction is missing.");
         var extractionStore = new ExtractionStore(stage);
         await extractionStore.StoreAsync(fingerprint, snapshot.AdapterId, snapshot.AdapterVersion, extraction);
         var loaded = await extractionStore.LoadAsync(fingerprint, snapshot.AdapterId, snapshot.AdapterVersion)
             ?? throw new InvalidDataException("The converted extraction could not be read.");
-        if (!JsonSerializer.SerializeToUtf8Bytes(extraction, LocalFiles.JsonOptions)
-            .AsSpan().SequenceEqual(JsonSerializer.SerializeToUtf8Bytes(loaded, LocalFiles.JsonOptions)))
+        if (!JsonSerializer.SerializeToUtf8Bytes(extraction, CoreJson.TypeInfo<ExtractionResult>(CoreJson.Storage))
+            .AsSpan().SequenceEqual(JsonSerializer.SerializeToUtf8Bytes(loaded, CoreJson.TypeInfo<ExtractionResult>(CoreJson.Storage))))
             throw new InvalidDataException("The converted extraction does not match its legacy input.");
 
         var memoryDirectory = Path.Combine(stage, "memory");
@@ -190,7 +205,7 @@ internal static class DataTool
         var settingsPath = Path.Combine(source, "settings.json");
         var legacySettings = await ReadObjectAsync(settingsPath);
         var gameSettings = ReadGameSettings(legacySettings);
-        var descriptor = await LocalFiles.ReadJsonAsync<GameProject>(Path.Combine(sourceProject, "game.json")) ?? new GameProject
+        var descriptor = await LocalFiles.ReadJsonAsync<GameProject>(Path.Combine(sourceProject, "game.json"), CoreJson.TypeInfo<GameProject>(CoreJson.Storage)) ?? new GameProject
         {
             Id = id, GameDirectory = gameDirectory,
             Name = new DirectoryInfo(gameDirectory).Name,
@@ -200,26 +215,35 @@ internal static class DataTool
 
         await CopyGlobalsAsync(source, destination);
         await CopyAdaptationHistoryAsync(source, stage, id);
-        await LocalFiles.WriteJsonAsync(Path.Combine(stage, "migration.json"), new
+        await LocalFiles.WriteJsonAsync(Path.Combine(stage, "migration.json"), new JsonObject
         {
-            schemaVersion = 2, sourceRoot = source, gameId = id, verifiedAt = DateTimeOffset.UtcNow,
-            copiedFiles = copied.Files, copiedBytes = copied.Bytes,
-            memoryEntries = memoryCount, extractionUnits = extraction.Units.Count,
-            sourceSnapshotsVerified = snapshot.Files.Count, legacyPreserved = true
-        });
+            ["schemaVersion"] = 2,
+            ["sourceRoot"] = source,
+            ["gameId"] = id,
+            ["verifiedAt"] = DateTimeOffset.UtcNow,
+            ["copiedFiles"] = copied.Files,
+            ["copiedBytes"] = copied.Bytes,
+            ["memoryEntries"] = memoryCount,
+            ["extractionUnits"] = CoreJson.Node(extraction.Units.Count, CoreJson.Storage),
+            ["sourceSnapshotsVerified"] = CoreJson.Node(snapshot.Files.Count, CoreJson.Storage),
+            ["legacyPreserved"] = true
+        }, CoreJson.TypeInfo<JsonObject>(CoreJson.Storage));
         // The descriptor is the commit marker. Never replace a game that already has a v2 descriptor.
-        await LocalFiles.WriteJsonAsync(Path.Combine(stage, "game.json"), descriptor);
+        await LocalFiles.WriteJsonAsync(Path.Combine(stage, "game.json"), descriptor, CoreJson.TypeInfo<GameProject>(CoreJson.Storage));
         if (await IsCurrentAsync(project)) throw new IOException("The destination game was modified during migration.");
         projectLock?.Dispose();
         CommitProject(stage, project, backup);
         if (options.ContainsKey("activate")) await ActivateAsync(bootstrap, destination);
         timer.Stop();
         var verified = await VerifyAsync(destination, gameDirectory);
-        return new
+        return new JsonObject
         {
-            status = "migrated", gameId = id, dataRoot = destination,
-            legacyBackup = Directory.Exists(backup) ? backup : null,
-            elapsedMilliseconds = timer.ElapsedMilliseconds, verification = verified
+            ["status"] = "migrated",
+            ["gameId"] = id,
+            ["dataRoot"] = destination,
+            ["legacyBackup"] = Directory.Exists(backup) ? backup : null,
+            ["elapsedMilliseconds"] = timer.ElapsedMilliseconds,
+            ["verification"] = CoreJson.Node(verified, CoreJson.Web)
         };
     }
 
@@ -227,11 +251,11 @@ internal static class DataTool
     {
         var timer = Stopwatch.StartNew();
         var project = projectOverride ?? Path.Combine(root, "games", TranslationPipeline.GameId(gameDirectory));
-        var descriptor = await LocalFiles.ReadJsonAsync<GameProject>(Path.Combine(project, "game.json"))
+        var descriptor = await LocalFiles.ReadJsonAsync<GameProject>(Path.Combine(project, "game.json"), CoreJson.TypeInfo<GameProject>(CoreJson.Storage))
             ?? throw new InvalidDataException("The game descriptor is missing.");
         if (descriptor.SchemaVersion != 2 || descriptor.Id != TranslationPipeline.GameId(gameDirectory))
             throw new InvalidDataException("The game descriptor has an unsupported version or identity.");
-        var snapshot = await LocalFiles.ReadJsonAsync<SourceSnapshot>(Path.Combine(project, "source.json"))
+        var snapshot = await LocalFiles.ReadJsonAsync<SourceSnapshot>(Path.Combine(project, "source.json"), CoreJson.TypeInfo<SourceSnapshot>(CoreJson.Storage))
             ?? throw new InvalidDataException("The source snapshot is missing.");
         var sources = Path.IsPathRooted(snapshot.Directory) ? snapshot.Directory : LocalFiles.UnderRoot(project, snapshot.Directory);
         foreach (var file in snapshot.Files)
@@ -258,15 +282,19 @@ internal static class DataTool
             if (await memory.FindAsync(unit, policy) is not null) cacheHits++;
         lookupTimer.Stop();
         timer.Stop();
-        return new
+        return new JsonObject
         {
-            gameId = descriptor.Id, schemaVersion = descriptor.SchemaVersion, extractionUnits = extraction.Units.Count,
-            memoryShardFiles = Directory.EnumerateFiles(Path.Combine(project, "memory"), "??.json").Count(),
-            cacheHits, sourceFilesVerified = snapshot.Files.Count,
-            responseFiles = CountFiles(Path.Combine(project, "responses")),
-            extractionLoadMilliseconds = extractionTimer.ElapsedMilliseconds,
-            memoryLoadMilliseconds = memoryTimer.ElapsedMilliseconds,
-            cacheLookupMilliseconds = lookupTimer.ElapsedMilliseconds, elapsedMilliseconds = timer.ElapsedMilliseconds
+            ["gameId"] = CoreJson.Node(descriptor.Id, CoreJson.Web),
+            ["schemaVersion"] = CoreJson.Node(descriptor.SchemaVersion, CoreJson.Web),
+            ["extractionUnits"] = CoreJson.Node(extraction.Units.Count, CoreJson.Web),
+            ["memoryShardFiles"] = Directory.EnumerateFiles(Path.Combine(project, "memory"), "??.json").Count(),
+            ["cacheHits"] = cacheHits,
+            ["sourceFilesVerified"] = CoreJson.Node(snapshot.Files.Count, CoreJson.Web),
+            ["responseFiles"] = CountFiles(Path.Combine(project, "responses")),
+            ["extractionLoadMilliseconds"] = extractionTimer.ElapsedMilliseconds,
+            ["memoryLoadMilliseconds"] = memoryTimer.ElapsedMilliseconds,
+            ["cacheLookupMilliseconds"] = lookupTimer.ElapsedMilliseconds,
+            ["elapsedMilliseconds"] = timer.ElapsedMilliseconds
         };
     }
 
@@ -280,19 +308,19 @@ internal static class DataTool
         {
             var key = Path.GetFileNameWithoutExtension(file);
             if (key.Length != 64) continue;
-            var entry = await LocalFiles.ReadJsonAsync<MemoryEntry>(file)
+            var entry = await LocalFiles.ReadJsonAsync<MemoryEntry>(file, CoreJson.TypeInfo<MemoryEntry>(CoreJson.Storage))
                 ?? throw new InvalidDataException("A legacy translation entry is empty.");
             if (entry.Key != key) throw new InvalidDataException("A legacy translation key does not match its filename.");
             var prefix = key[..2];
             if (!shards.TryGetValue(prefix, out var shard))
             {
-                shard = await LocalFiles.ReadJsonAsync<MemoryShard>(Path.Combine(converted, prefix + ".json"))
+                shard = await LocalFiles.ReadJsonAsync<MemoryShard>(Path.Combine(converted, prefix + ".json"), CoreJson.TypeInfo<MemoryShard>(CoreJson.Storage))
                     ?? throw new InvalidDataException("A converted memory shard is missing.");
                 shards.Add(prefix, shard);
             }
             if (!currentShards.TryGetValue(prefix, out var currentShard))
             {
-                currentShard = await LocalFiles.ReadJsonAsync<MemoryShard>(Path.Combine(currentMemory, prefix + ".json"));
+                currentShard = await LocalFiles.ReadJsonAsync<MemoryShard>(Path.Combine(currentMemory, prefix + ".json"), CoreJson.TypeInfo<MemoryShard>(CoreJson.Storage));
                 currentShards.Add(prefix, currentShard);
             }
             var expected = currentShard?.Entries.GetValueOrDefault(key) ?? entry;
@@ -385,31 +413,31 @@ internal static class DataTool
         {
             var file = Path.Combine(stage, name);
             if (!File.Exists(file)) continue;
-            var snapshot = await LocalFiles.ReadJsonAsync<SourceSnapshot>(file)
+            var snapshot = await LocalFiles.ReadJsonAsync<SourceSnapshot>(file, CoreJson.TypeInfo<SourceSnapshot>(CoreJson.Storage))
                 ?? throw new InvalidDataException("The source snapshot is missing.");
             await LocalFiles.WriteJsonAsync(file, snapshot with
             {
                 Directory = ProjectRelative(sourceProject, stage, snapshot.Directory, "sources")
-            });
+            }, CoreJson.TypeInfo<SourceSnapshot>(CoreJson.Storage));
         }
         foreach (var name in new[] { "latest-result.json", "latest-result.json.bak" })
         {
             var file = Path.Combine(stage, name);
             if (!File.Exists(file)) continue;
-            var result = await LocalFiles.ReadJsonAsync<PipelineResult>(file)
+            var result = await LocalFiles.ReadJsonAsync<PipelineResult>(file, CoreJson.TypeInfo<PipelineResult>(CoreJson.Storage))
                 ?? throw new InvalidDataException("The patch result is invalid.");
             await LocalFiles.WriteJsonAsync(file, result with
             {
                 PatchDirectory = ProjectRelative(sourceProject, stage, result.PatchDirectory, "patches")
-            });
+            }, CoreJson.TypeInfo<PipelineResult>(CoreJson.Storage));
         }
         var patches = Path.Combine(stage, "patches");
         if (!Directory.Exists(patches)) return;
         foreach (var file in EnumerateSafeFiles(patches).Where(path => Path.GetFileName(path) is "translation-report.json" or "translation-report.json.bak"))
         {
-            var result = await LocalFiles.ReadJsonAsync<PipelineResult>(file)
+            var result = await LocalFiles.ReadJsonAsync<PipelineResult>(file, CoreJson.TypeInfo<PipelineResult>(CoreJson.Storage))
                 ?? throw new InvalidDataException("A patch report is invalid.");
-            await LocalFiles.WriteJsonAsync(file, result with { PatchDirectory = Path.GetRelativePath(stage, Path.GetDirectoryName(file)!) });
+            await LocalFiles.WriteJsonAsync(file, result with { PatchDirectory = Path.GetRelativePath(stage, Path.GetDirectoryName(file)!) }, CoreJson.TypeInfo<PipelineResult>(CoreJson.Storage));
         }
     }
 
@@ -434,7 +462,7 @@ internal static class DataTool
     {
         var defaults = new GameTranslationSettings();
         var api = legacy?["apiConfiguration"] as JsonObject;
-        var chain = api?["translationProfileIds"]?.Deserialize<string[]>(LocalFiles.JsonOptions)
+        var chain = api?["translationProfileIds"]?.Deserialize<string[]>(CoreJson.TypeInfo<string[]>(CoreJson.Storage))
             ?? (api?["translationProfileId"]?.GetValue<string>() is { } id ? [id] : null);
         return defaults with
         {
@@ -504,14 +532,17 @@ internal static class DataTool
     {
         WorkspaceFiles.RejectLinkAncestors(bootstrap);
         Directory.CreateDirectory(bootstrap);
-        await LocalFiles.WriteJsonAsync(Path.Combine(bootstrap, "location.json"), new { dataDirectory = destination });
+        await LocalFiles.WriteJsonAsync(Path.Combine(bootstrap, "location.json"), new JsonObject
+        {
+            ["dataDirectory"] = destination
+        }, CoreJson.TypeInfo<JsonObject>(CoreJson.Storage));
     }
 
     private static async Task EmitAsync(object report, Dictionary<string, string?> options)
     {
         if (options.GetValueOrDefault("report") is { } path)
-            await LocalFiles.WriteJsonAsync(Path.GetFullPath(path), report);
-        Console.WriteLine(JsonSerializer.Serialize(report, LocalFiles.JsonOptions));
+            await LocalFiles.WriteJsonAsync(Path.GetFullPath(path), report, CoreJson.TypeInfo<object>(CoreJson.Storage));
+        Console.WriteLine(JsonSerializer.Serialize(report, CoreJson.TypeInfo<object>(CoreJson.Storage)));
     }
 
     private static Dictionary<string, string?> Parse(string[] args)
