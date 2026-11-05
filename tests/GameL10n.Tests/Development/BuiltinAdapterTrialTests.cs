@@ -2,12 +2,34 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using GameL10n.Core.Development;
+using GameL10n.Core.Storage;
 
 namespace GameL10n.Tests.Development;
 
 public sealed class BuiltinAdapterTrialTests : IDisposable
 {
     private readonly string root = Path.Combine(Path.GetTempPath(), "gamel10n-builtin-trial-tests-" + Guid.NewGuid().ToString("N"));
+
+    [Fact]
+    public async Task BuiltinTrialToolReturnsItsResultThroughProductionJsonMetadata()
+    {
+        var source = Directory.CreateDirectory(Path.Combine(root, "resources")).FullName;
+        await File.WriteAllTextAsync(Path.Combine(source, "script.rpy"), "label start:\n    \"こんにちは。\"\n");
+        var runner = new RecordingRunner(new AdapterProcessRunner());
+        var state = new AdaptationSession();
+        var tools = new AdaptationTools(new("fixture", root, []), state, root,
+            new(new(Path.Combine(root, "unused-runtime"), "10.0.402", "10.0.13"), runner),
+            new LocalAdapterPackageStore(Path.Combine(root, "store")), builtinTrial: CreateTrial(runner));
+        using var response = JsonDocument.Parse(await tools.ExecuteAsync(new("trial", "try_builtin_adapter",
+            """{"format":"Renpy","directory":"resources","files":["script.rpy"]}"""), default));
+        Assert.True(response.RootElement.GetProperty("success").GetBoolean());
+        var result = response.RootElement.GetProperty("result");
+        Assert.Equal("passed", result.GetProperty("status").GetString());
+        Assert.Equal("passed", result.GetProperty("roundtripStatus").GetString());
+        Assert.Equal(1, result.GetProperty("unitCount").GetInt32());
+        Assert.Equal("こんにちは。", Assert.Single(result.GetProperty("samples").EnumerateArray()).GetProperty("text").GetString());
+        Assert.Equal("passed", Assert.Single(state.BuiltinTrials).Status);
+    }
 
     [Fact]
     public async Task RealRenpyTrialReturnsBoundedSamplesAndVerifiesOriginalBytesWithoutLeavingOutput()

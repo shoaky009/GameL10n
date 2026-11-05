@@ -28,8 +28,14 @@ public sealed class AdapterProcessLimitException(string message, string? phase =
 
     internal static string LimitOutput(string value)
     {
-        const string suffix = "\n[diagnostic truncated]";
-        return value.Length > 8192 ? value[..(8192 - suffix.Length)] + suffix : value;
+        // Keep the captured process output available to read_tool_result, including failures.
+        // The runner enforces its own byte limit; exceptional callers still have a finite cap.
+        const int maximum = 1024 * 1024;
+        const string marker = "\n[diagnostic truncated]\n";
+        if (value.Length <= maximum) return value;
+        var head = (maximum - marker.Length) / 2;
+        var tail = maximum - marker.Length - head;
+        return value[..head] + marker + value[^tail..];
     }
 }
 
@@ -61,6 +67,7 @@ public sealed class AdapterProcessRunner : IAdapterProcessRunner
         // Do not inherit API credentials or arbitrary runtime overrides from the host environment.
         start.Environment.Clear();
         start.Environment["SystemRoot"] = start.Environment["WINDIR"] = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+        start.Environment["SystemDrive"] = Path.GetPathRoot(start.Environment["SystemRoot"]!)!.TrimEnd(Path.DirectorySeparatorChar);
         start.Environment["TEMP"] = start.Environment["TMP"] = start.WorkingDirectory;
         start.Environment["USERPROFILE"] = start.Environment["DOTNET_CLI_HOME"] = start.WorkingDirectory;
         start.Environment["DOTNET_ROOT"] = Path.GetDirectoryName(start.FileName);

@@ -102,10 +102,13 @@ public sealed partial class AdaptationTools
 
     private async Task<object> CopyAdapterComponentsAsync(JsonElement args, CancellationToken ct)
     {
-        session.VerifiedPackage = null;
         var copied = new List<AdapterReleaseFile>();
         var result = await ComponentAssets.CopyAsync(Strings(args, "ids"), workspace, ct, copied);
-        Development.RegisterReleaseFiles(copied);
+        if (copied.Count > 0)
+        {
+            session.VerifiedPackage = null;
+            Development.RegisterReleaseFiles(copied);
+        }
         return result;
     }
 

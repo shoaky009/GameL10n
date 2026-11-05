@@ -9,9 +9,11 @@ namespace GameL10n.Core.Development;
 /// <summary>Aggregates project metadata locally; source and diagnostic excerpts are read only on demand.</summary>
 public sealed class EngineReviewEvidence
 {
+    public const string SessionEvidencePath = "adaptation/current/session.json";
     private static readonly JsonSerializerOptions EvidenceJson = new(EngineJson.Default) { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
     private readonly Dictionary<string, string> hashes = new(StringComparer.Ordinal);
     private readonly HashSet<string> inspected = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> adaptationResults = new(StringComparer.Ordinal);
     private string project = "";
     private string? gameDirectory;
     private string? gameMetadata;
@@ -28,10 +30,10 @@ public sealed class EngineReviewEvidence
     {
         var result = new EngineReviewEvidence { project = Path.GetFullPath(projectDirectory) };
         object? sessionSummary = null;
-        var sessionPath = LocalFiles.UnderRoot(result.project, "adaptation/current/session.json");
+        var sessionPath = LocalFiles.UnderRoot(result.project, SessionEvidencePath);
         if (File.Exists(sessionPath))
         {
-            await result.AddAsync("adaptation/current/session.json", ct);
+            await result.AddAsync(SessionEvidencePath, ct);
             await using var stream = File.OpenRead(sessionPath);
             using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct);
             var session = doc.RootElement;
@@ -143,7 +145,8 @@ public sealed class EngineReviewEvidence
                         ["at"] = Text(row, "at", 80),
                         ["runId"] = Text(row, "runId", 80),
                         ["turn"] = Number(row, "turn"),
-                        ["callId"] = Text(entry, "callId", 160),
+                        ["callId"] = Text(entry, "callId", 160) is { Length: > 0 } callId ? callId
+                            : entry.TryGetProperty("call", out var toolCall) ? Text(toolCall, "id", 160) : "",
                         ["tool"] = tool,
                         ["status"] = Text(entry, "status", 80),
                         ["result"] = Raw(entry, "result", 2400),
@@ -210,6 +213,7 @@ public sealed class EngineReviewEvidence
             ["logFiles"] = EngineJson.Node(result.hashes.Keys.Where(path => path.StartsWith("logs/", StringComparison.Ordinal)).ToArray(), EngineJson.Web),
             ["partialInventory"] = partialInventory,
             ["incompleteLines"] = incompleteLines,
+            ["toolResultLookup"] = "read_tool_result(toolCallId, source='auto', query?, offset?, length?) 优先读取本次总结结果，再查历史适配会话。历史 callId 来自日志 entry.call.id；source='adaptation' 可明确选择历史域。返回 evidencePath 可引用；不回放整份 session。",
             ["caveat"] = "相同参数可能因源码或资源变化而需要重跑；累计耗时不是单次耗时；旧日志缺失字段不等于没有问题。静态验收不代表实机显示或完整覆盖。"
         };
         return result;
@@ -221,22 +225,25 @@ public sealed class EngineReviewEvidence
         if (query?.Length > 256) throw new InvalidDataException("查询最多 256 字符。");
         path = path.Replace('\\', '/');
         if (path == "overview.json") path = "overview";
-        if (path.EndsWith("session.json", StringComparison.Ordinal)) throw new InvalidDataException("会话摘要已在 overview 中；请读取日志或源码，避免回放全部 API 历史。");
+        if (path.EndsWith("session.json", StringComparison.Ordinal)) throw new InvalidDataException("不能直接回放整份 session；摘要见 overview。请从日志 entry.call.id 取历史 callId，再用 read_tool_result(toolCallId, source='adaptation', query?) 只读目标工具结果。");
         var source = path == "overview" ? JsonSerializer.Serialize(Overview, EngineJson.TypeInfo<object>(EvidenceJson)) : await ReadTextAsync(path, ct);
-        inspected.Add(path);
         offset = Math.Min(offset, source.Length);
         var found = string.IsNullOrEmpty(query) ? offset : source.IndexOf(query, offset, StringComparison.OrdinalIgnoreCase);
         if (found < 0) return new JsonObject
         {
             ["path"] = path,
             ["queryFound"] = false,
-            ["totalCharacters"] = source.Length
+            ["totalCharacters"] = source.Length,
+            ["cite"] = "未返回证据正文；调整 query 或 offset 后读取命中片段，再引用返回的 evidencePath。"
         };
         offset = found;
         var count = Math.Min(length, source.Length - offset);
+        if (count > 0) inspected.Add(path);
         return new JsonObject
         {
             ["path"] = path,
+            ["evidencePath"] = path,
+            ["cite"] = "improvement.evidence 使用 evidencePath 的原值，不使用 callId 或虚构片段路径。",
             ["offset"] = offset,
             ["totalCharacters"] = source.Length,
             ["queryFound"] = true,
@@ -244,6 +251,48 @@ public sealed class EngineReviewEvidence
             ["content"] = source.Substring(offset, count)
         };
     }
+
+    /// <summary>Reads only a selected tool message; other history and provider data never leave the evidence reader.</summary>
+    public async Task<string?> ReadAdaptationResultAsync(string toolCallId, CancellationToken ct)
+    {
+        if (!hashes.TryGetValue(SessionEvidencePath, out var hash)) return null;
+        var path = LocalFiles.UnderRoot(project, SessionEvidencePath);
+        async Task CheckSnapshotAsync()
+        {
+            if (await LocalFiles.HashFileAsync(path, ct) != hash)
+                throw new IOException("证据文件已变化：" + SessionEvidencePath + "；请重新总结。");
+        }
+        await CheckSnapshotAsync();
+        if (!adaptationResults.TryGetValue(toolCallId, out var content))
+        {
+            // Parse on demand and retain only the requested content, not the session's model/provider history.
+            await using (var stream = File.OpenRead(path))
+            using (var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct))
+            {
+                if (doc.RootElement.TryGetProperty("messages", out var messages) && messages.ValueKind == JsonValueKind.Array)
+                for (var index = messages.GetArrayLength() - 1; index >= 0; index--)
+                {
+                    var message = messages[index];
+                    if (message.ValueKind == JsonValueKind.Object && Text(message, "role", 16) == "tool"
+                        && Text(message, "toolCallId", 200) == toolCallId
+                        && message.TryGetProperty("content", out var text) && text.ValueKind == JsonValueKind.String)
+                    {
+                        content = text.GetString()!;
+                        break;
+                    }
+                }
+            }
+            await CheckSnapshotAsync();
+            if (content is null) return null;
+            adaptationResults.Add(toolCallId, content);
+        }
+        inspected.Add(SessionEvidencePath);
+        return content;
+    }
+
+    public string CitationHint() => "可引用 overview 或已读取的 evidencePath："
+        + string.Join(", ", inspected.Take(8).Prepend("overview").Distinct(StringComparer.Ordinal))
+        + "。日志/源码用 read_evidence(path, query?)；历史工具结果用 read_tool_result(toolCallId, source='adaptation')，取得可引用的 session evidencePath。";
 
     public async Task<string> ToolSourceAsync(string path, CancellationToken ct)
     {
@@ -266,7 +315,7 @@ public sealed class EngineReviewEvidence
         foreach (var (relative, hash) in hashes)
             if (relative == "game.json") await CheckGameMetadataAsync(ct);
             else if (await LocalFiles.HashFileAsync(LocalFiles.UnderRoot(project, relative), ct) != hash)
-                throw new IOException("总结期间项目证据发生了变化，请待当前任务结束后重新总结。");
+                throw new IOException("总结期间项目证据发生了变化：" + relative + "；请待当前任务结束后重新总结。");
     }
 
     private async Task AddAsync(string relative, CancellationToken ct) => hashes[relative] = await LocalFiles.HashFileAsync(LocalFiles.UnderRoot(project, relative), ct);

@@ -56,6 +56,7 @@ public static class EngineJson
 [JsonSerializable(typeof(global::GameL10n.Core.Development.AutomaticTemplateReport))]
 [JsonSerializable(typeof(global::GameL10n.Core.Development.BuiltinAdapterDiscoveryReport))]
 [JsonSerializable(typeof(global::GameL10n.Core.Development.BuiltinAdapterProbeObservation[]))]
+[JsonSerializable(typeof(global::GameL10n.Core.Development.BuiltinAdapterTrialResult))]
 [JsonSerializable(typeof(global::GameL10n.Core.Development.BuiltinAdapterTrialSample[]))]
 [JsonSerializable(typeof(global::GameL10n.Core.Development.BuiltinParserDependency))]
 [JsonSerializable(typeof(global::GameL10n.Core.Development.EngineArchiveComponent[]))]

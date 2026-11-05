@@ -6,6 +6,40 @@ namespace GameL10n.Tests.Development;
 public sealed partial class AutomaticAdaptationTests
 {
     [Fact]
+    public async Task BoundReferencePreloadsExecutionWithoutKeepingResearchSchemas()
+    {
+        var request = Request();
+        var store = new LocalAdapterPackageStore(Path.Combine(root, "store"));
+        await LocalFiles.WriteJsonAsync(Path.Combine(store.WorkDirectory, "current/session.json"), new AdaptationSession
+        {
+            GameId = request.GameId, GameDirectory = request.GameDirectory, ModelIdentity = "fake",
+            EngineReference = new(new string('a', 40), new string('b', 64), new string('c', 64)),
+            EnabledToolGroups = ["research"], Messages = [new("user", "Continue the implementation using the pinned library.")]
+        }, FixtureJson.TypeInfo<AdaptationSession>(FixtureJson.Storage));
+        var round = 0;
+        var model = new FakeModel(context =>
+        {
+            if (round++ == 0)
+            {
+                Assert.Contains(context.Tools, tool => tool.Name == "run_engine_python");
+                Assert.DoesNotContain(context.Tools, tool => tool.Name == "inspect_engine_reference");
+                return new(new("assistant", ToolCalls: [new("research", "load_tool_groups", """{"groups":["research"]}""")]), new(100, 20));
+            }
+            if (round == 2)
+            {
+                Assert.Contains(context.Tools, tool => tool.Name == "inspect_engine_reference");
+                return new(new("assistant", ToolCalls: [new("development", "load_tool_groups", """{"groups":["development"],"mode":"replace"}""")]), new(100, 20));
+            }
+            Assert.Contains(context.Tools, tool => tool.Name == "run_engine_python");
+            Assert.DoesNotContain(context.Tools, tool => tool.Name == "inspect_engine_reference");
+            return Blocked("needs_input", "需要显示反馈。", "提供画面。");
+        });
+        var result = await new AutomaticAdaptationService(model, Runtime(new ScriptedRunner()), store).AdaptAsync(request);
+        Assert.Equal(AdaptationStatus.WaitingForUser, result.Status);
+        Assert.Equal(3, model.Calls);
+    }
+
+    [Fact]
     public async Task ExplicitToolReplacementIsNotUndoneByHintsAndCheckpointTrimsUnusedGroups()
     {
         var request = Request();

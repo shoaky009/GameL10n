@@ -43,6 +43,7 @@ public sealed partial class AdaptationTools
             ["publicSymbols"] = EngineJson.Node(selected.TryGetProperty("public_symbols", out var symbols) ? symbols.Clone() : (JsonElement?)null, EngineJson.Web),
             ["pythonModules"] = EngineJson.Node(ReferenceStrings(selected, "python_references").ToArray(), EngineJson.Web),
             ["readySupport"] = EngineJson.Node(engine == "kirikiri" ? KirikiriTextGuidance.ScnSupport() : null, EngineJson.Web),
+            ["fontLayout"] = engine == "kirikiri" ? KirikiriTextGuidance.FontLayout : null,
             ["content"] = found < 0 ? "" : content[offset..end],
             ["queryFound"] = found >= 0,
             ["offset"] = offset,
@@ -62,6 +63,9 @@ public sealed partial class AdaptationTools
         var module = Text(args, "module", "");
         if ((relative.Length == 0) == (module.Length == 0))
             throw new InvalidDataException("script 和 module 必须且只能指定一个。");
+        var writeProbe = args.TryGetProperty("content", out var content);
+        if (writeProbe && (content.ValueKind != JsonValueKind.String || !relative.StartsWith("work/", StringComparison.Ordinal)))
+            throw new InvalidDataException("content 仅支持写入 work/*.py 探针；不能与 module 或 src/tools 脚本一起使用。");
         string? script = null;
         if (relative.Length > 0)
         {
@@ -72,7 +76,9 @@ public sealed partial class AdaptationTools
             var normalized = Path.GetRelativePath(workspace, script).Replace('\\', '/');
             if (!normalized.StartsWith("work/", StringComparison.Ordinal) && !normalized.StartsWith("src/tools/", StringComparison.Ordinal))
                 throw new InvalidDataException("Python 脚本必须在 work/ 或 src/tools/ 中。");
-            if (!File.Exists(script)) throw new FileNotFoundException("请先写入 Python 连接脚本。", relative);
+            if (writeProbe && !normalized.StartsWith("work/", StringComparison.Ordinal))
+                throw new InvalidDataException("content 仅支持写入 work/*.py 探针。");
+            if (!writeProbe && !File.Exists(script)) throw new FileNotFoundException("请提供 content 写入探针或选择已有 Python 脚本。", relative);
         }
         else if (!(module.StartsWith("python.engines.", StringComparison.Ordinal) || module.StartsWith("python.archives.", StringComparison.Ordinal))
             || module.Split('.').Any(part => part.Length == 0 || !char.IsAsciiLetter(part[0]) && part[0] != '_'
@@ -81,10 +87,18 @@ public sealed partial class AdaptationTools
         var arguments = args.TryGetProperty("arguments", out _) ? Strings(args, "arguments") : [];
         if (arguments.Count > 128 || arguments.Sum(value => value.Length) > 64 * 1024)
             throw new InvalidDataException("Python 参数过大。");
-        var prepared = await Development.PythonAsync(ct);
-        if (script is null) _ = EngineToolkit.Read(prepared.Dependency.Reference, module.Replace('.', '/') + ".py");
         var working = Text(args, "workingDirectory", ".");
         working = working == "." ? workspace : WorkspaceFiles.Resolve(workspace, working);
+        var timeout = TimeSpan.FromSeconds(Number(args, "timeoutSeconds", 120, 1, 600));
+        var stdin = Text(args, "stdin", "");
+        if (writeProbe)
+            await WriteFileAsync(JsonSerializer.SerializeToElement(new JsonObject
+            {
+                ["path"] = relative,
+                ["content"] = content.GetString()
+            }, EngineJson.TypeInfo<JsonObject>(Json)), ct);
+        var prepared = await Development.PythonAsync(ct);
+        if (script is null) _ = EngineToolkit.Read(prepared.Dependency.Reference, module.Replace('.', '/') + ".py");
         Directory.CreateDirectory(working);
         reportProgress?.Invoke("分析游戏资源", "解析工具已就绪，正在运行资源分析脚本。");
         AdapterProcessResult result;
@@ -93,8 +107,8 @@ public sealed partial class AdaptationTools
             var parser = await AnalysisParserAsync(ct);
             result = await runtime.Runner.RunAsync(new(prepared.Paths.Python,
                 script is null ? EngineReferenceToolkit.PythonModuleArguments(prepared.Paths, module, arguments)
-                    : EngineReferenceToolkit.PythonArguments(prepared.Paths, script, arguments), working, Text(args, "stdin", ""),
-                TimeSpan.FromSeconds(Number(args, "timeoutSeconds", 120, 1, 600)), 1024 * 1024,
+                    : EngineReferenceToolkit.PythonArguments(prepared.Paths, script, arguments), working, stdin,
+                timeout, 1024 * 1024,
                 VnTextPatchAssemblyPath: parser?.Path,
                 AdapterHostCommand: EngineReferenceToolkit.AdapterHostCommand(runtime.Toolchain),
                 VnTextPatchCommand: parser?.Command), ct);
@@ -109,8 +123,8 @@ public sealed partial class AdaptationTools
         {
             ["revision"] = prepared.Dependency.Reference.Revision,
             ["exitCode"] = result.ExitCode,
-            ["stdout"] = Limit(result.StandardOutput, 12000),
-            ["stderr"] = Limit(result.StandardError, 6000)
+            ["stdout"] = result.StandardOutput,
+            ["stderr"] = result.StandardError
         };
     }
 

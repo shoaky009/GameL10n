@@ -208,6 +208,50 @@ public sealed class EngineReferenceToolkitTests : IDisposable
         Assert.Equal(3, downloads.Count);
     }
 
+    [Fact]
+    public async Task InlineProbeWritesUtf8AndInvalidOrFailedWritesNeverExecute()
+    {
+        using var client = Client([]);
+        var workspace = Path.Combine(root, "project");
+        var store = new LocalAdapterPackageStore(Path.Combine(root, "extensions"));
+        var runner = new CaptureRunner();
+        var runtime = new AdapterRuntime(new(root, "10.0.402", "10.0.13"), runner);
+        var preparation = new EngineReferenceToolkit(Path.Combine(store.RootDirectory, "engine-tools"), client, allowDownloads: true);
+        var pin = await preparation.EnsureReferenceAsync(null, default);
+        await preparation.EnsurePythonAsync(pin, null, default);
+        var state = new AdaptationSession();
+        var tools = new AdaptationTools(new("fixture", workspace, []), state, workspace, runtime, store, client);
+        const string code = "print('探针：中文')\n";
+        await tools.ExecuteAsync(new("inline", "run_engine_python", JsonSerializer.Serialize(new
+        {
+            script = "work/probes/sample.py", content = code, arguments = new[] { "中文 参数" }, stdin = "输入"
+        })), default);
+        var path = Path.Combine(workspace, "work/probes/sample.py");
+        Assert.Equal(Encoding.UTF8.GetBytes(code), await File.ReadAllBytesAsync(path));
+        Assert.Contains(Path.GetFullPath(path), runner.Last!.Arguments);
+        Assert.Equal("中文 参数", runner.Last.Arguments[^1]);
+        Assert.Equal("输入", runner.Last.StandardInput);
+        Assert.Null(state.ReleaseFiles);
+
+        runner.Last = null;
+        foreach (var invalid in new[]
+        {
+            """{"module":"python.engines.fixture","content":"print(1)"}""",
+            """{"script":"src/tools/runtime.py","content":"print(1)"}""",
+            """{"script":"work/new.py","content":null}""",
+            """{"script":"work/new.py","content":"print(1)","timeoutSeconds":0}"""
+        })
+            await Assert.ThrowsAsync<InvalidDataException>(() => tools.ExecuteAsync(new("invalid", "run_engine_python", invalid), default));
+        Assert.False(File.Exists(Path.Combine(workspace, "work/new.py")));
+        Assert.False(File.Exists(Path.Combine(workspace, "src/tools/runtime.py")));
+        Directory.CreateDirectory(Path.Combine(workspace, "work/blocked.py"));
+        var error = await Record.ExceptionAsync(() => tools.ExecuteAsync(new("blocked", "run_engine_python",
+            """{"script":"work/blocked.py","content":"print(1)"}"""), default));
+        Assert.True(error is IOException or UnauthorizedAccessException, error?.ToString() ?? "Expected a failed write.");
+        Assert.Null(runner.Last);
+        Assert.False(File.Exists(Path.Combine(workspace, "work/blocked.py.write.tmp")));
+    }
+
     private static HttpClient Client(List<string> requests) => new(new Handler(request =>
     {
         requests.Add(request.RequestUri!.AbsoluteUri);

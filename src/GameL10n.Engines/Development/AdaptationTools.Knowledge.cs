@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using GameL10n.Core.Adapters;
 using GameL10n.Core.Isolation;
 using System.Text.Json.Nodes;
 using GameL10n.Core.Serialization;
@@ -37,7 +38,7 @@ public sealed partial class AdaptationTools
         }
     }
 
-    private object InspectEngineKnowledge(JsonElement args)
+    private async Task<object> InspectEngineKnowledgeAsync(JsonElement args, CancellationToken ct)
     {
         var id = Text(args, "id", "");
         if (id.Length > 0)
@@ -52,6 +53,7 @@ public sealed partial class AdaptationTools
                 ["conditions"] = entry.Conditions,
                 ["summary"] = entry.Summary,
                 ["guidance"] = entry.Guidance,
+                ["reuseOptions"] = await KnowledgeReuseOptionsAsync(entry, ct),
                 ["engineCandidateMatches"] = MatchedKnowledge.Any(item => item.Id == id),
                 ["tools"] = EngineJson.Array(entry.Tools.Select(tool => new JsonObject
                 {
@@ -87,6 +89,45 @@ public sealed partial class AdaptationTools
             ["nextOffset"] = offset + Math.Min(12, Math.Max(0, candidates.Count - offset)),
             ["more"] = candidates.Count > offset + 12,
             ["note"] = "同引擎仅表示调查线索，须核对变体条件；无匹配时按正常分析继续，不必强行归类。"
+        };
+    }
+
+    private async Task<JsonObject> KnowledgeReuseOptionsAsync(EngineKnowledgeEntry entry, CancellationToken ct)
+    {
+        var family = entry.Family;
+        var root = EngineKnowledgeStore.EngineRoot(family.Key);
+        var candidates = await store.ReadDiscoveryCandidatesAsync(ct: ct);
+        return new JsonObject
+        {
+            ["components"] = EngineJson.Node(ComponentAssets.Related([family.Key, family.AdapterId, family.Name]), EngineJson.Web),
+            ["publishedAdapters"] = EngineJson.Array(candidates.Where(candidate => candidate.Id == family.AdapterId
+                    || root is not null && EngineKnowledgeStore.EngineRoot(candidate.Family?.Key ?? candidate.Id) == root)
+                .OrderByDescending(candidate => candidate.Id == family.AdapterId)
+                .ThenByDescending(candidate => candidate.PublishedAt).ThenBy(candidate => candidate.Version, StringComparer.Ordinal)
+                .Take(4).Select(candidate => new JsonObject
+                {
+                    ["id"] = candidate.Id,
+                    ["version"] = candidate.Version,
+                    ["sameFamilyOnly"] = candidate.Id != family.AdapterId,
+                    ["metadataOnly"] = true,
+                    ["copyCall"] = new JsonObject
+                    {
+                        ["tool"] = "copy_adapter",
+                        ["arguments"] = new JsonObject { ["id"] = candidate.Id, ["version"] = candidate.Version }
+                    }
+                })),
+            ["builtInParsers"] = EngineJson.Array(VnTextPatchFormatCatalog.All
+                .Where(format => root is not null && EngineKnowledgeStore.EngineRoot(format.Family.Key) == root)
+                .Take(4).Select(format => new JsonObject
+                {
+                    ["format"] = format.Key,
+                    ["inspectCall"] = new JsonObject
+                    {
+                        ["tool"] = "inspect_builtin_adapter",
+                        ["arguments"] = new JsonObject { ["format"] = format.Key }
+                    }
+                })),
+            ["usage"] = "优先查看相关组件的 JSON 检测入口，在当前游戏样本上验证后复用。发布版本来自轻量索引，复制时才校验文件；同引擎不等于同变体。copy_adapter 需要空 src；已有源码时先检查本项目实现。旧 C# 源码仅供参考，新适配器使用 Python。归档过滤、脚本显示规则和中文运行条件分别确认。"
         };
     }
 

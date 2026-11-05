@@ -328,10 +328,9 @@ public sealed class AutomaticAdaptationService(Func<IAdaptationAgentModel> creat
                 if (state.BuiltinDiscovery?.Candidates.Count > 0 || state.ReuseFailures.Count > 0 || matchedKnowledge.Length > 0
                     || state.Objective != AdaptationObjective.Develop)
                     yield return "reuse";
-                if (state.ProtocolRead || state.ReleaseFiles is { Count: > 0 } || state.VerifiedPackage is not null
+                if (state.ProtocolRead || state.EngineReference is not null || state.ReleaseFiles is { Count: > 0 } || state.VerifiedPackage is not null
                     || Directory.Exists(Path.Combine(directory, "src")) || state.Objective != AdaptationObjective.Develop)
                     yield return "development";
-                if (state.EngineReference is not null) yield return "research";
                 if (state.BuiltinDiscovery?.Candidates.Any(candidate => candidate.Format == "Siglus") == true)
                     yield return "siglus";
             }
@@ -376,6 +375,8 @@ public sealed class AutomaticAdaptationService(Func<IAdaptationAgentModel> creat
             while (true)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                var previousMilestone = state.HighestVerificationMilestone;
+                var previousTrial = state.TrialVerificationCache;
                 // Known writes and one local run can share a turn. Each result is committed in order;
                 // a failed/uncertain prerequisite must never allow its dependent run to proceed.
                 var operations = state.PendingCalls.Where(call => call.Name != "report_progress").ToArray();
@@ -456,12 +457,20 @@ public sealed class AutomaticAdaptationService(Func<IAdaptationAgentModel> creat
                     }
                     toolTimer.Stop();
                     var outcome = ToolOutcome(output);
-                    if (outcome.Status == "completed" && call.Name == "run_engine_python"
-                        && Encoding.UTF8.GetByteCount(call.Arguments) <= 8192)
+                    if (outcome.Status == "completed" && call.Name == "run_engine_python")
                     {
-                        state.SuccessfulProbes.RemoveAll(item => item.Tool == call.Name && item.Arguments == call.Arguments);
-                        state.SuccessfulProbes.Add(new(call.Name, call.Arguments, state.TotalTurns));
-                        if (state.SuccessfulProbes.Count > 3) state.SuccessfulProbes.RemoveAt(0);
+                        // The file is the reusable probe. Do not replay its source (or rewrite it)
+                        // from the resume snapshot when only its invocation is needed.
+                        var arguments = call.Arguments;
+                        var probe = JsonNode.Parse(arguments)!.AsObject();
+                        if (probe.Remove("content"))
+                            arguments = JsonSerializer.Serialize(probe, EngineJson.TypeInfo<JsonObject>(ContextJson));
+                        if (Encoding.UTF8.GetByteCount(arguments) <= 8192)
+                        {
+                            state.SuccessfulProbes.RemoveAll(item => item.Tool == call.Name && item.Arguments == arguments);
+                            state.SuccessfulProbes.Add(new(call.Name, arguments, state.TotalTurns));
+                            if (state.SuccessfulProbes.Count > 3) state.SuccessfulProbes.RemoveAt(0);
+                        }
                     }
                     await TraceAsync(new JsonObject
                     {
@@ -563,18 +572,29 @@ public sealed class AutomaticAdaptationService(Func<IAdaptationAgentModel> creat
                     Report("调整分析方向", "正在核对已有成果，优先推进可验证的适配实现。");
                     await SaveAsync();
                 }
+                var verificationAdvanced = state.HighestVerificationMilestone >= AdapterVerificationMilestone.Discovery
+                        && state.HighestVerificationMilestone > previousMilestone
+                    || state.TrialVerificationCache is { Result.Passed: true } trial && !ReferenceEquals(trial, previousTrial);
+                if (verificationAdvanced)
+                    SelectContextTools(state.Messages.Skip(state.HistoryStart));
                 var remaining = limits.MaximumTokens - (state.Usage.TotalTokens - initialUsage);
                 var activeHistory = state.Messages.Skip(state.HistoryStart).ToArray();
                 var replay = AdaptationHistory.ForRequest(activeHistory);
                 var retainedHistoryBytes = VisibleHistoryBytes(activeHistory);
                 var historyBytes = VisibleHistoryBytes(replay.Messages);
-                if (historyBytes > 192 * 1024 || retainedHistoryBytes > 768 * 1024)
+                var checkpointHistoryBytes = retainedHistoryBytes - replay.ProcessOutputBytesSaved;
+                // A verified intermediate result is a useful boundary for discarding old source
+                // arguments. Small milestones keep flowing; full success can proceed to finish.
+                var milestoneCheckpoint = verificationAdvanced && state.VerifiedPackage is null
+                    && (historyBytes > 96 * 1024 || checkpointHistoryBytes > 384 * 1024);
+                if (checkpointRequested || milestoneCheckpoint || historyBytes > 192 * 1024 || checkpointHistoryBytes > 768 * 1024)
                 {
-                    if (checkpointRequested)
+                    if (checkpointRequested || state.VerifiedPackage is not null)
                     {
                         // A model may ignore checkpoint. Start a bounded replay at a complete exchange boundary;
                         // keep the originals (including provider data) available for targeted retrieval and restart.
-                        var recent = AdaptationHistory.RecentExchanges(activeHistory, 64 * 1024);
+                        var kept = AdaptationHistory.RecentExchanges(replay.Messages, 64 * 1024).Length;
+                        var recent = activeHistory.TakeLast(kept).ToArray();
                         var index = AdaptationHistory.ArchiveIndex(state.Messages, state.HistoryStart);
                         var snapshot = JsonSerializer.Serialize(new JsonObject
                         {
@@ -598,6 +618,7 @@ public sealed class AutomaticAdaptationService(Func<IAdaptationAgentModel> creat
                             ["operation"] = "history-compacted",
                             ["visibleHistoryBytes"] = historyBytes,
                             ["retainedHistoryBytes"] = retainedHistoryBytes,
+                            ["checkpointHistoryBytes"] = checkpointHistoryBytes,
                             ["historyStart"] = state.HistoryStart,
                             ["keptMessages"] = recent.Length
                         });
@@ -612,8 +633,10 @@ public sealed class AutomaticAdaptationService(Func<IAdaptationAgentModel> creat
                         await TraceAsync(new JsonObject
                         {
                             ["operation"] = "checkpoint-request",
+                            ["reason"] = milestoneCheckpoint ? "verification-milestone" : "history-size",
                             ["visibleHistoryBytes"] = historyBytes,
                             ["retainedHistoryBytes"] = retainedHistoryBytes,
+                            ["checkpointHistoryBytes"] = checkpointHistoryBytes,
                             ["messages"] = state.Messages.Count
                         });
                     }
@@ -788,13 +811,14 @@ public sealed class AutomaticAdaptationService(Func<IAdaptationAgentModel> creat
         // including provider reasoning/call IDs, so compaction does not force immediate rereads.
         var end = messages.FindLastIndex(message => message.Role == "assistant");
         if (end <= 0) return [];
+        var replay = AdaptationHistory.ForRequest(messages).Messages;
         var start = end;
         for (var kept = 0; kept < 4; kept++)
         {
             var candidate = start - 1;
             while (candidate >= 0 && messages[candidate].Role == "tool") candidate--;
             if (candidate < 0 || candidate == start - 1 || messages[candidate].Role != "assistant") break;
-            if (VisibleHistoryBytes(messages.Skip(candidate).Take(end - candidate)) > 64 * 1024) break;
+            if (VisibleHistoryBytes(replay.Skip(candidate).Take(end - candidate)) > 64 * 1024) break;
             start = candidate;
         }
         return messages.Skip(start).Take(end - start).ToArray();
@@ -1076,6 +1100,7 @@ public sealed class AutomaticAdaptationService(Func<IAdaptationAgentModel> creat
           a failure/uncertain interruption skips the dependent operations. Wait for results before deciding further work.
         - Staging, copying dependencies, test_adapter, finish, checkpoint and report_blocker each require a standalone call.
         - Temporary analysis/probe scripts must be work/*.py, executed with run_engine_python and the bundled shared interpreter.
+          For a new or updated probe, supply script + content in one run_engine_python call instead of separate write/run turns.
           Formal adapter entry is src/adapter.py. Reuse standard-library, pinned engine APIs and precompiled components;
           never generate C# or create MSBuild/project/restore/compiler shell scaffolding.
           Keep readable source lines. Inspect the reported traceback line and bounds before retrying;
@@ -1135,6 +1160,9 @@ public sealed class AutomaticAdaptationService(Func<IAdaptationAgentModel> creat
         Follow host launch evidence and preserve original native ACP/locale route, working directory and *.exe.le.config companions.
         chcp/managed culture does not set native ACP. For missing-file/movie errors compare actual files, reference bytes and launch environment.
         Keep original font style and size; check actual selected face, glyph coverage, charset/name filters, metrics and any engine font reset.
+        Unicode decoding does not ensure Chinese glyph coverage. For GDI fonts use the windows-font-metrics component on representative
+        Chinese and preserved text at the engine's signed height/width. Missing glyphs can cause inconsistent fallback advances; fix the
+        font selection/measurement/rendering path rather than inserting spaces or globally increasing pitch. Check saved font settings too.
         An independent GDI probe is not evidence of original-game font selection under Locale Emulator. Consult relevant component guidance.
         New launchers must be standalone EXEs declared in build.files and build.launchExecutable; retain registered fonts until the real game exits.
         Preserve the original EXE, output separate modified executables, and handle PE relocation/ASLR correctly rather than disabling ASLR.

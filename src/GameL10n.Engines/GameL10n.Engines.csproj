@@ -13,6 +13,10 @@
     <EmbeddedResource Include="../../adapters/components/renpy_rpyc_adapter.py" LogicalName="GameL10n.Components.renpy_rpyc_adapter.py" />
     <EmbeddedResource Include="../../adapters/components/renpy_mixed_adapter.py" LogicalName="GameL10n.Components.renpy_mixed_adapter.py" />
     <EmbeddedResource Include="../../adapters/components/kirikiri_scn_text.py" LogicalName="GameL10n.Components.kirikiri_scn_text.py" />
+    <EmbeddedResource Include="../../adapters/components/windows_font_metrics.py" LogicalName="GameL10n.Components.windows_font_metrics.py" />
+    <EmbeddedResource Include="../../adapters/components/kaguya_tblstr.py" LogicalName="GameL10n.Components.kaguya_tblstr.py" />
+    <EmbeddedResource Include="../../adapters/components/xp3_adler.py" LogicalName="GameL10n.Components.xp3_adler.py" />
+    <EmbeddedResource Include="../../adapters/components/sjis_tunnel.py" LogicalName="GameL10n.Components.sjis_tunnel.py" />
     <EmbeddedResource Include="../../adapters/components/gamel10n_host.py" LogicalName="GameL10n.Components.gamel10n_host.py" />
     <EmbeddedResource Include="../../adapters/components/EngineReferencePython.cs" LogicalName="GameL10n.Components.EngineReferencePython.cs" />
     <EmbeddedResource Include="../../adapters/templates/ScriptComponentAdapter.cs" LogicalName="GameL10n.Templates.ScriptComponentAdapter.cs" />

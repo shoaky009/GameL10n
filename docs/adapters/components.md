@@ -4,6 +4,10 @@
 
 | 组件 ID | 能力 | 适用条件 |
 |---|---|---|
+| `windows-font-metrics` | 主字体缺字、实际选中名称、字宽和字形包围框诊断 | Windows GDI；使用实际字体配置和代表性中文/原文样本，仅在分析时运行 |
+| `kaguya-tblstr` | ARC/ARI 结构、索引、CP932 和原字节往返检测；解析与变长重建 | XOR-FF、四字节最小对齐、类型 0/2/3 的 TBLSTR 变体；中文运行另验 |
+| `xp3-adler` | 有界读取索引和少数成员，校验 Adler 派生过滤器；分段相位 API | 至少两个不同受保护成员校验通过；未知索引块必须保留，不提供回包器 |
+| `sjis-tunnel` | VNTextProxy 兼容映射、容量及编码往返检查 | v0.0.41、最多 3422 个扩展 BMP 字符；字符遍历、字体与旁加载需另验 |
 | `kirikiri-scn-text` | PSB SCN 正文、显示姓名、选项、场景标题；缓存及长度自动重算 | 已解密、无资源的 PSB v2/v3 SCN，明确选择语言槽；依赖固定共享 Python 工具库 |
 | `cp932-glyph-map` | 全补丁字符映射、严格编解码、复用已有映射 | 已确认脚本使用 CP932，且运行时与字库接受指定码位 |
 | `qlie-sfnt-font` | 添加 SFNT 字形别名、调整字体名称及度量 | 已确认的 QLIE system 字体列表、MS Gothic／Mincho 替换策略、单字体 SFNT |
@@ -16,7 +20,27 @@
 
 新适配器使用 Python。编码和字体组件通过 `tools/gamel10n_host.py` 调用应用预编译宿主，不在分析或适配时编译 C#。启动器提供现成 EXE；辅助模块和启动素材放在 `src/tools/`，按用途登记到发布清单。
 
+仅供分析的组件放在 `work/`，不登记为发布文件；复制这类组件不使已有适配器验收失效。
+
 复制前检查所有目标文件，相同内容复用，不同内容保留现有修改并报告冲突。多个组件共用同一辅助模块，只复制一份。辅助文件及哈希纳入适配器包；解析器依赖单独固定，预编译宿主随应用更新。
+
+## 结构与编码检测
+
+`inspect_engine_knowledge(id)` 返回相关组件、内置解析器和已发布适配器的具体调用入口。关联按引擎族提供，只是待核对的候选；先用当前游戏样本验证格式，再按实际脚本消费者确认显示规则。发布版本从轻量索引读取，复制或使用时才校验文件，不在查询经验时扫描包内容。
+
+复制相应组件后，可直接调用以下入口，无需编写包装脚本：
+
+```text
+run_engine_python(script="src/tools/kaguya_tblstr.py", stdin='{"operation":"probe","input":"resources/table.arc","index":"resources/table.ari"}')
+run_engine_python(script="src/tools/xp3_adler.py", stdin='{"operation":"probe","input":"resources/scripts.xp3"}')
+run_engine_python(script="src/tools/sjis_tunnel.py", stdin='{"operation":"check","texts":["原文かな","简体中文译文"]}')
+```
+
+格式探针返回 `matched`、`rejected` 或 `needs-evidence`。TBLSTR 的结构匹配与中文编码能力分开报告；CP932 无法表示试验中文不使结构识别失效。未修改记录保留非零填充；终止符后超过最小对齐的尾部不按此变体接受。
+
+XP3 检测读取索引与少量成员，不解包整个游戏。`matched` 只确认已检测的 Adler 派生过滤器；自定义注音、角色名标签、显示表格和覆盖顺序分别确认。遇到未知索引块，返回 `rebuildRequiresPreservation=true`；后续重建须保留这些信息或停止。对独立分段缓冲区使用 `apply_key_in_place(..., member_offset=...)`，相位为本次范围首字节在成员内的位置。
+
+SJIS 检测只在内存中检查完整文本集所需的映射及往返，不写映射、不下载 DLL。正式构建通过 `Tunnel.serialize()` 保存映射，并将译文和保留原文一起纳入字符规划。映射容量通过不代表原引擎能够遍历隧道尾字节，也不能替代字体和运行验证。
 
 ## SCN 文本语义
 
@@ -39,6 +63,18 @@
 映射随输出资源或字体保存，用于重新提取产物；翻译记忆继续保存真实中文。接口处理完整文本单元，不用于分块流式编码。调用者仍需检查原 EXE 的字符遍历与字形查找、实际字体覆盖，以及试译后的显示和排版。
 
 ## 字体与启动器
+
+Unicode 脚本读写成功后，仍需检查实际字体是否覆盖中文。原字体缺字时，引擎的测宽和回退绘制可能使用不同度量，出现个别字重叠；通过加空格、全局加字距或缩小全文不能解决缺字。应优先通过引擎已有设置，让测宽与绘制使用覆盖所需字符的字体，并检查系统设置、字体重置和读档是否恢复了原字体。保留用户存档及原字号、风格；原文构建仍须保持原字节。
+
+`windows-font-metrics` 只依赖 Python 标准库和 Windows GDI。复制后用 `run_engine_python(script="work/windows_font_metrics.py", stdin=...)` 调用；JSON 例如：
+
+```json
+{"fonts":[{"face":"Original Font","file":"work/unpacked/font.ttf","height":-24},{"face":"Microsoft YaHei","height":-24}],"text":"原文かな、。简体译文喂么过这试！？ABC123"}
+```
+
+`fonts` 最多 4 项，`text` 最多 512 字符；字体 `file` 可省略以检查已安装字体，`height` 使用引擎实际有符号高度，还可指定 `width`、`weight`、`italic`、`charset` 和 `pitchAndFamily`。字体文件仅在诊断子进程内临时加载，不安装到系统。返回缺字计数及有界样例、实际字体名和字宽/字形度量；名字不同可能是本地化别名。缺字时测得的宽度不证明回退绘制正确；BMP 以外字符列为未检查，不计入覆盖通过。字形越出单字符边界本身也不等于排版错误。
+
+该工具不运行游戏，不证明实际引擎选择了同一字体，也不覆盖预渲染字库或其他渲染后端。适配器需把已确认的字体修复写入确定性的构建流程，核对实际生效资源，并通过试译确认显示；普通补丁构建无需重复调用模型或字体诊断。
 
 QLIE 字体模板沿用对应适配器的完整名称及行高度、平均宽度规则；不能直接套用于任意字体引擎。System4 位图模板保留字体替换检测和非空字形检查。组件不包含字体文件，适配器需准备符合许可要求的字体和必要声明。
 

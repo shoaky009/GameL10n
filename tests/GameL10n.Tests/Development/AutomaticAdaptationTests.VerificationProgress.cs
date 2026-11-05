@@ -6,6 +6,56 @@ namespace GameL10n.Tests.Development;
 
 public sealed partial class AutomaticAdaptationTests
 {
+    [Theory]
+    [InlineData(20_000, false, false)]
+    [InlineData(110_000, false, true)]
+    [InlineData(110_000, true, false)]
+    public async Task IntermediateMilestoneCompactsGrownHistoryWithoutInterruptingSmallOrCompletedWork(
+        int sourceLength, bool complete, bool checkpointExpected)
+    {
+        var request = Request();
+        var store = new LocalAdapterPackageStore(Path.Combine(root, "store"));
+        var workspace = Path.Combine(store.WorkDirectory, "current");
+        var state = new AdaptationSession { GameId = request.GameId, GameDirectory = request.GameDirectory, ModelIdentity = "fake" };
+        var runner = new ScriptedRunner { DropTranslatedUnit = !complete };
+        var tools = new AdaptationTools(request, state, workspace, Runtime(runner), store);
+        var write = new AgentToolCall("source", "write_file", JsonSerializer.Serialize(new
+        {
+            path = "src/adapter.py", content = "#" + new string('x', sourceLength)
+        }));
+        var output = await tools.ExecuteAsync(write, default);
+        await tools.ExecuteAsync(new("stage", "stage_resources", """{"files":["script.txt"]}"""), default);
+        state.Messages = [new("user", "Continue from the current source."), new("assistant", ToolCalls: [write]), new("tool", output, ToolCallId: write.Id)];
+        await LocalFiles.WriteJsonAsync(Path.Combine(workspace, "session.json"), state, FixtureJson.TypeInfo<AdaptationSession>(FixtureJson.Storage));
+        var round = 0;
+        var model = new FakeModel(context =>
+        {
+            if (round++ == 0)
+            {
+                Assert.DoesNotContain(context.Messages, message => message.Content.StartsWith("当前会话较长。下一步先调用 checkpoint"));
+                return new(new("assistant", ToolCalls: [new("verify", "test_adapter", CacheTestArguments)]), new(100, 20));
+            }
+            if (round == 2)
+            {
+                using var verified = JsonDocument.Parse(Assert.Single(context.Messages, message => message.ToolCallId == "verify").Content);
+                Assert.Equal(complete, verified.RootElement.GetProperty("result").GetProperty("passed").GetBoolean());
+                Assert.Equal(checkpointExpected, context.Messages.Any(message => message.Content.StartsWith("当前会话较长。下一步先调用 checkpoint")));
+                if (checkpointExpected)
+                    return new(new("assistant", ToolCalls: [new("save", "checkpoint", """{"summary":"Original-byte roundtrip passed; repair partial Chinese re-extraction next."}""")]), new(100, 20));
+            }
+            else
+            {
+                Assert.True(AutomaticAdaptationService.VisibleHistoryBytes(context.Messages) < 64 * 1024);
+                Assert.DoesNotContain(context.Messages, message => AdaptationHistory.ReadableMessage(message).Contains(new string('x', 1000)));
+                Assert.Contains(context.Messages, message => message.Content.Contains("repair partial Chinese re-extraction next"));
+            }
+            return Blocked("needs_input", "需要显示反馈。", "提供画面。");
+        });
+        var result = await new AutomaticAdaptationService(model, Runtime(runner), store).AdaptAsync(request);
+        Assert.True(result.Status == AdaptationStatus.WaitingForUser, string.Join("\n", result.Diagnostics));
+        Assert.Equal(checkpointExpected ? 3 : 2, model.Calls);
+    }
+
     [Fact]
     public async Task ContinuousSourceEditsStillReceiveVerificationReview()
     {

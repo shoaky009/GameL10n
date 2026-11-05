@@ -87,6 +87,78 @@ public sealed class AdapterComponentAssetsTests : IDisposable
     }
 
     [Fact]
+    public async Task FontDiagnosticStaysOutOfTheReleaseAndDistinguishesMissingGlyphsFromMeasuredWidths()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        using var fixture = new EngineArchiveFixture();
+        var release = new List<AdapterReleaseFile>();
+        await new AdapterComponentAssets().CopyAsync(["windows-font-metrics"], fixture.Root, releaseFiles: release);
+        Assert.Empty(release);
+        Assert.False(Directory.Exists(Path.Combine(fixture.Root, "src")));
+        var script = Path.Combine(fixture.Root, "work", "windows_font_metrics.py");
+        Assert.True(File.Exists(script));
+        // An unassigned BMP codepoint cannot acquire coverage through font linking. The supplementary
+        // character must remain explicitly unverified instead of accidentally passing a UTF-16 probe.
+        async Task<JsonDocument> InspectAsync(string text)
+        {
+            var request = JsonSerializer.Serialize(new
+            {
+                fonts = new[] { new { face = "Arial", height = -24 }, new { face = "Arial", height = -48 } }, text
+            }, Json);
+            var run = await new AdapterProcessRunner().RunAsync(new(fixture.Paths.Python,
+                EngineReferenceToolkit.PythonArguments(fixture.Paths, script, []), fixture.Root, request), default);
+            Assert.True(run.ExitCode == 0, run.StandardOutput + run.StandardError);
+            return JsonDocument.Parse(run.StandardOutput);
+        }
+        using var missing = await InspectAsync("A\u0378𠀋");
+        var fonts = missing.RootElement.GetProperty("fonts").EnumerateArray().ToArray();
+        foreach (var font in fonts)
+        {
+            Assert.False(font.GetProperty("coversSample").GetBoolean());
+            Assert.Equal(1, font.GetProperty("missingCount").GetInt32());
+            Assert.Equal("\u0378", font.GetProperty("missingCharacters").GetString());
+            Assert.Equal("U+2000B", Assert.Single(font.GetProperty("unsupportedCodepoints").EnumerateArray()).GetString());
+            var absent = font.GetProperty("samples").EnumerateArray().Single(sample => sample.GetProperty("character").GetString() == "\u0378");
+            Assert.False(absent.GetProperty("present").GetBoolean());
+            Assert.True(absent.TryGetProperty("measuredAdvance", out _));
+        }
+        using var present = await InspectAsync("AAA");
+        var sizes = present.RootElement.GetProperty("fonts").EnumerateArray().Select(font =>
+        {
+            Assert.True(font.GetProperty("coversSample").GetBoolean());
+            Assert.Equal(1, font.GetProperty("characterCount").GetInt32());
+            var glyph = Assert.Single(font.GetProperty("samples").EnumerateArray());
+            Assert.True(glyph.GetProperty("present").GetBoolean());
+            Assert.True(glyph.GetProperty("glyphAdvance").GetInt32() > 0);
+            return glyph.GetProperty("measuredAdvance").GetInt32();
+        }).ToArray();
+        Assert.True(sizes[1] > sizes[0]);
+        Assert.Single(Directory.GetFiles(Path.Combine(fixture.Root, "work"), "*", SearchOption.AllDirectories));
+    }
+
+    [Fact]
+    public async Task PrivateFontProbeReadsTheRequestedFileAndDoesNotModifyIt()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        using var fixture = new EngineArchiveFixture();
+        await new AdapterComponentAssets().CopyAsync(["windows-font-metrics"], fixture.Root);
+        var fontFile = Path.Combine(fixture.Root, "work", "sample.ttf");
+        File.Copy(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Fonts), "arial.ttf"), fontFile);
+        var before = await File.ReadAllBytesAsync(fontFile);
+        var request = JsonSerializer.Serialize(new { fonts = new[] { new { face = "Arial", file = fontFile } }, text = "ABC" }, Json);
+        var run = await new AdapterProcessRunner().RunAsync(new(fixture.Paths.Python,
+            EngineReferenceToolkit.PythonArguments(fixture.Paths, Path.Combine(fixture.Root, "work", "windows_font_metrics.py"), []),
+            fixture.Root, request), default);
+        Assert.True(run.ExitCode == 0, run.StandardOutput + run.StandardError);
+        using var result = JsonDocument.Parse(run.StandardOutput);
+        var font = Assert.Single(result.RootElement.GetProperty("fonts").EnumerateArray());
+        Assert.True(font.GetProperty("coversSample").GetBoolean());
+        Assert.True(font.GetProperty("selectedFace").GetString()!.Contains("Arial", StringComparison.OrdinalIgnoreCase));
+        Assert.Equal(before, await File.ReadAllBytesAsync(fontFile));
+        File.Delete(fontFile);
+    }
+
+    [Fact]
     public async Task MissingLauncherBinaryFailsBeforeCopyingAnySelectedComponents()
     {
         var assets = new AdapterComponentAssets(Path.Combine(root, "missing-assets"));

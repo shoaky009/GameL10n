@@ -62,7 +62,7 @@ internal static class AdaptationToolGroups
         + "Use replace when the working set changes; all is available for a broad inspection, not required when unsure. "
         + "Call alone; the next request includes the schemas. "
         + "Loading is local, requires no downloads and does not execute the loaded tools. "
-        + "On checkpoint, resume or model change, unused groups are trimmed to current context and recent operations. "
+        + "On verification milestones, checkpoint, resume or model change, unused groups are trimmed to current context and recent operations. "
         + "Any group can be loaded again; there are no phase locks.\n";
 
     internal static IReadOnlyList<AgentToolDefinition> ForRequest(AdaptationSession session)

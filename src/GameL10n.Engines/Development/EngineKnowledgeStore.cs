@@ -145,7 +145,7 @@ public sealed class EngineKnowledgeStore(string directory)
 
     private static string NormalizeRoot(string value) => string.Concat(value.Where(char.IsLetterOrDigit)).ToLowerInvariant();
 
-    private static string? EngineRoot(string value)
+    internal static string? EngineRoot(string value)
     {
         value = value.Trim();
         foreach (var prefix in new[] { "engine.", "template.", "builtin." })

@@ -35,7 +35,7 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
             AdaptationToolGroups.Parameters, "groups"),
         Define("report_progress", "Brief Chinese progress for the user when evidence or direction changes. exploring: unresolved issue and next probe; breakthrough: observed evidence and what it enables; implementing: established route; correction: retract an earlier claim. <=400 characters, no private reasoning, percentages or ETA. Accompany normal tools in the same response; no extra model turn. This report never validates or publishes an adapter.",
             """{"kind":{"type":"string","enum":["exploring","breakthrough","implementing","correction"]},"message":{"type":"string","minLength":1,"maxLength":400}}""", "kind", "message"),
-        Define("inspect_engine_knowledge", "Search shared engine/format experience from previous projects. With id, read conditional guidance and helper index. Without id, query searches engine names/aliases; empty query lists this game's candidates (exact matches first, then related variants). offset pages through candidates. Verify conditions locally; a family match does not prove variant compatibility, and no match does not mean unsupported.",
+        Define("inspect_engine_knowledge", "Search shared engine/format experience from previous projects. With id, read conditional guidance, helpers and reuseOptions with exact component/parser/published-adapter calls. Prefer their ready JSON probes over writing another wrapper. Without id, query searches engine names/aliases; empty query lists this game's candidates (exact first, related variants next). offset pages candidates. Verify format, script semantics and runtime conditions independently; a family match is only a lead.",
             """{"query":{"type":"string"},"id":{"type":"string"},"offset":{"type":"integer","minimum":0,"maximum":100000}}""", []),
         Define("copy_engine_knowledge_tools", "Copy one shared source helper into work/ without overwriting edits. Requires id and tool name from inspect_engine_knowledge. Inspect applicability and dependencies, then use run_engine_python on current samples. Does not execute, validate or publish an adapter. Call alone.",
             """{"id":{"type":"string"},"tool":{"type":"string"}}""", "id", "tool"),
@@ -68,7 +68,7 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
             """{"source":{"type":"string"},"query":{"type":"string"},"offset":{"type":"integer"},"length":{"type":"integer"}}""", []),
         Define("inspect_adapter_component", "Inspect one reusable text/encoding/font/launcher component from list_adapters.components: API, example, exact applicability and files. Optional path reads a bounded source slice (character offsets). Components are not complete adapters or proof of game compatibility.",
             """{"id":{"type":"string"},"path":{"type":"string"},"offset":{"type":"integer"},"length":{"type":"integer"}}""", "id"),
-        Define("copy_adapter_components", "Copy 1-4 selected Python helpers or precompiled patch components without overwriting differing files. Font/encoding helpers call the precompiled application host; the QLIE launcher includes a ready-to-copy standalone EXE under src/tools. No C# compilation, font files or framework installation. Confirm applicability before use; test_adapter still required. Call alone.",
+        Define("copy_adapter_components", "Copy 1-4 selected helpers/components without overwriting differing files. Analysis-only tools such as windows-font-metrics go to work/ and are not released. Runtime helpers go to src/tools; the QLIE launcher includes a standalone EXE. No C# compilation, font files or framework installation. Confirm applicability before use; test_adapter still required for adapter changes. Call alone.",
             """{"ids":{"type":"array","items":{"type":"string"}}}""", "ids"),
         Define("try_builtin_adapter", "Try a built-in parser on 1-12 explicit files under workspace resources/ or work/. Total input at most 64 MiB. Returns count, bounded samples, concrete parse diagnostics and optionally host-checked original-byte roundtrip (default true). Include required companions. Does not translate, test rendering, publish or activate. Stage original samples first; unpack archives locally into work/.",
             """{"format":{"type":"string"},"directory":{"type":"string"},"files":{"type":"array","items":{"type":"string"}},"checkRoundtrip":{"type":"boolean"}}""", "format", "directory", "files"),
@@ -79,8 +79,8 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
             """{"query":{"type":"string"}}""", "query"),
         Define("inspect_engine_reference", "Read one engine guide or a bounded source slice from the shared GalTransl Python toolkit. Uses the fixed source bundled with the app or already installed locally; no automatic download. Returns public function names, module paths and reuse instructions. engine is an exact ID from search_engine_references. Optional query/offset/length locate a relevant section. retryDownload retries local preparation after missing tool files are restored. Call alone.",
             """{"engine":{"type":"string"},"path":{"type":"string"},"query":{"type":"string"},"offset":{"type":"integer"},"length":{"type":"integer"},"retryDownload":{"type":"boolean"}}""", "engine"),
-        Define("run_engine_python", "Run exactly one script (work/*.py or src/tools/*.py) OR module (python.engines.* / python.archives.* from the pinned library). module calls an existing CLI directly, e.g. arguments=[--help], without writing a wrapper. Use this for all temporary analysis scripts. Bundled portable Python, no downloads, system Python, pip or pycache. UTF-8 stdin/stdout/stderr; workingDirectory defaults to the workspace root. Use staged samples and concise output. Can follow write_file calls in one ordered batch.",
-            """{"script":{"type":"string","description":"Existing work/*.py or src/tools/*.py. Omit when module is supplied."},"module":{"type":"string","description":"Exact pinned module name, such as python.engines.kirikiri_hxv4_text. Omit when script is supplied."},"arguments":{"type":"array","maxItems":128,"items":{"type":"string"}},"workingDirectory":{"type":"string"},"stdin":{"type":"string"},"timeoutSeconds":{"type":"integer","minimum":1,"maximum":600,"default":120}}""", []),
+        Define("run_engine_python", "Run one script OR pinned library module. For a new/updated work/*.py probe, supply script + content to write and run in ONE call; a failed write prevents execution. Omit content to rerun an existing script or call a module CLI directly. Bundled portable Python, UTF-8 IO, no downloads/pip/pycache. Use staged samples and concise counts/differences/samples. Long output is previewed; read_tool_result retrieves the retained original. Can follow edits in one ordered batch.",
+            """{"script":{"type":"string","description":"work/*.py or existing src/tools/*.py. Omit with module."},"content":{"type":"string","description":"Optional UTF-8 probe source; requires script under work/. Saved before execution; omit to reuse the file."},"module":{"type":"string","description":"Exact pinned module, e.g. python.engines.kirikiri_hxv4_text; mutually exclusive with script/content."},"arguments":{"type":"array","maxItems":128,"items":{"type":"string"}},"workingDirectory":{"type":"string"},"stdin":{"type":"string"},"timeoutSeconds":{"type":"integer","minimum":1,"maximum":600,"default":120}}""", []),
         Define("inspect_engine_component", "List fixed callable archive components or inspect one id. Returns supported formats, read/write operations, budgets and dependency contract. No downloads or source reading. Prefer run_engine_component over writing a Python wrapper for a supported format.",
             """{"id":{"type":"string"}}"""),
         Define("run_engine_component", "Directly inspect/extract/rebuild a staged archive using a fixed component, without writing code. Input under resources/ or work/; output is a NEW work/ directory. Returns bounded entries plus full manifest.json. Optional members/extensions select extraction. RPA inspect reads only the index; extract reads selected payloads (unread SHA256=null). verifyContents=true hashes all members. Rebuild replacements map exact archive names to work/ files; untouched members are verified. Uses pinned local shared Python/library, no pip/download. XP3 requires independently confirmed filter=none. Call alone.",
@@ -171,7 +171,7 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
         {
             "load_tool_groups" => AdaptationToolGroups.Load(session, args),
             "report_progress" => ReportProgress(args),
-            "inspect_engine_knowledge" => InspectEngineKnowledge(args),
+            "inspect_engine_knowledge" => await InspectEngineKnowledgeAsync(args, ct),
             "copy_engine_knowledge_tools" => await CopyEngineKnowledgeToolsAsync(args, ct),
             "list_files" => ListFiles(args),
             "read_file" => await ReadFileAsync(args, ct),
@@ -783,8 +783,8 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
         return new JsonObject
         {
             ["exitCode"] = result.ExitCode,
-            ["stdout"] = Limit(result.StandardOutput, 16_000),
-            ["stderr"] = Limit(result.StandardError, 8000)
+            ["stdout"] = result.StandardOutput,
+            ["stderr"] = result.StandardError
         };
     }
 

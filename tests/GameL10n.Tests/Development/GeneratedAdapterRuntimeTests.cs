@@ -127,19 +127,20 @@ public sealed class GeneratedAdapterRuntimeTests : IDisposable
         var source = Directory.CreateDirectory(Path.Combine(root, "src")).FullName;
         await File.WriteAllTextAsync(Path.Combine(source, "Program.cs"), "Invalid adapter source must not be compiled for analysis.");
         var script = Path.Combine(work, "probe.py");
-        await File.WriteAllTextAsync(script, """
+        const string content = """
             import sys
             from pathlib import Path
             print(sys.argv[1] + ':' + sys.stdin.read())
             print('诊断', file=sys.stderr)
             Path('result.txt').write_text('已运行', encoding='utf-8')
             sys.exit(7)
-            """, new UTF8Encoding(false));
+            """;
         var compiler = new AdapterRuntime(new(Path.Combine(root, "absent-dotnet"), "10.0.402", "10.0.13"), fixture.Runner);
         var tools = new AdaptationTools(new("analysis", root, []), new(), root, compiler, store);
-        var result = await tools.ExecuteAsync(new("analysis", "run_engine_python", """
-            {"script":"work/probe.py","arguments":["参数"],"stdin":"输入","workingDirectory":"work"}
-            """), default);
+        var result = await tools.ExecuteAsync(new("analysis", "run_engine_python", JsonSerializer.Serialize(new
+        {
+            script = "work/probe.py", content, arguments = new[] { "参数" }, stdin = "输入", workingDirectory = "work"
+        })), default);
         using var parsed = JsonDocument.Parse(result);
         var output = parsed.RootElement.GetProperty("result");
         Assert.Equal(7, output.GetProperty("exitCode").GetInt32());
@@ -148,7 +149,7 @@ public sealed class GeneratedAdapterRuntimeTests : IDisposable
         Assert.Equal("已运行", await File.ReadAllTextAsync(Path.Combine(work, "result.txt")));
         Assert.True(File.Exists(script));
         Assert.False(Directory.Exists(Path.Combine(root, "build")));
-        Assert.Empty(Directory.EnumerateDirectories(work));
+        Assert.True(!Directory.EnumerateDirectories(work).Any(), string.Join("\n", Directory.EnumerateDirectories(work)));
         Assert.DoesNotContain(AdaptationTools.Definitions, tool => tool.Name == "run_csharp");
     }
 
