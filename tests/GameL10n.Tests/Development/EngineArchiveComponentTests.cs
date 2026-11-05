@@ -169,7 +169,7 @@ internal sealed class EngineArchiveFixture : IDisposable
             while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "global.json"))) directory = directory.Parent;
             if (directory is null) throw new InvalidOperationException("找不到测试工具链。");
             return [Path.Combine(directory.FullName, ".tools", "dotnet", "dotnet.exe"), "exec", "--runtimeconfig",
-                Path.Combine(AppContext.BaseDirectory, "GameL10n.Tests.runtimeconfig.json"), typeof(GameL10n.AdapterHost.Program).Assembly.Location];
+                Path.Combine(AppContext.BaseDirectory, "GameL10n.AdapterHost.runtimeconfig.json"), typeof(GameL10n.AdapterHost.Program).Assembly.Location];
         }
     }
     public EngineArchiveFixture(string libraryResource = "EngineArchiveReference.zip")

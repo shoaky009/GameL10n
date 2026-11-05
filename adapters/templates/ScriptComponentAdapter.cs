@@ -73,7 +73,7 @@ internal static class ScriptComponentAdapter
             {
                 var response = JsonNode.Parse(BuiltinScriptParser.ExecuteJson(request.ToJsonString()))!.AsObject();
                 foreach (var key in new[] { "extraction", "build" })
-                    if (response[key] is JsonObject result) result["warnings"]!.AsArray().Add(Warning);
+                    if (response[key] is JsonObject result) result["warnings"]!.AsArray().Add((JsonNode?)JsonValue.Create(Warning));
                 return response;
             }
             Directory.CreateDirectory(scratch);
@@ -216,7 +216,7 @@ internal static class ScriptComponentAdapter
                 var validation = Parser("validate", before.Directory, before.Files, after.Directory)["validation"]!;
                 foreach (var issue in validation["issues"]!.AsArray()) issues.Add(issue!.DeepClone());
                 if (!validation["passed"]!.GetValue<bool>() && validation["issues"]!.AsArray().Count == 0)
-                    issues.Add(new JsonObject { ["code"] = "script-validation", ["message"] = "脚本结构未通过验证：" + before.Resource });
+                    issues.Add((JsonNode)new JsonObject { ["code"] = "script-validation", ["message"] = "脚本结构未通过验证：" + before.Resource });
             }
             return Success("validation", new JsonObject
             {

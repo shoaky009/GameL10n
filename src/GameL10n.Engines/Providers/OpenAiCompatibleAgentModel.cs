@@ -128,7 +128,7 @@ public sealed class OpenAiCompatibleAgentModel : OpenAiCompatibleClient, IAdapta
     {
         var messages = new JsonArray();
         if (_settings.Protocol == ProviderApiProtocol.ChatCompletions)
-            messages.Add(new JsonObject
+            messages.Add((JsonNode)new JsonObject
             {
                 ["role"] = "system",
                 ["content"] = request.Instructions
@@ -144,7 +144,7 @@ public sealed class OpenAiCompatibleAgentModel : OpenAiCompatibleClient, IAdapta
             else if (message.Role == "tool")
             {
                 messages.Add(_settings.Protocol == ProviderApiProtocol.Responses
-                    ? new JsonObject
+                    ? (JsonNode)new JsonObject
                     {
                         ["type"] = "function_call_output",
                         ["call_id"] = message.ToolCallId,
@@ -161,12 +161,12 @@ public sealed class OpenAiCompatibleAgentModel : OpenAiCompatibleClient, IAdapta
             {
                 if (_settings.Protocol == ProviderApiProtocol.Responses)
                 {
-                    if (!string.IsNullOrEmpty(message.Content)) messages.Add(new JsonObject
+                    if (!string.IsNullOrEmpty(message.Content)) messages.Add((JsonNode)new JsonObject
                     {
                         ["role"] = "assistant",
                         ["content"] = message.Content
                     });
-                    foreach (var call in message.ToolCalls) messages.Add(new JsonObject
+                    foreach (var call in message.ToolCalls) messages.Add((JsonNode)new JsonObject
                     {
                         ["type"] = "function_call",
                         ["call_id"] = call.Id,
@@ -174,7 +174,7 @@ public sealed class OpenAiCompatibleAgentModel : OpenAiCompatibleClient, IAdapta
                         ["arguments"] = call.Arguments
                     });
                 }
-                else messages.Add(new JsonObject
+                else messages.Add((JsonNode)new JsonObject
                 {
                     ["role"] = "assistant",
                     ["content"] = string.IsNullOrEmpty(message.Content) ? null : message.Content,
@@ -190,7 +190,7 @@ public sealed class OpenAiCompatibleAgentModel : OpenAiCompatibleClient, IAdapta
                     }))
                 });
             }
-            else messages.Add(new JsonObject
+            else messages.Add((JsonNode)new JsonObject
             {
                 ["role"] = message.Role,
                 ["content"] = message.Content
@@ -214,7 +214,7 @@ public sealed class OpenAiCompatibleAgentModel : OpenAiCompatibleClient, IAdapta
             }));
             payload["max_output_tokens"] = request.MaximumOutputTokens;
             payload["store"] = false;
-            payload["include"] = new JsonArray { "reasoning.encrypted_content" };
+            payload["include"] = new JsonArray(JsonValue.Create("reasoning.encrypted_content"));
             if (_settings.AnalysisReasoningEffort is { } effort) payload["reasoning"] = new JsonObject
             {
                 ["effort"] = effort

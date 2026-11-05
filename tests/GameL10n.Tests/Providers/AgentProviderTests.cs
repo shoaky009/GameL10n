@@ -9,17 +9,19 @@ namespace GameL10n.Tests.Providers;
 
 public sealed class AgentProviderTests
 {
+    // Keep fixture metadata explicit so this suite also runs with the desktop's reflection default disabled.
+    private static readonly JsonSerializerOptions Json = new(FixtureJson.Storage) { PropertyNamingPolicy = null, WriteIndented = false };
     private static readonly AgentToolDefinition[] Tools =
     [
         new("read_file", "Read one workspace file", JsonSerializer.SerializeToElement(new
         {
             type = "object", properties = new { path = new { type = "string" } }, required = new[] { "path" }, additionalProperties = false
-        })),
+        }, Json)),
         new("write_file", "Write one workspace file", JsonSerializer.SerializeToElement(new
         {
             type = "object", properties = new { path = new { type = "string" }, content = new { type = "string" } },
             required = new[] { "path", "content" }, additionalProperties = false
-        }))
+        }, Json))
     ];
 
     [Theory]
@@ -79,7 +81,7 @@ public sealed class AgentProviderTests
                 : TextEnvelope(protocol, "Adapter validated.");
             if (round < 2)
             {
-                var document = JsonSerializer.SerializeToElement(envelope);
+                var document = JsonSerializer.SerializeToElement(envelope, Json);
                 originalOutputs[round] = protocol == ProviderApiProtocol.Responses ? document.GetProperty("output") : document.GetProperty("choices")[0].GetProperty("message");
             }
             return Response(envelope);
@@ -109,7 +111,7 @@ public sealed class AgentProviderTests
     [InlineData(ProviderApiProtocol.Responses)]
     public async Task MultipleCallsReplayBothResultsAndOriginalReasoning(ProviderApiProtocol protocol)
     {
-        var envelope = System.Text.Json.Nodes.JsonNode.Parse(JsonSerializer.Serialize(ToolEnvelope(protocol)))!;
+        var envelope = System.Text.Json.Nodes.JsonNode.Parse(JsonSerializer.Serialize(ToolEnvelope(protocol), Json))!;
         var calls = protocol == ProviderApiProtocol.Responses ? envelope["output"]!.AsArray()
             : envelope["choices"]![0]!["message"]!["tool_calls"]!.AsArray();
         var second = calls.Last()!.DeepClone();
@@ -190,17 +192,17 @@ public sealed class AgentProviderTests
         try
         {
             var envelope = JsonSerializer.SerializeToNode(ToolEnvelope(protocol, name: "write_file",
-                arguments: "{\"content\":\"private-key unfinished-source"))!;
+                arguments: "{\"content\":\"private-key unfinished-source"), Json)!;
             if (protocol == ProviderApiProtocol.Responses)
             {
                 envelope["status"] = "incomplete";
-                envelope["incomplete_details"] = JsonSerializer.SerializeToNode(new { reason = "max_output_tokens" });
-                envelope["usage"]!["output_tokens_details"] = JsonSerializer.SerializeToNode(new { reasoning_tokens = 5 });
+                envelope["incomplete_details"] = JsonSerializer.SerializeToNode(new { reason = "max_output_tokens" }, Json);
+                envelope["usage"]!["output_tokens_details"] = JsonSerializer.SerializeToNode(new { reasoning_tokens = 5 }, Json);
             }
             else
             {
                 envelope["choices"]![0]!["finish_reason"] = "length";
-                envelope["usage"]!["completion_tokens_details"] = JsonSerializer.SerializeToNode(new { reasoning_tokens = 5 });
+                envelope["usage"]!["completion_tokens_details"] = JsonSerializer.SerializeToNode(new { reasoning_tokens = 5 }, Json);
             }
             using var client = new HttpClient(new Handler(_ => Task.FromResult(Response(envelope))));
             var error = await Assert.ThrowsAsync<TranslationProviderException>(() =>
@@ -282,13 +284,13 @@ public sealed class AgentProviderTests
     public async Task ProgressTextAndToolCallArriveTogetherAndProviderHistoryIsUnchanged(ProviderApiProtocol protocol)
     {
         const string progress = "关键突破：已验证字体映射，接下来整合回填。";
-        var envelope = JsonSerializer.SerializeToNode(ToolEnvelope(protocol))!;
+        var envelope = JsonSerializer.SerializeToNode(ToolEnvelope(protocol), Json)!;
         if (protocol == ProviderApiProtocol.Responses)
             envelope["output"]!.AsArray().Add(JsonSerializer.SerializeToNode(new
             {
                 type = "message", role = "assistant", status = "completed",
                 content = new[] { new { type = "output_text", text = progress } }
-            }));
+            }, Json));
         else envelope["choices"]![0]!["message"]!["content"] = progress;
         var handler = new Handler(_ => Task.FromResult(Response(envelope)));
         using var client = new HttpClient(handler);
@@ -296,7 +298,7 @@ public sealed class AgentProviderTests
         Assert.Equal(progress, turn.Message.Content);
         Assert.Single(turn.Message.ToolCalls!);
         Assert.Equal(1, handler.Calls);
-        var original = JsonSerializer.SerializeToElement(envelope);
+        var original = JsonSerializer.SerializeToElement(envelope, Json);
         Assert.True(JsonElement.DeepEquals(protocol == ProviderApiProtocol.Responses ? original.GetProperty("output")
             : original.GetProperty("choices")[0].GetProperty("message"), turn.Message.ProviderData!.Value));
     }
@@ -325,7 +327,7 @@ public sealed class AgentProviderTests
         ? new { status = "completed", output = new[] { new { type = "message", role = "assistant", status = "completed", content = new[] { new { type = "output_text", text = content } } } }, usage = new { input_tokens = 11, output_tokens = 7 } }
         : new { choices = new[] { new { finish_reason = "stop", message = new { role = "assistant", content } } }, usage = new { prompt_tokens = 11, completion_tokens = 7 } };
     private static HttpResponseMessage Response(object body) => new(HttpStatusCode.OK)
-        { Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json") };
+        { Content = new StringContent(JsonSerializer.Serialize(body, Json), Encoding.UTF8, "application/json") };
     private sealed class Handler(Func<HttpRequestMessage, Task<HttpResponseMessage>> handle) : HttpMessageHandler
     {
         public int Calls { get; private set; }

@@ -11,6 +11,12 @@
 ./scripts/publish.ps1
 ```
 
+API 请求与会话回放的回归检查还需使用与桌面端相同的 JSON 配置，关闭默认反射回退：
+
+```powershell
+./scripts/dotnet.ps1 test tests/GameL10n.Tests -c Release --no-restore -p:JsonSerializerIsReflectionEnabledByDefault=false --filter FullyQualifiedName~AgentProviderTests
+```
+
 `scripts/dotnet.ps1` 支持系统 SDK，也支持项目下 `.tools/dotnet` 中的独立 SDK。`scripts/publish.ps1` 输出 `artifacts/GameL10n`，包含桌面应用、运行时、文档和自动适配所需的工具链。发行时保留完整目录，单独复制 EXE 不足以运行桌面工具。
 
 根目录的 `logo.png` 用于 README，`icon.png` 是程序图标原图。Windows 使用由原图转换的多尺寸 `src/GameL10n.Desktop/Assets/GameL10n.ico`；替换原图时同步更新 ICO。构建将其嵌入 EXE 并复制到应用的 `Assets` 目录，运行时窗口使用同一文件。
@@ -58,7 +64,9 @@
 
 JSON 序列化与反序列化使用各模块的 `JsonSerializerContext` 生成类型信息，由模块自己的上下文维护数据契约，并按项目依赖组合下层解析器。`LocalFiles` 接收调用方提供的 `JsonTypeInfo<T>`，只负责文件读写、原子替换及备份恢复。动态工具结果和 API 请求使用 `JsonObject`、`JsonArray`；以 `object` 传递的具体数据类型也需要在所属模块登记。新增调用应使用明确的类型信息，避免隐式依赖运行时反射。
 
-存储文件沿用 Web 命名与缩进配置，哈希输入中使用默认大小写的序列化保持独立配置；调整属性顺序、编码或命名规则会影响已有缓存键和适配器版本。桌面应用、数据工具及当前 VNTextPatch 命令行入口关闭 JSON 的默认反射回退。AdapterHost 自身使用生成的类型信息，但在解析器改为独立进程前，仍为其加载的旧版解析器 DLL 保留默认回退。开发诊断与测试输入构造可使用反射，不属于发行应用的数据契约。
+构造 JSON 数组时使用显式 `JsonNode`，字符串可用 `new JsonArray(JsonValue.Create("value"))`。字符串集合初始化器和 `Add<T>` 可能在建树阶段查询默认解析器；稍后序列化整棵树时传入的类型信息不能补救这一步。
+
+存储文件沿用 Web 命名与缩进配置，哈希输入中使用默认大小写的序列化保持独立配置；调整属性顺序、编码或命名规则会影响已有缓存键和适配器版本。桌面应用、数据工具、AdapterHost 及当前 VNTextPatch 命令行入口关闭 JSON 的默认反射回退。旧版解析器 DLL 通过独立的托管兼容进程调用，该进程保留反射回退。开发诊断与测试输入构造可使用显式反射解析器，不属于发行应用的数据契约。
 
 ## 资源验证
 

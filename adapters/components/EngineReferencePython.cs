@@ -20,10 +20,10 @@ internal static class EngineReferencePython
         }
         if (args.Length != 0) throw new InvalidDataException("Unknown adapter entry arguments.");
         var json = JsonNode.Parse(request)!.AsObject();
-        var command = new JsonArray(Environment.ProcessPath!);
+        var command = new JsonArray(JsonValue.Create(Environment.ProcessPath));
         if (Path.GetFileNameWithoutExtension(Environment.ProcessPath!).Equals("dotnet", StringComparison.OrdinalIgnoreCase))
-            command.Add(typeof(EngineReferencePython).Assembly.Location);
-        command.Add("--builtin");
+            command.Add((JsonNode?)JsonValue.Create(typeof(EngineReferencePython).Assembly.Location));
+        command.Add((JsonNode?)JsonValue.Create("--builtin"));
         json["builtinCommand"] = command;
         return Run(relativeScript, json.ToJsonString());
     }
