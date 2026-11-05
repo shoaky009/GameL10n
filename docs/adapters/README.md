@@ -10,7 +10,7 @@
 | [System4 AIN v14 MSG1 + FNL](engines/system4-ain14-msg1-fnl.md) | `engine.system4-ain14-msg1-fnl` | MSG1 剧情消息、FNL 补字及匹配已登记代码的运行时修补 |
 | [QLIE FilePackVer3.0 + system_fix](engines/qlie-filepack3-systemfont.md) | `engine.qlie-filepack3-systemfont` | 匹配主封包、外置密钥、EXE 密钥资源及字体布局的版本 |
 | [VNTextPatch：22 个引擎系列／29 个脚本格式](engines/vntextpatch.md) | `engine.vntextpatch-*` | 已解包脚本的提取与回填；封包和中文运行条件见格式表 |
-| [Ren’Py RPYC2](engines/renpy-rpyc.md) | `template.loose-renpy-rpyc` / `template.rpa3-renpy-rpyc` | 编译脚本的惰性 AST 读写；支持松散脚本及 RPA/ARC 3.0，未知结构或加载顺序保留诊断 |
+| [Ren’Py RPYC2 及混合资源](engines/renpy-rpyc.md) | `template.loose-renpy-rpyc` / `template.rpa3-renpy-rpyc` / `template.renpy-mixed` | 编译脚本的惰性 AST 读写；支持松散脚本、RPA/ARC 3.0 及无路径冲突的源码组合，未知结构或加载顺序保留诊断 |
 | [Siglus / Scene.pck](engines/siglus.md) | `engine.siglus` | 指定场景布局、已确认显示调用及 FKDS 48/441 字库模板 |
 | [Unity SerializedFile 已确认文本布局](engines/unity-serialized-text.md) | `engine.unity-textasset-dialogue-json` | 已确认的对话 JSON、静态字段与部分动态说明模板，不是通用 Unity 文本解析器 |
 

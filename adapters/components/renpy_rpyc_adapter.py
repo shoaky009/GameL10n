@@ -108,6 +108,26 @@ def extract(scripts):
     return dict(extraction=dict(units=result, warnings=[WARNING]))
 
 
+def build_script(resource, member, path, translations):
+    script, names, rows, manifest = read_script(path, member)
+    matched = set()
+    for row, record in zip(rows, manifest["records"]):
+        unit_id, _ = identity(resource, member, record["locator"])
+        if unit_id in translations:
+            row["message"] = translations[unit_id]
+            matched.add(unit_id)
+    return rpyc.patch(script, rows, manifest, filename=member, names=names), script.raw, matched
+
+
+def validate_script(before, after, member):
+    original, names, _, manifest = read_script(before, member)
+    modified = rpyc.parse(archive.read_file(after, rpyc.MAX_FILE))
+    rows, _ = rpyc.export(modified, filename=member, names=names)
+    # Recreate only permitted text changes, preserving the complete original graph.
+    if rpyc.patch(original, rows, manifest, filename=member, names=names) != modified.raw:
+        raise ValueError("RPYC2 补丁改变了文本之外的内容：" + member)
+
+
 def build(request, source, files, packed, scripts, reports, scratch):
     translations = request.get("translations") or {}
     if request.get("translationsFile"):
@@ -118,16 +138,11 @@ def build(request, source, files, packed, scripts, reports, scratch):
     output = archive.checked_path(request["outputDirectory"])
     archive.separate(archive.checked_path(source), output)
     for index, (resource, member, path) in enumerate(scripts):
-        script, names, rows, manifest = read_script(path, member)
-        for row, record in zip(rows, manifest["records"]):
-            unit_id, _ = identity(resource, member, record["locator"])
-            if unit_id in translations:
-                row["message"] = translations[unit_id]
-                remaining.discard(unit_id)
-        patched = rpyc.patch(script, rows, manifest, filename=member, names=names)
+        patched, original, matched = build_script(resource, member, path, translations)
+        remaining.difference_update(matched)
         if not packed:
             target = resolve(output, resource)
-        elif patched != script.raw:
+        elif patched != original:
             target = scratch / ("changed-" + str(index))
             raw_name = next(entry["name"] for entry in reports[resource]["entries"]
                             if archive.member_name(entry["name"]) == member)
@@ -167,13 +182,7 @@ def validate(request, files, packed, scripts, reports, scratch):
             if (resource, archive.member_name(member)) not in selected and entry["sha256"] != after[member]["sha256"]:
                 raise ValueError("补丁修改了未选择的封包成员：" + resource + " → " + member)
     for (_, member, before), (_, _, after) in zip(scripts, after_scripts):
-        original, names, _, manifest = read_script(before, member)
-        modified = rpyc.parse(archive.read_file(after, rpyc.MAX_FILE))
-        rows, _ = rpyc.export(modified, filename=member, names=names)
-        # Recreate exactly the permitted text changes from the original graph.
-        # This also checks opaque Python, lookup keys, slots and digest suffix.
-        if rpyc.patch(original, rows, manifest, filename=member, names=names) != modified.raw:
-            raise ValueError("RPYC2 补丁改变了文本之外的内容：" + member)
+        validate_script(before, after, member)
     return dict(validation=dict(passed=True, issues=[], runtimeStatus="not-tested"))
 
 

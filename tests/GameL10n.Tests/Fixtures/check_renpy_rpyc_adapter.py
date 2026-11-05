@@ -11,6 +11,12 @@ from renpy_rpyc_fixture import Raw, encode, sample
 package = Path(sys.argv[1])
 sys.path.append(str(package))
 from tools import renpy_rpyc_adapter as adapter
+from tools import renpy_mixed_adapter as mixed
+
+config_path = package / "tools/adapter-template.json"
+config = json.loads(config_path.read_text())
+config.update(templateId="loose-renpy-rpyc", archiveComponent=None, scriptExtensions=[".rpyc"])
+config_path.write_text(json.dumps(config))
 
 
 def reject(action, message):
@@ -85,5 +91,19 @@ for name in packed["resourceFiles"]:
 reject(lambda: adapter.execute(packed), "相同 RPYC 路径")
 archive(source / "one.rpa", {"same.rpyc": original, "same.rpy": b"source overrides compiled"})
 reject(lambda: adapter.execute(dict(packed, resourceFiles=["one.rpa"])), "加载顺序")
+config.update(templateId="renpy-mixed", archiveComponent="archive.rpa3", scriptExtensions=[".rpy", ".rpyc"])
+config_path.write_text(json.dumps(config))
+script.write_bytes(original)
+(source / "script.rpy").write_text('label start:\n    "Source"\n')
+reject(lambda: mixed.execute(dict(request("extract"), resourceFiles=["script.rpy", "script.rpyc"])), "加载冲突")
+archive(source / "one.rpa", {"script.rpyc": original})
+reject(lambda: mixed.execute(dict(request("extract"), resourceFiles=["script.rpy", "one.rpa"])), "加载冲突")
+archive(source / "one.rpa", {"story.rpy": b"source"})
+archive(source / "two.rpa", {"story.rpyc": original})
+reject(lambda: mixed.execute(packed), "加载冲突")
+(source / "nested").mkdir()
+archive(source / "nested/one.rpa", {"other.rpyc": original})
+reject(lambda: mixed.execute(dict(packed, resourceFiles=["script.rpyc", "nested/one.rpa"])), "加载根目录")
+assert not list(Path.cwd().glob("renpy-*")), "mixed temporary resources leaked"
 assert not list(Path.cwd().glob("rpyc-*")), "temporary resources leaked"
 print("rpyc-adapter-ok")

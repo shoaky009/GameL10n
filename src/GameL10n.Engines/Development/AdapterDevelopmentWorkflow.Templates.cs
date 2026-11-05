@@ -21,10 +21,14 @@ public sealed partial class AdapterDevelopmentWorkflow
         var config = new AdapterTemplateConfiguration(1, template.Id, template.Version, template.Format,
             template.ArchiveComponent, template.ArchiveComponent == "archive.xp3" ? filter : null, template.ScriptExtensions, patterns);
         var compiledRenpy = template.ScriptExtensions.Contains(".rpyc");
-        var files = compiledRenpy ? new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase)
-            : await BuiltinAssets.PrepareSharedFilesAsync(template.Format, ct);
-        files.Add("src/adapter.py", Encoding.UTF8.GetBytes(compiledRenpy ? AdapterTemplates.RpycEntry : AdapterTemplates.PythonEntry));
+        var mixedRenpy = template.Id == "renpy-mixed";
+        var usesParser = !compiledRenpy || mixedRenpy;
+        var files = usesParser ? await BuiltinAssets.PrepareSharedFilesAsync(template.Format, ct)
+            : new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
+        files.Add("src/adapter.py", Encoding.UTF8.GetBytes(mixedRenpy ? AdapterTemplates.MixedRenpyEntry
+            : compiledRenpy ? AdapterTemplates.RpycEntry : AdapterTemplates.PythonEntry));
         if (compiledRenpy) files.Add("src/" + AdapterTemplates.RpycScriptPath, Encoding.UTF8.GetBytes(AdapterTemplates.RpycSource));
+        if (mixedRenpy) files.Add("src/" + AdapterTemplates.MixedRenpyScriptPath, Encoding.UTF8.GetBytes(AdapterTemplates.MixedRenpySource));
         files.Add("src/" + AdapterTemplates.ConfigurationPath, JsonSerializer.SerializeToUtf8Bytes(config, EngineJson.TypeInfo<AdapterTemplateConfiguration>(Json)));
         var prepared = await PythonAsync(ct);
         if (prepared.Dependency.Reference.Kind != "galtransl") throw new InvalidDataException("此模板需要 GalTransl 共享工具库。");
@@ -43,7 +47,7 @@ public sealed partial class AdapterDevelopmentWorkflow
             if (File.Exists(target) && !(await File.ReadAllBytesAsync(target, ct)).AsSpan().SequenceEqual(content))
                 throw new IOException("保留已有修改，未写入任何文件：" + path + "。可继续修改现有实现，或在新工作区组合模板。");
         }
-        if (!compiledRenpy)
+        if (usesParser)
         {
             var parser = JsonSerializer.Deserialize<BuiltinParserDependency>(files["src/" + BuiltinAdapterAssets.SharedDependencyPath], EngineJson.TypeInfo<BuiltinParserDependency>(Json))!;
             await BuiltinAssets.ResolveSharedAsync(Path.Combine(store.RootDirectory, "engine-tools"), parser, ct);

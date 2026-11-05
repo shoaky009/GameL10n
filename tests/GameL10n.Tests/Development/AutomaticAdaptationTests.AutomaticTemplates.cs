@@ -47,14 +47,14 @@ public sealed partial class AutomaticAdaptationTests
     }
 
     [Fact]
-    public async Task LooseSamplesCannotHideCompiledScriptsArchivesOrKnownLaunchIssues()
+    public async Task LooseSamplesCannotHideOtherEnginesModulesOrKnownLaunchIssues()
     {
         var request = Request();
         await File.WriteAllTextAsync(Path.Combine(request.GameDirectory, "script.rpy"), "label start:\n    \"こんにちは。\"\n");
         var store = new LocalAdapterPackageStore(Path.Combine(root, "store"));
         var workspace = Path.Combine(root, "workspace");
         var compiler = Runtime(new ScriptedRunner());
-        foreach (var blocker in new[] { "compiled.rpyc", "script_ren.py", "data.rpa", "data.xp3", "other.ks", "error.log" })
+        foreach (var blocker in new[] { "script_ren.py", "data.arc", "data.xp3", "other.ks", "error.log" })
         {
             var path = Path.Combine(request.GameDirectory, blocker);
             await File.WriteAllTextAsync(path, "uninvestigated resource");
