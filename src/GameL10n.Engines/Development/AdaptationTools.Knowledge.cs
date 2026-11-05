@@ -10,6 +10,7 @@ namespace GameL10n.Core.Development;
 public sealed partial class AdaptationTools
 {
     private IReadOnlyList<EngineKnowledgeEntry>? knowledgeEntries;
+    private readonly HashSet<(string Id, string Tool)> reportedKnowledge = [];
     private IReadOnlyList<EngineKnowledgeEntry> KnowledgeEntries => knowledgeEntries ??= EngineKnowledgeStore.ForAdapters(store)
         .ReadAll(message => reportProgress?.Invoke("读取引擎经验", message));
 
@@ -45,10 +46,11 @@ public sealed partial class AdaptationTools
         {
             var entry = KnowledgeEntries.SingleOrDefault(item => item.Id == id && item.Enabled)
                 ?? throw new InvalidDataException("未找到已启用的引擎经验。");
-            return new JsonObject
+            var result = new JsonObject
             {
                 ["id"] = entry.Id,
                 ["revision"] = entry.Revision,
+                ["knowledgeName"] = entry.Family.Name,
                 ["family"] = EngineJson.Node(entry.Family, EngineJson.Web),
                 ["conditions"] = entry.Conditions,
                 ["summary"] = entry.Summary,
@@ -69,6 +71,9 @@ public sealed partial class AdaptationTools
                 })),
                 ["limitation"] = "先根据当前资源核对适用条件。来源游戏的结论不能代替本游戏的提取、回填、字形或运行验证。"
             };
+            if (reportedKnowledge.Add((entry.Id, "")))
+                reportProgress?.Invoke("参考引擎经验", $"模型已读取引擎经验：{entry.Family.Name} · {entry.Summary}");
+            return result;
         }
         var query = Text(args, "query", "").Trim();
         var candidates = query.Length == 0 ? MatchedKnowledge : KnowledgeEntries.Where(entry => entry.Enabled
@@ -151,10 +156,14 @@ public sealed partial class AdaptationTools
             Directory.CreateDirectory(Path.GetDirectoryName(target)!);
             if (!File.Exists(target)) await File.WriteAllTextAsync(target, content, new UTF8Encoding(false), ct);
         }
+        if (reportedKnowledge.Add((entry.Id, tool.Name)))
+            reportProgress?.Invoke("复用经验工具", $"已复制经验辅助工具：{entry.Family.Name} · {entry.Summary} / {tool.Name}");
         return new JsonObject
         {
             ["id"] = entry.Id,
             ["revision"] = entry.Revision,
+            ["knowledgeName"] = entry.Family.Name,
+            ["knowledgeTool"] = tool.Name,
             ["usage"] = tool.Usage,
             ["files"] = EngineJson.Node((files.Select(file => file.Path)).ToArray(), EngineJson.Web),
             ["next"] = (tool.Files.Keys.Any(path => Path.GetExtension(path) == ".cs")

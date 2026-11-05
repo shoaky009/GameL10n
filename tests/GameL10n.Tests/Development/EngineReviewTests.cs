@@ -104,19 +104,40 @@ public sealed partial class EngineReviewTests : IDisposable
         var packages = new LocalAdapterPackageStore(Path.Combine(root, "extensions"));
         var toolchain = new PinnedDotNetToolchain(Path.Combine(root, "unused"), "10.0.402", "10.0.13");
         var runner = new NeverRun();
+        var progress = new List<(string Stage, string Message)>();
         AdaptationTools Tools(string format, string workspace) => new(new("another-game", project, []), new AdaptationSession
         {
             BuiltinDiscovery = new(BuiltinAdapterDiscovery.Revision, 1, false,
                 [new(format, "builtin." + format, format, "header", [], [], [])], [])
-        }, workspace, new(toolchain, runner), packages);
+        }, workspace, new(toolchain, runner), packages, reportProgress: (stage, message) => progress.Add((stage, message)));
         var related = Tools("Yuris", Path.Combine(root, "other-workspace"));
         var unrelated = Tools("Unity", Path.Combine(root, "unity-workspace"));
         using var matches = JsonDocument.Parse(await related.ExecuteAsync(new("lookup", "inspect_engine_knowledge", "{}"), default));
         Assert.Equal(entry.Id, matches.RootElement.GetProperty("result").GetProperty("entries")[0].GetProperty("id").GetString());
         using var none = JsonDocument.Parse(await unrelated.ExecuteAsync(new("lookup", "inspect_engine_knowledge", "{}"), default));
         Assert.Empty(none.RootElement.GetProperty("result").GetProperty("entries").EnumerateArray());
+        Assert.Empty(progress);
+        var readArgs = JsonSerializer.Serialize(new { id = entry.Id });
+        var detail = await related.ExecuteAsync(new("read", "inspect_engine_knowledge", readArgs), default);
+        await related.ExecuteAsync(new("reread", "inspect_engine_knowledge", readArgs), default);
+        var readNotice = Assert.Single(progress);
+        Assert.Equal("参考引擎经验", readNotice.Stage);
+        Assert.Contains(entry.Family.Name, readNotice.Message);
+        Assert.Contains(entry.Summary, readNotice.Message);
+        var readTrace = JsonSerializer.SerializeToElement(AdaptationTrace.Result(detail), Json);
+        Assert.Equal(entry.Family.Name, readTrace.GetProperty("knowledgeName").GetString());
+        Assert.Equal(entry.Revision, readTrace.GetProperty("revision").GetString());
         var args = JsonSerializer.Serialize(new { id = entry.Id, tool = "probe" });
-        using var copied = JsonDocument.Parse(await related.ExecuteAsync(new("copy", "copy_engine_knowledge_tools", args), default));
+        var copyResult = await related.ExecuteAsync(new("copy", "copy_engine_knowledge_tools", args), default);
+        using var copied = JsonDocument.Parse(copyResult);
+        await related.ExecuteAsync(new("recopy", "copy_engine_knowledge_tools", args), default);
+        Assert.Equal(2, progress.Count);
+        Assert.Equal("复用经验工具", progress[1].Stage);
+        Assert.Contains(entry.Family.Name, progress[1].Message);
+        Assert.Contains("probe", progress[1].Message);
+        var copyTrace = JsonSerializer.SerializeToElement(AdaptationTrace.Result(copyResult), Json);
+        Assert.Equal(entry.Family.Name, copyTrace.GetProperty("knowledgeName").GetString());
+        Assert.Equal("probe", copyTrace.GetProperty("knowledgeTool").GetString());
         var relative = copied.RootElement.GetProperty("result").GetProperty("files")[0].GetString()!;
         Assert.Equal("import sys; print(sys.argv[1])", await File.ReadAllTextAsync(Path.Combine(root, "other-workspace", relative)));
         await Store.SetEnabledAsync(entry.Id, false);

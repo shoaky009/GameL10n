@@ -315,10 +315,12 @@ public sealed class AutomaticAdaptationService(Func<IAdaptationAgentModel> creat
 
             var instructions = Instructions + "\n" + AdaptationToolGroups.Context + "\n"
                 + ObjectiveContext(state.Objective.Value) + tools.KnowledgeContext;
-            var matchedKnowledge = tools.MatchedKnowledge.Take(6).Select(entry => new JsonObject
+            var matchedEntries = tools.MatchedKnowledge.Take(6).ToArray();
+            var matchedKnowledge = matchedEntries.Select(entry => new JsonObject
             {
                 ["id"] = entry.Id,
-                ["revision"] = entry.Revision
+                ["revision"] = entry.Revision,
+                ["name"] = entry.Family.Name
             }).ToArray();
             var knownToolNames = AdaptationTools.Definitions.Select(tool => tool.Name).ToHashSet(StringComparer.Ordinal);
             var instructionBytes = Encoding.UTF8.GetByteCount(instructions);
@@ -342,7 +344,9 @@ public sealed class AutomaticAdaptationService(Func<IAdaptationAgentModel> creat
             }
             SelectContextTools(state.Messages.Skip(state.HistoryStart));
             if (matchedKnowledge.Length > 0)
-                Report("匹配全局引擎经验", $"找到 {matchedKnowledge.Length} 项相关经验，将结合当前资源核对适用条件。");
+                Report("匹配全局引擎经验", $"找到 {matchedKnowledge.Length} 项相关经验："
+                    + string.Join("；", matchedEntries.Select(entry => entry.Family.Name + " · " + entry.Summary))
+                    + "。将结合当前资源核对适用条件。");
             await TraceAsync(new JsonObject
             {
                 ["operation"] = "engine-knowledge",

@@ -74,6 +74,9 @@ internal static class AdaptationTrace
                 fields[name] = value.ValueKind == JsonValueKind.String ? Limit(value.GetString()!, 160) : value.Clone();
         if (document.RootElement.TryGetProperty("result", out var result) && result.ValueKind == JsonValueKind.Object)
         {
+            foreach (var name in new[] { "knowledgeName", "knowledgeTool", "revision" })
+                if (result.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String)
+                    fields[name] = Limit(value.GetString()!, 240);
             foreach (var name in new[] { "passed", "stage", "compiled", "changed", "reused", "stale", "unitCount", "status", "stopped", "more", "nextOffset", "totalCharacters", "queryFound", "totalMatches", "failedRanges", "compileMs", "discoveryMs", "verificationMs", "scope", "trialResourceCount", "trialBytes", "encoding", "bytes", "sha256", "releaseRegistered", "component", "entryCount", "selectedCount", "inputBytes", "selectedBytes", "readBytes", "allContentsVerified" })
                 if (result.TryGetProperty(name, out var value) && value.ValueKind is JsonValueKind.True or JsonValueKind.False or JsonValueKind.Number or JsonValueKind.String)
                     fields[name] = value.ValueKind == JsonValueKind.String ? Limit(value.GetString()!, 160) : value.Clone();
