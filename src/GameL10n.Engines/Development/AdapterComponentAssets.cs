@@ -4,13 +4,13 @@ using GameL10n.Core.Isolation;
 
 namespace GameL10n.Core.Development;
 
-/// <summary>Small, independently copyable source components; copied files are pinned by the normal adapter package hashes.</summary>
+/// <summary>Python helpers and precompiled patch assets pinned by the adapter package hashes.</summary>
 public sealed class AdapterComponentAssets(string? assetsDirectory = null)
 {
     private readonly string directory = Path.GetFullPath(assetsDirectory ?? Path.Combine(AppContext.BaseDirectory, "tools", "adapter-components"));
     private sealed record FileEntry(string Name, string Destination, bool Binary = false);
     private sealed record Component(string Id, string Name, string Scope, string Origin, string Api, string Example, FileEntry[] Files);
-    private const string Version = "1.0.0";
+    private const string Version = "2.0.0";
     private static readonly Component[] Components =
     [
         new("kirikiri-scn-text", "Kirikiri PSB / KAGEX SCN 文本", "已解密、无资源的 PSB v2/v3 SCN；显式选择 language_index，内部 speaker ID 默认仅作上下文。只提取正文、显示名、选项和场景标题，派生朗读/搜索缓存不送翻译。未知元组、控制语法或缓存规则会明确失败，不猜测回填。",
@@ -27,25 +27,26 @@ public sealed class AdapterComponentAssets(string? assetsDirectory = null)
             """, [new("kirikiri_scn_text.py", "src/tools/kirikiri_scn_text.py")]),
         new("cp932-glyph-map", "CP932 字形映射", "确定性分配、保留原文码位、已有映射复用、严格编解码；不修改 EXE 或字体。调用者必须确认允许码位能被原引擎遍历、查字和显示。",
             "基于现有 QLIE / System4 适配器的映射流程整理；增加全补丁保留文本及严格往返检查。",
-            "GameL10n.AdapterComponents.Cp932GlyphEncoding.Plan(outputTexts, allowedSlots, preservedTexts, existingMap=null)；返回 Encoding，SlotToUnicode 为码位→真实 Unicode。new Cp932GlyphEncoding(savedMap) 用于重提取。完整文本单元接口，不用于分块流式编码。",
+            "from tools.gamel10n_host import component。glyph_plan 接受 texts、allowedSlots、preservedTexts、map，返回 map（码位→真实 Unicode，JSON 键为十进制字符串）；glyph_encode 接受 texts/map，返回 base64 values；glyph_decode 接受 values/map，返回 texts。一次处理完整文本单元，按批次调用预编译组件。",
             """
-            // Supply ALL final logical text: translations plus unchanged dialogue/names. Reserve known UI/non-extracted literals too.
-            // allowedSlots must come from verified runtime + glyph evidence; CP932 support alone is insufficient.
-            var codec = GameL10n.AdapterComponents.Cp932GlyphEncoding.Plan(allOutputTexts, verifiedSlots, otherPreservedText, existingSlotToUnicode);
-            byte[] encoded = codec.GetBytes(chineseText);
-            // Persist codec.SlotToUnicode with the output font/resources, not in translation memory.
-            // A font alias writer consumes slot -> actual Unicode. Existing FNL maps use the reverse direction: convert explicitly.
-            """, [new("Cp932GlyphEncoding.cs", "src/Components/Cp932GlyphEncoding.cs")]),
+            from tools.gamel10n_host import component
+            # Include ALL final logical text and reserve known UI/non-extracted literals.
+            # allowedSlots needs runtime + glyph evidence; CP932 support alone is insufficient.
+            mapping = component("glyph_plan", request, texts=all_output_texts, allowedSlots=verified_slots,
+                                preservedTexts=other_preserved_text, map=existing_slot_to_unicode)["map"]
+            encoded = component("glyph_encode", request, texts=output_texts, map=mapping)["values"]
+            # Persist mapping with output fonts/resources; FNL maps use the reverse direction: convert explicitly.
+            """, [new("gamel10n_host.py", "src/tools/gamel10n_host.py")]),
         new("qlie-sfnt-font", "QLIE SFNT 字体模板", "仅适用于已确认的 QLIE system 字体列表、MS Gothic/Mincho 字高与半角宽度策略。支持原模板使用的单字体 SFNT、cmap 4/12；不是 TTC/WOFF 通用字体工具。保留轮廓，调整映射、名称和该模板的度量。",
             "adapters/qlie-filepack3-systemfont/QlieFont.cs；对应 QLIE 模板曾获得用户中文正常显示反馈，其他版本仍需验证。",
-            "QlieFont.Create(inputFont, outputFont, family, IDictionary<int,int> slotToUnicode)。引擎配置完整名为 family + \" Regular\"，须与原转区路径的枚举结果一致。字体文件及其许可由适配器准备。",
-            "QlieFont.Create(sourceFont, outputFont, familyName, new System.Collections.Generic.Dictionary<int,int>(codec.SlotToUnicode));",
-            [new("QlieFont.cs", "src/QlieFont.cs")]),
+            "component('qlie_font', request, input=source_font, output=output_font, family=family, map=slot_to_unicode)。引擎配置完整名为 family + \" Regular\"，须与原转区路径的枚举结果一致。字体文件及其许可由适配器准备。",
+            "from tools.gamel10n_host import component\ncomponent('qlie_font', request, input=source_font, output=output_font, family=family_name, map=slot_to_unicode)",
+            [new("gamel10n_host.py", "src/tools/gamel10n_host.py")]),
         new("system4-fnl-glyph", "System4 FNL 位图字形模板", "Windows GDI / SimSun / BMP 字符；输出底朝上、每行按 4 字节对齐的单色位图，按原字形包围框缩放。适用于已确认的 FNL 位图布局，不提供 FNL 封包或运行时码位修补。",
             "adapters/system4-ain14-msg1-fnl/GlyphRasterizer.cs；保留已使用的原字体替换检测及非空字形检查。",
-            "using var raster = new GlyphRasterizer(); raster.Render(character, width, height, originalReferenceBitmap)。需要本机宋体，字体不随组件分发。",
-            "using var raster = new GlyphRasterizer(); byte[] glyph = raster.Render('译', cellWidth, cellHeight, referenceGlyph);",
-            [new("GlyphRasterizer.cs", "src/GlyphRasterizer.cs")]),
+            "component('render_glyphs', request, glyphs=[{character,width,height,reference}]) 返回 base64 values。reference 为原字形位图的 base64；一次批量生成多个字形。需要本机宋体，字体不随组件分发。",
+            "from tools.gamel10n_host import component\nglyphs = component('render_glyphs', request, glyphs=[dict(character='译', width=cell_width, height=cell_height, reference=reference_base64)])['values']",
+            [new("gamel10n_host.py", "src/tools/gamel10n_host.py")]),
         new("qlie-japanese-font-launcher", "QLIE 日语转区与字体启动器", "独立 x86 .NET Framework EXE；读取 qlie-l10n/launch.xml，临时加载字体并保留日语 Locale Emulator 路径。检查 QLIE SHIFTJIS_CHARSET 完整字体名；等待 LEProc/游戏退出后卸载字体。仅适用 LEProc 等待实际游戏的已确认启动链。",
             "adapters/qlie-filepack3-systemfont/tools/QlieLauncher.cs；直接提供同源码编译的启动器，不调用分析 API 编写或编译。",
             "将 tools/QlieLauncher.exe 复制到补丁的启动入口并声明 build.launchExecutable。launch.xml 的 executable、font.file 相对启动器目录；原 EXE 的 .le.config 保持原样。face 必须与字体内部 name ID 4 一致。Windows .NET Framework 4.x；需要转区时使用玩家本机 Locale Emulator。",
@@ -72,7 +73,7 @@ public sealed class AdapterComponentAssets(string? assetsDirectory = null)
                 path = file.Destination, binary = file.Binary,
                 available = !file.Binary || File.Exists(Path.Combine(directory, file.Name))
             }).ToArray(),
-            usage = "copy_adapter_components 按需复制。C# 源码可参加现有 .NET 10 编译；Python 组件由 use_engine_reference 的固定共享运行库执行，支持的 JSON CLI 可用 run_engine_python 直接运行。tools 下的启动器源码不会成为适配器 Main。组件本身不保证当前游戏兼容，仍需资源回填及运行显示验证。"
+            usage = "copy_adapter_components 按需复制 Python 调用辅助文件或预编译启动器。编码、字体组件通过 gamel10n_host 调用预编译宿主，不生成或编译 C#；Python 库由固定共享运行库执行。支持的 JSON CLI 可用 run_engine_python 直接运行。组件本身不保证当前游戏兼容，仍需资源回填及运行显示验证。"
         };
     }
 
@@ -101,9 +102,9 @@ public sealed class AdapterComponentAssets(string? assetsDirectory = null)
             {
                 var path = WorkspaceFiles.Resolve(directory, file.Name);
                 if (!File.Exists(path)) throw new FileNotFoundException("缺少预编译启动组件，请使用完整发行包或执行 package-adapter-components.ps1。", path);
-                files.Add(file.Destination, await File.ReadAllBytesAsync(path, ct));
+                files.TryAdd(file.Destination, await File.ReadAllBytesAsync(path, ct));
             }
-            else files.Add(file.Destination, ReadSourceBytes(file.Name));
+            else files.TryAdd(file.Destination, ReadSourceBytes(file.Name));
         }
         var root = Path.GetFullPath(workspace);
         var reused = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -134,7 +135,7 @@ public sealed class AdapterComponentAssets(string? assetsDirectory = null)
             // The editable launcher source is development material; its precompiled EXE is the patch asset.
             if (path.StartsWith("src/tools/", StringComparison.Ordinal) && path.EndsWith(".cs", StringComparison.OrdinalIgnoreCase)) continue;
             releaseFiles?.Add(new(AdapterReleaseFiles.PackagePath(path),
-                path.StartsWith("src/tools/", StringComparison.Ordinal) ? "asset" : "source", "内置文本、编码、字体或启动组件"));
+                path.EndsWith(".py", StringComparison.OrdinalIgnoreCase) ? "runtime" : "asset", "内置文本、编码、字体或启动组件"));
         }
         return new
         {

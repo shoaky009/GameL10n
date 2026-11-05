@@ -12,7 +12,7 @@ public sealed partial class AdapterDevelopmentWorkflow
     {
         if (toolkitFailure is not null && !retry)
             throw new InvalidDataException("共享引擎工具准备失败，当前会话不自动重复准备：" + toolkitFailure
-                + "。可继续使用内置解析器或在线参考资料；恢复完整发行包的工具文件后 inspect_engine_reference(retryDownload=true)。");
+                + "。可继续读取内置解析器资料或在线参考；恢复完整发行包的工具文件后 inspect_engine_reference(retryDownload=true)。");
         try
         {
             var dependency = await SourceDependencyAsync(ct);
@@ -42,6 +42,19 @@ public sealed partial class AdapterDevelopmentWorkflow
     private Task<EnginePythonDependency?> SourceDependencyAsync(CancellationToken ct) =>
         GameL10n.Core.Storage.LocalFiles.ReadJsonAsync<EnginePythonDependency>(
             WorkspaceFiles.Resolve(SourceDirectory, EngineReferenceToolkit.DependencyPath), ct);
+
+    private async Task<EnginePythonPaths> PreparePythonReleaseAsync(CancellationToken ct)
+    {
+        var prepared = await PythonAsync(ct);
+        var path = WorkspaceFiles.Resolve(SourceDirectory, EngineReferenceToolkit.DependencyPath);
+        if (!File.Exists(path))
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            await LocalFiles.WriteJsonAsync(path, prepared.Dependency, ct);
+        }
+        RegisterReleaseFiles([new(EngineReferenceToolkit.DependencyPath, "runtime", "固定版本 Python 解释器及引擎库")]);
+        return prepared.Paths;
+    }
 
     internal void RegisterReleaseFiles(IEnumerable<AdapterReleaseFile> files)
     {

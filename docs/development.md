@@ -15,21 +15,21 @@
 
 根目录的 `logo.png` 用于 README，`icon.png` 是程序图标原图。Windows 使用由原图转换的多尺寸 `src/GameL10n.Desktop/Assets/GameL10n.ico`；替换原图时同步更新 ICO。构建将其嵌入 EXE 并复制到应用的 `Assets` 目录，运行时窗口使用同一文件。
 
-工具链打包来源为 `.tools/dotnet`，使用 SDK 10.0.402 与运行时 10.0.13。桌面程序、数据工具和 VNTextPatch 共用 `toolchain/` 中的固定版本 .NET 运行时，不依赖用户安装 .NET。WinUI 的原生运行组件仍随包提供；项目按需引用 WinUI、DWrite 和 Runtime，不携带 Windows AI、机器学习或搜索组件。智能适配通过 HTTP 调用模型，无需 ONNX Runtime 或 DirectML。
+构建使用 SDK 10.0.402，发行运行时从 `.tools/dotnet` 提取 10.0.13。桌面程序、数据工具、预编译适配组件宿主和 VNTextPatch 共用 `toolchain/` 中的固定版本 .NET 运行时，不依赖用户安装 .NET。WinUI 的原生运行组件仍随包提供；项目按需引用 WinUI、DWrite 和 Runtime，不携带 Windows AI、机器学习或搜索组件。智能适配通过 HTTP 调用模型，无需 ONNX Runtime 或 DirectML。
 
 界面未使用内嵌浏览器，WebView2 的间接依赖资产不参与构建或发行。控件语言资源仅保留简体中文和英文回退；该筛选同时覆盖托管卫星程序集和 WinUI 原生 MUI 文件。游戏解析、翻译和字体处理仍保留完整编码及 Unicode 支持。
 
-智能分析中的临时探针和处理脚本统一使用内置 Python，不编译临时 C# 程序。正式适配器仍使用 C#，由宿主编译验收，因此完整发行包仍需编译器与引用程序集；桌面程序和内置解析器也仍需共享 .NET 运行时。
+智能分析的临时脚本和新生成的正式适配器统一使用内置 Python，入口为 `src/adapter.py`。宿主检查语法、打包明确选中的文件，并执行资源发现和回填验收；内置 C# 解析、字体及编码组件在应用构建时预编译，通过 `tools/adapter-host/GameL10n.AdapterHost.dll` 提供固定接口。
 
-编译工具只包含直接调用 `csc.dll` 所需的程序集、运行配置和简体中文诊断资源，不包含 VB 编译器或编译服务。引用程序集只打包 `ref/net10.0/*.dll`，不包含 XML 文档、分析器和 SDK 元数据。使用 `-WithoutToolchain` 可省略编译器和引用程序集，共享运行时仍会保留；该发行包不能编译或修改正式适配器。
+发行包不包含 C# 编译器、Roslyn 或框架引用程序集，无需额外开关。旧 Manifest v1～v3 的 `adapter.dll` 仍通过共享 .NET 运行时执行；继续修改这类适配器时需把相关逻辑迁移为 Python，再验收发布新版本。开发诊断和旧格式维护仍可使用开发机的 SDK。
 
 发行脚本会重建已有的发行目录，避免旧依赖残留；非空目录必须能识别为桌面发行包，且不能包含应用数据。请勿在发行输出目录中保存个人文件。
 
 内置 VNTextPatch 脚本工具随发行包保存在 `tools/vntextpatch`，包含独立 EXE，并使用包内的共享运行时，不需要安装 SDK，也不在每次处理脚本时解压运行时。辅助程序从各自 EXE 所在位置查找 `../../toolchain`，移动发行包时应保留相对目录结构。其上游源码固定版本并随仓库保存，构建时不从 GitHub 动态下载；具体脚本格式与运行限制见[内置脚本适配说明](adapters/engines/vntextpatch.md)。
 
-同目录的小型 `GameL10n.VnTextPatch.dll` 与 `sources.zip` 用于智能适配复用，发行脚本通过 `scripts/package-vntextpatch-assets.ps1` 生成。源码统一压缩保存，默认开发任务仅保存调用代码与固定版本依赖记录，解析库按内容哈希跨项目共享；需要修改时才展开所选引擎的源码。仅执行桌面项目的 `dotnet build` 不会生成这些发行资产，完整功能验证应使用发行目录。
+同目录的小型 `GameL10n.VnTextPatch.dll` 与 `sources.zip` 用于智能适配复用，发行脚本通过 `scripts/package-vntextpatch-assets.ps1` 生成。源码统一压缩保存，供按需读取结构参考；开发任务保存 Python 调用代码与固定依赖记录，解析库按内容哈希跨项目共享。需要补充或修改的逻辑使用 Python。仅执行桌面项目的 `dotnet build` 不会生成这些发行资产，完整功能验证应使用发行目录。
 
-[编码与运行组件](adapters/components.md)的 C# 源码嵌入 Engines；预编译 QLIE 启动器由 `scripts/package-adapter-components.ps1` 生成到 `tools/adapter-components`，发行脚本自动调用。该步骤使用固定 SDK 编译器及 Windows .NET Framework 4.x 程序集，启动器自身不依赖 .NET 10。组件打包集成测试使用 PowerShell 7。
+[编码与运行组件](adapters/components.md)的 C# 实现编入 `GameL10n.AdapterHost`，Python 辅助模块嵌入 Engines，供开发工作区按需复制。预编译 QLIE 启动器由 `scripts/package-adapter-components.ps1` 生成到 `tools/adapter-components`，发行脚本自动调用。该构建步骤使用固定 SDK 编译器及 Windows .NET Framework 4.x 程序集，启动器自身不依赖 .NET 10。组件打包集成测试使用 PowerShell 7。
 
 ## 代码结构
 

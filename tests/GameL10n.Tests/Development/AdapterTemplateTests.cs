@@ -26,7 +26,7 @@ public sealed class AdapterTemplateTests : IDisposable
         var (tools, state, store, workspace, compiler, assets) = await ToolsAsync(game, archive: true);
         var composition = await ComposeAsync(tools, id);
         Assert.Null(state.VerifiedPackage);
-        Assert.Equal(7, state.ReleaseFiles!.Count);
+        Assert.Equal(6, state.ReleaseFiles!.Count);
         Assert.Contains(state.ReleaseFiles, file => file.Path == EngineArchiveComponents.ScriptPath && file.Role == "runtime");
         Assert.Contains(state.ReleaseFiles, file => file.Path == BuiltinAdapterAssets.SharedDependencyPath);
         Assert.Empty(Directory.EnumerateFiles(Path.Combine(workspace, "src"), "*.dll", SearchOption.AllDirectories));
@@ -93,7 +93,7 @@ public sealed class AdapterTemplateTests : IDisposable
         Assert.Equal(id, state.AutomaticTemplate.TemplateId);
         Assert.Equal(archive ? 2 : 0, state.AutomaticTemplate.EvidenceFiles.Count);
         Assert.Equal(2, state.ResourceHashes.Count);
-        Assert.Equal(archive ? 7 : 5, state.ReleaseFiles!.Count);
+        Assert.Equal(archive ? 6 : 5, state.ReleaseFiles!.Count);
         Assert.NotNull(state.VerifiedPackage);
         Assert.Equal(state.VerifiedPackage.Version, store.LoadActive("game")!.Version);
         Assert.Contains(state.VerificationDiagnostics, item => item.Contains("byte for byte", StringComparison.Ordinal));
@@ -106,9 +106,9 @@ public sealed class AdapterTemplateTests : IDisposable
             Assert.Equal(await File.ReadAllBytesAsync(Path.Combine(game, path)), await File.ReadAllBytesAsync(Path.Combine(workspace, "resources", path)));
         if (!archive)
         {
-            Assert.DoesNotContain(state.ReleaseFiles, file => file.Path == EngineReferenceToolkit.DependencyPath || file.Path.EndsWith(".py", StringComparison.Ordinal));
-            Assert.False(Directory.Exists(Path.Combine(store.RootDirectory, "engine-tools", "python")));
-            Assert.Null(state.EngineReference);
+            Assert.Contains(state.ReleaseFiles, file => file.Path == EngineReferenceToolkit.DependencyPath);
+            Assert.True(Directory.Exists(Path.Combine(store.RootDirectory, "engine-tools", "python")));
+            Assert.NotNull(state.EngineReference);
         }
     }
 
@@ -150,7 +150,7 @@ public sealed class AdapterTemplateTests : IDisposable
         state = JsonSerializer.Deserialize<AdaptationSession>(await File.ReadAllTextAsync(Path.Combine(workspace, "session.json")), Json)!;
         Assert.Equal("verification", state.AutomaticTemplate!.Stage);
         Assert.Equal("incomplete", state.AutomaticTemplate.Status);
-        Assert.True(File.Exists(Path.Combine(workspace, "src", "Program.cs")));
+        Assert.True(File.Exists(Path.Combine(workspace, "src", "adapter.py")));
         Assert.NotEmpty(state.ReleaseFiles!);
         Assert.NotEmpty(state.VerificationDiagnostics);
         Assert.Null(state.VerifiedPackage);
@@ -186,7 +186,7 @@ public sealed class AdapterTemplateTests : IDisposable
         Assert.Equal("incomplete", state.AutomaticTemplate.Status);
         Assert.Null(state.VerifiedPackage);
         Assert.Null(store.LoadActive("game"));
-        Assert.True(File.Exists(Path.Combine(workspace, "src", "Program.cs")));
+        Assert.True(File.Exists(Path.Combine(workspace, "src", "adapter.py")));
     }
 
     [Fact]
@@ -194,7 +194,7 @@ public sealed class AdapterTemplateTests : IDisposable
     {
         var (tools, state, _, workspace, _, _) = await ToolsAsync(fixture.Root, archive: false);
         var source = Directory.CreateDirectory(Path.Combine(workspace, "src")).FullName;
-        var program = Path.Combine(source, "Program.cs");
+        var program = Path.Combine(source, "adapter.py");
         await File.WriteAllTextAsync(program, "custom adapter source");
         await Assert.ThrowsAsync<IOException>(() => ComposeAsync(tools, "loose-renpy"));
         Assert.Equal("custom adapter source", await File.ReadAllTextAsync(program));
@@ -251,7 +251,7 @@ public sealed class AdapterTemplateTests : IDisposable
     }
 
     private async Task<(AdaptationTools Tools, AdaptationSession State, LocalAdapterPackageStore Store, string Workspace,
-        GeneratedAdapterCompiler Compiler, BuiltinAdapterAssets Assets)> ToolsAsync(string game, bool archive)
+        AdapterRuntime Compiler, BuiltinAdapterAssets Assets)> ToolsAsync(string game, bool archive)
     {
         var assetsDirectory = Directory.CreateDirectory(Path.Combine(fixture.Root, "assets")).FullName;
         File.Copy(typeof(GameL10n.VnTextPatch.Worker).Assembly.Location, Path.Combine(assetsDirectory, "GameL10n.VnTextPatch.dll"));
@@ -260,11 +260,11 @@ public sealed class AdapterTemplateTests : IDisposable
         var assets = new BuiltinAdapterAssets(assetsDirectory);
         var workspace = Directory.CreateDirectory(Path.Combine(fixture.Root, "workspace")).FullName;
         var store = new LocalAdapterPackageStore(Path.Combine(fixture.Root, "store"));
-        if (archive) await fixture.PrepareSharedToolsAsync(store.RootDirectory);
+        await fixture.PrepareSharedToolsAsync(store.RootDirectory);
         var repository = new DirectoryInfo(AppContext.BaseDirectory);
         while (repository is not null && !File.Exists(Path.Combine(repository.FullName, "global.json"))) repository = repository.Parent;
         Assert.NotNull(repository);
-        var compiler = new GeneratedAdapterCompiler(new(Path.Combine(repository!.FullName, ".tools", "dotnet"), "10.0.402", "10.0.13"), fixture.Runner);
+        var compiler = new AdapterRuntime(new(Path.Combine(repository!.FullName, ".tools", "dotnet"), "10.0.402", "10.0.13"), fixture.Runner);
         var state = new AdaptationSession();
         var tools = new AdaptationTools(new("game", game, []), state, workspace, compiler, store, builtinAssets: assets);
         return (tools, state, store, workspace, compiler, assets);

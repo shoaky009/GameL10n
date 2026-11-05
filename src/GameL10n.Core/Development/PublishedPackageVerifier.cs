@@ -108,7 +108,7 @@ public sealed class PublishedPackageVerifier(PinnedDotNetToolchain toolchain, IA
         { status = "cancelled"; diagnostics.Add("验证已取消，没有更新适配器或游戏文件。"); }
         catch (Exception error) when (error is IOException or InvalidDataException or GeneratedAdapterException or JsonException
             or UnauthorizedAccessException or AdapterProcessLimitException or AdapterProcessUnavailableException)
-        { status = "failed"; diagnostics.Add(GeneratedAdapterCompiler.LimitDiagnostic(error.Message)); }
+        { status = "failed"; diagnostics.Add(GeneratedGameAdapter.LimitDiagnostic(error.Message)); }
         finally { GeneratedGameAdapter.DeleteStagedTree(temporary); }
 
         var result = new PublishedPackageVerification(package.Id, package.Version, DateTimeOffset.UtcNow, status,

@@ -24,7 +24,7 @@ public sealed partial class BuiltinAdapterAssets(string? assetsDirectory = null)
             bundledSources = SourceEntries(archive, selected).Select(entry => (entry.FullName, entry.Length)).ToArray();
         }
         catch (BuiltinAdapterAssetException error) { sourceError = error; }
-        var generated = GeneratedSources(selected);
+        var helper = EnginePythonBridge.HelperSource;
         return new
         {
             format = selected.Key, name = selected.Family.Name, parserType = selected.ParserType,
@@ -36,10 +36,10 @@ public sealed partial class BuiltinAdapterAssets(string? assetsDirectory = null)
             sourceBundleIssue = sourceError is null ? null : new
             {
                 code = sourceError.Code, asset = sourceError.AssetName, message = sourceError.Message,
-                recovery = "源码包故障不代表引擎不受支持。binaryAvailable=true 时，继续用 try_builtin_adapter 验证兼容性，并以 copy_adapter(editableSource=false) 复用二进制；需要修改源码时先恢复源码包。"
+                recovery = "源码包故障不代表引擎不受支持。binaryAvailable=true 时，继续用 try_builtin_adapter 验证兼容性，并以 copy_adapter 复用固定解析器；恢复源码包后可读取结构参考，新增逻辑使用 Python。"
             },
             sourceFiles = bundledSources.Select(entry => new { path = entry.Path, bytes = entry.Bytes })
-                .Concat(generated.Select(pair => new { path = pair.Key, bytes = (long)Utf8.GetByteCount(pair.Value) }))
+                .Concat(new[] { new { path = EnginePythonBridge.HelperPath, bytes = (long)Utf8.GetByteCount(helper) } })
                 .Concat(References(selected).Select(pair => new { path = pair.Key, bytes = (long)Utf8.GetByteCount(pair.Value) }))
                 .OrderBy(item => item.path, StringComparer.Ordinal).ToArray(),
             limitations = Limitations(selected), usage = Usage(selected), example = Example(selected),
@@ -54,7 +54,7 @@ public sealed partial class BuiltinAdapterAssets(string? assetsDirectory = null)
         var selected = FindFormat(format);
         string normalized = path.Replace('\\', '/');
         string content;
-        if (GeneratedSources(selected).TryGetValue(normalized, out string? generated)) content = generated;
+        if (normalized == EnginePythonBridge.HelperPath) content = EnginePythonBridge.HelperSource;
         else if (References(selected).TryGetValue(normalized, out string? reference)) content = reference;
         else
         {
@@ -83,30 +83,9 @@ public sealed partial class BuiltinAdapterAssets(string? assetsDirectory = null)
     {
         ct.ThrowIfCancellationRequested();
         var selected = FindFormat(format);
-        var files = editableSource ? new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase)
-        {
-            ["src/BuiltinScriptParser.cs"] = Utf8.GetBytes(Bridge(selected))
-        } : await PrepareSharedFilesAsync(format, ct);
         if (editableSource)
-        {
-            foreach (string name in new[] { "VNTextPatch.LICENSE", "VNTextPatch.NOTICE.md" })
-                files.Add("src/tools/vntextpatch/" + name, await File.ReadAllBytesAsync(Asset(name), ct));
-            using var archive = OpenSources();
-            try
-            {
-                foreach (var entry in SourceEntries(archive, selected))
-                {
-                    await using var input = entry.Open();
-                    using var contents = new MemoryStream();
-                    await input.CopyToAsync(contents, ct);
-                    files.Add("src/BuiltinVnTextPatch/" + entry.FullName, contents.ToArray());
-                }
-            }
-            catch (Exception error) when (error is IOException or InvalidDataException or UnauthorizedAccessException)
-            { throw SourceError(error); }
-            foreach (var (path, content) in GeneratedSources(selected).Where(pair => pair.Key != "generated/BuiltinScriptParser.cs"))
-                files.Add("src/BuiltinVnTextPatch/" + path, Utf8.GetBytes(content));
-        }
+            throw new InvalidDataException("不再复制可编译的 C# 解析器源码。可用 inspect_builtin_adapter 读取结构参考，新增或修改的适配逻辑请使用 Python。");
+        var files = await PrepareSharedFilesAsync(format, ct);
 
         // Check every destination before creating any files; a conflict must not leave a half-copied source tree.
         string root = Path.GetFullPath(workspace);
@@ -133,28 +112,26 @@ public sealed partial class BuiltinAdapterAssets(string? assetsDirectory = null)
             await output.WriteAsync(content, ct);
         }
         foreach (var path in files.Keys)
-            releaseFiles?.Add(new(AdapterReleaseFiles.PackagePath(path),
-                !path.StartsWith("src/tools/", StringComparison.Ordinal) ? "source"
-                    : path == "src/" + SharedDependencyPath ? "runtime" : "license",
-                "内置 " + selected.Key + " 解析器实现及依赖"));
+            releaseFiles?.Add(new(AdapterReleaseFiles.PackagePath(path), "runtime", "固定版本内置脚本解析器与 Python 调用接口"));
         return new
         {
-            format = selected.Key, editableSource, files = files.Keys.Order(StringComparer.Ordinal).ToArray(),
-            reused = reused.Order(StringComparer.Ordinal).ToArray(), usage = Usage(selected), example = Example(selected),
-            limitations = Limitations(selected), directApi = editableSource ? DirectApi(selected) : null,
-            librarySourceFiles = editableSource ? files.Keys.Where(path => path.EndsWith(".cs", StringComparison.OrdinalIgnoreCase))
-                .Order(StringComparer.Ordinal).ToArray() : null,
-            analysisUsage = editableSource
-                ? "Use librarySourceFiles as formal adapter sources (including generated/GlobalUsings.cs), then verify changes through test_adapter. Use work/*.py with run_engine_python for temporary resource analysis; do not compile C# probes."
-                : "Use try_builtin_adapter for bundled parser trials and test_adapter for the copied binary bridge. Temporary resource analysis belongs in work/*.py with run_engine_python."
+            format = selected.Key, destination = "src", reused = reused.ToArray(),
+            files = files.Select(pair => new { path = pair.Key, bytes = pair.Value.Length }).OrderBy(item => item.path, StringComparer.Ordinal).ToArray(),
+            limitations = Limitations(selected),
+            analysisUsage = "from tools.gamel10n_host import parser; response = parser(request, format='" + selected.Key
+                + "')。入口为 src/adapter.py，probe 由 Python 检查文件头或有界范围；解析器修改逻辑也使用 Python，不编译 C#。"
         };
     }
 
-    internal async Task<Dictionary<string, byte[]>> PrepareSharedFilesAsync(string format, CancellationToken ct) => new(StringComparer.OrdinalIgnoreCase)
+    internal async Task<Dictionary<string, byte[]>> PrepareSharedFilesAsync(string format, CancellationToken ct)
     {
-        ["src/BuiltinScriptParser.cs"] = Utf8.GetBytes(Bridge(FindFormat(format))),
-        ["src/" + SharedDependencyPath] = JsonSerializer.SerializeToUtf8Bytes(await SharedDependencyAsync(ct), new JsonSerializerOptions(JsonSerializerDefaults.Web))
-    };
+        _ = FindFormat(format);
+        return new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["src/" + EnginePythonBridge.HelperPath] = Utf8.GetBytes(EnginePythonBridge.HelperSource),
+            ["src/" + SharedDependencyPath] = JsonSerializer.SerializeToUtf8Bytes(await SharedDependencyAsync(ct), new JsonSerializerOptions(JsonSerializerDefaults.Web))
+        };
+    }
 
     private string Asset(string name)
     {
@@ -217,8 +194,8 @@ public sealed partial class BuiltinAdapterAssets(string? assetsDirectory = null)
         KirikiriTextGuidance.AppliesTo(format.Key)
             ? "KS/SOC 支持读取 CP932、带 BOM 的 UTF-8/UTF-16，修改后写 UTF-16；须验证游戏实际脚本加载路径接受该编码，原文无修改仍保留原字节。"
             : "保留内置解析器的原编码约束；Shift-JIS 无法表示的中文会明确报错，不生成未验证的 sjis_ext.bin。",
-        "生成适配器的 probe 只获得最多 65536 字节文件头，必须由 Program 按签名、长度和版本识别；调用桥禁止直接使用整文件解析器执行 probe。",
-        "源码模式仅复制目标引擎组和公共工具，支持框架引用及 /unsafe- 编译；没有 Main，必须自行实现协议入口和资源包处理。",
+        "生成适配器的 probe 只获得最多 65536 字节文件头，必须由 Python 按签名、长度和版本识别；调用桥禁止直接使用整文件解析器执行 probe。",
+        "解析器源码仅供了解格式；发行包不含 C# 编译器，需要修改的适配逻辑使用 Python，固定解析器通过预编译组件调用。",
         format.Key switch
         {
             "Kaguya" => KaguyaMessage40Guidance.EncodingWarning,
@@ -231,123 +208,24 @@ public sealed partial class BuiltinAdapterAssets(string? assetsDirectory = null)
     ];
 
     private static string Usage(VnTextPatchFormat format) =>
-        $"在 src/Program.cs 实现独立协议入口。使用 BuiltinScriptParser.ExecuteJson(requestJson) 调用 {format.Key}；调用桥固定 format，返回完整 JSON 字符串。" +
+        $"在 src/adapter.py 实现协议入口。from tools.gamel10n_host import parser, write_response；parser(request, '{format.Key}') 调用固定解析器并返回响应字典。" +
         "先解包到独立工作目录，再传入该目录及相对 resourceFiles；build 的 outputDirectory 必须与 sourceDirectory 分开，随后把结果重新封包并声明所有最终输出。" +
-        "二进制模式只登记固定版本的共享 DLL，由宿主提供路径，不复制到项目；无需添加编译引用，不要复制自包含 EXE。需要修改解析器时使用源码模式 src/BuiltinVnTextPatch；优先使用已编译进适配器的源码。" +
-        "调用桥不写 responseFile；Program 应按协议把最终响应写到 responseFile，并把诊断写 stderr。" +
-        "若同时 use_engine_reference 连接 Python，可直接用 EngineReferencePython.Run(\"tools/adapter.py\", args, BuiltinScriptParser.ExecuteJson) 作为 Program 入口，复用 UTF-8 JSON 和 request['builtinCommand'] 子进程调用，不另写 --builtin 分支。";
+        "仅登记固定版本的共享 DLL，由预编译宿主加载，不复制到项目。解析器不支持的逻辑使用 Python 实现。" +
+        "最终响应用 write_response(request, response) 写入 responseFile；诊断写 stderr。probe 由入口独立实现，不能用整文件解析器猜测截断输入。";
 
     private static string Example(VnTextPatchFormat format) => $$"""
-        // No Main is supplied. Implement header-only probe in your protocol entry point.
-        string parserResponse = BuiltinScriptParser.ExecuteJson(System.Text.Json.JsonSerializer.Serialize(new
-        {
-            protocolVersion = 1, operation = "extract", format = {{JsonSerializer.Serialize(format.Key)}},
-            sourceDirectory = unpackedScriptsDirectory, resourceFiles = scriptRelativePaths
-        }));
-        // For build, also provide outputDirectory and translationsFile (or translations).
-        // Repack output into the game's resource format and return final resource paths.
+        from tools.gamel10n_host import parser, write_response
+        # Implement bounded probe separately; this full parser handles extract/build/validate.
+        response = parser(request, {{JsonSerializer.Serialize(format.Key)}}, sourceDirectory=unpacked_scripts_directory,
+                          resourceFiles=script_relative_paths, responseFile=None)
+        # Build also needs outputDirectory and translationsFile (or translations).
+        # Repack into the game's resource format and return final resource paths before write_response.
         """;
 
-    private static string DirectApi(VnTextPatchFormat format) => $$"""
-        // Prefer BuiltinScriptParser.ExecuteJson for normal extraction/build (includes untouched-file and re-extraction checks).
-        // When editing the parser requires direct calls, use these actual signatures, not string path overloads:
-        var parser = new global::{{format.ParserType}}();
-        parser.Load(VNTextPatch.Shared.ScriptLocation.FromFilePath(inputPath, {{JsonSerializer.Serialize(format.Key)}}));
-        VNTextPatch.Shared.ScriptString[] originals = parser.GetStrings().ToArray();
-        // Keep all original strings/types; replace selected entries only. Preserve companions in the unpacked folder.
-        parser.WritePatched(updatedStrings, VNTextPatch.Shared.ScriptLocation.FromFilePath(outputPath, {{JsonSerializer.Serialize(format.Key)}}));
-        // Independently check original-byte roundtrip, changed strings and every unselected string after reload.
-        """;
-
-    // Research notes are visible through inspect_builtin_adapter, but never copied into adapter packages.
     private static Dictionary<string, string> References(VnTextPatchFormat format) => format.Key == "Kaguya"
         ? new(StringComparer.Ordinal) { [KaguyaMessage40Guidance.ReferencePath] = KaguyaMessage40Guidance.Reference }
         : KirikiriTextGuidance.AppliesTo(format.Key)
             ? new(StringComparer.Ordinal) { [KirikiriTextGuidance.ReferencePath] = KirikiriTextGuidance.Reference }
             : new(StringComparer.Ordinal);
 
-    private static Dictionary<string, string> GeneratedSources(VnTextPatchFormat format) => new(StringComparer.Ordinal)
-    {
-        ["generated/GlobalUsings.cs"] = "global using System;\nglobal using System.Collections.Generic;\nglobal using System.IO;\nglobal using System.Linq;\nglobal using System.Net.Http;\nglobal using System.Threading;\nglobal using System.Threading.Tasks;\n",
-        ["generated/BuiltinScriptParser.cs"] = Bridge(format),
-        ["generated/Formats.cs"] = $$"""
-            using VNTextPatch.Shared;
-            namespace GameL10n.VnTextPatch;
-            internal sealed record Format(string Key, Func<IScript> Create, string[] Extensions, string[] Companions)
-            {
-                public bool Matches(string path) => Extensions.Contains(Path.GetExtension(path), StringComparer.OrdinalIgnoreCase);
-                public static Format Get(string key) => All.FirstOrDefault(format => format.Key.Equals(key, StringComparison.OrdinalIgnoreCase))
-                    ?? throw new InvalidDataException("This adapter contains only {{format.Key}}.");
-                public static readonly Format[] All =
-                [new({{JsonSerializer.Serialize(format.Key)}}, () => new global::{{format.ParserType}}(),
-                    {{JsonSerializer.Serialize(format.Extensions)}}, {{JsonSerializer.Serialize(format.CompanionFileNames)}})];
-            }
-            """,
-        ["generated/FolderScriptCollection.cs"] = """
-            namespace VNTextPatch.Shared.Scripts;
-            public sealed class FolderScriptCollection : IScriptCollection
-            {
-                public FolderScriptCollection(string folderPath, string? extension, string? format = null)
-                {
-                    FolderPath = folderPath;
-                    Extension = extension ?? string.Empty;
-                    Format = format;
-                }
-                public string Name => FolderPath;
-                public string FolderPath { get; }
-                public string Extension { get; }
-                public string? Format { get; }
-                public IScript GetTemporaryScript() => (Format is null
-                    ? GameL10n.VnTextPatch.Format.All[0] : GameL10n.VnTextPatch.Format.Get(Format)).Create();
-                public IEnumerable<string> Scripts => Directory.EnumerateFiles(FolderPath, "*" + Extension, SearchOption.AllDirectories)
-                    .Select(path => Path.GetRelativePath(FolderPath, path));
-                public bool Exists(string scriptName) => File.Exists(Path.Combine(FolderPath, scriptName));
-                public void Add(string scriptName)
-                {
-                    string path = Path.Combine(FolderPath, scriptName);
-                    Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-                    using var stream = File.Create(path);
-                }
-                public void Add(string scriptName, ScriptLocation copyFrom)
-                {
-                    string path = Path.Combine(FolderPath, scriptName);
-                    Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-                    File.Copy(copyFrom.ToFilePath(), path, true);
-                }
-            }
-            """
-    };
-
-    private static string Bridge(VnTextPatchFormat format) => $$"""
-        using System;
-        using System.IO;
-        using System.Reflection;
-        using System.Text.Json.Nodes;
-        public static class BuiltinScriptParser
-        {
-            public const string Format = {{JsonSerializer.Serialize(format.Key)}};
-            private static readonly Lazy<MethodInfo> Execute = new(() =>
-            {
-                const string typeName = "GameL10n.VnTextPatch.Worker";
-                Type? worker = typeof(BuiltinScriptParser).Assembly.GetType(typeName);
-                if (worker is null)
-                {
-                    string path = Environment.GetEnvironmentVariable("GAMEL10N_VNTEXTPATCH")
-                        ?? Path.Combine(AppContext.BaseDirectory, "tools", "vntextpatch", "GameL10n.VnTextPatch.dll");
-                    worker = Assembly.LoadFrom(path).GetType(typeName);
-                }
-                return worker?.GetMethod("ExecuteJson", BindingFlags.Public | BindingFlags.Static, null, new[] { typeof(string) }, null)
-                    ?? throw new InvalidOperationException("The built-in parser API is missing.");
-            });
-            public static string ExecuteJson(string requestJson)
-            {
-                JsonObject request = JsonNode.Parse(requestJson)?.AsObject() ?? throw new InvalidDataException("Expected a JSON request.");
-                if (request["operation"]?.GetValue<string>() == "probe")
-                    throw new InvalidOperationException("Implement probe using the available 65536-byte headers; the script parser requires complete files.");
-                request["format"] = Format;
-                return (string)(Execute.Value.Invoke(null, new object[] { request.ToJsonString() })
-                    ?? throw new InvalidDataException("The parser did not return a response."));
-            }
-        }
-        """;
 }

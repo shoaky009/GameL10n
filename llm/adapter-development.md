@@ -14,7 +14,7 @@
 
 智能体可以用 `list_adapters` 检索内置和已发布的能力，用 `inspect_builtin_adapter` 查看相关解析器的限制、调用说明及指定源码片段。`try_builtin_adapter` 直接处理工作副本中的少量脚本，不需要先生成调用程序：每次最多 12 个文件、合计 64 MiB，返回提取数量、少量文本预览、具体解析错误，以及默认执行的原文逐字节回填检查。伴随文件也应纳入样本。这个限制只约束开发阶段的快速试验，不限制正式任务规模。
 
-解析器兼容时，`copy_adapter` 默认只写入调用代码和固定版本依赖清单，VNTextPatch DLL 与许可文件按内容哈希跨项目共享，智能体补充资源包、格式变体或中文运行支持。需要修改解析实现时可选择源码模式，只复制所选引擎组及公共工具，已有不同内容的源码不会被覆盖。生成适配器的探测仍只读取文件头，完整脚本解析用于提取、回填和结构验证。
+解析器兼容时，`copy_adapter` 写入 Python 调用辅助模块和固定依赖清单，VNTextPatch DLL 与许可文件按内容哈希跨项目共享。`src/adapter.py` 调用预编译组件，补充资源包、格式变体或中文运行支持；新增逻辑统一使用 Python，不复制可编译 C# 源码。上游源码可按需读取结构参考。探测只使用文件头和有界范围，完整脚本解析用于提取、回填和结构验证。
 
 候选线索及最近样本试验保存在现有 `session.json`，包含观察时间和试验输入哈希；继续适配和压缩上下文后仍可使用，不另建逐次报告。资源变化后可通过 `list_adapters` 的 `refreshCandidates` 刷新线索，必要时重新试验。样本检查不替代完整 `test_adapter` 验收，也不代表中文字体或游戏启动已经验证。
 
@@ -56,7 +56,7 @@ XP3 必须由独立证据确认没有过滤器，再显式传 `filter: "none"`�
 
 `list_adapters` 的 `components` 返回可选组件。`inspect_adapter_component` 查看接口、限制及文件列表；传入列表中的 `path` 可按字符偏移阅读源码片段。
 
-`copy_adapter_components` 接受 1 到 4 个组件 ID，一次复制所选组件。普通 C# 文件直接参加适配器编译；启动器源码与已编译 EXE 放在 `src/tools/`，不会成为适配器的第二个入口。组件源码不引用主程序程序集，不需要 NuGet 或额外服务。
+`copy_adapter_components` 接受 1 到 4 个组件 ID。编码和字体组件共用 `src/tools/gamel10n_host.py`，调用应用预编译宿主；启动器提供现成 EXE。通过 `from tools.gamel10n_host import component` 使用按批次处理的 JSON 接口，不编译 C#。接口见返回的示例及[组件说明](../docs/adapters/components.md)。
 
 复制前检查全部目标文件。相同内容直接复用；已有不同内容时停止复制并说明冲突，保留现有修改。不会产生备份或每次一份的新目录。复制后的文件及哈希纳入现有适配器包，更新应用不会自动替换已发布适配器中的组件。
 
@@ -68,7 +68,7 @@ XP3 必须由独立证据确认没有过滤器，再显式传 `filter: "none"`�
 
 `inspect_engine_reference` 按精确引擎 ID 读取指南，支持按路径、关键词和字符范围读取所需 API。发行包附带固定 commit 的工具库，将 Python 源码、目录、指南和许可文件保留在一个共享 ZIP 中。`run_engine_python` 自动提供便携 Python，直接运行 `work/*.py` 或 `src/tools/*.py` 连接脚本，复用 `python.archives` / `python.engines`，无需将已有算法重新实现为 C#。不同引擎和版本的函数接口不统一，仍需按指南选择并用样本验证。
 
-`use_engine_reference` 将固定依赖记录与 C# 调用桥写入适配器源码。智能体只需补 JSON CLI、资源选择及确实缺失的版本处理，再执行原有 `test_adapter`。发布后的适配器使用相同共享库，常规提取与回填不调用模型。继续适配保留所用源码版本，已安装的库可离线使用；工具缺失时需恢复对应版本的完整发行包或共享工具，内容改变会明确报错，不自动替换成新版。
+`use_engine_reference` 将固定依赖记录与 Python 辅助模块写入适配器源码。实现 `src/adapter.py` 的 JSON 协议、资源选择及确实缺失的版本处理，再执行 `test_adapter`。内置解析器通过 `parser(request, format)` 调用预编译组件；发布后的适配器使用相同共享库，常规提取与回填不调用模型。继续适配保留所用源码版本，已安装的库可离线使用；工具缺失时需恢复对应版本的完整发行包或共享工具，内容改变会明确报错，不自动替换成新版。
 
 未命中时可继续查询格式目录和上游注册清单。`fetch_url` 支持 `query` 关键词定位及 `offset` / `length` 字符分页，大型目录在本地搜索，只将相关片段交给模型；读取完整条目后再判断能力。GitHub 仓库搜索只查仓库元数据，不查源码正文。Bishop 的 GSC 资料与 BSScript Rev.6 等不同格式不能因厂商相同而直接混用。
 
@@ -114,7 +114,7 @@ XP3 必须由独立证据确认没有过滤器，再显式传 `filter: "none"`�
 
 ## 本地探针与工作目录
 
-临时分析和处理脚本统一放在 `work/*.py`，通过 `run_engine_python` 使用发行包中的共享 Python 解释器运行，也可直接调用固定工具库的模块。参数及标准输入输出使用 UTF-8，可用 `workingDirectory` 指定工作区内的运行目录；不使用系统 Python、pip 或临时下载的运行时。C# 仅用于 `src/` 中的正式适配器代码及其依赖，修改后通过 `test_adapter` 编译验收，不编译临时 C# 探针。`run_tool` 用于调用已有工具和文件编排。
+临时分析和处理脚本统一放在 `work/*.py`，通过 `run_engine_python` 使用发行包中的共享 Python 解释器运行，也可直接调用固定工具库的模块。参数及标准输入输出使用 UTF-8，可用 `workingDirectory` 指定工作区内的运行目录；不使用系统 Python、pip 或临时下载的运行时。正式适配器也使用 Python，入口为 `src/adapter.py`；`test_adapter` 检查语法、打包并执行完整资源验收，自动准备固定共享 Python 依赖。发行包不含 C# 编译器。`run_tool` 用于调用已有工具和文件编排。
 
 Python 探针使用 `run_engine_python`，其他本地工具使用 `run_tool`。临时脚本、报告和解包结果放在 `work/`；原始资源副本放在 `resources/`。只有正式解析代码和运行依赖进入 `src/` 及 `src/tools/`。完整路径和保留规则见[产物说明](../docs/adapters/artifacts.md)。
 
@@ -130,7 +130,7 @@ Python 探针使用 `run_engine_python`，其他本地工具使用 `run_tool`。
 
 ```json
 { "releaseFiles": [
-  { "path": "src/Program.cs", "role": "source", "purpose": "适配器入口与资源发现" },
+  { "path": "src/adapter.py", "role": "source", "purpose": "适配器入口与资源发现" },
   { "path": "tools/parser.py", "role": "runtime", "purpose": "提取与回填脚本消息表" },
   { "path": "tools/Launcher.exe", "role": "asset", "purpose": "复制为汉化启动入口" },
   { "path": "tools/LICENSE.txt", "role": "license", "purpose": "解析依赖的许可声明" }
@@ -139,7 +139,7 @@ Python 探针使用 `run_engine_python`，其他本地工具使用 `run_tool`。
 
 清单维护规则：
 
-- `write_file` 新建 `src/` 下的 C# 实现时自动登记为 `source`；`work/` 中的分析脚本不登记。直接由外部脚本生成的文件需要登记，不扫描目录自动纳入。
+- `write_file` 新建 `src/` 下的 Python 实现时自动登记为 `source`；`work/` 中的分析脚本不登记。直接由外部脚本生成的文件需要登记，不扫描目录自动纳入。
 - 复制正式适配器时继承其发布清单；复制内置解析器、编码/字体/启动组件或共享工具链连接代码时，由程序登记已知必要文件。组件附带的分析、编辑辅助文件不因被复制而自动发布。
 - 新依赖可在 `write_file` / `download_tool` 中一次提供 `releaseRole` 和 `purpose`；后续编辑继承已有登记。下载依赖的来源记录随依赖保留。
 - `update_release_files` 的 `files` 按路径增补或更新，`remove` 只排除发布、不删除文件。无参数时可查看清单及未登记文件的数量、体积和部分路径；未登记并不等于可安全删除。

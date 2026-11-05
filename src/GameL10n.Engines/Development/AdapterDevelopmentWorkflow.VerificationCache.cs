@@ -59,7 +59,7 @@ public sealed partial class AdapterDevelopmentWorkflow
         {
             cacheSchema = 1, verifierRevision = GeneratedAdapterVerifier.Revision,
             hostBuild = typeof(AdapterDevelopmentWorkflow).Module.ModuleVersionId,
-            compiler.Toolchain, gameDirectory = Path.GetFullPath(request.GameDirectory),
+            runtime.Toolchain, gameDirectory = Path.GetFullPath(request.GameDirectory),
             family, patterns = patterns.Select(GeneratedAdapterResources.Normalize).Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.Ordinal),
             releaseFiles, sources, discoveryOnly, session.Recognition, session.Objective, session.LaunchInspection,
             coverage = session.TextCoverage.Fingerprint(),

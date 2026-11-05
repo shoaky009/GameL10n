@@ -54,6 +54,12 @@ public sealed class GeneratedAdapterRuntimeTests : IDisposable
         Assert.Equal("原文 日本語𠮷", Assert.Single((await adapter.ExtractAsync(game)).Units).SourceText);
         await File.AppendAllTextAsync(Path.Combine(loaded.DirectoryPath, loaded.EntryFile), "\n# changed");
         await Assert.ThrowsAsync<GeneratedAdapterException>(() => adapter.ExtractAsync(game));
+        await File.WriteAllTextAsync(Path.Combine(source, "adapter.py"), "def broken(");
+        var invalid = Path.Combine(root, "invalid");
+        var error = await Assert.ThrowsAsync<GeneratedAdapterException>(() => builder.BuildWorkspaceAsync(
+            source, invalid, ["*.lines"], release, fixture.Paths));
+        Assert.Contains("Python 语法检查失败", error.Message);
+        Assert.False(Directory.Exists(invalid));
     }
 
     [Fact]
@@ -129,7 +135,7 @@ public sealed class GeneratedAdapterRuntimeTests : IDisposable
             Path('result.txt').write_text('已运行', encoding='utf-8')
             sys.exit(7)
             """, new UTF8Encoding(false));
-        var compiler = new GeneratedAdapterCompiler(new(Path.Combine(root, "absent-dotnet"), "10.0.402", "10.0.13"), fixture.Runner);
+        var compiler = new AdapterRuntime(new(Path.Combine(root, "absent-dotnet"), "10.0.402", "10.0.13"), fixture.Runner);
         var tools = new AdaptationTools(new("analysis", root, []), new(), root, compiler, store);
         var result = await tools.ExecuteAsync(new("analysis", "run_engine_python", """
             {"script":"work/probe.py","arguments":["参数"],"stdin":"输入","workingDirectory":"work"}
@@ -172,16 +178,17 @@ public sealed class GeneratedAdapterRuntimeTests : IDisposable
         if (expectedEncoding == "utf8") Assert.Contains("中文", result);
     }
 
-    private AdaptationTools AnalysisTools(GeneratedAdapterCompiler compiler, AdaptationSession? session = null) =>
+    private AdaptationTools AnalysisTools(AdapterRuntime compiler, AdaptationSession? session = null) =>
         new(new("analysis", root, []), session ?? new(), root, compiler, new(Path.Combine(root, "store")));
 
     [Fact]
     public async Task DiscoveryReportsMissingResourcesBeforeRoundtripAndRechecksBeforePublication()
     {
+        using var fixture = new EngineArchiveFixture();
+        await fixture.PrepareSharedToolsAsync(Path.Combine(root, "store"));
         var source = Path.Combine(root, "src");
         Directory.CreateDirectory(Path.Combine(source, "tools"));
-        await File.WriteAllTextAsync(Path.Combine(source, "Program.cs"), FixtureProgram);
-        await File.WriteAllTextAsync(Path.Combine(source, "Records.cs"), FixtureRecords);
+        await File.WriteAllTextAsync(Path.Combine(source, "adapter.py"), FixturePython);
         await File.WriteAllTextAsync(Path.Combine(source, "tools", "font.ini"), "font fixture");
         var game = Path.Combine(root, "game");
         Directory.CreateDirectory(game);
@@ -189,9 +196,9 @@ public sealed class GeneratedAdapterRuntimeTests : IDisposable
         await File.WriteAllTextAsync(Path.Combine(game, "second.lines"), "AVG_LINE_V1\nSecond");
         var session = new AdaptationSession();
         var tools = new AdaptationTools(new("discovery", game, []), session, root,
-            new(FindToolchain(), new AdapterProcessRunner()), new(Path.Combine(root, "store")));
+            new(FindToolchain(), fixture.Runner), new(Path.Combine(root, "store")));
         await tools.ExecuteAsync(new("stage", "stage_resources", """{"files":["first.lines"]}"""), default);
-        const string options = """{"kind":"template","key":"fixture-lines","name":"Fixture lines","resourcePatterns":["*.lines"],"releaseFiles":[{"path":"src/Program.cs","role":"source","purpose":"Entry"},{"path":"src/Records.cs","role":"source","purpose":"Parser types"},{"path":"tools/font.ini","role":"asset","purpose":"Font configuration"}]}""";
+        const string options = """{"kind":"template","key":"fixture-lines","name":"Fixture lines","resourcePatterns":["*.lines"],"releaseFiles":[{"path":"src/adapter.py","role":"source","purpose":"Entry"},{"path":"tools/font.ini","role":"asset","purpose":"Font configuration"}]}""";
         using (var failed = JsonDocument.Parse(await tools.ExecuteAsync(new("test", "test_adapter", options), default)))
         {
             var result = failed.RootElement.GetProperty("result");
@@ -571,6 +578,41 @@ public sealed class GeneratedAdapterRuntimeTests : IDisposable
     }
 
     public void Dispose() { if (Directory.Exists(root)) Directory.Delete(root, true); }
+
+    private const string FixturePython = """
+        import json, sys, shutil
+        from pathlib import Path
+        request = json.load(sys.stdin)
+        operation = request['operation']
+        source = Path(request['sourceDirectory'])
+        files = request['resourceFiles']
+        response = dict(protocolVersion=1, success=True)
+        if operation == 'probe':
+            supported = all((source / file).read_text(encoding='utf-8').splitlines()[0] == 'AVG_LINE_V1' for file in files)
+            response['probe'] = dict(engineId='fixture', adapterId='fixture', adapterVersion='1', description='Fixture line scripts',
+                                     requiredFiles=files, warnings=[]) if supported else None
+        elif operation == 'extract':
+            units = []
+            for file in files:
+                for index, text in enumerate((source / file).read_text(encoding='utf-8').splitlines()[1:], 1):
+                    units.append(dict(id=f'{file}:{index}', resourcePath=file, locator=f'line:{index}', sourceText=text, context='fixture'))
+            response['extraction'] = dict(units=units, warnings=[])
+        elif operation == 'build':
+            output = Path(request['outputDirectory'])
+            translations = json.loads(Path(request['translationsFile']).read_text(encoding='utf-8'))
+            for file in files:
+                lines = (source / file).read_text(encoding='utf-8').splitlines()
+                for index in range(1, len(lines)):
+                    lines[index] = translations.get(f'{file}:{index}', lines[index])
+                target = output / file
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text('\n'.join(lines), encoding='utf-8', newline='')
+            shutil.copyfile(Path(request['adapterDirectory']) / 'tools/font.ini', output / 'font.ini')
+            response['build'] = dict(files=[*files, 'font.ini'], warnings=[])
+        else:
+            response['validation'] = dict(passed=True, issues=[], runtimeStatus='not-tested')
+        Path(request['responseFile']).write_text(json.dumps(response, ensure_ascii=False), encoding='utf-8')
+        """;
 
     private const string FixtureRecords = """
         public sealed record Unit(string Id, string ResourcePath, string Locator, string SourceText,

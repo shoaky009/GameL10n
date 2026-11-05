@@ -327,7 +327,7 @@ public sealed partial class MainWindow
             {
                 using var projectLock = AcquireGameFileLock(game);
                 var store = CreateAdapterStore(game);
-                var compiler = new GeneratedAdapterCompiler(FindToolchain(), new AdapterProcessRunner());
+                var runtime = new AdapterRuntime(FindToolchain(), new AdapterProcessRunner());
                 var runId = game.RunId;
                 game.AdaptationBlocker = null;
                 string? lastStage = null;
@@ -346,7 +346,7 @@ public sealed partial class MainWindow
                 });
                 var baseline = game.AdaptationObjective == AdaptationObjective.Repair
                     ? await LoadAdaptationBaselineAsync(game, token) : null;
-                var adaptation = await Task.Run(() => new AutomaticAdaptationService(createModel, compiler, store)
+                var adaptation = await Task.Run(() => new AutomaticAdaptationService(createModel, runtime, store)
                     .AdaptAsync(new AdaptationRequest(game.Id, game.GameDirectory, adapters, limits, game.AdaptationInstruction,
                         game.BuiltinProbes.ToArray(), ImproveExisting: improving, Objective: game.AdaptationObjective,
                         BaselineUnits: baseline, ReuseFailures: game.ReuseFailures), token, progress));

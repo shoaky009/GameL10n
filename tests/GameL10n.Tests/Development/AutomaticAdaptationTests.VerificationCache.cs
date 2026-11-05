@@ -17,8 +17,8 @@ public sealed partial class AutomaticAdaptationTests
         var state = new AdaptationSession { Objective = request.Objective };
         var workspace = Path.Combine(root, "workspace");
         var store = new LocalAdapterPackageStore(Path.Combine(root, "store"));
-        var tools = new AdaptationTools(request, state, workspace, Compiler(runner), store);
-        await tools.ExecuteAsync(new("source", "write_file", """{"path":"src/Program.cs","content":"// fixture"}"""), default);
+        var tools = new AdaptationTools(request, state, workspace, Runtime(runner), store);
+        await tools.ExecuteAsync(new("source", "write_file", """{"path":"src/adapter.py","content":"# fixture"}"""), default);
         await tools.ExecuteAsync(new("dependency", "write_file", """{"path":"src/tools/parser.py","content":"# fixture","releaseRole":"runtime","purpose":"Parser"}"""), default);
         await tools.ExecuteAsync(new("stage", "stage_resources", """{"files":["script.txt"]}"""), default);
         return (request, state, workspace, store);
@@ -30,7 +30,7 @@ public sealed partial class AutomaticAdaptationTests
         var runs = 0;
         var runner = new ScriptedRunner { ObserveRequest = _ => runs++ };
         var (request, state, workspace, store) = await VerificationCacheFixtureAsync(runner);
-        var tools = new AdaptationTools(request, state, workspace, Compiler(runner), store);
+        var tools = new AdaptationTools(request, state, workspace, Runtime(runner), store);
         using var first = JsonDocument.Parse(await tools.ExecuteAsync(new("test", "test_adapter", CacheTestArguments), default));
         Assert.True(first.RootElement.GetProperty("result").GetProperty("passed").GetBoolean());
         var initialRuns = runs;
@@ -38,11 +38,11 @@ public sealed partial class AutomaticAdaptationTests
         await tools.ExecuteAsync(new("checkpoint", "checkpoint", """{"summary":"Full checks passed; publish next."}"""), default);
         Directory.CreateDirectory(Path.Combine(workspace, "work"));
         await File.WriteAllTextAsync(Path.Combine(workspace, "work/notes.txt"), "Investigation only.");
-        await File.WriteAllTextAsync(Path.Combine(workspace, "src/Unused.cs"), "not selected for release");
+        await File.WriteAllTextAsync(Path.Combine(workspace, "src/Unused.py"), "not selected for release");
         var sessionPath = Path.Combine(workspace, "session.json");
         await LocalFiles.WriteJsonAsync(sessionPath, state);
         state = (await LocalFiles.ReadJsonAsync<AdaptationSession>(sessionPath))!;
-        var resumed = new AdaptationTools(request, state, workspace, Compiler(runner), store);
+        var resumed = new AdaptationTools(request, state, workspace, Runtime(runner), store);
         using var repeated = JsonDocument.Parse(await resumed.ExecuteAsync(new("repeat", "test_adapter", """
             {"kind":"template","key":"line-script","name":"Line script","resourcePatterns":["*.txt"],
              "pendingCoverage":["Options menu not covered."],"runtimeChecks":["Confirm Chinese font in game."]}
@@ -82,7 +82,7 @@ public sealed partial class AutomaticAdaptationTests
         var runs = 0;
         var runner = new ScriptedRunner { ObserveRequest = _ => runs++ };
         var (request, state, workspace, store) = await VerificationCacheFixtureAsync(runner);
-        var tools = new AdaptationTools(request, state, workspace, Compiler(runner), store);
+        var tools = new AdaptationTools(request, state, workspace, Runtime(runner), store);
         await tools.ExecuteAsync(new("test", "test_adapter", CacheTestArguments), default);
         Assert.NotNull(state.VerifiedPackage);
         var initialRuns = runs;
@@ -91,7 +91,7 @@ public sealed partial class AutomaticAdaptationTests
         {
             case "source":
             case "dependency":
-                var file = Path.Combine(workspace, change == "source" ? "src/Program.cs" : "src/tools/parser.py");
+                var file = Path.Combine(workspace, change == "source" ? "src/adapter.py" : "src/tools/parser.py");
                 var timestamp = File.GetLastWriteTimeUtc(file);
                 // Same length and timestamp still require content-based invalidation, including external edits.
                 await File.WriteAllTextAsync(file, (await File.ReadAllTextAsync(file)).Replace("fixture", "changed"));
@@ -124,13 +124,13 @@ public sealed partial class AutomaticAdaptationTests
                 break;
             case "baseline":
                 request = request with { BaselineUnits = [request.BaselineUnits![0] with { Context = "changed" }] };
-                tools = new AdaptationTools(request, state, workspace, Compiler(runner), store);
+                tools = new AdaptationTools(request, state, workspace, Runtime(runner), store);
                 break;
             case "revision":
                 state.VerificationCache = state.VerificationCache! with { Revision = GeneratedAdapterVerifier.Revision - 1 };
                 break;
             case "artifact":
-                await File.WriteAllBytesAsync(Path.Combine(state.VerifiedPackage!.DirectoryPath, "adapter.dll"), [9, 9, 9]);
+                await File.WriteAllBytesAsync(Path.Combine(state.VerifiedPackage!.DirectoryPath, state.VerifiedPackage.EntryFile), [9, 9, 9]);
                 break;
             case "missing-build":
                 Directory.Delete(state.VerifiedPackage!.DirectoryPath, true);
@@ -154,7 +154,7 @@ public sealed partial class AutomaticAdaptationTests
             CorruptUntouchedTrialText = stage == "verification" };
         var (request, state, workspace, store) = await VerificationCacheFixtureAsync(runner);
         if (stage == "discovery") state.Recognition = new(1, [new(["missing.dat"])], []);
-        var tools = new AdaptationTools(request, state, workspace, Compiler(runner), store);
+        var tools = new AdaptationTools(request, state, workspace, Runtime(runner), store);
         var call = new AgentToolCall("test", "test_adapter", CacheTestArguments);
         string? error = null;
         if (stage == "compilation") error = (await Assert.ThrowsAsync<GeneratedAdapterException>(() => tools.ExecuteAsync(call, default))).Message;
@@ -162,7 +162,7 @@ public sealed partial class AutomaticAdaptationTests
         Assert.NotNull(state.VerificationCache);
         var initialRuns = runs;
         state = JsonSerializer.Deserialize<AdaptationSession>(JsonSerializer.Serialize(state, Json), Json)!;
-        var resumed = new AdaptationTools(request, state, workspace, Compiler(runner), store);
+        var resumed = new AdaptationTools(request, state, workspace, Runtime(runner), store);
         if (stage == "compilation")
             Assert.Equal(error, (await Assert.ThrowsAsync<GeneratedAdapterException>(() => resumed.ExecuteAsync(call, default))).Message);
         else
@@ -186,7 +186,7 @@ public sealed partial class AutomaticAdaptationTests
         var runs = 0;
         var runner = new ScriptedRunner { ObserveRequest = _ => runs++ };
         var (request, state, workspace, store) = await VerificationCacheFixtureAsync(runner);
-        var tools = new AdaptationTools(request, state, workspace, Compiler(runner), store);
+        var tools = new AdaptationTools(request, state, workspace, Runtime(runner), store);
         var discovery = CacheTestArguments[..^1] + ",\"discoveryOnly\":true}";
         await tools.ExecuteAsync(new("discovery", "test_adapter", discovery), default);
         var initialRuns = runs;
@@ -209,7 +209,7 @@ public sealed partial class AutomaticAdaptationTests
     {
         var runner = new ScriptedRunner();
         var (request, state, workspace, store) = await VerificationCacheFixtureAsync(runner);
-        var tools = new AdaptationTools(request, state, workspace, Compiler(runner), store);
+        var tools = new AdaptationTools(request, state, workspace, Runtime(runner), store);
         await tools.ExecuteAsync(new("test", "test_adapter", CacheTestArguments), default);
         await File.AppendAllTextAsync(Path.Combine(original ? request.GameDirectory : Path.Combine(workspace, "resources"), "script.txt"), "changed");
         var error = await Assert.ThrowsAsync<InvalidDataException>(() => tools.ExecuteAsync(new("repeat", "test_adapter", CacheTestArguments), default));
@@ -230,7 +230,7 @@ public sealed partial class AutomaticAdaptationTests
             }
         } };
         var (request, state, workspace, store) = await VerificationCacheFixtureAsync(runner);
-        var tools = new AdaptationTools(request, state, workspace, Compiler(runner), store);
+        var tools = new AdaptationTools(request, state, workspace, Runtime(runner), store);
         await tools.ExecuteAsync(new("test", "test_adapter", CacheTestArguments), default);
         Assert.Contains(state.VerificationDiagnostics, text => text.Contains("temporary file lock"));
         Assert.Null(state.VerificationCache);
@@ -250,7 +250,7 @@ public sealed partial class AutomaticAdaptationTests
                 throw cancelled ? new OperationCanceledException() : new AdapterProcessLimitException("fixture timeout");
         } };
         var (request, state, workspace, store) = await VerificationCacheFixtureAsync(runner);
-        var tools = new AdaptationTools(request, state, workspace, Compiler(runner), store);
+        var tools = new AdaptationTools(request, state, workspace, Runtime(runner), store);
         var error = await Record.ExceptionAsync(() => tools.ExecuteAsync(new("test", "test_adapter", CacheTestArguments), default));
         Assert.IsType(cancelled ? typeof(OperationCanceledException) : typeof(AdapterProcessLimitException), error);
         Assert.Null(state.VerificationCache);

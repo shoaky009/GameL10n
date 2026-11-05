@@ -196,10 +196,10 @@ public sealed class EngineReviewService(IAdaptationAgentModel model, EngineKnowl
                 }
                 catch (Exception error) when (error is JsonException or InvalidDataException or ArgumentException or KeyNotFoundException or InvalidOperationException)
                 {
-                    messages.Add(new("tool", JsonSerializer.Serialize(new { success = false, error = GeneratedAdapterCompiler.LimitDiagnostic(error.Message) }, Json), ToolCallId: call.Id));
+                    messages.Add(new("tool", JsonSerializer.Serialize(new { success = false, error = GeneratedGameAdapter.LimitDiagnostic(error.Message) }, Json), ToolCallId: call.Id));
                     await trace.WriteAsync(new { operation = "tool", turn = turn + 1, tool = call.Name, status = "failed",
                         elapsedMs = toolWatch.ElapsedMilliseconds, call = AdaptationTrace.Call(call),
-                        error = GeneratedAdapterCompiler.LimitDiagnostic(error.Message) });
+                        error = GeneratedGameAdapter.LimitDiagnostic(error.Message) });
                 }
             }
         }
@@ -251,7 +251,7 @@ public sealed class EngineReviewService(IAdaptationAgentModel model, EngineKnowl
         State limits. Do not copy the project chronology or recommend blindly skipping checks. Main-program fixes belong ONLY in
         mainProgramSuggestions; guidance cannot fix compiled host code. One project's success does not prove an entire engine.
         Optional tools reuse ONLY inspected existing .py files with parameterized inputs and self-contained source dependencies.
-        Analysis scripts run through run_engine_python; C# is reserved for formal adapter code verified by test_adapter.
+        Analysis scripts run through run_engine_python. All generated adapter logic also uses Python, with src/adapter.py verified by test_adapter.
         Do not export game-specific absolute paths, fixed filenames/offsets, credentials, resource/text dumps or downloaded code
         without its required attribution. Empty tools is fine. Captured sources remain reference helpers: callers must inspect
         applicability and run sample checks using existing runners before using them in an adapter. These are NOT trusted adapters.

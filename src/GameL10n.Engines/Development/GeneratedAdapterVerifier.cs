@@ -157,7 +157,7 @@ public sealed class GeneratedAdapterVerifier
         }
         catch (Exception exception) when (exception is GeneratedAdapterException or InvalidDataException or IOException or System.Text.Json.JsonException)
         {
-            diagnostics.Add(GeneratedAdapterCompiler.LimitDiagnostic($"[{phase}] {exception.Message}"));
+            diagnostics.Add(GeneratedGameAdapter.LimitDiagnostic($"[{phase}] {exception.Message}"));
             return new GeneratedAdapterVerification(false, diagnostics, originalRoundtripPassed,
                 Cacheable: exception is not IOException || exception is InvalidDataException);
         }
@@ -194,7 +194,7 @@ public sealed class GeneratedAdapterVerifier
             if (details.Count < 2) details.Add("已有文本字段改变（" + string.Join(", ", fields) + "）：" + DescribeUnit(before));
         }
         if (incompatible == 0) return;
-        throw new GeneratedAdapterException(GeneratedAdapterCompiler.LimitDiagnostic(
+        throw new GeneratedAdapterException(GeneratedGameAdapter.LimitDiagnostic(
             $"本次适配改变了 {incompatible} / {baseline.Count} 条已有文本的身份或缓存字段，不能直接复用已有译文与校对记录。"
             + "保留原 ID、位置、原文、上下文、说话人、类型及保护标记，在适配器内部维护新的编码/槽位映射。"
             + "使用 inspect_existing_text 分页读取原字段，不要靠原文相似度合并。\n" + string.Join("\n", details)));
@@ -258,7 +258,7 @@ public sealed class GeneratedAdapterVerifier
             message.AppendLine("  suppliedTranslation=" + Sample(expectedTexts[unit.Id]));
         }
         foreach (var unit in byId.Values.Take(sampleLimit)) message.AppendLine("Added " + DescribeUnit(unit));
-        throw new GeneratedAdapterException(GeneratedAdapterCompiler.LimitDiagnostic(message.ToString()));
+        throw new GeneratedAdapterException(GeneratedGameAdapter.LimitDiagnostic(message.ToString()));
     }
 
     private static bool SameProtectedTokens(TranslationUnit before, TranslationUnit after) =>

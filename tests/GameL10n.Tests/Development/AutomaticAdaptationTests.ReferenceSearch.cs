@@ -119,7 +119,7 @@ public sealed partial class AutomaticAdaptationTests
             writer.Write(JsonSerializer.Serialize(new { engines }));
         var pin = new EngineReferencePin(SearchReferenceRevision, Hash(library), Hash(library));
         return new AdaptationTools(Request(), new() { EngineReference = pin }, workspace,
-            Compiler(new ScriptedRunner()), store, client);
+            Runtime(new ScriptedRunner()), store, client);
     }
 
     private static HttpClient ReferenceSearchOfflineClient() => new(new ResearchHandler(_ =>

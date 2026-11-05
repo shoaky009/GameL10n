@@ -26,7 +26,7 @@ public sealed partial class AutomaticAdaptationTests
                 throw new AdapterProcessLimitException("fixture timeout", timedOut: true,
                     standardOutput: "private-timeout-output", standardError: "private-timeout-error");
         } };
-        var result = await new AutomaticAdaptationService(model, Compiler(runner), store).AdaptAsync(Request());
+        var result = await new AutomaticAdaptationService(model, Runtime(runner), store).AdaptAsync(Request());
         Assert.Equal(AdaptationStatus.WaitingForUser, result.Status);
         var log = Assert.Single(Directory.GetFiles(Path.Combine(store.RootDirectory, "logs"), "adaptation-*.jsonl"));
         var logText = await File.ReadAllTextAsync(log);

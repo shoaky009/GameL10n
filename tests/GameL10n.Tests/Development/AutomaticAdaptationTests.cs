@@ -15,7 +15,12 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
     private readonly string root = Path.Combine(Path.GetTempPath(), "gamel10n-adaptation-test-" + Guid.NewGuid().ToString("N"));
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
-    public AutomaticAdaptationTests() => Directory.CreateDirectory(root);
+    public AutomaticAdaptationTests()
+    {
+        Directory.CreateDirectory(root);
+        using var fixture = new EngineArchiveFixture();
+        fixture.PrepareSharedToolsAsync(Path.Combine(root, "store")).GetAwaiter().GetResult();
+    }
 
     [Fact]
     public async Task RecognitionDeclarationIsVerifiedPersistedAndVersionedIndependentlyOfTheCli()
@@ -23,9 +28,9 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         var workspace = Path.Combine(root, "workspace");
         var state = new AdaptationSession();
         var store = new LocalAdapterPackageStore(Path.Combine(root, "store"));
-        var compiler = Compiler(new ScriptedRunner());
+        var compiler = Runtime(new ScriptedRunner());
         var tools = new AdaptationTools(Request(), state, workspace, compiler, store);
-        await tools.ExecuteAsync(new("source", "write_file", """{"path":"src/Program.cs","content":"// fixture"}"""), default);
+        await tools.ExecuteAsync(new("source", "write_file", """{"path":"src/adapter.py","content":"# fixture"}"""), default);
         await tools.ExecuteAsync(new("stage", "stage_resources", """{"files":["script.txt"]}"""), default);
         var initial = await tools.ExecuteAsync(new("test", "test_adapter", """
             {"kind":"template","key":"line-script","name":"Line script","resourcePatterns":["*.txt"],
@@ -40,7 +45,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         var package = state.VerifiedPackage!;
         Assert.NotNull(package);
         Assert.Equal(1, package.ProtocolVersion);
-        Assert.Equal(3, package.ManifestVersion);
+        Assert.Equal(4, package.ManifestVersion);
         var restored = JsonSerializer.Deserialize<AdaptationSession>(JsonSerializer.Serialize(state, Json), Json)!;
         Assert.NotNull(restored.Recognition);
         var resumed = new AdaptationTools(Request(), restored, workspace, compiler, store);
@@ -52,8 +57,10 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         var loaded = store.LoadActive(Request().GameId)!;
         Assert.NotNull(loaded.Recognition);
         Assert.NotNull(Assert.Single(await store.ReadDiscoveryCandidatesAsync()).Descriptor!.Recognition);
-        var without = await compiler.CompileWorkspaceAsync(Path.Combine(workspace, "src"), Path.Combine(root, "plain"),
-            ["*.txt"], restored.ReleaseFiles!, family: loaded.Family);
+        var python = await new EngineReferenceToolkit(Path.Combine(store.RootDirectory, "engine-tools")).ResolvePackageAsync(
+            package.DirectoryPath, default);
+        var without = await new GeneratedAdapterBuilder(compiler.Runner).BuildWorkspaceAsync(Path.Combine(workspace, "src"), Path.Combine(root, "plain"),
+            ["*.txt"], restored.ReleaseFiles!, new(python!.Python!, python.EngineLibrary!), family: loaded.Family);
         Assert.NotEqual(loaded.Version, without.Version);
     }
 
@@ -64,7 +71,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         var source = Path.Combine(root, "source");
         Directory.CreateDirectory(source);
         await File.WriteAllTextAsync(Path.Combine(source, "Program.cs"), "// fixture");
-        var compiler = Compiler(new ScriptedRunner());
+        var compiler = LegacyCompiler(new ScriptedRunner());
         var package = await compiler.CompileWorkspaceAsync(source, Path.Combine(root, "compiled"), ["*.txt"],
             [new("src/Program.cs", "source", "Entry")]);
         var inventory = GameDiscoverySession.Scan(request.GameDirectory);
@@ -81,6 +88,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         Assert.Equal(1, inventory.RangeReads);
         Assert.Equal("First line\nSecond line", await File.ReadAllTextAsync(Path.Combine(request.GameDirectory, "script.txt")));
     }
+
 
     [Theory]
     [InlineData("same", true)]
@@ -178,28 +186,28 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         var request = Request();
         var store = new LocalAdapterPackageStore(Path.Combine(root, "store"));
         var tools = new AdaptationTools(request, state, workspace,
-            Compiler(new ScriptedRunner { ValidationResponse = new(false, [new("fixture", "fixture failure")], "failed") }), store);
-        await tools.ExecuteAsync(new("source", "write_file", """{"path":"src/Program.cs","content":"// fixture"}"""), default);
+            Runtime(new ScriptedRunner { ValidationResponse = new(false, [new("fixture", "fixture failure")], "failed") }), store);
+        await tools.ExecuteAsync(new("source", "write_file", """{"path":"src/adapter.py","content":"# fixture"}"""), default);
         await tools.ExecuteAsync(new("dependency", "write_file", """
             {"path":"src/tools/parser.py","content":"# fixture","releaseRole":"runtime","purpose":"Parser"}
             """), default);
-        await tools.ExecuteAsync(new("probe", "write_file", """{"path":"work/Probe.cs","content":"// analysis only"}"""), default);
+        await tools.ExecuteAsync(new("probe", "write_file", """{"path":"work/Probe.py","content":"// analysis only"}"""), default);
         await tools.ExecuteAsync(new("stage", "stage_resources", """{"files":["script.txt"]}"""), default);
         const string verify = """{"kind":"template","key":"line-script","name":"Line script","resourcePatterns":["*.txt"]}""";
         await tools.ExecuteAsync(new("test", "test_adapter", verify), default);
         Assert.Null(state.VerifiedPackage);
-        Assert.Equal(2, state.ReleaseFiles!.Count);
+        Assert.Equal(3, state.ReleaseFiles!.Count);
 
         // Checkpoint/restart must not depend on the original tool-call arguments surviving in history.
         state.Messages.Clear();
         state = JsonSerializer.Deserialize<AdaptationSession>(JsonSerializer.Serialize(state, Json), Json)!;
-        tools = new AdaptationTools(request, state, workspace, Compiler(new ScriptedRunner()), store);
-        await tools.ExecuteAsync(new("edit", "write_file", """{"path":"src/Program.cs","content":"// repaired"}"""), default);
+        tools = new AdaptationTools(request, state, workspace, Runtime(new ScriptedRunner()), store);
+        await tools.ExecuteAsync(new("edit", "write_file", """{"path":"src/adapter.py","content":"// repaired"}"""), default);
         await tools.ExecuteAsync(new("test", "test_adapter", verify), default);
         Assert.NotNull(state.VerifiedPackage);
-        await tools.ExecuteAsync(new("edit", "write_file", """{"path":"src/Program.cs","content":"// repaired again"}"""), default);
+        await tools.ExecuteAsync(new("edit", "write_file", """{"path":"src/adapter.py","content":"// repaired again"}"""), default);
         Assert.Null(state.VerifiedPackage);
-        Assert.Equal(2, state.ReleaseFiles!.Count);
+        Assert.Equal(3, state.ReleaseFiles!.Count);
         await tools.ExecuteAsync(new("test", "test_adapter", verify), default);
         await tools.ExecuteAsync(new("finish", "finish", """{"summary":"Verified release."}"""), default);
         Assert.Equal(store.LoadActive(request.GameId)!.DirectoryPath, state.VerifiedPackage!.DirectoryPath);
@@ -211,8 +219,8 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         var workspace = Path.Combine(root, "workspace");
         var state = new AdaptationSession();
         var store = new LocalAdapterPackageStore(Path.Combine(root, "store"));
-        var tools = new AdaptationTools(Request(), state, workspace, Compiler(new ScriptedRunner()), store);
-        await tools.ExecuteAsync(new("source", "write_file", """{"path":"src/Program.cs","content":"// fixture"}"""), default);
+        var tools = new AdaptationTools(Request(), state, workspace, Runtime(new ScriptedRunner()), store);
+        await tools.ExecuteAsync(new("source", "write_file", """{"path":"src/adapter.py","content":"# fixture"}"""), default);
         await tools.ExecuteAsync(new("copy", "write_file", """
             {"path":"src/tools/renamed.dat","content":"First line\nSecond line","releaseRole":"asset","purpose":"Mistaken game copy"}
             """), default);
@@ -234,26 +242,26 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
     {
         var workspace = Path.Combine(root, "workspace");
         Directory.CreateDirectory(Path.Combine(workspace, "src/tools"));
-        await File.WriteAllTextAsync(Path.Combine(workspace, "src/Program.cs"), "// fixture");
-        await File.WriteAllTextAsync(Path.Combine(workspace, "src/Probe.cs"), "not compilable; analysis only");
+        await File.WriteAllTextAsync(Path.Combine(workspace, "src/adapter.py"), "# fixture");
+        await File.WriteAllTextAsync(Path.Combine(workspace, "src/Probe.py"), "not compilable; analysis only");
         await File.WriteAllTextAsync(Path.Combine(workspace, "src/tools/unused.zip"), "download");
         await File.WriteAllTextAsync(Path.Combine(workspace, "src/tools/parser.py"), "# fixture dependency");
         var state = new AdaptationSession();
         var store = new LocalAdapterPackageStore(Path.Combine(root, "store"));
-        var tools = new AdaptationTools(Request(), state, workspace, Compiler(new ScriptedRunner()), store);
+        var tools = new AdaptationTools(Request(), state, workspace, Runtime(new ScriptedRunner()), store);
         await tools.ExecuteAsync(new("stage", "stage_resources", """{"files":["script.txt"]}"""), default);
         await tools.ExecuteAsync(new("verify", "test_adapter", """
             {"kind":"template","key":"line-script","name":"Line script","resourcePatterns":["*.txt"],
-             "releaseFiles":[{"path":"src/Program.cs","role":"source","purpose":"Parser entry"},
+             "releaseFiles":[{"path":"src/adapter.py","role":"source","purpose":"Parser entry"},
                              {"path":"tools/parser.py","role":"runtime","purpose":"Script parser"}]}
             """), default);
         var verified = state.VerifiedPackage!;
         Assert.NotNull(verified);
-        Assert.Equal(3, verified.ManifestVersion);
-        Assert.Equal(4, verified.PackageFiles!.Count);
-        Assert.False(File.Exists(Path.Combine(verified.DirectoryPath, "src/Probe.cs")));
+        Assert.Equal(4, verified.ManifestVersion);
+        Assert.Equal(3, verified.PackageFiles!.Count);
+        Assert.False(File.Exists(Path.Combine(verified.DirectoryPath, "src/Probe.py")));
         Assert.False(File.Exists(Path.Combine(verified.DirectoryPath, "tools/unused.zip")));
-        await tools.ExecuteAsync(new("edit", "write_file", """{"path":"src/Probe.cs","content":"new analysis probe"}"""), default);
+        await tools.ExecuteAsync(new("edit", "write_file", """{"path":"src/Probe.py","content":"new analysis probe"}"""), default);
         Assert.Same(verified, state.VerifiedPackage);
         await tools.ExecuteAsync(new("finish", "finish", """{"summary":"Selected release verified."}"""), default);
         var published = store.LoadActive(Request().GameId)!;
@@ -263,28 +271,29 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
     }
 
     [Theory]
-    [InlineData("work/Probe.cs", "source")]
+    [InlineData("work/Probe.py", "source")]
     [InlineData("src/tools/parser.py", "runtime")]
     [InlineData("tools/../parser.py", "runtime")]
     [InlineData("tools/*", "runtime")]
-    [InlineData("src/Extra.cs", "analysis")]
+    [InlineData("src/Extra.py", "analysis")]
     public async Task InvalidReleaseSelectionIsRejectedBeforeCompilation(string path, string role)
     {
         var source = Directory.CreateDirectory(Path.Combine(root, "src")).FullName;
         await File.WriteAllTextAsync(Path.Combine(source, "Program.cs"), "// fixture");
-        var compiler = Compiler(new ScriptedRunner());
+        var compiler = LegacyCompiler(new ScriptedRunner());
         var error = await Record.ExceptionAsync(() => compiler.CompileWorkspaceAsync(source, Path.Combine(root, "build"), ["*.txt"],
             releaseFiles: [new("src/Program.cs", "source", "Entry"), new(path, role, "Invalid input")]));
         Assert.True(error is GeneratedAdapterException or InvalidDataException, error?.ToString());
         Assert.False(Directory.Exists(Path.Combine(root, "build")));
     }
 
+
     [Fact]
     public async Task MissingReleaseSelectionIsRejectedAndLegacyPackagesRemainLoadable()
     {
         var source = Directory.CreateDirectory(Path.Combine(root, "src")).FullName;
         await File.WriteAllTextAsync(Path.Combine(source, "Program.cs"), "// fixture");
-        var compiler = Compiler(new ScriptedRunner());
+        var compiler = LegacyCompiler(new ScriptedRunner());
         await Assert.ThrowsAsync<GeneratedAdapterException>(() => compiler.CompileWorkspaceAsync(source, Path.Combine(root, "build"), ["*.txt"], null!));
         var package = await compiler.CompileWorkspaceAsync(source, Path.Combine(root, "build"), ["*.txt"],
             [new("src/Program.cs", "source", "Entry")], family: new("template", "line-script", "Line script"));
@@ -295,6 +304,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         Assert.Null(loaded.ReleaseFiles);
     }
 
+
     [Fact]
     public async Task ExplicitSampleCorrectionSurvivesCheckpointAndRequiresFreshVerification()
     {
@@ -302,7 +312,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         var replacement = new TextCoverageSample("text.json", "dialogues/80/text", "Actual original dialogue");
         var state = new AdaptationSession { TextCoverage = new([original, replacement], ["Known omission."])
             { RuntimeChecks = ["Font not tested."] }, VerifiedPackage = CreatePackage(), VerifiedCoverageFingerprint = "old" };
-        var tools = new AdaptationTools(Request(), state, Path.Combine(root, "workspace"), Compiler(new ScriptedRunner()),
+        var tools = new AdaptationTools(Request(), state, Path.Combine(root, "workspace"), Runtime(new ScriptedRunner()),
             new LocalAdapterPackageStore(Path.Combine(root, "store")));
         var correction = new TextCoverageSampleCorrection(original, replacement, "The original title came from the manual.",
             "The items field is an internal key; dialogues/80/text independently contains the original dialogue.");
@@ -363,14 +373,14 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
             return Blocked("needs_input", "需要显示反馈。", "提供画面后继续。");
         }
         var request = Request();
-        await new AutomaticAdaptationService(model, Compiler(runner), store).AdaptAsync(request);
+        await new AutomaticAdaptationService(model, Runtime(runner), store).AdaptAsync(request);
         Assert.Equal(1, runs);
         var state = await GameL10n.Core.Storage.LocalFiles.ReadJsonAsync<AdaptationSession>(Path.Combine(workspace, "session.json"));
         Assert.Equal(arguments, Assert.Single(state!.SuccessfulProbes).Arguments);
         Assert.Contains("development", state.EnabledToolGroups);
         state.SuccessfulProbes.Add(new("run_csharp", "{\"sourceFiles\":[\"work/legacy.cs\"]}", 0));
         await GameL10n.Core.Storage.LocalFiles.WriteJsonAsync(Path.Combine(workspace, "session.json"), state);
-        await new AutomaticAdaptationService(new FakeModel(CheckContext), Compiler(runner), store).AdaptAsync(request);
+        await new AutomaticAdaptationService(new FakeModel(CheckContext), Runtime(runner), store).AdaptAsync(request);
         Assert.Equal(1, runs);
     }
 
@@ -388,7 +398,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
             Assert.Contains(context.Messages, message => message.Content.Contains("整次响应未接受", StringComparison.Ordinal));
             return Blocked("needs_input", "需要一个资源样本。", "提供样本后继续。");
         });
-        var result = await new AutomaticAdaptationService(model, Compiler(new ScriptedRunner()), store).AdaptAsync(request);
+        var result = await new AutomaticAdaptationService(model, Runtime(new ScriptedRunner()), store).AdaptAsync(request);
         Assert.Equal(2, model.Calls);
         Assert.Equal(10_620, result.Usage.TotalTokens);
         var restored = new FakeModel(context =>
@@ -396,7 +406,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
             Assert.Equal(20_000, context.MaximumOutputTokens);
             return Blocked("needs_input", "仍缺样本。", "提供样本后继续。");
         });
-        await new AutomaticAdaptationService(restored, Compiler(new ScriptedRunner()), store).AdaptAsync(request);
+        await new AutomaticAdaptationService(restored, Runtime(new ScriptedRunner()), store).AdaptAsync(request);
         Assert.Equal(1, restored.Calls);
     }
 
@@ -406,7 +416,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         var model = new FakeModel(_ => throw new GameL10n.Core.Providers.TranslationProviderException("truncated",
             usage: new(100, 10_000), diagnostic: new("output-token-limit")));
         var store = new LocalAdapterPackageStore(Path.Combine(root, "store"));
-        var result = await new AutomaticAdaptationService(model, Compiler(new ScriptedRunner()), store).AdaptAsync(Request());
+        var result = await new AutomaticAdaptationService(model, Runtime(new ScriptedRunner()), store).AdaptAsync(Request());
         Assert.Equal(2, model.Calls);
         Assert.Equal(AdaptationStatus.Failed, result.Status);
         Assert.Equal(20_200, result.Usage.TotalTokens);
@@ -422,7 +432,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
     {
         var model = new FakeModel(_ => throw new GameL10n.Core.Providers.TranslationProviderException("failure",
             usage: new(100, 20), diagnostic: new(code)));
-        var result = await new AutomaticAdaptationService(model, Compiler(new ScriptedRunner()),
+        var result = await new AutomaticAdaptationService(model, Runtime(new ScriptedRunner()),
             new LocalAdapterPackageStore(Path.Combine(root, "store"))).AdaptAsync(Request());
         Assert.Equal(1, model.Calls);
         Assert.Equal(120, result.Usage.TotalTokens);
@@ -433,7 +443,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
     {
         var model = new FakeModel(_ => throw new GameL10n.Core.Providers.TranslationProviderException("truncated",
             usage: new(100, 10_000), diagnostic: new("output-token-limit")));
-        var result = await new AutomaticAdaptationService(model, Compiler(new ScriptedRunner()),
+        var result = await new AutomaticAdaptationService(model, Runtime(new ScriptedRunner()),
             new LocalAdapterPackageStore(Path.Combine(root, "store"))).AdaptAsync(Request() with { Limits = new(MaximumTurns: 1) });
         Assert.Equal(1, model.Calls);
         Assert.Equal(AdaptationStatus.BudgetExhausted, result.Status);
@@ -444,7 +454,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
     public async Task CoverageSamplesAndPendingWorkSurviveSummaryOnlyCheckpoints()
     {
         var state = new AdaptationSession { Objective = AdaptationObjective.Repair };
-        var tools = new AdaptationTools(Request(), state, Path.Combine(root, "workspace"), Compiler(new ScriptedRunner()),
+        var tools = new AdaptationTools(Request(), state, Path.Combine(root, "workspace"), Runtime(new ScriptedRunner()),
             new LocalAdapterPackageStore(Path.Combine(root, "store")));
         await tools.ExecuteAsync(new("a", "checkpoint", """{"summary":"Known fields.","coverageSamples":[{"resourcePath":"resources.assets","locator":"Item/description","sourceText":"Unlock the class."}],"pendingCoverage":["Trace item effects."],"runtimeChecks":["Check the selected font in game."]}"""), default);
         await tools.ExecuteAsync(new("b", "checkpoint", """{"summary":"Test the adapter next."}"""), default);
@@ -477,7 +487,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
                 ? new(new("assistant", ToolCalls: [new("save", "checkpoint", """{"summary":"现有实现保留；下一步验证修正后的资源。"}""")]), new(100, 20))
                 : Blocked("needs_input", "需要一个缺失的资源包。", "补齐资源包后继续。");
         });
-        await new AutomaticAdaptationService(model, Compiler(new ScriptedRunner()), store).AdaptAsync(request);
+        await new AutomaticAdaptationService(model, Runtime(new ScriptedRunner()), store).AdaptAsync(request);
         Assert.Equal(2, model.Calls);
         var continuation = new FakeModel(context =>
         {
@@ -485,7 +495,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
             Assert.Contains("（" + objective + "）", context.Messages.Last(message => message.Role == "user").Content);
             return Blocked("needs_input", "仍缺资源包。", "补齐资源包后继续。");
         });
-        await new AutomaticAdaptationService(continuation, Compiler(new ScriptedRunner()), store)
+        await new AutomaticAdaptationService(continuation, Runtime(new ScriptedRunner()), store)
             .AdaptAsync(request with { ImproveExisting = false, UserInstruction = null });
         var saved = await GameL10n.Core.Storage.LocalFiles.ReadJsonAsync<AdaptationSession>(
             Path.Combine(store.WorkDirectory, "current", "session.json"));
@@ -503,15 +513,15 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
                 new("line-1", "script.txt", "line:1", "Second line", "fixture")] };
         var workspace = Path.Combine(root, "workspace");
         Directory.CreateDirectory(Path.Combine(workspace, "src"));
-        await File.WriteAllTextAsync(Path.Combine(workspace, "src/Program.cs"), "// fixture");
+        await File.WriteAllTextAsync(Path.Combine(workspace, "src/adapter.py"), "# fixture");
         var state = new AdaptationSession { Objective = AdaptationObjective.Repair };
         var store = new LocalAdapterPackageStore(Path.Combine(root, "store"));
-        var tools = new AdaptationTools(request, state, workspace, Compiler(new ScriptedRunner()), store);
+        var tools = new AdaptationTools(request, state, workspace, Runtime(new ScriptedRunner()), store);
         await tools.ExecuteAsync(new("stage", "stage_resources", """{"files":["script.txt"]}"""), default);
         var testOutput = await tools.ExecuteAsync(new("test", "test_adapter", JsonSerializer.Serialize(new
         {
             kind = "template", key = "line-script", name = "Line script", resourcePatterns = new[] { "*.txt" },
-            releaseFiles = new[] { new AdapterReleaseFile("src/Program.cs", "source", "Fixture parser") },
+            releaseFiles = new[] { new AdapterReleaseFile("src/adapter.py", "source", "Fixture parser") },
             pendingCoverage = missingCoverage ? new[] { "Options menu is not extracted." } : [],
             runtimeChecks = new[] { "Confirm original font selection in game." }
         })), default);
@@ -543,7 +553,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         var state = new AdaptationSession { Objective = AdaptationObjective.Repair, VerifiedPackage = CreatePackage(),
             VerificationRevision = GeneratedAdapterVerifier.Revision, VerifiedObjective = previousObjective,
             VerifiedBaselineFingerprint = "previous-baseline" };
-        var tools = new AdaptationTools(request, state, Path.Combine(root, "workspace"), Compiler(new ScriptedRunner()), store);
+        var tools = new AdaptationTools(request, state, Path.Combine(root, "workspace"), Runtime(new ScriptedRunner()), store);
         var error = await Assert.ThrowsAsync<InvalidDataException>(() => tools.ExecuteAsync(
             new("finish", "finish", """{"summary":"Repair complete."}"""), default));
         Assert.Contains("原有文本基线", error.Message);
@@ -556,7 +566,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         var request = Request() with { ImproveExisting = true, Objective = AdaptationObjective.Repair };
         var store = new LocalAdapterPackageStore(Path.Combine(root, "store"));
         var state = new AdaptationSession { Objective = AdaptationObjective.Repair };
-        var tools = new AdaptationTools(request, state, Path.Combine(root, "workspace"), Compiler(new ScriptedRunner()), store);
+        var tools = new AdaptationTools(request, state, Path.Combine(root, "workspace"), Runtime(new ScriptedRunner()), store);
         var error = await Assert.ThrowsAsync<InvalidDataException>(() => tools.ExecuteAsync(
             new("finish", "finish", """{"summary":"Repair complete."}"""), default));
         Assert.Contains("coverageSamples", error.Message);
@@ -571,15 +581,15 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         var request = Request() with { ImproveExisting = true };
         var workspace = Path.Combine(root, "workspace");
         Directory.CreateDirectory(Path.Combine(workspace, "src"));
-        await File.WriteAllTextAsync(Path.Combine(workspace, "src/Program.cs"), "// fixture");
+        await File.WriteAllTextAsync(Path.Combine(workspace, "src/adapter.py"), "# fixture");
         var state = new AdaptationSession();
         var store = new LocalAdapterPackageStore(Path.Combine(root, "store"));
-        var tools = new AdaptationTools(request, state, workspace, Compiler(new ScriptedRunner()), store);
+        var tools = new AdaptationTools(request, state, workspace, Runtime(new ScriptedRunner()), store);
         await tools.ExecuteAsync(new("stage", "stage_resources", """{"files":["script.txt"]}"""), default);
         await tools.ExecuteAsync(new("test", "test_adapter", JsonSerializer.Serialize(new
         {
             kind = "template", key = "line-script", name = "Line script", resourcePatterns = new[] { "*.txt" },
-            releaseFiles = new[] { new AdapterReleaseFile("src/Program.cs", "source", "Fixture parser") },
+            releaseFiles = new[] { new AdapterReleaseFile("src/adapter.py", "source", "Fixture parser") },
             coverageSamples = new[] { new { resourcePath = "script.txt", locator = "line:0", sourceText = expected } },
             pendingCoverage = new[] { "Input labels need a display-only mapping." }
         })), default);
@@ -599,6 +609,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
     [Fact]
     public async Task EngineReferenceLookupSeparatesRelatedFormatsAndReusesIndexWithoutWorkspaceFiles()
     {
+        Directory.Delete(Path.Combine(root, "store", "engine-tools"), recursive: true);
         var requests = 0;
         using var client = new HttpClient(new ResearchHandler(_ =>
         {
@@ -614,7 +625,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
                 """) };
         }));
         var workspace = Path.Combine(root, "workspace");
-        var tools = new AdaptationTools(Request(), new(), workspace, Compiler(new ScriptedRunner()),
+        var tools = new AdaptationTools(Request(), new(), workspace, Runtime(new ScriptedRunner()),
             new LocalAdapterPackageStore(Path.Combine(root, "store")), client);
         using var qlie = JsonDocument.Parse(await tools.ExecuteAsync(new("ref", "search_engine_references", """{"query":"ImoScripter"}"""), default));
         var result = qlie.RootElement.GetProperty("result");
@@ -636,11 +647,12 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
     [Fact]
     public async Task UnavailableReferenceIndexIsReportedAsUnavailableAndCanBeRetried()
     {
+        Directory.Delete(Path.Combine(root, "store", "engine-tools"), recursive: true);
         var calls = 0;
         using var client = new HttpClient(new ResearchHandler(_ => ++calls == 1
             ? new(System.Net.HttpStatusCode.TooManyRequests)
             : new(System.Net.HttpStatusCode.OK) { Content = new StringContent("""{"engines":[]}""") }));
-        var tools = new AdaptationTools(Request(), new(), Path.Combine(root, "workspace"), Compiler(new ScriptedRunner()),
+        var tools = new AdaptationTools(Request(), new(), Path.Combine(root, "workspace"), Runtime(new ScriptedRunner()),
             new LocalAdapterPackageStore(Path.Combine(root, "store")), client);
         using var first = JsonDocument.Parse(await tools.ExecuteAsync(new("ref", "search_engine_references", """{"query":"cp932"}"""), default));
         var result = first.RootElement.GetProperty("result");
@@ -665,7 +677,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
                 : new(System.Net.HttpStatusCode.OK) { Content = new StringContent(content) };
         }));
         var store = new LocalAdapterPackageStore(Path.Combine(root, "store"));
-        var tools = new AdaptationTools(Request(), new(), Path.Combine(root, "workspace"), Compiler(new ScriptedRunner()),
+        var tools = new AdaptationTools(Request(), new(), Path.Combine(root, "workspace"), Runtime(new ScriptedRunner()),
             store, client);
         using var first = JsonDocument.Parse(await tools.ExecuteAsync(new("read", "fetch_url",
             """{"url":"https://example.com/formats.json","query":"BSScript Rev.6","length":100}"""), default));
@@ -684,7 +696,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         Assert.Equal(1, requests);
 
         // A different project/tool instance reuses the persisted document and its actual fetch time.
-        var resumed = new AdaptationTools(Request(), new(), Path.Combine(root, "other-workspace"), Compiler(new ScriptedRunner()), store, client);
+        var resumed = new AdaptationTools(Request(), new(), Path.Combine(root, "other-workspace"), Runtime(new ScriptedRunner()), store, client);
         using var persisted = JsonDocument.Parse(await resumed.ExecuteAsync(new("persisted", "fetch_url",
             """{"url":"https://example.com/formats.json","length":21}"""), default));
         Assert.True(persisted.RootElement.GetProperty("result").GetProperty("reused").GetBoolean());
@@ -697,7 +709,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         receipt["retrievedAt"] = expiredAt;
         await File.WriteAllTextAsync(receiptPath, receipt.ToJsonString());
         unavailable = true;
-        resumed = new(Request(), new(), Path.Combine(root, "other-workspace"), Compiler(new ScriptedRunner()), store, client);
+        resumed = new(Request(), new(), Path.Combine(root, "other-workspace"), Runtime(new ScriptedRunner()), store, client);
         using var stale = JsonDocument.Parse(await resumed.ExecuteAsync(new("offline", "fetch_url",
             """{"url":"https://example.com/formats.json","length":21}"""), default));
         Assert.True(stale.RootElement.GetProperty("result").GetProperty("stale").GetBoolean());
@@ -734,8 +746,8 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         var firstWorkspace = Path.Combine(root, "first-workspace");
         var secondWorkspace = Path.Combine(root, "second-workspace");
         var firstState = new AdaptationSession();
-        var first = new AdaptationTools(Request(), firstState, firstWorkspace, Compiler(new ScriptedRunner()), store, client);
-        var second = new AdaptationTools(Request(), new(), secondWorkspace, Compiler(new ScriptedRunner()), store, client);
+        var first = new AdaptationTools(Request(), firstState, firstWorkspace, Runtime(new ScriptedRunner()), store, client);
+        var second = new AdaptationTools(Request(), new(), secondWorkspace, Runtime(new ScriptedRunner()), store, client);
         var download = new AgentToolCall("download", "download_tool", """
             {"url":"https://example.com/tool.bin","path":"src/tools/tool.bin","releaseRole":"runtime","purpose":"Fixture parser"}
             """);
@@ -779,7 +791,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         var currentBlob = Assert.Single(Directory.GetFiles(cacheRoot, LocalFiles.HashText(body) + ".bin", SearchOption.AllDirectories));
         await File.WriteAllTextAsync(currentBlob, new string('x', body.Length));
         var thirdWorkspace = Path.Combine(root, "third-workspace");
-        var third = new AdaptationTools(Request(), new(), thirdWorkspace, Compiler(new ScriptedRunner()), store, client);
+        var third = new AdaptationTools(Request(), new(), thirdWorkspace, Runtime(new ScriptedRunner()), store, client);
         await third.ExecuteAsync(download, default);
         Assert.Equal(4, requests);
         Assert.Equal(body, await File.ReadAllTextAsync(Path.Combine(thirdWorkspace, "src", "tools", "tool.bin")));
@@ -802,7 +814,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
     {
         using var client = new HttpClient(new ResearchHandler(_ => new(System.Net.HttpStatusCode.OK)
             { Content = new StringContent("""{"tree":[],"truncated":true}""") }));
-        var tools = new AdaptationTools(Request(), new(), Path.Combine(root, "workspace"), Compiler(new ScriptedRunner()),
+        var tools = new AdaptationTools(Request(), new(), Path.Combine(root, "workspace"), Runtime(new ScriptedRunner()),
             new LocalAdapterPackageStore(Path.Combine(root, "store")), client);
         using var read = JsonDocument.Parse(await tools.ExecuteAsync(new("tree", "fetch_url",
             """{"url":"https://api.github.com/repos/example/repo/git/trees/main?recursive=1","query":"Bishop"}"""), default));
@@ -815,7 +827,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
     {
         using var client = new HttpClient(new ResearchHandler(_ => new(System.Net.HttpStatusCode.OK)
             { Content = new StringContent(new string('x', 8 * 1024 * 1024 + 1)) }));
-        var tools = new AdaptationTools(Request(), new(), Path.Combine(root, "workspace"), Compiler(new ScriptedRunner()),
+        var tools = new AdaptationTools(Request(), new(), Path.Combine(root, "workspace"), Runtime(new ScriptedRunner()),
             new LocalAdapterPackageStore(Path.Combine(root, "store")), client);
         var error = await Assert.ThrowsAsync<InvalidDataException>(() => tools.ExecuteAsync(new("large", "fetch_url",
             """{"url":"https://example.com/large","query":"Bishop"}"""), default));
@@ -861,7 +873,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
                 ? new(new("assistant", ToolCalls: [new("save", "checkpoint", """{"summary":"Reuse the Renpy parser; verify the font next."}""")]), new(100, 20))
                 : Blocked("needs_input", "需要启动反馈。", "提供游戏运行报错。");
         });
-        await new AutomaticAdaptationService(model, Compiler(runner), store, builtinTrial: trial).AdaptAsync(request);
+        await new AutomaticAdaptationService(model, Runtime(runner), store, builtinTrial: trial).AdaptAsync(request);
         Assert.Equal(2, model.Calls);
         var statePath = Path.Combine(store.WorkDirectory, "current", "session.json");
         var first = JsonSerializer.Deserialize<AdaptationSession>(await File.ReadAllTextAsync(statePath), Json)!;
@@ -877,7 +889,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         Assert.False(Directory.Exists(Path.Combine(store.WorkDirectory, "current", "src")));
         Assert.Null(store.LoadActive(request.GameId));
 
-        await new AutomaticAdaptationService(model, Compiler(runner), store, builtinTrial: trial)
+        await new AutomaticAdaptationService(model, Runtime(runner), store, builtinTrial: trial)
             .AdaptAsync(request with { BuiltinProbes = null });
         Assert.Equal(3, model.Calls);
         var resumed = JsonSerializer.Deserialize<AdaptationSession>(await File.ReadAllTextAsync(statePath), Json)!;
@@ -893,7 +905,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         var request = Request();
         var workspace = Path.Combine(root, "workspace");
         var state = new AdaptationSession();
-        var tools = new AdaptationTools(request, state, workspace, Compiler(new ScriptedRunner()),
+        var tools = new AdaptationTools(request, state, workspace, Runtime(new ScriptedRunner()),
             new LocalAdapterPackageStore(Path.Combine(root, "store")));
         using var first = JsonDocument.Parse(await tools.ExecuteAsync(new("list", "list_adapters", """{"query":"Renpy"}"""), default));
         var builtin = Assert.Single(first.RootElement.GetProperty("result").GetProperty("builtIns").EnumerateArray());
@@ -911,7 +923,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         var request = Request();
         var workspace = Path.Combine(root, "workspace");
         var state = new AdaptationSession { VerifiedPackage = CreatePackage() };
-        var tools = new AdaptationTools(request, state, workspace, Compiler(new ScriptedRunner()),
+        var tools = new AdaptationTools(request, state, workspace, Runtime(new ScriptedRunner()),
             new LocalAdapterPackageStore(Path.Combine(root, "store")));
         using var list = JsonDocument.Parse(await tools.ExecuteAsync(new("list", "list_adapters", """{"query":"cp932"}"""), default));
         Assert.Contains(list.RootElement.GetProperty("result").GetProperty("components").EnumerateArray(),
@@ -923,7 +935,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         await tools.ExecuteAsync(new("copy", "copy_adapter_components", """{"ids":["cp932-glyph-map"]}"""), default);
         Assert.Null(state.VerifiedPackage);
         Assert.Null(tools.PublishedAdapter);
-        Assert.True(File.Exists(Path.Combine(workspace, "src/Components/Cp932GlyphEncoding.cs")));
+        Assert.True(File.Exists(Path.Combine(workspace, "src/tools/gamel10n_host.py")));
         Assert.True(AdaptationTools.CanBatch("inspect_adapter_component"));
         Assert.False(AdaptationTools.CanBatch("copy_adapter_components"));
     }
@@ -945,9 +957,9 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
                 ? new(new("assistant", ToolCalls: [new("save", "checkpoint", """{"summary":"Parser work is pending."}""")]), new(100, 20))
                 : Blocked("needs_input", "需要启动反馈。", "提供游戏运行报错。");
         });
-        await new AutomaticAdaptationService(model, Compiler(new ScriptedRunner()), store).AdaptAsync(request);
+        await new AutomaticAdaptationService(model, Runtime(new ScriptedRunner()), store).AdaptAsync(request);
         Assert.Equal(2, model.Calls);
-        await new AutomaticAdaptationService(model, Compiler(new ScriptedRunner()), store).AdaptAsync(request);
+        await new AutomaticAdaptationService(model, Runtime(new ScriptedRunner()), store).AdaptAsync(request);
         Assert.Equal(3, model.Calls);
     }
 
@@ -969,7 +981,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
             Assert.True(toolIndex >= 0 && evidenceIndex > toolIndex);
             return Blocked("needs_input", "需要启动反馈。", "提供游戏运行报错。");
         });
-        await new AutomaticAdaptationService(model, Compiler(new ScriptedRunner()), store).AdaptAsync(request);
+        await new AutomaticAdaptationService(model, Runtime(new ScriptedRunner()), store).AdaptAsync(request);
         Assert.Equal(1, model.Calls);
     }
 
@@ -977,7 +989,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
     public async Task HostRejectsUndeclaredLauncherEvenWhenTextRoundtripWorks()
     {
         var request = Request();
-        var compiler = Compiler(new ScriptedRunner { UndeclaredLaunchScript = true });
+        var compiler = LegacyCompiler(new ScriptedRunner { UndeclaredLaunchScript = true });
         var package = await compiler.CompileAsync("// fixture", Path.Combine(root, "compile"), ["script.txt"],
             family: new("template", "launcher-test", "Launcher fixture"));
         var adapter = new GeneratedGameAdapter(package, compiler.Toolchain, compiler.Runner, Path.Combine(root, "run"));
@@ -986,6 +998,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Contains("未声明启动入口", StringComparison.Ordinal));
         Assert.False(File.Exists(Path.Combine(request.GameDirectory, "start.cmd")));
     }
+
 
     [Fact]
     public async Task TestingRequiresLocaleProfileAlongsideItsSelectedExecutable()
@@ -997,7 +1010,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         var state = new AdaptationSession { LaunchInspection = await GameLaunchInspector.InspectAsync(request.GameDirectory),
             ResourceHashes = new() { ["game.exe"] = "fixture" } };
         var store = new LocalAdapterPackageStore(Path.Combine(root, "store"));
-        var tools = new AdaptationTools(request, state, Path.Combine(root, "workspace"), Compiler(new ScriptedRunner()), store);
+        var tools = new AdaptationTools(request, state, Path.Combine(root, "workspace"), Runtime(new ScriptedRunner()), store);
         var error = await Assert.ThrowsAsync<InvalidDataException>(() => tools.ExecuteAsync(new("test", "test_adapter",
             """{"kind":"template","key":"locale-test","name":"Locale fixture","resourcePatterns":["*.exe"]}"""), default));
         Assert.Contains("game.exe.le.config", error.Message);
@@ -1015,7 +1028,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
                 new("progress", "report_progress", """{"kind":"breakthrough","message":"已确认索引结构，正在实现回填。"}"""),
                 new("save", "checkpoint", """{"summary":"Index understood; implement writer."}""")]), new(100, 20))
             : new(new("assistant", ToolCalls: [new("list", "list_files", """{"root":"workspace"}""")]), new(100, 20)));
-        var result = await new AutomaticAdaptationService(model, Compiler(new ScriptedRunner()), store)
+        var result = await new AutomaticAdaptationService(model, Runtime(new ScriptedRunner()), store)
             .AdaptAsync(Request() with { Limits = new(MaximumTurns: 2) }, progress: updates);
         Assert.Equal("breakthrough", result.ProgressNote!.Kind);
         Assert.Equal(result.ProgressNote, result.LastBreakthrough);
@@ -1038,7 +1051,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
                 new("write", "write_file", """{"path":"src/unwanted.cs","content":"fixture"}"""),
                 new("list", "list_files", """{"root":"workspace"}""")]), new(100, 20))
             : new(new("assistant", ToolCalls: [new("progress-alone", "report_progress", """{"kind":"verified","message":"已通过所有检查。"}""")]), new(100, 20)));
-        var result = await new AutomaticAdaptationService(model, Compiler(new ScriptedRunner()), store)
+        var result = await new AutomaticAdaptationService(model, Runtime(new ScriptedRunner()), store)
             .AdaptAsync(Request() with { Limits = new(MaximumTurns: 2) });
         Assert.Null(result.ProgressNote);
         Assert.False(File.Exists(Path.Combine(store.WorkDirectory, "current/src/unwanted.cs")));
@@ -1061,7 +1074,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
             return new(new("assistant", implementation, [new("files", "list_files", """{"root":"workspace"}""")]), new(100, 20));
         });
         var request = Request() with { Limits = new(MaximumTurns: 2) };
-        var result = await new AutomaticAdaptationService(model, Compiler(new ScriptedRunner()), store).AdaptAsync(request, progress: updates);
+        var result = await new AutomaticAdaptationService(model, Runtime(new ScriptedRunner()), store).AdaptAsync(request, progress: updates);
         Assert.Equal(2, model.Calls);
         Assert.Equal(AdaptationStatus.BudgetExhausted, result.Status);
         Assert.Null(result.Adapter);
@@ -1079,7 +1092,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
                 && message.Content.Contains(result.ProgressNote.Message, StringComparison.Ordinal));
             return new(new("assistant", ToolCalls: [new("files-again", "list_files", """{"root":"workspace"}""")]), new(100, 20));
         });
-        var resumed = await new AutomaticAdaptationService(continued, Compiler(new ScriptedRunner()), store)
+        var resumed = await new AutomaticAdaptationService(continued, Runtime(new ScriptedRunner()), store)
             .AdaptAsync(request with { Limits = new(MaximumTurns: 1) });
         Assert.Equal(1, continued.Calls);
         Assert.Equal(result.ProgressNote, resumed.ProgressNote);
@@ -1094,7 +1107,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         const string firstText = "关键突破：字符映射探针通过。";
         async Task<AdaptationResult> Run(string text) => await new AutomaticAdaptationService(
             new FakeModel(_ => new(new("assistant", text, [new(Guid.NewGuid().ToString("N"), "list_files", """{"root":"workspace"}""")]), new(100, 20))),
-            Compiler(new ScriptedRunner()), store).AdaptAsync(request);
+            Runtime(new ScriptedRunner()), store).AdaptAsync(request);
 
         var first = await Run(firstText);
         Assert.Equal(first.ProgressNote, (await Run(firstText)).ProgressNote);
@@ -1120,7 +1133,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
     {
         var model = new FakeModel(_ => throw new InvalidOperationException("The model should not be called."));
         var adapter = new ExistingAdapter();
-        var service = new AutomaticAdaptationService(model, Compiler(new ScriptedRunner()), new LocalAdapterPackageStore(Path.Combine(root, "store")));
+        var service = new AutomaticAdaptationService(model, Runtime(new ScriptedRunner()), new LocalAdapterPackageStore(Path.Combine(root, "store")));
         var result = await service.AdaptAsync(Request([adapter]));
         Assert.Equal(AdaptationStatus.Reused, result.Status);
         Assert.Same(adapter, result.Adapter);
@@ -1132,7 +1145,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
     public async Task MissingToolchainDoesNotCallModelOrLeaveAWorkspace()
     {
         var model = new FakeModel(_ => throw new Exception("No API expected"));
-        var compiler = Compiler(new ScriptedRunner());
+        var compiler = Runtime(new ScriptedRunner());
         File.Delete(compiler.Toolchain.ExecutablePath);
         var store = new LocalAdapterPackageStore(Path.Combine(root, "store"));
         var result = await new AutomaticAdaptationService(model, compiler, store).AdaptAsync(Request());
@@ -1145,18 +1158,18 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
     public async Task CompletedToolResultsAndSourceSurviveRestart()
     {
         var model = new FakeModel(_ => new(new("assistant", ToolCalls:
-            [new("write-1", "write_file", "{\"path\":\"src/Program.cs\",\"content\":\"// saved source\"}")]), new(100, 40)));
+            [new("write-1", "write_file", "{\"path\":\"src/adapter.py\",\"content\":\"// saved source\"}")]), new(100, 40)));
         var store = new LocalAdapterPackageStore(Path.Combine(root, "store"));
         var request = Request() with { Limits = new(MaximumTurns: 1) };
-        var first = await new AutomaticAdaptationService(model, Compiler(new ScriptedRunner()), store).AdaptAsync(request);
+        var first = await new AutomaticAdaptationService(model, Runtime(new ScriptedRunner()), store).AdaptAsync(request);
         Assert.Equal(AdaptationStatus.BudgetExhausted, first.Status);
-        Assert.Equal("// saved source", await File.ReadAllTextAsync(Path.Combine(store.WorkDirectory, "current", "src", "Program.cs")));
+        Assert.Equal("// saved source", await File.ReadAllTextAsync(Path.Combine(store.WorkDirectory, "current", "src", "adapter.py")));
         var resumedModel = new FakeModel(context =>
         {
             Assert.Contains(context.Messages, message => message.Role == "tool" && message.ToolCallId == "write-1");
             return new(new("assistant", "需要继续验证。"), new(100, 20));
         });
-        var resumed = await new AutomaticAdaptationService(resumedModel, Compiler(new ScriptedRunner()), store).AdaptAsync(request);
+        var resumed = await new AutomaticAdaptationService(resumedModel, Runtime(new ScriptedRunner()), store).AdaptAsync(request);
         Assert.Equal(AdaptationStatus.BudgetExhausted, resumed.Status);
         Assert.Equal(1, resumedModel.Calls);
         Assert.Equal(260, resumed.Usage.TotalTokens);
@@ -1175,7 +1188,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
             Assert.Contains("false", result.Content);
             return new(new("assistant", "已收到路径错误。"), new(60, 10));
         });
-        var result = await new AutomaticAdaptationService(model, Compiler(new ScriptedRunner()),
+        var result = await new AutomaticAdaptationService(model, Runtime(new ScriptedRunner()),
             new LocalAdapterPackageStore(Path.Combine(root, "store"))).AdaptAsync(Request());
         Assert.Equal(AdaptationStatus.Incomplete, result.Status);
         Assert.Equal(3, model.Calls);
@@ -1186,9 +1199,9 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
     public async Task ProviderUsageOverBudgetCannotExecuteReturnedTools()
     {
         var model = new FakeModel(_ => new(new("assistant", ToolCalls:
-            [new("write-1", "write_file", "{\"path\":\"src/Program.cs\",\"content\":\"not executed\"}")]), new(100_000, 100_000)));
+            [new("write-1", "write_file", "{\"path\":\"src/adapter.py\",\"content\":\"not executed\"}")]), new(100_000, 100_000)));
         var store = new LocalAdapterPackageStore(Path.Combine(root, "store"));
-        var result = await new AutomaticAdaptationService(model, Compiler(new ScriptedRunner()), store)
+        var result = await new AutomaticAdaptationService(model, Runtime(new ScriptedRunner()), store)
             .AdaptAsync(Request() with { Limits = new(MaximumTokens: 100_000) });
         Assert.Equal(AdaptationStatus.BudgetExhausted, result.Status);
         Assert.Equal(1, model.Calls);
@@ -1217,7 +1230,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
                     return Blocked("needs_input", "当前设置的字体名无法从资源中确认。", "请在游戏设置中查看当前字体名，填写到补充要求后继续。");
             }
         });
-        var result = await new AutomaticAdaptationService(model, Compiler(new ScriptedRunner()), store).AdaptAsync(Request());
+        var result = await new AutomaticAdaptationService(model, Runtime(new ScriptedRunner()), store).AdaptAsync(Request());
         Assert.Equal(AdaptationStatus.WaitingForUser, result.Status);
         Assert.Equal(3, model.Calls);
         Assert.Contains("当前字体名", result.NextAction);
@@ -1253,7 +1266,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
                 default: return Blocked("needs_input", "已生成可检查的字体证据，但需要确认原版在本机的显示。", "请描述原版相同位置的字体显示情况。");
             }
         });
-        var result = await new AutomaticAdaptationService(model, Compiler(new ScriptedRunner()), store).AdaptAsync(Request());
+        var result = await new AutomaticAdaptationService(model, Runtime(new ScriptedRunner()), store).AdaptAsync(Request());
         Assert.Equal(AdaptationStatus.WaitingForUser, result.Status);
         Assert.Equal(3, model.Calls);
         Assert.True(File.Exists(Path.Combine(store.WorkDirectory, "current", "work", "next.md")));
@@ -1266,7 +1279,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         var model = new FakeModel(_ => new(new("assistant", ToolCalls: [new("stop", "report_blocker", """
             {"kind":"unsupported","summary":"尚未完成。","reason":"还需要分析编码。","nextAction":"继续分析字符遍历。"}
             """)]), new(100, 20)));
-        var result = await new AutomaticAdaptationService(model, Compiler(new ScriptedRunner()),
+        var result = await new AutomaticAdaptationService(model, Runtime(new ScriptedRunner()),
             new LocalAdapterPackageStore(Path.Combine(root, "store"))).AdaptAsync(Request());
         Assert.Equal(AdaptationStatus.Incomplete, result.Status);
         Assert.True(result.Blocker!.WorkRemaining);
@@ -1279,7 +1292,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
     public async Task RepeatedPlainSummariesStopWithoutClaimingSuccessOrSpendingIndefinitely()
     {
         var model = new FakeModel(_ => new(new("assistant", "适配完成了。"), new(100, 20)));
-        var result = await new AutomaticAdaptationService(model, Compiler(new ScriptedRunner()),
+        var result = await new AutomaticAdaptationService(model, Runtime(new ScriptedRunner()),
             new LocalAdapterPackageStore(Path.Combine(root, "store"))).AdaptAsync(Request());
         Assert.Equal(AdaptationStatus.Incomplete, result.Status);
         Assert.Equal(2, model.Calls);
@@ -1294,7 +1307,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         var store = new LocalAdapterPackageStore(Path.Combine(root, "store"));
         var request = Request();
         await new AutomaticAdaptationService(new FakeModel(_ => Blocked("needs_input", "需要确认字体名称。", "请查看字体设置。")),
-            Compiler(new ScriptedRunner()), store).AdaptAsync(request);
+            Runtime(new ScriptedRunner()), store).AdaptAsync(request);
         const string feedback = "字体名称为 SimSun；保留原启动程序。";
         var turn = 0;
         var model = new FakeModel(context =>
@@ -1307,7 +1320,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
             }
             return Blocked("unsupported", "工具尚不支持此字库版本。", "提供支持此版本的字库工具链接后可以继续。");
         });
-        var result = await new AutomaticAdaptationService(model, Compiler(new ScriptedRunner()), store)
+        var result = await new AutomaticAdaptationService(model, Runtime(new ScriptedRunner()), store)
             .AdaptAsync(request with { UserInstruction = feedback });
         Assert.Equal(AdaptationStatus.Unsupported, result.Status);
         Assert.False(result.Blocker!.RequiresUserInput);
@@ -1324,7 +1337,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
     {
         var adapter = new ExistingAdapter();
         var model = new FakeModel(_ => Blocked("needs_input", "需要缺失的语言资源包。", "补齐资源包后继续。"));
-        var result = await new AutomaticAdaptationService(model, Compiler(new ScriptedRunner()),
+        var result = await new AutomaticAdaptationService(model, Runtime(new ScriptedRunner()),
             new LocalAdapterPackageStore(Path.Combine(root, "store"))).AdaptAsync(Request([adapter]) with
             {
                 ImproveExisting = explicitImprovement,
@@ -1362,7 +1375,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
             Assert.Contains("保留已有文本的 ID、上下文和类型", continuation);
             return Blocked("needs_input", "尚缺一个资源包。", "补齐资源包后继续。" );
         });
-        var result = await new AutomaticAdaptationService(model, Compiler(new ScriptedRunner()), store).AdaptAsync(request);
+        var result = await new AutomaticAdaptationService(model, Runtime(new ScriptedRunner()), store).AdaptAsync(request);
         Assert.Equal(AdaptationStatus.WaitingForUser, result.Status);
         Assert.Equal(1, model.Calls);
         Assert.Equal("// confirmed parser", await File.ReadAllTextAsync(source));
@@ -1384,7 +1397,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
             Assert.Contains(context.Messages, item => item.Role == "user" && item.Content.Contains("仅调查", StringComparison.Ordinal));
             return Blocked("unsupported", "目前缺少兼容工具。", "可补充工具来源后继续调查。");
         });
-        var result = await new AutomaticAdaptationService(model, Compiler(new ScriptedRunner()), store)
+        var result = await new AutomaticAdaptationService(model, Runtime(new ScriptedRunner()), store)
             .AdaptAsync(request with { UserInstruction = "仅调查，不修改已有源码。" });
         Assert.Equal(AdaptationStatus.Unsupported, result.Status);
         Assert.False(File.Exists(Path.Combine(store.WorkDirectory, "current", "src", "obsolete.cs")));
@@ -1431,7 +1444,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
             Assert.Contains("Investigate FNL font table next", restored.Content);
             return Blocked("needs_input", "需要确认显示设置。", "提供字体设置名称后继续。");
         });
-        var result = await new AutomaticAdaptationService(model, Compiler(new ScriptedRunner()), store).AdaptAsync(request);
+        var result = await new AutomaticAdaptationService(model, Runtime(new ScriptedRunner()), store).AdaptAsync(request);
         Assert.Equal(AdaptationStatus.WaitingForUser, result.Status);
         Assert.Null(localAdapter.ProbedDirectory);
         Assert.Equal("// existing parser", await File.ReadAllTextAsync(Path.Combine(workspace, "src", "Parser.cs")));
@@ -1453,14 +1466,14 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
             if (turn++ == 0)
             {
                 Assert.Contains(context.Messages, item => item.Role == "user" && item.Content.Contains("下一步先调用 checkpoint", StringComparison.Ordinal));
-                return new(new("assistant", ToolCalls: [new("save", "checkpoint", """{"summary":"Engine identified; parser in src/Parser.cs; byte roundtrip passed; font support pending."}""")]), new(100, 30));
+                return new(new("assistant", ToolCalls: [new("save", "checkpoint", """{"summary":"Engine identified; parser in src/Parser.py; byte roundtrip passed; font support pending."}""")]), new(100, 30));
             }
             var compacted = Assert.Single(context.Messages);
             Assert.Contains("byte roundtrip passed", compacted.Content);
             Assert.DoesNotContain(new string('x', 1000), compacted.Content);
             return Blocked("needs_input", "需要运行反馈。", "提供游戏字体设置名称后继续。");
         });
-        var result = await new AutomaticAdaptationService(model, Compiler(new ScriptedRunner()), store).AdaptAsync(request);
+        var result = await new AutomaticAdaptationService(model, Runtime(new ScriptedRunner()), store).AdaptAsync(request);
         Assert.Equal(2, model.Calls);
         Assert.Equal(AdaptationStatus.WaitingForUser, result.Status);
         var saved = await GameL10n.Core.Storage.LocalFiles.ReadJsonAsync<AdaptationSession>(Path.Combine(store.WorkDirectory, "current", "session.json"));
@@ -1481,7 +1494,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         await LocalFiles.WriteJsonAsync(path, new AdaptationSession
         {
             GameId = request.GameId, GameDirectory = request.GameDirectory, ModelIdentity = "fake",
-            Notes = "Confirmed byte roundtrip; implement partial writer in src/Parser.cs.",
+            Notes = "Confirmed byte roundtrip; implement partial writer in src/Parser.py.",
             VerificationDiagnostics = ["[partial-translation-re-extraction] Partial write mismatch at unit 7."],
             Messages = [new("user", "repair"), new("assistant", original + new string('x', 210_000)),
                 new("assistant", ToolCalls: [new("old-failure", "test_adapter", "{}")]),
@@ -1518,7 +1531,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
                     return Blocked("needs_input", "需要实际显示反馈。", "提供反馈后继续。");
             }
         });
-        var result = await new AutomaticAdaptationService(model, Compiler(new ScriptedRunner()), store).AdaptAsync(request);
+        var result = await new AutomaticAdaptationService(model, Runtime(new ScriptedRunner()), store).AdaptAsync(request);
         Assert.True(result.Status == AdaptationStatus.WaitingForUser, string.Join("\n", result.Diagnostics));
         Assert.Equal(4, model.Calls);
         var saved = (await LocalFiles.ReadJsonAsync<AdaptationSession>(path))!;
@@ -1535,7 +1548,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
             return Blocked("needs_input", "需要实际显示反馈。", "提供反馈后继续。");
         });
         Assert.Equal(AdaptationStatus.WaitingForUser,
-            (await new AutomaticAdaptationService(resumed, Compiler(new ScriptedRunner()), store).AdaptAsync(request)).Status);
+            (await new AutomaticAdaptationService(resumed, Runtime(new ScriptedRunner()), store).AdaptAsync(request)).Status);
         Assert.Equal(2, resumed.Calls);
     }
 
@@ -1558,7 +1571,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
                 ? new(new("assistant", ToolCalls: [new("save", "checkpoint", """{"summary":"Known sample; implement parser."}""")]), new(100, 20))
                 : Blocked("needs_input", "需要显示反馈。", "提供字体设置名称。");
         });
-        var result = await new AutomaticAdaptationService(model, Compiler(new ScriptedRunner()), store).AdaptAsync(request);
+        var result = await new AutomaticAdaptationService(model, Runtime(new ScriptedRunner()), store).AdaptAsync(request);
         Assert.Equal(3, model.Calls);
         Assert.Equal(AdaptationStatus.WaitingForUser, result.Status);
     }
@@ -1582,7 +1595,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
                 new("one", "write_file", """{"path":"work/one.txt","content":"first"}"""),
                 new("two", "write_file", """{"path":"work/two.txt","content":"second"}"""),
                 new("run", "run_tool", """{"executable":"dotnet","arguments":["--probe"]}""")]), new(100, 20)));
-        var result = await new AutomaticAdaptationService(model, Compiler(runner), store).AdaptAsync(request);
+        var result = await new AutomaticAdaptationService(model, Runtime(runner), store).AdaptAsync(request);
         Assert.Equal(AdaptationStatus.WaitingForUser, result.Status);
         Assert.Equal(2, model.Calls);
         Assert.Equal(1, runs);
@@ -1607,7 +1620,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
             Assert.Contains("本步骤未执行", Assert.Single(context.Messages, message => message.ToolCallId == "run").Content);
             return Blocked("needs_input", "需要信息。", "提供反馈。");
         });
-        await new AutomaticAdaptationService(model, Compiler(new ProbeRunner(_ => Assert.Fail("Dependent run executed"))), store).AdaptAsync(request);
+        await new AutomaticAdaptationService(model, Runtime(new ProbeRunner(_ => Assert.Fail("Dependent run executed"))), store).AdaptAsync(request);
         Assert.False(File.Exists(Path.Combine(store.WorkDirectory, "current/src/should-not-run.cs")));
         Assert.Equal(2, model.Calls);
     }
@@ -1639,7 +1652,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
             Assert.Equal(2, context.Messages.Count(message => message.Role == "tool"));
             return Blocked("needs_input", "需要信息。", "提供反馈。");
         });
-        await new AutomaticAdaptationService(model, Compiler(new ProbeRunner(_ => runs++)), store).AdaptAsync(request);
+        await new AutomaticAdaptationService(model, Runtime(new ProbeRunner(_ => runs++)), store).AdaptAsync(request);
         Assert.Equal(interrupted ? 0 : 1, runs);
         var saved = await GameL10n.Core.Storage.LocalFiles.ReadJsonAsync<AdaptationSession>(path);
         Assert.False(saved!.PendingCallsAreSequential);
@@ -1657,14 +1670,14 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
             if (turn++ == 24)
             {
                 Assert.Contains(context.Messages, message => message.Content.StartsWith("收敛检查："));
-                return new(new("assistant", ToolCalls: [new("implement", "write_file", """{"path":"src/Parser.cs","content":"// implementation"}""")]), new(100, 20));
+                return new(new("assistant", ToolCalls: [new("implement", "write_file", """{"path":"src/Parser.py","content":"// implementation"}""")]), new(100, 20));
             }
             if (turn > 25) return Blocked("needs_input", "需要反馈。", "提供画面。");
             return new(new("assistant", ToolCalls: [turn % 6 == 0
                 ? new("checkpoint" + turn, "checkpoint", """{"summary":"Read sample; implement parser next."}""")
                 : new("read" + turn, "read_file", """{"root":"game","path":"script.txt","encoding":"utf8"}""")]), new(100, 20));
         });
-        var result = await new AutomaticAdaptationService(model, Compiler(new ScriptedRunner()), store).AdaptAsync(request);
+        var result = await new AutomaticAdaptationService(model, Runtime(new ScriptedRunner()), store).AdaptAsync(request);
         Assert.Equal(AdaptationStatus.WaitingForUser, result.Status);
         var saved = await GameL10n.Core.Storage.LocalFiles.ReadJsonAsync<AdaptationSession>(Path.Combine(store.WorkDirectory, "current/session.json"));
         Assert.Equal(24, saved!.LastEfficiencyReviewTurn);
@@ -1675,9 +1688,9 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
     public async Task UnchangedSourceDoesNotResetImplementationProgressOrInvalidateVerification()
     {
         var state = new AdaptationSession { TotalTurns = 8 };
-        var tools = new AdaptationTools(Request(), state, Path.Combine(root, "workspace"), Compiler(new ScriptedRunner()),
+        var tools = new AdaptationTools(Request(), state, Path.Combine(root, "workspace"), Runtime(new ScriptedRunner()),
             new LocalAdapterPackageStore(Path.Combine(root, "store")));
-        AgentToolCall call = new("write", "write_file", """{"path":"src/Parser.cs","content":"// same bytes"}""");
+        AgentToolCall call = new("write", "write_file", """{"path":"src/Parser.py","content":"// same bytes"}""");
         await tools.ExecuteAsync(call, default);
         var verified = CreatePackage();
         state.VerifiedPackage = verified;
@@ -1687,7 +1700,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         Assert.Equal(8, state.LastImplementationTurn);
         Assert.Same(verified, state.VerifiedPackage);
         var error = await Assert.ThrowsAsync<InvalidDataException>(() => tools.ExecuteAsync(new("read", "read_file",
-            """{"root":"workspace","path":"src/Parser.cs","length":50000}"""), default));
+            """{"root":"workspace","path":"src/Parser.py","length":50000}"""), default));
         Assert.Contains("32768", error.Message);
         Assert.Contains("50000", error.Message);
     }
@@ -1699,14 +1712,14 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
     {
         var workspace = Path.Combine(root, "workspace");
         Directory.CreateDirectory(Path.Combine(workspace, "src"));
-        var file = Path.Combine(workspace, "src/Parser.cs");
+        var file = Path.Combine(workspace, "src/Parser.py");
         const string original = "// 保留\r\nkeep keep\r\nreturn 1;\r\n";
         await File.WriteAllTextAsync(file, original, new UTF8Encoding(bom));
         var state = new AdaptationSession { VerifiedPackage = CreatePackage(), TotalTurns = 9 };
-        var tools = new AdaptationTools(Request(), state, workspace, Compiler(new ScriptedRunner()),
+        var tools = new AdaptationTools(Request(), state, workspace, Runtime(new ScriptedRunner()),
             new LocalAdapterPackageStore(Path.Combine(root, "store")));
         async Task<JsonDocument> Replace(string oldText, string newText) => JsonDocument.Parse(await tools.ExecuteAsync(
-            new("edit", "replace_text", JsonSerializer.Serialize(new { path = "src/Parser.cs", oldText, newText })), default));
+            new("edit", "replace_text", JsonSerializer.Serialize(new { path = "src/Parser.py", oldText, newText })), default));
         using var changed = await Replace("return 1;", "return 2;");
         Assert.True(changed.RootElement.GetProperty("success").GetBoolean());
         Assert.Null(state.VerifiedPackage);
@@ -1731,7 +1744,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         await File.WriteAllTextAsync(Path.Combine(workspace, "src/nested/Parser.cs"), content, new UTF8Encoding(false));
         await File.WriteAllTextAsync(Path.Combine(workspace, "src/.env.json"), "needle secret");
         await File.WriteAllTextAsync(Path.Combine(workspace, "src/game.ypf"), "needle binary");
-        var tools = new AdaptationTools(Request(), new(), workspace, Compiler(new ScriptedRunner()),
+        var tools = new AdaptationTools(Request(), new(), workspace, Runtime(new ScriptedRunner()),
             new LocalAdapterPackageStore(Path.Combine(root, "store")));
         var found = new List<long>();
         var offset = 0;
@@ -1764,7 +1777,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
     {
         var request = Request();
         var state = new AdaptationSession { VerifiedPackage = CreatePackage() };
-        var tools = new AdaptationTools(request, state, Path.Combine(root, "workspace"), Compiler(new ScriptedRunner()),
+        var tools = new AdaptationTools(request, state, Path.Combine(root, "workspace"), Runtime(new ScriptedRunner()),
             new LocalAdapterPackageStore(Path.Combine(root, "store")));
         const string report = "中文字段布局\nWeightEffect: Action, Metric; stride=8";
         await tools.ExecuteAsync(new("write", "write_file", JsonSerializer.Serialize(new { path = "work/layout.txt", content = report })), default);
@@ -1793,7 +1806,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         var request = Request();
         var workspace = Path.Combine(root, "workspace");
         Directory.CreateDirectory(Path.Combine(workspace, "src/tools"));
-        await File.WriteAllTextAsync(Path.Combine(workspace, "src/Program.cs"), "// fixture");
+        await File.WriteAllTextAsync(Path.Combine(workspace, "src/adapter.py"), "# fixture");
         await File.WriteAllTextAsync(Path.Combine(workspace, "src/tools/data.txt"), "dependency");
         var runner = new ScriptedRunner
         {
@@ -1801,8 +1814,8 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
             {
                 var relative = change switch
                 {
-                    "source" or "removed-source" => "src/Program.cs", "dependency" => "src/tools/data.txt",
-                    "resource" => "resources/script.txt", "added-source" => "src/Extra.cs", _ => "work/report.txt"
+                    "source" or "removed-source" => "src/adapter.py", "dependency" => "src/tools/data.txt",
+                    "resource" => "resources/script.txt", "added-source" => "src/Extra.py", _ => "work/report.txt"
                 };
                 var path = Path.Combine(workspace, relative);
                 Directory.CreateDirectory(Path.GetDirectoryName(path)!);
@@ -1812,10 +1825,10 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         };
         var store = new LocalAdapterPackageStore(Path.Combine(root, "store"));
         var state = new AdaptationSession();
-        var tools = new AdaptationTools(request, state, workspace, Compiler(runner), store);
+        var tools = new AdaptationTools(request, state, workspace, Runtime(runner), store);
         await tools.ExecuteAsync(new("stage", "stage_resources", """{"files":["script.txt"]}"""), default);
         await tools.ExecuteAsync(new("verify", "test_adapter",
-            """{"kind":"template","key":"line-script","name":"Line script","resourcePatterns":["*.txt"],"releaseFiles":[{"path":"src/Program.cs","role":"source","purpose":"Fixture parser"},{"path":"tools/data.txt","role":"asset","purpose":"Fixture dependency"}]}"""), default);
+            """{"kind":"template","key":"line-script","name":"Line script","resourcePatterns":["*.txt"],"releaseFiles":[{"path":"src/adapter.py","role":"source","purpose":"Fixture parser"},{"path":"tools/data.txt","role":"asset","purpose":"Fixture dependency"}]}"""), default);
         Assert.NotNull(state.VerifiedPackage);
         await tools.ExecuteAsync(new("run", "run_tool", """{"executable":"dotnet","arguments":["--probe"]}"""), default);
         var publish = new AgentToolCall("finish", "finish", """{"summary":"verified fixture"}""");
@@ -1843,7 +1856,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
             Assert.Contains(context.Messages, message => message.Content.Contains("stride 8"));
             return Blocked("needs_input", "需要显示反馈。", "提供画面。");
         });
-        await new AutomaticAdaptationService(model, Compiler(new ScriptedRunner()), new(Path.Combine(root, "store"))).AdaptAsync(Request());
+        await new AutomaticAdaptationService(model, Runtime(new ScriptedRunner()), new(Path.Combine(root, "store"))).AdaptAsync(Request());
         Assert.Equal(3, model.Calls);
     }
 
@@ -1867,7 +1880,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
             Assert.Contains(context.Messages, message => message.ToolCallId == "read0" && message.Content.Contains("identicalTo"));
             return Blocked("needs_input", "需要显示反馈。", "提供画面。");
         });
-        await new AutomaticAdaptationService(model, Compiler(new ScriptedRunner()), store).AdaptAsync(request);
+        await new AutomaticAdaptationService(model, Runtime(new ScriptedRunner()), store).AdaptAsync(request);
     }
 
     [Fact]
@@ -1886,7 +1899,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
             Assert.All(results, message => Assert.Contains("本批未执行", message.Content));
             return Blocked("needs_input", "需要显示反馈。", "提供字体设置名称。");
         });
-        await new AutomaticAdaptationService(model, Compiler(new ScriptedRunner()), store).AdaptAsync(request);
+        await new AutomaticAdaptationService(model, Runtime(new ScriptedRunner()), store).AdaptAsync(request);
         Assert.False(File.Exists(Path.Combine(store.WorkDirectory, "current", "src", "unwanted.cs")));
     }
 
@@ -1904,7 +1917,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
             Assert.DoesNotContain(context.Messages, message => message.Content.StartsWith("当前会话较长。下一步先调用 checkpoint"));
             return Blocked("needs_input", "需要显示反馈。", "提供字体设置名称。");
         });
-        await new AutomaticAdaptationService(model, Compiler(new ScriptedRunner()), store).AdaptAsync(request);
+        await new AutomaticAdaptationService(model, Runtime(new ScriptedRunner()), store).AdaptAsync(request);
         Assert.Equal(1, model.Calls);
     }
 
@@ -1932,7 +1945,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
             Assert.Equal(new string('中', 12_000), replay[1].GetProperty("content")[0].GetProperty("text").GetString());
             return Blocked("needs_input", "需要实际运行反馈。", "提供试译画面的显示情况后继续。");
         });
-        var result = await new AutomaticAdaptationService(model, Compiler(new ScriptedRunner()), store).AdaptAsync(request);
+        var result = await new AutomaticAdaptationService(model, Runtime(new ScriptedRunner()), store).AdaptAsync(request);
         Assert.Equal(AdaptationStatus.WaitingForUser, result.Status);
         Assert.Equal(1, model.Calls);
     }
@@ -1971,7 +1984,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
             Assert.Contains("decisive-finding-0", Assert.Single(context.Messages, message => message.ToolCallId == "recover").Content);
             return Blocked("needs_input", "需要显示反馈。", "提供试译画面。");
         });
-        var result = await new AutomaticAdaptationService(model, Compiler(new ScriptedRunner()), store).AdaptAsync(request);
+        var result = await new AutomaticAdaptationService(model, Runtime(new ScriptedRunner()), store).AdaptAsync(request);
         Assert.Equal(AdaptationStatus.WaitingForUser, result.Status);
         Assert.Equal(2, model.Calls);
         var saved = await GameL10n.Core.Storage.LocalFiles.ReadJsonAsync<AdaptationSession>(path);
@@ -1986,11 +1999,11 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         var turn = 0;
         var model = new FakeModel(_ => turn++ switch
         {
-            0 => new(new("assistant", ToolCalls: [new("write", "write_file", JsonSerializer.Serialize(new { path = "work/probe.cs", content = sourceText }))]), new(100, 30)),
+            0 => new(new("assistant", ToolCalls: [new("write", "write_file", JsonSerializer.Serialize(new { path = "work/probe.py", content = sourceText }))]), new(100, 30)),
             1 => new(new("assistant", ToolCalls: [new("fail", "read_file", """{"root":"workspace","path":"work/missing.cs"}""")]), new(100, 30)),
             _ => Blocked("needs_input", "缺少用于核对的文件。", "提供对应文件来源后继续。")
         });
-        var result = await new AutomaticAdaptationService(model, Compiler(new ScriptedRunner()), store).AdaptAsync(Request());
+        var result = await new AutomaticAdaptationService(model, Runtime(new ScriptedRunner()), store).AdaptAsync(Request());
         Assert.Equal(AdaptationStatus.WaitingForUser, result.Status);
         var log = Assert.Single(Directory.GetFiles(Path.Combine(store.RootDirectory, "logs"), "adaptation-*.jsonl"));
         var lines = await File.ReadAllLinesAsync(log);
@@ -2008,7 +2021,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
     {
         using var cancellation = new CancellationTokenSource();
         var model = new WaitingModel(cancellation);
-        var result = await new AutomaticAdaptationService(model, Compiler(new ScriptedRunner()), new LocalAdapterPackageStore(Path.Combine(root, "store")))
+        var result = await new AutomaticAdaptationService(model, Runtime(new ScriptedRunner()), new LocalAdapterPackageStore(Path.Combine(root, "store")))
             .AdaptAsync(Request(), cancellation.Token);
         Assert.Equal(AdaptationStatus.Cancelled, result.Status);
         Assert.Null(result.Adapter);
@@ -2037,7 +2050,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
             else Assert.Contains(context.Messages, item => item.Role == "user" && item.Content.Contains("中断", StringComparison.Ordinal));
             return new(new("assistant", "需要检查已有结果。"), new(40, 20));
         });
-        var result = await new AutomaticAdaptationService(model, Compiler(new ScriptedRunner()), store).AdaptAsync(request);
+        var result = await new AutomaticAdaptationService(model, Runtime(new ScriptedRunner()), store).AdaptAsync(request);
         Assert.Equal(AdaptationStatus.Incomplete, result.Status);
         Assert.False(File.Exists(Path.Combine(store.WorkDirectory, "current", "src", "should-not-run.cs")));
         var saved = await GameL10n.Core.Storage.LocalFiles.ReadJsonAsync<AdaptationSession>(Path.Combine(store.WorkDirectory, "current", "session.json"));
@@ -2054,7 +2067,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         Encoding.UTF8.GetBytes("SCENARIO").CopyTo(contents, contents.Length - 8);
         await File.WriteAllBytesAsync(file, contents);
         var workspace = Path.Combine(root, "workspace");
-        var tools = new AdaptationTools(request, new(), workspace, Compiler(new ScriptedRunner()),
+        var tools = new AdaptationTools(request, new(), workspace, Runtime(new ScriptedRunner()),
             new LocalAdapterPackageStore(Path.Combine(root, "store")));
         var result = await tools.ExecuteAsync(new("read", "read_file",
             """{"root":"game","path":"scenario.ain","offset":1048568,"length":8,"encoding":"utf8"}"""), CancellationToken.None);
@@ -2122,9 +2135,9 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         var store = new LocalAdapterPackageStore(Path.Combine(root, "store"));
         var updates = new List<AdaptationProgressNote>();
         var tools = new AdaptationTools(Request(), state, Path.Combine(root, "workspace"),
-            Compiler(new ScriptedRunner { DropTranslatedUnit = fails }), store,
+            Runtime(new ScriptedRunner { DropTranslatedUnit = fails }), store,
             reportProgress: (_, _) => { if (state.ProgressNote is { } note) updates.Add(note); });
-        await tools.ExecuteAsync(new("write", "write_file", """{"path":"src/Program.cs","content":"// fixture"}"""), default);
+        await tools.ExecuteAsync(new("write", "write_file", """{"path":"src/adapter.py","content":"# fixture"}"""), default);
         await tools.ExecuteAsync(new("stage", "stage_resources", """{"files":["script.txt"]}"""), default);
         await tools.ExecuteAsync(new("test", "test_adapter", """{"kind":"template","key":"line-script","name":"Line script","resourcePatterns":["*.txt"]}"""), default);
         Assert.Equal("verified", state.ProgressNote!.Kind);
@@ -2240,7 +2253,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
     {
         var store = new LocalAdapterPackageStore(Path.Combine(root, "store"));
         var state = new AdaptationSession { VerifiedPackage = CreatePackage() };
-        var tools = new AdaptationTools(Request(), state, Path.Combine(root, "workspace"), Compiler(new ScriptedRunner()), store);
+        var tools = new AdaptationTools(Request(), state, Path.Combine(root, "workspace"), Runtime(new ScriptedRunner()), store);
         var error = await Assert.ThrowsAsync<InvalidDataException>(() => tools.ExecuteAsync(
             new("publish", "finish", """{"summary":"old verification"}"""), default));
         Assert.Contains("重新 test_adapter", error.Message);
@@ -2268,7 +2281,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         var adapter = new ExistingAdapter("engine.fixture");
         await store.SetFamilyEnabledAsync(adapter.Id, false);
         var model = new FakeModel(_ => Blocked("needs_input", "需要格式样本。", "提供样本后继续。"));
-        var result = await new AutomaticAdaptationService(model, Compiler(new ScriptedRunner()), store)
+        var result = await new AutomaticAdaptationService(model, Runtime(new ScriptedRunner()), store)
             .AdaptAsync(Request([adapter]));
         Assert.Null(adapter.ProbedDirectory);
         Assert.NotEqual(AdaptationStatus.Reused, result.Status);
@@ -2301,7 +2314,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         };
         foreach (var format in VnTextPatchFormatCatalog.All.Where(format => format.Extensions.Contains(".txt")))
             await store.SetFamilyEnabledAsync(format.Family.AdapterId, false);
-        var compiler = Compiler(runner);
+        var compiler = Runtime(runner);
         var discovery = new AdapterDiscoveryService(store, () => compiler.Toolchain, runner,
             new EngineReferenceToolkit(Path.Combine(store.RootDirectory, "engine-tools")));
         var analysis = await new GameAnalysisService(new TranslationPipeline(Path.Combine(root, "data")), discovery)
@@ -2340,7 +2353,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
                 ? Blocked("needs_input", "需要实际运行反馈。", "提供画面后继续。")
                 : new(new("assistant", ToolCalls: [new("save", "checkpoint", """{"summary":"Continue repairing the partial writer."}""")]), new(100, 20));
         });
-        var result = await new AutomaticAdaptationService(model, Compiler(runner), store).AdaptAsync(request);
+        var result = await new AutomaticAdaptationService(model, Runtime(runner), store).AdaptAsync(request);
         Assert.Equal(AdaptationStatus.WaitingForUser, result.Status);
         Assert.Equal(2, model.Calls);
         Assert.Equal(previousBuilds, builds);
@@ -2356,7 +2369,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
             CheckEvidence(context);
             return Blocked("needs_input", "需要实际运行反馈。", "提供画面后继续。");
         });
-        await new AutomaticAdaptationService(resumedModel, Compiler(runner), store).AdaptAsync(request);
+        await new AutomaticAdaptationService(resumedModel, Runtime(runner), store).AdaptAsync(request);
         Assert.Equal(previousRuns, runs);
         Assert.Equal(published.SourceSha256, Hash(Path.Combine(published.DirectoryPath, "Program.cs")));
 
@@ -2381,7 +2394,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         Directory.CreateDirectory(interruptedVerification);
         File.WriteAllText(Path.Combine(interruptedVerification, "incomplete.txt"), "interrupted verification output");
         var model = new FakeModel(_ => throw new InvalidOperationException("No model call should be needed."));
-        var result = await new AutomaticAdaptationService(model, Compiler(new ScriptedRunner()), store).AdaptAsync(Request());
+        var result = await new AutomaticAdaptationService(model, Runtime(new ScriptedRunner()), store).AdaptAsync(Request());
         Assert.Equal(AdaptationStatus.Reused, result.Status);
         Assert.Equal(0, model.Calls);
         Assert.False(Directory.Exists(Path.Combine(store.WorkDirectory, "reuse-check")));
@@ -2432,7 +2445,8 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         return new PinnedDotNetToolchain(runtime, "10.0.402", "10.0.13");
     }
 
-    private GeneratedAdapterCompiler Compiler(IAdapterProcessRunner runner) => new(Toolchain(), runner);
+    private AdapterRuntime Runtime(IAdapterProcessRunner runner) => new(Toolchain(), runner);
+    private GeneratedAdapterCompiler LegacyCompiler(IAdapterProcessRunner runner) => new(Toolchain(), runner);
 
     private GeneratedAdapterPackage CreatePackage()
     {
@@ -2444,6 +2458,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         return new GeneratedAdapterPackage("template.line-script", "one", path, ["script.txt"], Hash(Path.Combine(path, "Program.cs")),
             Hash(Path.Combine(path, "adapter.dll")), new AdapterFamily("template", "line-script", "Line script"));
     }
+
 
     private static string Hash(string path) => Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(path)));
     public void Dispose() { if (Directory.Exists(root)) Directory.Delete(root, true); }
@@ -2515,7 +2530,9 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
                 return Task.FromResult(new AdapterProcessResult(0, "probe complete", ""));
             }
             if (request.Arguments[0] == "--info") return Task.FromResult(new AdapterProcessResult(0, "trusted toolchain", ""));
-            if (Path.GetFileName(request.ExecutablePath) == "python.exe")
+            if (request.Arguments.Any(argument => argument.StartsWith("import ast,pathlib,sys;", StringComparison.Ordinal)))
+                return Task.FromResult(new AdapterProcessResult(CompilationError is null ? 0 : 1, "", CompilationError ?? ""));
+            if (Path.GetFileName(request.ExecutablePath) == "python.exe" && string.IsNullOrEmpty(request.StandardInput))
             {
                 LocalProbe?.Invoke();
                 return Task.FromResult(new AdapterProcessResult(0, "confirmed layout", ""));

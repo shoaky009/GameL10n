@@ -8,14 +8,14 @@ using GameL10n.Core.Storage;
 namespace GameL10n.Core.Development;
 
 /// <summary>A single, resumable tool conversation. Published adapters execute without a model.</summary>
-public sealed class AutomaticAdaptationService(Func<IAdaptationAgentModel> createModel, GeneratedAdapterCompiler compiler,
+public sealed class AutomaticAdaptationService(Func<IAdaptationAgentModel> createModel, AdapterRuntime runtime,
     LocalAdapterPackageStore packageStore, HttpClient? researchClient = null, BuiltinAdapterTrial? builtinTrial = null,
     BuiltinAdapterAssets? builtinAssets = null)
 {
-    public AutomaticAdaptationService(IAdaptationAgentModel model, GeneratedAdapterCompiler compiler,
+    public AutomaticAdaptationService(IAdaptationAgentModel model, AdapterRuntime runtime,
         LocalAdapterPackageStore packageStore, HttpClient? researchClient = null, BuiltinAdapterTrial? builtinTrial = null,
         BuiltinAdapterAssets? builtinAssets = null)
-        : this(() => model, compiler, packageStore, researchClient, builtinTrial, builtinAssets) { }
+        : this(() => model, runtime, packageStore, researchClient, builtinTrial, builtinAssets) { }
 
     private static readonly JsonSerializerOptions ContextJson = new(JsonSerializerDefaults.Web)
         { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
@@ -98,7 +98,7 @@ public sealed class AutomaticAdaptationService(Func<IAdaptationAgentModel> creat
                 && string.IsNullOrWhiteSpace(request.UserInstruction))
             {
                 var toolkit = new EngineReferenceToolkit(Path.Combine(packageStore.RootDirectory, "engine-tools"), researchClient, Report);
-                var discovery = await new AdapterDiscoveryService(packageStore, () => compiler.Toolchain, compiler.Runner, toolkit)
+                var discovery = await new AdapterDiscoveryService(packageStore, () => runtime.Toolchain, runtime.Runner, toolkit)
                     .FindAsync(new(request.GameId, request.GameDirectory, request.ExistingAdapters,
                         PreviousFailures: request.ReuseFailures), cancellationToken, progress: Report, trace: TraceAsync);
                 diagnostics.AddRange(discovery.Diagnostics);
@@ -107,8 +107,8 @@ public sealed class AutomaticAdaptationService(Func<IAdaptationAgentModel> creat
                     return await CompleteAsync(AdaptationStatus.Reused, "已找到可用适配器，可以选择文本试译。", reused);
             }
 
-            if (!File.Exists(compiler.Toolchain.ExecutablePath))
-                return await CompleteAsync(AdaptationStatus.Unavailable, "缺少本地 .NET 工具链，请使用完整发行包。");
+            if (!File.Exists(runtime.Toolchain.ExecutablePath))
+                return await CompleteAsync(AdaptationStatus.Unavailable, "缺少共享 .NET 运行时，请使用完整发行包。");
             if (File.Exists(statePath))
             {
                 try
@@ -199,9 +199,9 @@ public sealed class AutomaticAdaptationService(Func<IAdaptationAgentModel> creat
             state.BuiltinTrials ??= [];
             state.BuiltinProbes ??= [];
             state.SuccessfulProbes ??= [];
-            var development = new AdapterDevelopmentWorkflow(request, state, directory, compiler, packageStore,
+            var development = new AdapterDevelopmentWorkflow(request, state, directory, runtime, packageStore,
                 researchClient, builtinAssets, Report);
-            var tools = new AdaptationTools(request, state, directory, compiler, packageStore, researchClient,
+            var tools = new AdaptationTools(request, state, directory, runtime, packageStore, researchClient,
                 builtinAssets: builtinAssets, builtinTrial: builtinTrial, reportProgress: Report, development: development);
             if (request.BuiltinProbes is { Count: > 0 }) state.BuiltinProbes = request.BuiltinProbes.TakeLast(6).ToArray();
             if (state.BuiltinDiscovery is null || state.BuiltinDiscovery.Revision != BuiltinAdapterDiscovery.Revision)
@@ -360,14 +360,14 @@ public sealed class AutomaticAdaptationService(Func<IAdaptationAgentModel> creat
                     {
                         diagnostics.Add(call.Name + ": " + error.Message);
                         output = JsonSerializer.Serialize(new { success = false,
-                            error = GeneratedAdapterCompiler.LimitDiagnostic(error.Message),
+                            error = GeneratedGameAdapter.LimitDiagnostic(error.Message),
                             phase = error.Phase, timedOut = error.TimedOut,
                             stdout = error.StandardOutput, stderr = error.StandardError }, ContextJson);
                     }
                     catch (Exception error) when (error is not OperationCanceledException)
                     {
                         diagnostics.Add(call.Name + ": " + error.Message);
-                        output = JsonSerializer.Serialize(new { success = false, error = GeneratedAdapterCompiler.LimitDiagnostic(error.Message) }, ContextJson);
+                        output = JsonSerializer.Serialize(new { success = false, error = GeneratedGameAdapter.LimitDiagnostic(error.Message) }, ContextJson);
                     }
                     toolTimer.Stop();
                     var outcome = ToolOutcome(output);
@@ -576,7 +576,7 @@ public sealed class AutomaticAdaptationService(Func<IAdaptationAgentModel> creat
                 state.TotalTurns++;
                 turns++;
                 if (!string.IsNullOrWhiteSpace(turn.Message.Content))
-                    state.Summary = GeneratedAdapterCompiler.LimitDiagnostic(turn.Message.Content);
+                    state.Summary = GeneratedGameAdapter.LimitDiagnostic(turn.Message.Content);
                 var note = AdaptationProgressNote.FromAssistantText(turn.Message.Content);
                 var changedProgress = note is not null && state.UpdateProgress(note);
                 await SaveAsync();
@@ -877,7 +877,8 @@ public sealed class AutomaticAdaptationService(Func<IAdaptationAgentModel> creat
         protocol entry, resource rules and pinned release dependencies. Use its testArguments with staged samples for test_adapter;
         generation alone never verifies or publishes support. Modify only confirmed missing behavior instead of rewriting the entry.
         For other missing formats use search_engine_references, inspect_engine_reference, then run_engine_python to CALL pinned library APIs.
-        use_engine_reference supplies the C# bridge and shared dependency for runtime use without LLM calls. Don't port entire parsers to C#.
+        use_engine_reference supplies a Python helper and pinned shared dependency for runtime use without LLM calls.
+        All generated analysis and adapter logic must be Python; compiled legacy adapters remain executable without modification.
         For Siglus/Scene.pck use inspect_siglus_game and copy_adapter engine.siglus; reuse actual command references and bundled glyph handling.
         Only for confirmed Unity games, use inspect_unity_schema for fields, display literals and candidate native consumers; its returned
         guidance covers Unity-specific extraction and coverage review. mode=references accepts matching IL2CPP v31 metadata and x64
@@ -894,28 +895,28 @@ public sealed class AutomaticAdaptationService(Func<IAdaptationAgentModel> creat
         Tool execution:
         - Batch independent reads/searches (prefer 2-6 calls). Results are saved in order.
         - Prefer replace_text for local changes: supply one exact unique oldText and its replacement; unchanged text stays intact.
-          Split new implementations into small files and deliver one compilable piece at a time rather than generating the full adapter in one turn.
+          Split new implementations into small Python files and deliver one executable piece at a time rather than generating the full adapter in one turn.
         - Batch up to 8 known write_file/replace_text calls, optionally ending with ONE run_engine_python or run_tool. Writes run first;
           a failure/uncertain interruption skips the dependent operations. Wait for results before deciding further work.
         - Staging, copying dependencies, test_adapter, finish, checkpoint and report_blocker each require a standalone call.
         - Temporary analysis/probe scripts must be work/*.py, executed with run_engine_python and the bundled shared interpreter.
-          Reuse standard-library and pinned engine APIs. C# is for formal src/ adapter code verified by test_adapter;
-          never compile analysis scripts or create MSBuild/project/restore/compiler shell scaffolding.
+          Formal adapter entry is src/adapter.py. Reuse standard-library, pinned engine APIs and precompiled components;
+          never generate C# or create MSBuild/project/restore/compiler shell scaffolding.
           Keep readable source lines. Inspect the reported traceback line and bounds before retrying;
           don't guess layout changes repeatedly after the same exception. Preserve partial findings when a later probe fails.
         - run_tool PowerShell is Windows PowerShell 5.1, not PowerShell 7 or modern .NET. Tools run as the current user; respect scoped paths.
         - src/ holds adapter code/dependencies, resources/ holds chosen original copies, work/ holds probes/results, build/ is host output.
-          Use AppContext.BaseDirectory for packaged dependencies; don't depend on temporary absolute workspace paths.
+          Use request.adapterDirectory for packaged tools and pathlib.Path(__file__).parent for Python modules; don't depend on temporary workspace paths.
         - The host persists the release selection separately from verification. test_adapter defaults to this saved list;
-          do not repeat it after failures or checkpoints. New src/*.cs written with write_file and copied built-in components
+          do not repeat it after failures or checkpoints. New src/*.py written with write_file and copied built-in components
           auto-register. Analysis code belongs in work/. For new tools dependencies use write_file/download_tool releaseRole
           and purpose once, or update_release_files for incremental additions/exclusions. It also lists unregistered files.
           Explicit test_adapter releaseFiles replaces the list (useful for legacy workspaces); never select every tool by default.
-          Roles: source (src/*.cs), runtime (tools/* scripts/DLLs), asset (tools/* patch fonts/launchers/data), license (tools/* notices).
+          Roles: source (src/*.py), runtime (tools/* scripts/DLLs), asset (tools/* patch fonts/launchers/data), license (tools/* notices).
           Paths are package-relative: tools/* maps to workspace src/tools/*. Include indirect imports and native dependencies.
           Game executables/resources are per-game inputs under resources/, never reusable engine assets. Generate modified
           EXEs/resources in patch output from checked current-game originals. Do not embed a whole game EXE in src/tools/.
-          Only selected files are compiled/tested/published. Editing unselected files does not require retesting. Do not clean
+          Only selected files are syntax-checked/tested/published. Editing unselected files does not require retesting. Do not clean
           existing workspace or old packages; their development/source/translation state remains available.
         - Read bounded ranges and print concise findings, offsets and errors. Do not upload whole game resources or dump entire disassemblies.
           A successful write needs no confirmation read. Use search_text byteOffsets for the relevant function/field instead of whole-file reads.

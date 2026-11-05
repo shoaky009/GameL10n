@@ -54,7 +54,7 @@ public sealed class AdaptationToolGroupTests
         };
         AdaptationToolGroups.Restore(state);
         AdaptationToolGroups.SelectForContext(state, ["development"], state.Messages);
-        Assert.Equal(new[] { "development", "native", "research" }, state.EnabledToolGroups);
+        Assert.Equal(new[] { "development", "native" }, state.EnabledToolGroups);
         Assert.DoesNotContain(AdaptationToolGroups.ForRequest(state), tool => tool.Name == "inspect_unity_schema");
         Assert.Contains(AdaptationToolGroups.ForRequest(state), tool => tool.Name == "run_engine_python");
     }

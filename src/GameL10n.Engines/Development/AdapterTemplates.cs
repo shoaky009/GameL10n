@@ -10,6 +10,13 @@ public sealed record AdapterTemplateConfiguration(int SchemaVersion, string Temp
 public static class AdapterTemplates
 {
     public const string ConfigurationPath = "tools/adapter-template.json";
+    public const string PythonEntry = """
+        import json, sys
+        from tools.gamel10n_host import invoke, write_response
+        request = json.load(sys.stdin)
+        response = invoke('template', request)
+        write_response(request, response)
+        """;
     public static IReadOnlyList<AdapterTemplateDefinition> All { get; } =
     [
         new("loose-renpy", 1, "Renpy", null, [".rpy"], ["**/*.rpy"], new("template", "loose-renpy", "Ren’Py 源脚本")),

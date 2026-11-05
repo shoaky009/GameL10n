@@ -7,7 +7,7 @@ using GameL10n.Core.Adapters;
 
 namespace GameL10n.Core.Development;
 
-/// <summary>Compiles C# with pinned framework references; project files, build tasks and package restore are not executed.</summary>
+/// <summary>Developer SDK compiler for legacy packages. Automatic adaptation uses the Python builder.</summary>
 public sealed partial class GeneratedAdapterCompiler(PinnedDotNetToolchain toolchain, IAdapterProcessRunner runner)
 {
     public PinnedDotNetToolchain Toolchain { get; } = toolchain;
@@ -16,7 +16,7 @@ public sealed partial class GeneratedAdapterCompiler(PinnedDotNetToolchain toolc
     public async Task CheckAvailabilityAsync(string workspace, CancellationToken cancellationToken = default)
     {
         if (!File.Exists(Toolchain.ExecutablePath))
-            throw new AdapterProcessUnavailableException("缺少 .NET 适配工具链，请使用包含 toolchain 的完整发行包。");
+            throw new AdapterProcessUnavailableException("缺少开发用 .NET SDK，请配置固定版本的开发工具链。");
         Directory.CreateDirectory(workspace);
         var result = await Runner.RunAsync(new AdapterProcessRequest(Toolchain.ExecutablePath,
             ["--info"], workspace, Timeout: TimeSpan.FromSeconds(20)), cancellationToken);
@@ -105,12 +105,12 @@ public sealed partial class GeneratedAdapterCompiler(PinnedDotNetToolchain toolc
     {
         if (!VersionPattern().IsMatch(Toolchain.SdkVersion) || !VersionPattern().IsMatch(Toolchain.RuntimeVersion)
             || !Toolchain.RuntimeVersion.StartsWith("10.", StringComparison.Ordinal))
-            throw new AdapterProcessUnavailableException("A pinned .NET 10 SDK and runtime are required for generated adapters.");
+            throw new AdapterProcessUnavailableException("A pinned development .NET 10 SDK is required for legacy adapter compilation.");
         var root = Path.GetFullPath(Toolchain.RootDirectory);
         var compiler = Path.Combine(root, "sdk", Toolchain.SdkVersion, "Roslyn", "bincore", "csc.dll");
         var referencePath = Path.Combine(root, "packs", "Microsoft.NETCore.App.Ref", Toolchain.RuntimeVersion, "ref", "net10.0");
         if (!File.Exists(Toolchain.ExecutablePath) || !File.Exists(compiler) || !Directory.Exists(referencePath))
-            throw new AdapterProcessUnavailableException("缺少 .NET 编译器或引用程序集，请使用包含 toolchain 的完整发行包。");
+            throw new AdapterProcessUnavailableException("缺少开发用 .NET 编译器或引用程序集；发行包仅支持 Python 适配开发，旧格式编译需开发机 SDK。");
         foreach (var path in new[] { root, compiler, referencePath }) WorkspaceFiles.RejectLinkAncestors(path);
         var references = Directory.GetFiles(referencePath, "*.dll").Order(StringComparer.Ordinal).ToArray();
         if (references.Length == 0) throw new AdapterProcessUnavailableException("The pinned framework reference pack is empty.");
@@ -149,7 +149,7 @@ public sealed partial class GeneratedAdapterCompiler(PinnedDotNetToolchain toolc
     }
 
     private static string HashText(string value) => Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(value)));
-    internal static string LimitDiagnostic(string value) => value.Length > 8_192 ? value[..8_192] + "\n[diagnostic truncated]" : value;
+    internal static string LimitDiagnostic(string value) => GeneratedGameAdapter.LimitDiagnostic(value);
 
     [GeneratedRegex("^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[A-Za-z0-9.-]+)?$")]
     private static partial Regex VersionPattern();

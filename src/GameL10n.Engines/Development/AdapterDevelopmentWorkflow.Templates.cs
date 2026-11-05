@@ -20,16 +20,13 @@ public sealed partial class AdapterDevelopmentWorkflow
         var config = new AdapterTemplateConfiguration(1, template.Id, template.Version, template.Format,
             template.ArchiveComponent, template.ArchiveComponent == "archive.xp3" ? filter : null, template.ScriptExtensions, patterns);
         var files = await BuiltinAssets.PrepareSharedFilesAsync(template.Format, ct);
-        files.Add("src/Program.cs", Encoding.UTF8.GetBytes(AdapterTemplates.Source));
-        files.Add("src/EngineReferencePython.cs", Encoding.UTF8.GetBytes(EnginePythonBridge.Source));
+        files.Add("src/adapter.py", Encoding.UTF8.GetBytes(AdapterTemplates.PythonEntry));
         files.Add("src/" + AdapterTemplates.ConfigurationPath, JsonSerializer.SerializeToUtf8Bytes(config, Json));
+        var prepared = await PythonAsync(ct);
+        if (prepared.Dependency.Reference.Kind != "galtransl") throw new InvalidDataException("此模板需要 GalTransl 共享工具库。");
+        files.Add("src/" + EngineReferenceToolkit.DependencyPath, JsonSerializer.SerializeToUtf8Bytes(prepared.Dependency, Json));
         if (template.ArchiveComponent is not null)
-        {
-            var prepared = await PythonAsync(ct);
-            if (prepared.Dependency.Reference.Kind != "galtransl") throw new InvalidDataException("此模板需要 GalTransl 共享工具库。");
-            files.Add("src/" + EngineReferenceToolkit.DependencyPath, JsonSerializer.SerializeToUtf8Bytes(prepared.Dependency, Json));
             files.Add("src/" + EngineArchiveComponents.ScriptPath, Encoding.UTF8.GetBytes(EngineArchiveComponents.Source));
-        }
         // Check the complete composition before writing any parser, entry point or dependency.
         var root = Path.GetFullPath(workspace);
         foreach (var (path, content) in files)
@@ -54,7 +51,7 @@ public sealed partial class AdapterDevelopmentWorkflow
             await output.WriteAsync(content, ct);
         }
         var release = files.Keys.Select(path => new AdapterReleaseFile(AdapterReleaseFiles.PackagePath(path),
-            path.EndsWith(".cs", StringComparison.Ordinal) ? "source" : "runtime", "组件组合模板 " + template.Id + " 的入口、配置及固定依赖")).ToArray();
+            path.StartsWith("src/tools/", StringComparison.Ordinal) ? "runtime" : "source", "组件组合模板 " + template.Id + " 的入口、配置及固定依赖")).ToArray();
         RegisterReleaseFiles(release);
         return new(template, files.Keys.Order(StringComparer.Ordinal).ToArray(), patterns);
     }

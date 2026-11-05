@@ -96,7 +96,7 @@ public sealed partial class AdapterDevelopmentWorkflow
                     // The fixed component checks the exact RPA version, safe names and bounded decoded members.
                     var prepared = await PythonAsync(token);
                     var outputPath = WorkspaceFiles.Resolve(workspace, output);
-                    var inspected = await new EngineArchiveComponentClient(compiler.Runner).InvokeAsync(prepared.Paths,
+                    var inspected = await new EngineArchiveComponentClient(runtime.Runner).InvokeAsync(prepared.Paths,
                         new(1, template.ArchiveComponent, "inspect", WorkspaceFiles.Resolve(ResourceDirectory, resource),
                             Path.Combine(outputPath, "manifest.json"), Extensions: template.ScriptExtensions), workspace, token);
                     evidence.Add(output + "/manifest.json");

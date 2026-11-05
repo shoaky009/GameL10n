@@ -161,7 +161,7 @@ public sealed class EngineReferenceToolkitTests : IDisposable
         Directory.CreateDirectory(Path.Combine(workspace, "work"));
         var store = new LocalAdapterPackageStore(Path.Combine(root, "extensions"));
         var runner = new CaptureRunner();
-        var compiler = new GeneratedAdapterCompiler(new(root, "10.0.402", "10.0.13"), runner);
+        var compiler = new AdapterRuntime(new(root, "10.0.402", "10.0.13"), runner);
         var preparation = new EngineReferenceToolkit(Path.Combine(store.RootDirectory, "engine-tools"), client, allowDownloads: true);
         var preparedPin = await preparation.EnsureReferenceAsync(null, default);
         await preparation.EnsurePythonAsync(preparedPin, null, default);

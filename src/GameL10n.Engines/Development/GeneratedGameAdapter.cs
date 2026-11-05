@@ -22,6 +22,7 @@ public sealed class GeneratedGameAdapter(
     public string Id => package.Id;
     public string Version => package.Version;
     public GeneratedAdapterPackage Package => package;
+    internal static string LimitDiagnostic(string value) => value.Length > 8192 ? value[..8192] + "\n[diagnostic truncated]" : value;
     public AdapterCatalogEntry? CatalogEntry => package.Family is { } family ? new(family, Version, []) : null;
 
     public IReadOnlyList<string> DiscoverResources(string sourceDirectory) => GeneratedAdapterResources.Discover(package, sourceDirectory);
@@ -97,7 +98,7 @@ public sealed class GeneratedGameAdapter(
     }
 
     private static string UnitLocation(TranslationUnit unit) =>
-        GeneratedAdapterCompiler.LimitDiagnostic(unit.ResourcePath + "（" + unit.Locator + "）");
+        LimitDiagnostic(unit.ResourcePath + "（" + unit.Locator + "）");
 
     public async Task<AdapterBuildResult> BuildPatchAsync(string sourceDirectory,
         IReadOnlyDictionary<string, string> translations, string patchDirectory, CancellationToken cancellationToken = default) =>
@@ -114,7 +115,7 @@ public sealed class GeneratedGameAdapter(
             throw new GeneratedAdapterException("适配器返回了矛盾的校验结果：passed=true，但 issues 非空。issues 只用于阻止通过的错误；"
                 + "错误应返回 passed=false，覆盖范围、字体差异或尚未实机测试等说明应放入 probe/extraction/build.warnings，"
                 + "运行状态使用 runtimeStatus=not-tested。首条 issue："
-                + GeneratedAdapterCompiler.LimitDiagnostic(validation.Issues[0].Code + ": " + validation.Issues[0].Message));
+                + LimitDiagnostic(validation.Issues[0].Code + ": " + validation.Issues[0].Message));
         var issues = validation.Issues.Concat(ValidateExecutables(sourceDirectory, patchDirectory, EnumerateFiles(patchDirectory)
             .Select(path => GeneratedAdapterResources.Normalize(Path.GetRelativePath(patchDirectory, path))), null)).ToArray();
         return validation with { Passed = validation.Passed && issues.Length == 0, Issues = issues, RuntimeStatus = "not-tested" };
@@ -230,7 +231,7 @@ public sealed class GeneratedGameAdapter(
                 if (patchBaseline is not null && !HashesEqual(patchBaseline, await AllHashesAsync(output, cancellationToken)))
                     throw new GeneratedAdapterException("The adapter modified patch files during validation.");
                 if (result.ExitCode != 0)
-                    throw new GeneratedAdapterException("The adapter process failed: " + GeneratedAdapterCompiler.LimitDiagnostic(result.StandardError));
+                    throw new GeneratedAdapterException("The adapter process failed: " + LimitDiagnostic(result.StandardError));
                 probeReads?.VerifyUnchanged();
                 try
                 {
@@ -245,7 +246,7 @@ public sealed class GeneratedGameAdapter(
                 }
                 catch (JsonException exception) { throw new GeneratedAdapterException("The adapter returned invalid protocol JSON: " + exception.Message); }
                 if (response.ProtocolVersion != package.ProtocolVersion || !response.Success)
-                    throw new GeneratedAdapterException("The adapter rejected the operation: " + GeneratedAdapterCompiler.LimitDiagnostic(response.Error ?? "Invalid protocol version or unsuccessful response."));
+                    throw new GeneratedAdapterException("The adapter rejected the operation: " + LimitDiagnostic(response.Error ?? "Invalid protocol version or unsuccessful response."));
                 if (response.ProbeReads is not { Count: > 0 } reads) break;
                 if (probeReads is null || response.Probe is not null)
                     throw new GeneratedAdapterException("probeReads 仅可用于新版 probe 请求，不能同时返回 probe 结果。");

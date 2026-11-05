@@ -39,7 +39,7 @@ public sealed partial class AutomaticAdaptationTests
             }
             return new(new("assistant", ToolCalls: [call]), new(100, 20));
         });
-        await new AutomaticAdaptationService(model, Compiler(new ScriptedRunner()), store).AdaptAsync(request);
+        await new AutomaticAdaptationService(model, Runtime(new ScriptedRunner()), store).AdaptAsync(request);
         var saved = await LocalFiles.ReadJsonAsync<AdaptationSession>(Path.Combine(store.WorkDirectory, "current/session.json"));
         Assert.DoesNotContain("native", saved!.EnabledToolGroups);
         // A historical all choice must not return when the same session is reopened with another model.
@@ -53,7 +53,7 @@ public sealed partial class AutomaticAdaptationTests
             Assert.DoesNotContain(context.Tools, tool => tool.Name == "inspect_unity_schema");
             return Blocked("needs_input", "需要显示反馈。", "提供画面。");
         });
-        await new AutomaticAdaptationService(resumed, Compiler(new ScriptedRunner()), store).AdaptAsync(request);
+        await new AutomaticAdaptationService(resumed, Runtime(new ScriptedRunner()), store).AdaptAsync(request);
         Assert.Equal(1, resumed.Calls);
     }
 }

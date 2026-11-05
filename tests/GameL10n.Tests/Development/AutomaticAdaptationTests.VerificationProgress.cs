@@ -22,10 +22,10 @@ public sealed partial class AutomaticAdaptationTests
             Assert.DoesNotContain(context.Messages, message => message.Content.Contains("验证进展检查：", StringComparison.Ordinal));
             return new(new("assistant", ToolCalls: [new("edit" + turn, "write_file", JsonSerializer.Serialize(new
             {
-                path = "src/Parser.cs", content = "// implementation " + turn
+                path = "src/Parser.py", content = "// implementation " + turn
             }))]), new(100, 20));
         });
-        var result = await new AutomaticAdaptationService(model, Compiler(new ScriptedRunner()), store).AdaptAsync(request);
+        var result = await new AutomaticAdaptationService(model, Runtime(new ScriptedRunner()), store).AdaptAsync(request);
         Assert.Equal(AdaptationStatus.WaitingForUser, result.Status);
         var saved = await LocalFiles.ReadJsonAsync<AdaptationSession>(Path.Combine(store.WorkDirectory, "current/session.json"));
         Assert.Equal(24, saved!.LastImplementationTurn);
@@ -38,16 +38,16 @@ public sealed partial class AutomaticAdaptationTests
     {
         var (request, state, workspace, store) = await VerificationCacheFixtureAsync(new ScriptedRunner());
         var tools = new AdaptationTools(request, state, workspace,
-            Compiler(new ScriptedRunner { CompilationError = "fixture compilation failure" }), store);
+            Runtime(new ScriptedRunner { CompilationError = "fixture compilation failure" }), store);
         state.TotalTurns = 3;
         await Assert.ThrowsAsync<GeneratedAdapterException>(() => tools.ExecuteAsync(new("bad", "test_adapter", CacheTestArguments), default));
         Assert.Equal(AdapterVerificationMilestone.None, state.HighestVerificationMilestone);
         Assert.Null(state.LastVerificationProgressTurn);
 
         async Task ChangeSource(string content) => await tools.ExecuteAsync(new("edit", "write_file",
-            JsonSerializer.Serialize(new { path = "src/Program.cs", content })), default);
+            JsonSerializer.Serialize(new { path = "src/adapter.py", content })), default);
         await ChangeSource("// implementation 1");
-        tools = new(request, state, workspace, Compiler(new ScriptedRunner { DropTranslatedUnit = true }), store);
+        tools = new(request, state, workspace, Runtime(new ScriptedRunner { DropTranslatedUnit = true }), store);
         state.TotalTurns = 5;
         using var partial = JsonDocument.Parse(await tools.ExecuteAsync(new("partial", "test_adapter", CacheTestArguments), default));
         Assert.False(partial.RootElement.GetProperty("result").GetProperty("passed").GetBoolean());
@@ -60,7 +60,7 @@ public sealed partial class AutomaticAdaptationTests
         await tools.ExecuteAsync(new("same-stage", "test_adapter", CacheTestArguments), default);
         Assert.Equal(5, state.LastVerificationProgressTurn);
 
-        tools = new(request, state, workspace, Compiler(new ScriptedRunner()), store);
+        tools = new(request, state, workspace, Runtime(new ScriptedRunner()), store);
         state.TotalTurns = 12;
         await ChangeSource("// implementation 3");
         await tools.ExecuteAsync(new("complete", "test_adapter", CacheTestArguments), default);
@@ -88,7 +88,7 @@ public sealed partial class AutomaticAdaptationTests
             Assert.Single(context.Messages, message => message.Content.Contains("验证进展检查：", StringComparison.Ordinal));
             return Blocked("needs_input", "需要显示反馈。", "提供画面。");
         });
-        var service = new AutomaticAdaptationService(model, Compiler(new ScriptedRunner()), store);
+        var service = new AutomaticAdaptationService(model, Runtime(new ScriptedRunner()), store);
         await service.AdaptAsync(request);
         await service.AdaptAsync(request);
         var saved = await LocalFiles.ReadJsonAsync<AdaptationSession>(path);

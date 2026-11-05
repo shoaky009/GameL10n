@@ -32,16 +32,16 @@ public sealed class BuiltinAdapterAssetsTests : IDisposable
         var issue = description.GetProperty("sourceBundleIssue");
         Assert.Equal(code, issue.GetProperty("code").GetString());
         Assert.Equal("sources.zip", issue.GetProperty("asset").GetString());
-        Assert.Contains("二进制模式", description.GetProperty("usage").GetString());
+        Assert.Contains("预编译", description.GetProperty("usage").GetString());
         Assert.Equal(new[] { "extract", "build", "validate" }, description.GetProperty("operations").EnumerateArray().Select(item => item.GetString()));
-        Assert.NotNull(assets.ReadSource("Renpy", "generated/BuiltinScriptParser.cs"));
+        Assert.NotNull(assets.ReadSource("Renpy", "tools/gamel10n_host.py"));
 
         var error = Assert.Throws<BuiltinAdapterAssetException>(() => assets.ReadSource("Renpy", "vendor/Scripts/RenpyScript.cs"));
         Assert.Equal(code, error.Code);
         Assert.Equal("sources.zip", error.AssetName);
         Assert.Throws<ArgumentException>(() => assets.Describe("unknown-format"));
         string editableWorkspace = Path.Combine(root, "editable");
-        Assert.Equal(code, (await Assert.ThrowsAsync<BuiltinAdapterAssetException>(() => assets.CopyAsync("Renpy", editableWorkspace, true))).Code);
+        await Assert.ThrowsAsync<InvalidDataException>(() => assets.CopyAsync("Renpy", editableWorkspace, true));
         Assert.False(Directory.Exists(editableWorkspace));
 
         string workspace = Path.Combine(root, "binary");
@@ -103,7 +103,7 @@ public sealed class BuiltinAdapterAssetsTests : IDisposable
         Assert.Equal(36, slice.GetProperty("nextOffset").GetInt32());
 
         string workspace = Path.Combine(root, "workspace");
-        await assets.CopyAsync("Kaguya", workspace, true);
+        await assets.CopyAsync("Kaguya", workspace, false);
         Assert.False(Directory.Exists(Path.Combine(workspace, "src/BuiltinVnTextPatch/reference")));
         var unrelated = JsonSerializer.SerializeToElement(assets.Describe("Renpy"), Json);
         Assert.Equal(JsonValueKind.Null, unrelated.GetProperty("engineGuidance").ValueKind);
@@ -125,12 +125,12 @@ public sealed class BuiltinAdapterAssetsTests : IDisposable
         Assert.Equal(JsonValueKind.Null, JsonSerializer.SerializeToElement(assets.Describe("Renpy"), Json)
             .GetProperty("engineGuidance").ValueKind);
         var workspace = Path.Combine(root, "workspace");
-        await assets.CopyAsync("KirikiriKs", workspace, true);
+        await assets.CopyAsync("KirikiriKs", workspace, false);
         Assert.False(Directory.Exists(Path.Combine(workspace, "src/BuiltinVnTextPatch/reference")));
     }
 
     [Fact]
-    public async Task SourceIndexIsBoundedAndBinaryCopyCanUpgradeWithoutReplacingExistingSource()
+    public async Task SourceIndexIsBoundedAndPythonCopyIsRepeatableWithoutReplacingExistingFiles()
     {
         var assets = CreateAssets();
         var description = JsonSerializer.SerializeToElement(assets.Describe("Renpy"), Json);
@@ -147,20 +147,19 @@ public sealed class BuiltinAdapterAssetsTests : IDisposable
         string workspace = Path.Combine(root, "workspace");
         var release = new List<AdapterReleaseFile>();
         await assets.CopyAsync("Renpy", workspace, false, releaseFiles: release);
-        Assert.Contains(release, file => file.Path == "src/BuiltinScriptParser.cs" && file.Role == "source");
+        Assert.Contains(release, file => file.Path == "tools/gamel10n_host.py" && file.Role == "runtime");
         Assert.Contains(release, file => file.Role == "runtime" && file.Path == BuiltinAdapterAssets.SharedDependencyPath);
         Assert.Equal(2, release.Count);
-        string bridge = Path.Combine(workspace, "src/BuiltinScriptParser.cs");
+        string bridge = Path.Combine(workspace, "src/tools/gamel10n_host.py");
         byte[] original = await File.ReadAllBytesAsync(bridge);
         Assert.False(File.Exists(Path.Combine(workspace, "src/tools/vntextpatch/GameL10n.VnTextPatch.dll")));
         Assert.True(File.Exists(Path.Combine(workspace, "src", BuiltinAdapterAssets.SharedDependencyPath)));
         Assert.False(Directory.Exists(Path.Combine(workspace, "src/BuiltinVnTextPatch")));
-        var upgrade = JsonSerializer.SerializeToElement(await assets.CopyAsync("Renpy", workspace, true), Json);
-        Assert.Contains("src/BuiltinScriptParser.cs", upgrade.GetProperty("reused").EnumerateArray().Select(item => item.GetString()));
+        var repeat = JsonSerializer.SerializeToElement(await assets.CopyAsync("Renpy", workspace, false), Json);
+        Assert.Contains("src/tools/gamel10n_host.py", repeat.GetProperty("reused").EnumerateArray().Select(item => item.GetString()));
         Assert.Equal(original, await File.ReadAllBytesAsync(bridge));
-        Assert.True(File.Exists(Path.Combine(workspace, "src/BuiltinVnTextPatch/vendor/Scripts/RenpyScript.cs")));
-        Assert.False(File.Exists(Path.Combine(workspace, "src/BuiltinVnTextPatch/vendor/Scripts/FolderScriptCollection.cs")));
-        Assert.False(File.Exists(Path.Combine(workspace, "src/Program.cs")));
+        await Assert.ThrowsAsync<InvalidDataException>(() => assets.CopyAsync("Renpy", workspace, true));
+        Assert.Empty(Directory.GetFiles(Path.Combine(workspace, "src"), "*.cs", SearchOption.AllDirectories));
     }
 
     [Fact]
@@ -168,43 +167,32 @@ public sealed class BuiltinAdapterAssetsTests : IDisposable
     {
         var assets = CreateAssets();
         string workspace = Path.Combine(root, "workspace");
-        string conflict = Path.Combine(workspace, "src/tools/vntextpatch/VNTextPatch.NOTICE.md");
+        string conflict = Path.Combine(workspace, "src/tools/gamel10n_host.py");
         Directory.CreateDirectory(Path.GetDirectoryName(conflict)!);
         await File.WriteAllTextAsync(conflict, "Keep my modifications.");
-        await Assert.ThrowsAsync<IOException>(() => assets.CopyAsync("Renpy", workspace, true));
+        await Assert.ThrowsAsync<IOException>(() => assets.CopyAsync("Renpy", workspace, false));
         Assert.Equal(new[] { Path.GetFullPath(conflict) }, Directory.GetFiles(workspace, "*", SearchOption.AllDirectories));
         Assert.Equal("Keep my modifications.", await File.ReadAllTextAsync(conflict));
     }
 
     [Theory]
-    [InlineData("Renpy", false)]
-    [InlineData("Renpy", true)]
-    [InlineData("KirikiriKs", true)]
-    public async Task CopiedParserCompilesWithPinnedFrameworkOnlyCompilerAndWritesChinese(string format, bool editableSource)
+    [InlineData("Renpy")]
+    [InlineData("KirikiriKs")]
+    public async Task CopiedPythonHelperCallsPrecompiledParserAndWritesChinese(string format)
     {
         var assets = CreateAssets();
         string workspace = Path.Combine(root, "workspace");
-        await assets.CopyAsync(format, workspace, editableSource);
-        await File.WriteAllTextAsync(Path.Combine(workspace, "src/Program.cs"), """
-            using System;
-            using System.Text;
-            Console.InputEncoding = new UTF8Encoding(false);
-            Console.OutputEncoding = new UTF8Encoding(false);
-            try { Console.Write(BuiltinScriptParser.ExecuteJson(Console.In.ReadToEnd())); return 0; }
-            catch (Exception error) { Console.Error.WriteLine(error.Message); return 3; }
-            """);
-        var toolchain = new PinnedDotNetToolchain(Path.Combine(Repository(), ".tools/dotnet"), "10.0.402", "10.0.13");
-        var runner = new AdapterProcessRunner();
-        var compiler = new GeneratedAdapterCompiler(toolchain, runner);
+        await assets.CopyAsync(format, workspace, false);
+        using var fixture = new EngineArchiveFixture();
+        var runner = fixture.Runner;
         var source = Path.Combine(workspace, "src");
-        var releaseFiles = Directory.GetFiles(source, "*", SearchOption.AllDirectories).Select(file =>
-        {
-            var relative = Path.GetRelativePath(source, file).Replace('\\', '/');
-            return relative.StartsWith("tools/", StringComparison.Ordinal)
-                ? new AdapterReleaseFile(relative, relative.EndsWith(".dll") ? "runtime" : "license", "Selected parser dependency")
-                : new AdapterReleaseFile("src/" + relative, "source", "Selected parser implementation");
-        }).ToArray();
-        var package = await compiler.CompileWorkspaceAsync(source, Path.Combine(root, "compiled"), ["**/*"], releaseFiles: releaseFiles);
+        var entry = Path.Combine(source, "adapter.py");
+        await File.WriteAllTextAsync(entry, """
+            import json, sys
+            from tools.gamel10n_host import parser
+            request = json.load(sys.stdin)
+            print(json.dumps(parser(request, request['format']), ensure_ascii=False))
+            """);
         string resources = Directory.CreateDirectory(Path.Combine(root, "resources")).FullName;
         string file = format == "Renpy" ? "scene.rpy" : "scene.ks";
         string sourceText = format == "Renpy" ? "こんにちは。" : "こんにちは♪・。";
@@ -212,10 +200,16 @@ public sealed class BuiltinAdapterAssetsTests : IDisposable
         string script = format == "Renpy" ? $"label start:\n    \"{sourceText}\"\n" : $"*start\r\n{sourceText}[p]\r\n";
         Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
         await File.WriteAllTextAsync(Path.Combine(resources, file), script, format == "Renpy" ? new UTF8Encoding(false) : Encoding.GetEncoding(932));
-        var sharedParser = editableSource ? null : await new EngineReferenceToolkit(Path.Combine(root, "shared"), parserAssets: assets)
+        var sharedParser = await new EngineReferenceToolkit(Path.Combine(root, "shared"), parserAssets: assets)
             .ResolveVnTextPatchAsync(source, default);
-        async Task<AdapterProcessResult> Invoke(object request) => await runner.RunAsync(new(toolchain.ExecutablePath,
-            [Path.Combine(package.DirectoryPath, "adapter.dll")], package.DirectoryPath, JsonSerializer.Serialize(request, Json), VnTextPatchAssemblyPath: sharedParser), default);
+        async Task<AdapterProcessResult> Invoke(object request)
+        {
+            var payload = JsonSerializer.SerializeToNode(request, Json)!;
+            payload["format"] = format;
+            payload["toolPaths"] = JsonSerializer.SerializeToNode(new { hostCommand = EngineArchiveFixture.HostCommand, vnTextPatch = sharedParser }, Json);
+            return await runner.RunAsync(new(fixture.Paths.Python,
+                EngineReferenceToolkit.PythonArguments(fixture.Paths, entry, []), source, payload.ToJsonString()), default);
+        }
         var extraction = await Invoke(new { protocolVersion = 1, operation = "extract", sourceDirectory = resources, resourceFiles = new[] { file } });
         Assert.Equal(0, extraction.ExitCode);
         using var parsed = JsonDocument.Parse(extraction.StandardOutput);
@@ -229,31 +223,8 @@ public sealed class BuiltinAdapterAssetsTests : IDisposable
         Assert.Equal(script.Replace(sourceText, targetText), await File.ReadAllTextAsync(Path.Combine(output, file)));
         if (format == "KirikiriKs") Assert.True(File.ReadAllBytes(Path.Combine(output, file)).AsSpan().StartsWith(Encoding.Unicode.GetPreamble()));
         var probe = await Invoke(new { protocolVersion = 1, operation = "probe", sourceDirectory = resources });
-        Assert.Equal(3, probe.ExitCode);
-        Assert.Contains("65536", probe.StandardError);
-    }
-
-    [Theory]
-    [InlineData("SilkysMes")]
-    [InlineData("Renpy")]
-    public async Task ReturnedLibrarySourceListCompilesAsSelectedFormalAdapterSources(string format)
-    {
-        var assets = CreateAssets();
-        string workspace = Path.Combine(root, "workspace");
-        var copied = JsonSerializer.SerializeToElement(await assets.CopyAsync(format, workspace, true), Json);
-        var sources = copied.GetProperty("librarySourceFiles").EnumerateArray().Select(item => item.GetString()!).ToArray();
-        Assert.Contains("src/BuiltinVnTextPatch/generated/GlobalUsings.cs", sources);
-        Assert.Equal(Directory.GetFiles(Path.Combine(workspace, "src"), "*.cs", SearchOption.AllDirectories)
-            .Select(path => Path.GetRelativePath(workspace, path).Replace('\\', '/')).Order(StringComparer.Ordinal), sources);
-        await File.WriteAllTextAsync(Path.Combine(workspace, "src/Program.cs"), "System.Console.Write(typeof(BuiltinScriptParser).Name);");
-        var toolchain = new PinnedDotNetToolchain(Path.Combine(Repository(), ".tools/dotnet"), "10.0.402", "10.0.13");
-        var runner = new AdapterProcessRunner();
-        var compiler = new GeneratedAdapterCompiler(toolchain, runner);
-        var package = await compiler.CompileWorkspaceAsync(Path.Combine(workspace, "src"), Path.Combine(workspace, "build"),
-            ["*.dat"], sources.Append("src/Program.cs").Select(path => new AdapterReleaseFile(path, "source", "Parser implementation")).ToArray());
-        var result = await runner.RunAsync(new(toolchain.ExecutablePath, [Path.Combine(package.DirectoryPath, "adapter.dll")], workspace), default);
-        Assert.Equal(0, result.ExitCode);
-        Assert.Equal("BuiltinScriptParser", result.StandardOutput);
+        Assert.NotEqual(0, probe.ExitCode);
+        Assert.Contains("有界范围", probe.StandardError);
     }
 
     [Fact]

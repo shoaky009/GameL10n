@@ -3,22 +3,25 @@ namespace GameL10n.Core.Development;
 public static class GeneratedAdapterProtocol
 {
     public const string Description = """
-        Standalone .NET 10 CLI protocol v1, with no dependency on the translator assembly.
-        Compile multiple src/**/*.cs files with framework references only. No csproj, NuGet restore or build tasks.
+        Python CLI protocol v1, with entry src/adapter.py and no dependency on the translator assembly.
+        All generated analysis and adapter logic uses Python. No C# compilation, csproj, NuGet restore or build tasks.
         test_adapter reuses the persisted release selection; optional releaseFiles replaces it. update_release_files changes
-        only selected entries. New src/*.cs and copied built-ins auto-register; other dependencies declare source/runtime/asset/license
+        only selected entries. New src/*.py and copied built-ins auto-register; other dependencies declare source/runtime/asset/license
         roles and short purposes once through write_file/download_tool or update_release_files. tools/* maps to workspace src/tools/*. Include required indirect dependencies/notices, not probes,
-        samples, reports or unused tools. Only this selected package is compiled, tested and published (manifest v3).
-        Optional selected tools are packaged as tools/ beside adapter.dll. Locate them with AppContext.BaseDirectory,
-        use ProcessStartInfo.ArgumentList, and keep any attribution/source metadata in tools/sources.json.
+        samples, reports or unused tools. Only this selected package is syntax-checked, tested and published (manifest v4).
+        Selected tools are packaged as tools/ beside src/. Locate them relative to request.adapterDirectory;
+        use subprocess argument arrays, and keep any attribution/source metadata in tools/sources.json.
         Read one UTF-8 JSON request from stdin. Write diagnostics to stderr. All JSON properties use camelCase.
         User-facing warnings, errors and issue messages must be concise, actionable Chinese; keep detailed research in development notes.
         Request: {protocolVersion:1,operation:"probe"|"extract"|"build"|"validate",sourceDirectory,outputDirectory,
           resourceFiles:[relativePath],probeFiles:[{path,length,headerBytes}],probeRanges:[{path,offset,length,dataPath}],
-          probeReadLimits,responseFile,translationsFile,translations,toolPaths}.
-        Optional tools/engine-reference.json pins the shared Python source library and interpreter. use_engine_reference writes
-        this dependency and EngineReferencePython.cs. With it, toolPaths:{python,engineLibrary} contains host-resolved local paths.
-        A small tools/*.py JSON CLI can call existing python.engines/python.archives modules without rewriting their algorithms.
+          probeReadLimits,responseFile,translationsFile,translations,toolPaths,adapterDirectory}.
+        tools/engine-reference.json pins the shared Python source library and interpreter; test_adapter prepares it automatically.
+        use_engine_reference also supplies tools/gamel10n_host.py. toolPaths:{python,engineLibrary,vnTextPatch,hostCommand}
+        contains host-resolved local paths and the precompiled component command array.
+        Python can call existing python.engines/python.archives modules without rewriting their algorithms.
+        from tools.gamel10n_host import parser, component accesses pinned parsers and precompiled font/encoding components.
+        Implement bounded probe in Python; full-file parsers must never run against truncated probe input.
         The same pinned files are used for test_adapter and all published operations; use bundled/shared dependencies, restoring missing files from a complete release.
         Never hardcode these paths, download libraries from adapter code, or copy shared runtimes into game output.
         Always enumerate the current resourceFiles or sourceDirectory; filenames from the development game must not be pinned.
@@ -40,7 +43,7 @@ public static class GeneratedAdapterProtocol
         Do not infer unsupported formats from missing bytes or classify archive contents by filename/size alone.
         Full extract/build/validate operations receive host source snapshots. Read sources only; do not modify them.
         For build, load the unit-ID-to-text dictionary from translationsFile when non-null, else from inline translations.
-        Write the full response JSON to the absolute responseFile path when supplied (File.Create + JsonSerializer.SerializeAsync
+        Write the full response JSON to the absolute responseFile path when supplied (open with encoding='utf-8' and json.dump
         supports large extractions). An inline stdout JSON response is also supported for legacy adapters.
         Each CLI operation is cancellable. Probe has a 45-second total budget; other operations have a ten-minute timeout. stdout/stderr diagnostics are limited to 8 MiB for new
         packages; extraction responses written to responseFile have no fixed byte limit. Do not print extraction data to stdout.

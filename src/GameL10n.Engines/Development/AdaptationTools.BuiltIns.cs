@@ -92,7 +92,7 @@ public sealed partial class AdaptationTools
     {
         var directory = Text(args, "directory");
         var files = Strings(args, "files");
-        var result = await (builtinTrial ?? new BuiltinAdapterTrial(compiler.Runner)).RunAsync(Text(args, "format"),
+        var result = await (builtinTrial ?? new BuiltinAdapterTrial(runtime.Runner)).RunAsync(Text(args, "format"),
             workspace, directory, files, Boolean(args, "checkRoundtrip", true), ct);
         RecordBuiltinTrial(result, directory, files);
         return result;

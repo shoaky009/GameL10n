@@ -43,6 +43,8 @@ public sealed record PinnedDotNetToolchain(string RootDirectory, string SdkVersi
     public string ExecutablePath => Path.Combine(Path.GetFullPath(RootDirectory), "dotnet.exe");
 }
 
+public sealed record AdapterRuntime(PinnedDotNetToolchain Toolchain, IAdapterProcessRunner Runner);
+
 public sealed record GeneratedAdapterPackage(string Id, string Version, string DirectoryPath,
     IReadOnlyList<string> ResourceFiles, string SourceSha256, string AssemblySha256, AdapterFamily? Family = null,
     IReadOnlyList<string>? ResourcePatterns = null,

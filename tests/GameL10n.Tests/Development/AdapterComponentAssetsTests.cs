@@ -72,16 +72,16 @@ public sealed class AdapterComponentAssetsTests : IDisposable
         var workspace = Path.Combine(root, "workspace");
         var release = new List<AdapterReleaseFile>();
         await assets.CopyAsync(["cp932-glyph-map"], workspace, releaseFiles: release);
-        Assert.Equal("src/Components/Cp932GlyphEncoding.cs", Assert.Single(release).Path);
-        Assert.Equal("source", release[0].Role);
+        Assert.Equal("tools/gamel10n_host.py", Assert.Single(release).Path);
+        Assert.Equal("runtime", release[0].Role);
         var repeat = JsonSerializer.SerializeToElement(await assets.CopyAsync(["cp932-glyph-map"], workspace), Json);
         Assert.True(repeat.GetProperty("files")[0].GetProperty("reused").GetBoolean());
-        var path = Path.Combine(workspace, "src", "Components", "Cp932GlyphEncoding.cs");
-        await File.AppendAllTextAsync(path, "\n// User modification\n");
+        var path = Path.Combine(workspace, "src", "tools", "gamel10n_host.py");
+        await File.AppendAllTextAsync(path, "\n# User modification\n");
         var error = await Assert.ThrowsAsync<IOException>(() => assets.CopyAsync(["qlie-sfnt-font", "cp932-glyph-map"], workspace));
         Assert.Contains("未写入文件", error.Message);
         Assert.Single(Directory.GetFiles(workspace, "*", SearchOption.AllDirectories));
-        Assert.EndsWith("// User modification\n", await File.ReadAllTextAsync(path));
+        Assert.EndsWith("# User modification\n", await File.ReadAllTextAsync(path));
         Assert.False(Directory.Exists(Path.Combine(workspace, "backups")));
         Assert.Throws<InvalidDataException>(() => assets.ReadSource("cp932-glyph-map", "../QlieFont.cs"));
     }
@@ -99,7 +99,7 @@ public sealed class AdapterComponentAssetsTests : IDisposable
     }
 
     [Fact]
-    public async Task CopiedComponentsCompileIndependentlyAndLauncherIsDeterministicFrameworkExecutable()
+    public async Task ComponentsSharePythonHelperAndLauncherIsDeterministicFrameworkExecutable()
     {
         var repository = Repository();
         var runner = new AdapterProcessRunner();
@@ -140,28 +140,12 @@ public sealed class AdapterComponentAssetsTests : IDisposable
         }
         var assets = new AdapterComponentAssets(assetsDirectory);
         var workspace = Path.Combine(root, "workspace");
-        await assets.CopyAsync(["cp932-glyph-map", "qlie-sfnt-font", "system4-fnl-glyph", "qlie-japanese-font-launcher"], workspace);
-        await File.WriteAllTextAsync(Path.Combine(workspace, "src/Program.cs"), """
-            using System;
-            using System.Collections.Generic;
-            using GameL10n.AdapterComponents;
-            var codec = Cp932GlyphEncoding.Plan(new[] { "译文", "日文\ue000" }, new[] { 0xe000, 0xe001, 0xe002 }, Array.Empty<string>());
-            if (codec.GetString(codec.GetBytes("译文")) != "译文" || codec.SlotToUnicode.ContainsKey(0xe000)) return 1;
-            Console.Write("component-ok");
-            return 0;
-            """, new UTF8Encoding(false));
-        var toolchain = new PinnedDotNetToolchain(Path.Combine(repository, ".tools/dotnet"), "10.0.402", "10.0.13");
-        var package = await new GeneratedAdapterCompiler(toolchain, runner).CompileWorkspaceAsync(
-            Path.Combine(workspace, "src"), Path.Combine(root, "compiled"), ["*.txt"], releaseFiles:
-            [new("src/Program.cs", "source", "Entry"), new("src/Components/Cp932GlyphEncoding.cs", "source", "Codec"),
-             new("src/QlieFont.cs", "source", "Font"), new("src/GlyphRasterizer.cs", "source", "Glyphs"),
-             new("tools/QlieLauncher.cs", "asset", "Launcher source"), new("tools/QlieLauncher.exe", "asset", "Launcher")]);
-        Assert.Contains("tools/QlieLauncher.exe", package.PackageFiles!.Keys);
-        Assert.Contains("tools/QlieLauncher.cs", package.PackageFiles.Keys);
-        Assert.Contains("src/Components/Cp932GlyphEncoding.cs", package.PackageFiles.Keys);
-        var run = await runner.RunAsync(new(toolchain.ExecutablePath, [Path.Combine(package.DirectoryPath, "adapter.dll")], package.DirectoryPath), default);
-        Assert.Equal(0, run.ExitCode);
-        Assert.Equal("component-ok", run.StandardOutput);
+        var release = new List<AdapterReleaseFile>();
+        await assets.CopyAsync(["cp932-glyph-map", "qlie-sfnt-font", "system4-fnl-glyph", "qlie-japanese-font-launcher"], workspace, releaseFiles: release);
+        Assert.Single(release, file => file.Path == "tools/gamel10n_host.py" && file.Role == "runtime");
+        Assert.Contains(release, file => file.Path == "tools/QlieLauncher.exe" && file.Role == "asset");
+        Assert.DoesNotContain(release, file => file.Role == "source");
+        Assert.Equal(initial, await File.ReadAllBytesAsync(Path.Combine(workspace, "src/tools/QlieLauncher.exe")));
     }
 
     private static string Repository()

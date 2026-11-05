@@ -2,7 +2,7 @@
 
 ## 目标与当前状态
 
-将 GameL10n 已有的临时 C# 分析／处理脚本迁移为可供当前智能分析继续使用的 Python 脚本。旧数据尚未提供，尚未扫描、转换或验证任何真实脚本。本任务在持有旧数据的机器上执行。
+将 GameL10n 已有且需要继续使用的 C# 分析／处理脚本和适配逻辑迁移为 Python。旧数据尚未提供，尚未扫描、转换或验证任何真实脚本。本任务在持有旧数据的机器上执行。
 
 用户允许按实际需要制作独立迁移工具，工具不纳入 GameL10n 主项目、正式脚本目录或发行包。脚本数量少时直接逐组迁移即可，不必先开发通用转换框架。遵循 KISS；按风险判断是否需要新增测试，优先使用真实样本与已有检查。
 
@@ -13,7 +13,9 @@
 - 新的引擎经验评审只导出 Python 辅助脚本；旧的 C# 经验仍可读取、复制作参考。
 - 恢复上下文不再推荐历史 `run_csharp` 成功调用。原始会话、源码和日志不会因此被自动转换或删除。
 
-正式生成的适配器仍使用 C#，现有 C# 适配器无需因上述改动迁移。此次任务不迁移正式适配器、不修改宿主协议、不删除发行包编译器或 .NET 运行时。
+当前新生成的正式适配器也统一使用 Python，入口 `src/adapter.py`，包格式为 Manifest v4；临时脚本与正式入口都不再编译 C#。编码、字体和内置解析器通过预编译宿主调用，发行包不携带 C# 编译器或引用程序集，共享 .NET 运行时仍保留。
+
+已发布 Manifest v1～v3 的 `adapter.dll` 可继续原样运行，不要求批量迁移。需要继续修复、扩展或重新发布的旧实现，在独立工作区迁移为 Python 并通过完整资源验收后发布新版本；不要原地改写旧包。
 
 ## 开始前需要的信息
 
@@ -29,7 +31,7 @@
 | `games/<项目 ID>/adaptation/current/session.json` | 查 `messages` 中的 `run_csharp` 调用、`successfulProbes` 和 `pendingCalls`，还原源文件组合、引用、参数、标准输入和工作目录 |
 | `extensions/engine-knowledge/*.json` | 检查 `tools[].files` 内嵌的 C# 辅助源码、`usage` 和相关指引；不只是扫描磁盘上的 `.cs` |
 | `adaptation/current/work/engine-knowledge/` | 已复制到项目的经验辅助源码，可能与全局经验重复或已有本地修改 |
-| `adaptation/current/src/`、`src/tools/` | 结合 `releaseFiles` 和调用关系区分正式实现／依赖与误放的临时脚本；不批量转换 |
+| `adaptation/current/src/`、`src/tools/` | 结合 `releaseFiles` 和调用关系区分正式实现／依赖与误放的临时脚本；需要续接的正式逻辑迁移到 `src/adapter.py` 及 Python 模块，重新选择清单并验收 |
 | `extensions/packages/` 及其 `package.json`、`adapter.dll` | 正式适配器及不可变版本，保留原状，不原地改源码、清单或哈希 |
 
 `run_csharp` 的 `arguments` 字段在工具调用记录中是 JSON 字符串，需要解析后读取 `sourceFiles`、`references`、`arguments`、`workingDirectory`、`stdin`、`timeoutSeconds`。旧日志可能另有封装，按实际格式读取，不要硬套一种结构。
@@ -42,6 +44,7 @@
 2. 优先复用 Python 标准库和应用已固定的引擎库 API。原探针引用正式 C# 解析器时，优先使用现成解析器试用／CLI 或已有组件，不为迁移一个探针复制整套解析器，也不重新引入 C# 动态编译、pythonnet、pip 或运行时下载。
 3. 保持参数、工作目录和文件行为；迁移时特别核对小端／大端、有符号整数、溢出、流位置、CP932／CP936、UTF-16 字符长度与字节偏移的区别。探针只处理暂存样本，不修改游戏原文件。
 4. Python 临时入口放在对应工作区的 `work/`，保留原 C# 和独立迁移映射。通过 `run_engine_python` 运行，使用工作区相对路径；正式依赖才放在 `src/tools/` 并登记发布角色。
+   正式入口使用 `src/adapter.py`，遵循现有 CLI v1 的 probe/extract/build/validate、稳定 ID、原文字节往返及输出声明契约。内置解析器可用 `tools.gamel10n_host.parser`，编码、字体可用 `component` 批量调用。旧包中随适配器编译的私有算法若无现成预编译接口，按实际语义迁移为 Python，不增加新的运行时编译路径。移除发布清单中不再运行的 C# 源码，保留其副本作参考。
 5. 为迁移单元记录新的调用，例如：
 
    ```json

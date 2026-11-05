@@ -9,14 +9,11 @@
     <EmbeddedResource Include="../../third_party/SiglusSSU/siglus_ssu-0.5.7-cp314-cp314-win_amd64.whl" LogicalName="GameL10n.Siglus.upstream.whl" />
     <EmbeddedResource Include="../../adapters/siglus/*.py" LogicalName="GameL10n.Siglus.%(Filename)%(Extension)" />
     <EmbeddedResource Include="../../adapters/siglus/*.json" LogicalName="GameL10n.Siglus.%(Filename)%(Extension)" />
-    <EmbeddedResource Include="../../adapters/components/Cp932GlyphEncoding.cs" LogicalName="GameL10n.Components.Cp932GlyphEncoding.cs" />
     <EmbeddedResource Include="../../adapters/components/engine_archive.py" LogicalName="GameL10n.Components.engine_archive.py" />
     <EmbeddedResource Include="../../adapters/components/kirikiri_scn_text.py" LogicalName="GameL10n.Components.kirikiri_scn_text.py" />
     <EmbeddedResource Include="../../adapters/components/gamel10n_host.py" LogicalName="GameL10n.Components.gamel10n_host.py" />
     <EmbeddedResource Include="../../adapters/components/EngineReferencePython.cs" LogicalName="GameL10n.Components.EngineReferencePython.cs" />
     <EmbeddedResource Include="../../adapters/templates/ScriptComponentAdapter.cs" LogicalName="GameL10n.Templates.ScriptComponentAdapter.cs" />
-    <EmbeddedResource Include="../../adapters/qlie-filepack3-systemfont/QlieFont.cs" LogicalName="GameL10n.Components.QlieFont.cs" />
-    <EmbeddedResource Include="../../adapters/system4-ain14-msg1-fnl/GlyphRasterizer.cs" LogicalName="GameL10n.Components.GlyphRasterizer.cs" />
     <EmbeddedResource Include="../../adapters/qlie-filepack3-systemfont/tools/QlieLauncher.cs" LogicalName="GameL10n.Components.QlieLauncher.cs" />
   </ItemGroup>
 </Project>

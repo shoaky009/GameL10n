@@ -29,7 +29,7 @@ public sealed partial class AdaptationTools
         var reused = 0;
         var attempted = 0;
         long selectedBytes = 0;
-        var trial = builtinTrial ?? new BuiltinAdapterTrial(compiler.Runner);
+        var trial = builtinTrial ?? new BuiltinAdapterTrial(runtime.Runner);
         string? parserFingerprint = null;
         session.AutomaticTrials = new(AutomaticTrialRevision, "running", 0, []);
         await save();

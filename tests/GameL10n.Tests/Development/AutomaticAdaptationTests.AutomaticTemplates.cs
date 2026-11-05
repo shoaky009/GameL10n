@@ -13,7 +13,7 @@ public sealed partial class AutomaticAdaptationTests
         var discovery = await BuiltinAdapterDiscovery.InspectAsync(request.GameDirectory);
         var store = new LocalAdapterPackageStore(Path.Combine(root, "store"));
         var workspace = Path.Combine(root, "workspace");
-        var compiler = Compiler(new ScriptedRunner());
+        var compiler = Runtime(new ScriptedRunner());
         async Task<AdaptationSession> Run(AdaptationRequest current, IReadOnlySet<string>? disabled = null)
         {
             var state = new AdaptationSession { Objective = AutomaticAdaptationService.ResolveObjective(current), BuiltinDiscovery = discovery };
@@ -40,7 +40,7 @@ public sealed partial class AutomaticAdaptationTests
             Assert.False(Directory.Exists(Path.Combine(workspace, "src")));
         }
         Directory.CreateDirectory(Path.Combine(workspace, "src"));
-        var source = Path.Combine(workspace, "src", "Program.cs");
+        var source = Path.Combine(workspace, "src", "adapter.py");
         await File.WriteAllTextAsync(source, "existing implementation");
         Assert.Null((await Run(request)).AutomaticTemplate);
         Assert.Equal("existing implementation", await File.ReadAllTextAsync(source));
@@ -53,7 +53,7 @@ public sealed partial class AutomaticAdaptationTests
         await File.WriteAllTextAsync(Path.Combine(request.GameDirectory, "script.rpy"), "label start:\n    \"こんにちは。\"\n");
         var store = new LocalAdapterPackageStore(Path.Combine(root, "store"));
         var workspace = Path.Combine(root, "workspace");
-        var compiler = Compiler(new ScriptedRunner());
+        var compiler = Runtime(new ScriptedRunner());
         foreach (var blocker in new[] { "compiled.rpyc", "data.rpa", "data.xp3", "other.ks", "error.log" })
         {
             var path = Path.Combine(request.GameDirectory, blocker);

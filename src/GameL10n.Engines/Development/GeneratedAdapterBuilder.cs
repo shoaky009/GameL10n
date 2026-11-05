@@ -43,7 +43,7 @@ public sealed class GeneratedAdapterBuilder(IAdapterProcessRunner runner)
             var checkedSyntax = await runner.RunAsync(new(python.Python, ["-I", "-B", "-X", "utf8", "-c", syntax, .. sources],
                 pending, Timeout: TimeSpan.FromSeconds(30), MaximumOutputBytes: 64 * 1024), ct);
             if (checkedSyntax.ExitCode != 0)
-                throw new GeneratedAdapterException("Python 语法检查失败：" + GeneratedAdapterCompiler.LimitDiagnostic(checkedSyntax.StandardOutput + "\n" + checkedSyntax.StandardError));
+                throw new GeneratedAdapterException("Python 语法检查失败：" + GeneratedGameAdapter.LimitDiagnostic(checkedSyntax.StandardOutput + "\n" + checkedSyntax.StandardError));
             var files = GeneratedGameAdapter.EnumerateFiles(pending).ToDictionary(path =>
                 GeneratedAdapterResources.Normalize(Path.GetRelativePath(pending, path)), GeneratedAdapterResources.HashFile, StringComparer.Ordinal);
             var sourceHash = GeneratedAdapterResources.HashEntries(files.Where(pair => pair.Key.StartsWith("src/", StringComparison.Ordinal)));

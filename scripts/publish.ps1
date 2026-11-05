@@ -1,27 +1,13 @@
-param([switch]$SkipBuild, [switch]$WithoutToolchain, [string]$OutputDirectory = 'artifacts/GameL10n', [string]$EngineToolsCacheDirectory = '.tools/engine-tools')
+param([switch]$SkipBuild, [string]$OutputDirectory = 'artifacts/GameL10n', [string]$EngineToolsCacheDirectory = '.tools/engine-tools')
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path $PSScriptRoot -Parent
 $output = [IO.Path]::GetFullPath([IO.Path]::Combine($repoRoot, $OutputDirectory))
 $runtimeVersion = '10.0.13'
-$sdkVersion = '10.0.402'
 $toolchainSource = Join-Path $repoRoot '.tools/dotnet'
 $toolchainTarget = Join-Path $output 'toolchain'
 $toolchainItems = @('dotnet.exe', "host/fxr/$runtimeVersion", "shared/Microsoft.NETCore.App/$runtimeVersion", 'LICENSE.txt', 'ThirdPartyNotices.txt')
-if (-not $WithoutToolchain) {
-    $compilerDirectory = "sdk/$sdkVersion/Roslyn/bincore"
-    # csc runs directly; Visual Basic, the compiler server and other locale resources are not used.
-    foreach ($name in @('csc.dll', 'csc.deps.json', 'csc.runtimeconfig.json',
-        'Microsoft.CodeAnalysis.dll', 'Microsoft.CodeAnalysis.CSharp.dll',
-        'zh-Hans/Microsoft.CodeAnalysis.resources.dll', 'zh-Hans/Microsoft.CodeAnalysis.CSharp.resources.dll')) {
-        $toolchainItems += "$compilerDirectory/$name"
-    }
-}
 foreach ($relative in $toolchainItems) {
     if (-not (Test-Path -LiteralPath (Join-Path $toolchainSource $relative))) { throw "Pinned toolchain component is missing: $relative" }
-}
-$referenceDirectory = "packs/Microsoft.NETCore.App.Ref/$runtimeVersion/ref/net10.0"
-if (-not $WithoutToolchain -and -not (Test-Path -LiteralPath (Join-Path $toolchainSource $referenceDirectory))) {
-    throw "Pinned framework references are missing: $referenceDirectory"
 }
 $desktopExecutable = Join-Path $output 'GameL10n.Desktop.exe'
 if (Get-Process -Name GameL10n.Desktop -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $desktopExecutable }) {
@@ -78,6 +64,7 @@ $engineToolsCache = [IO.Path]::GetFullPath([IO.Path]::Combine($repoRoot, $Engine
 if ($LASTEXITCODE -ne 0) { throw 'Shared engine tools are missing; publishing stopped instead of deferring downloads to game analysis.' }
 if (-not (Test-Path -LiteralPath (Join-Path $output 'GameL10n.Desktop.exe'))) { throw 'The desktop executable is missing.' }
 if (-not (Test-Path -LiteralPath (Join-Path $output 'tools/data/GameL10n.DataTool.exe'))) { throw 'The data tool is missing.' }
+if (-not (Test-Path -LiteralPath (Join-Path $output 'tools/adapter-host/GameL10n.AdapterHost.dll'))) { throw 'The precompiled adapter host is missing.' }
 if (-not (Test-Path -LiteralPath (Join-Path $output 'tools/vntextpatch/GameL10n.VnTextPatch.exe'))) { throw 'The built-in script tool is missing.' }
 if (Test-Path -LiteralPath $toolchainTarget) { Remove-Item -LiteralPath $toolchainTarget -Recurse -Force }
 foreach ($relative in $toolchainItems) {
@@ -90,13 +77,6 @@ foreach ($relative in $toolchainItems) {
         New-Item -ItemType Directory -Path (Split-Path $target -Parent) -Force | Out-Null
         Copy-Item -LiteralPath $source -Destination $target -Force
     }
-}
-if (-not $WithoutToolchain) {
-    # csc consumes only reference DLLs; XML documentation, analyzers and SDK metadata are not used.
-    $referenceTarget = Join-Path $toolchainTarget $referenceDirectory
-    New-Item -ItemType Directory -Path $referenceTarget -Force | Out-Null
-    Get-ChildItem -LiteralPath (Join-Path $toolchainSource $referenceDirectory) -Filter '*.dll' -File |
-        Copy-Item -Destination $referenceTarget -Force
 }
 Copy-Item -LiteralPath (Join-Path $repoRoot 'README.md'), (Join-Path $repoRoot 'THIRD-PARTY-NOTICES.md'), (Join-Path $repoRoot 'logo.png') -Destination $output -Force
 New-Item -ItemType Directory -Path (Join-Path $output 'docs') -Force | Out-Null

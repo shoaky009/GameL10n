@@ -13,7 +13,7 @@ public sealed partial class AdaptationTools
         _ = Number(args, "length", 6000, 1, 12000);
         if (Text(args, "source", "").Length > 256 || Text(args, "query", "").Length > 256)
             throw new InvalidDataException("源码名称或查询词过长。");
-        var result = await new SiglusClient(EngineToolkit, compiler.Runner, reportProgress)
+        var result = await new SiglusClient(EngineToolkit, runtime.Runner, reportProgress)
             .InvokeAsync("inspect", request.GameDirectory, null, null, args, ct);
         return result.GetProperty("inspection");
     }
@@ -25,8 +25,7 @@ public sealed partial class AdaptationTools
         var files = new Dictionary<string, string>
         {
             ["src/" + EngineReferenceToolkit.DependencyPath] = JsonSerializer.Serialize(prepared.Dependency, Json),
-            ["src/EngineReferencePython.cs"] = EnginePythonBridge.Source,
-            ["src/Program.cs"] = "return EngineReferencePython.Run(\"tools/adapter.py\");\n",
+            ["src/adapter.py"] = "import runpy\nrunpy.run_module('tools.adapter', run_name='__main__', alter_sys=True)\n",
             ["src/tools/adapter.py"] = SiglusAssets.EntryScript,
             ["src/tools/siglus-rules.json"] = "{\"commandRules\":[]}\n"
         };

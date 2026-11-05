@@ -43,8 +43,8 @@ public sealed partial class AdaptationTools
             offset, nextOffset = end, more = end < content.Length, totalCharacters = content.Length,
             usage = "先用现成 CLI（run_engine_python 的 module 参数）或 work/*.py 小样本调用 python.engines / python.archives 的现成函数，工具自动提供共享解释器和库。"
                 + "模块接口按引擎和版本不同，请按 publicSymbols/指南定位，不要把整个算法改写为 C#。"
-                + "只补资源选择、容器与脚本连接及版本差异。需要正式复用时 use_engine_reference 生成固定版本依赖和 C# 调用桥，"
-                + "将 JSON CLI 连接脚本放到 src/tools/*.py，再通过 test_adapter 验收。可选第三方模块不自动安装，缺依赖需明确报告。"
+                + "只补资源选择、容器与脚本连接及版本差异。需要正式复用时 use_engine_reference 生成固定版本依赖和 Python 组件接口，"
+                + "将 JSON CLI 入口放到 src/adapter.py，再通过 test_adapter 验收。可选第三方模块不自动安装，缺依赖需明确报告。"
         };
     }
 
@@ -82,12 +82,12 @@ public sealed partial class AdaptationTools
         AdapterProcessResult result;
         try
         {
-            result = await compiler.Runner.RunAsync(new(prepared.Paths.Python,
+            result = await runtime.Runner.RunAsync(new(prepared.Paths.Python,
                 script is null ? EngineReferenceToolkit.PythonModuleArguments(prepared.Paths, module, arguments)
                     : EngineReferenceToolkit.PythonArguments(prepared.Paths, script, arguments), working, Text(args, "stdin", ""),
                 TimeSpan.FromSeconds(Number(args, "timeoutSeconds", 120, 1, 600)), 1024 * 1024,
                 VnTextPatchAssemblyPath: await AnalysisParserPathAsync(ct),
-                AdapterHostCommand: EngineReferenceToolkit.AdapterHostCommand(compiler.Toolchain)), ct);
+                AdapterHostCommand: EngineReferenceToolkit.AdapterHostCommand(runtime.Toolchain)), ct);
         }
         catch (AdapterProcessLimitException error)
         {
@@ -105,7 +105,7 @@ public sealed partial class AdaptationTools
         var files = new Dictionary<string, string>
         {
             ["src/" + EngineReferenceToolkit.DependencyPath] = JsonSerializer.Serialize(prepared.Dependency, Json),
-            ["src/EngineReferencePython.cs"] = EnginePythonBridge.Source
+            ["src/" + EnginePythonBridge.HelperPath] = EnginePythonBridge.HelperSource
         };
         foreach (var (path, content) in files)
         {
@@ -123,10 +123,10 @@ public sealed partial class AdaptationTools
         Development.RegisterReleaseFiles(files.Keys.Select(path => new AdapterReleaseFile(AdapterReleaseFiles.PackagePath(path),
             path.StartsWith("src/tools/", StringComparison.Ordinal) ? "runtime" : "source", "共享引擎工具链连接与规则")));
         return new { files = files.Keys, prepared.Dependency,
-            example = "Program.cs: return EngineReferencePython.Run(\"tools/adapter.py\");",
-            composedParserExample = "同时 copy_adapter 复用内置脚本解析器时，Program.cs 只需：return EngineReferencePython.Run(\"tools/adapter.py\", args, BuiltinScriptParser.ExecuteJson); "
-                + "Python 使用 request['builtinCommand'] 作为 subprocess 参数列表，以 UTF-8 JSON 调用。入口已处理 --builtin 分支、dotnet 主机参数及 Unicode stdin/stdout，不要另写 Main 或猜测解析器 DLL 路径。",
-            protocol = "tools/adapter.py reads one JSON request from stdin and writes the standard adapter response to request['responseFile']. "
+            example = "src/adapter.py: import json, sys; request = json.load(sys.stdin). Return the standard JSON response through tools.gamel10n_host.write_response(request, response).",
+            composedParserExample = "copy_adapter 复用内置解析器后，from tools.gamel10n_host import parser; "
+                + "response = parser(request, format='Renpy') 调用固定解析器；自行实现仅使用文件头或有界范围读取的 probe。组件路径由宿主提供，无需 C# 入口。",
+            protocol = "src/adapter.py reads one JSON request from stdin and writes the standard adapter response to request['responseFile']. "
                 + "Use from python.engines.<module> import ... and the existing sourceDirectory/resourceFiles/probeRanges. "
                 + "The host supplies pinned paths in toolPaths, including after publication. Never hardcode data paths or download at runtime. "
                 + "Only source/license data and a shared interpreter are provided; engine-specific decoding, fonts and runtime still need verification."
@@ -136,6 +136,18 @@ public sealed partial class AdaptationTools
 
 public static class EnginePythonBridge
 {
+    public const string HelperPath = "tools/gamel10n_host.py";
+    public static string HelperSource
+    {
+        get
+        {
+            using var stream = typeof(EnginePythonBridge).Assembly.GetManifestResourceStream("GameL10n.Components.gamel10n_host.py")
+                ?? throw new InvalidDataException("Python 组件调用接口缺失。");
+            using var reader = new StreamReader(stream);
+            return reader.ReadToEnd();
+        }
+    }
+
     public static string Source
     {
         get

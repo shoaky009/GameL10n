@@ -32,7 +32,7 @@ public sealed record AdapterTestResult(bool Passed, AdapterTestStage Stage, IRea
 
 /// <summary>Builds, verifies and publishes a development workspace independently of the agent tool protocol.</summary>
 public sealed partial class AdapterDevelopmentWorkflow(AdaptationRequest request, AdaptationSession session, string workspace,
-    GeneratedAdapterCompiler compiler, LocalAdapterPackageStore store, HttpClient? researchClient = null,
+    AdapterRuntime runtime, LocalAdapterPackageStore store, HttpClient? researchClient = null,
     BuiltinAdapterAssets? builtinAssets = null, Action<string, string>? reportProgress = null)
 {
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web)
@@ -62,13 +62,13 @@ public sealed partial class AdapterDevelopmentWorkflow(AdaptationRequest request
         bool discoveryOnly, CancellationToken ct)
     {
         session.Recognition?.Validate();
-        var releaseFiles = session.ReleaseFiles;
         ClearVerification();
         if (session.ResourceHashes.Count == 0) throw new InvalidDataException("请先 stage_resources 选择用于验证的真实资源。");
         RequireLaunchResources();
         family.Validate();
         GeneratedAdapterResources.ValidatePatterns(patterns);
-        releaseFiles = AdapterReleaseFiles.Validate(releaseFiles);
+        var python = await PreparePythonReleaseAsync(ct);
+        var releaseFiles = AdapterReleaseFiles.Validate(session.ReleaseFiles);
         var fingerprint = await VerificationFingerprintAsync(family, patterns, releaseFiles, discoveryOnly, ct);
         if (await ReuseVerificationAsync(fingerprint, ct) is { } reused) return reused;
         session.VerificationCache = null;
@@ -84,7 +84,8 @@ public sealed partial class AdapterDevelopmentWorkflow(AdaptationRequest request
         GeneratedAdapterPackage package;
         try
         {
-            package = await compiler.CompileWorkspaceAsync(SourceDirectory, Path.Combine(workspace, "build"), patterns, releaseFiles, ct, family, session.Recognition);
+            package = await new GeneratedAdapterBuilder(runtime.Runner).BuildWorkspaceAsync(SourceDirectory,
+                Path.Combine(workspace, "build"), patterns, releaseFiles, python, ct, family, session.Recognition);
         }
         catch (GeneratedAdapterException error)
         {
@@ -95,7 +96,7 @@ public sealed partial class AdapterDevelopmentWorkflow(AdaptationRequest request
         session.RecordVerificationProgress(AdapterVerificationMilestone.Compiled);
         var compileMs = timer.ElapsedMilliseconds;
         timer.Restart();
-        var adapter = new GeneratedGameAdapter(package, compiler.Toolchain, compiler.Runner, store.WorkDirectory, EngineToolkit, reportProgress);
+        var adapter = new GeneratedGameAdapter(package, runtime.Toolchain, runtime.Runner, store.WorkDirectory, EngineToolkit, reportProgress);
         try
         {
             await CheckDiscoveryAsync(adapter, ct);
@@ -169,7 +170,7 @@ public sealed partial class AdapterDevelopmentWorkflow(AdaptationRequest request
         CheckReleaseGameInputs(package);
         RequireLaunchResources();
         await CheckResourcesAsync(ct);
-        var probe = await CheckDiscoveryAsync(new GeneratedGameAdapter(package, compiler.Toolchain, compiler.Runner, store.WorkDirectory, EngineToolkit, reportProgress), ct);
+        var probe = await CheckDiscoveryAsync(new GeneratedGameAdapter(package, runtime.Toolchain, runtime.Runner, store.WorkDirectory, EngineToolkit, reportProgress), ct);
         if (beforePublish is not null) await beforePublish(ct);
         var published = await store.PublishAndActivateAsync(request.GameId, package, session.VerificationDiagnostics, ct);
         session.VerifiedPackage = published;
@@ -180,7 +181,7 @@ public sealed partial class AdapterDevelopmentWorkflow(AdaptationRequest request
             + (partial ? "\n已知未覆盖内容：" + string.Join("；", session.TextCoverage.Pending) : "")
             + (session.TextCoverage.RuntimeChecks.Count > 0 ? "\n运行效果待验证：" + string.Join("；", session.TextCoverage.RuntimeChecks) : "");
         session.Stage = partial ? "部分文字可试译" : "适配完成";
-        PublishedAdapter = new GeneratedGameAdapter(published, compiler.Toolchain, compiler.Runner, store.WorkDirectory, EngineToolkit, reportProgress);
+        PublishedAdapter = new GeneratedGameAdapter(published, runtime.Toolchain, runtime.Runner, store.WorkDirectory, EngineToolkit, reportProgress);
         return PublishedAdapter;
     }
 

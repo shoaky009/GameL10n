@@ -178,7 +178,7 @@ internal sealed class EngineArchiveFixture : IDisposable
         var pin = new EngineReferencePin(revision, hash, hash);
         var library = Path.Combine(shared, "references", revision, "library.zip");
         Directory.CreateDirectory(Path.GetDirectoryName(library)!);
-        File.Copy(Paths.EngineLibrary, library);
+        File.Copy(Paths.EngineLibrary, library, overwrite: true);
         var json = new JsonSerializerOptions(JsonSerializerDefaults.Web);
         await File.WriteAllTextAsync(Path.Combine(shared, "current.json"), JsonSerializer.Serialize(pin, json));
         var runtime = Directory.CreateDirectory(Path.Combine(shared, "python", EngineReferenceToolkit.PythonVersion)).FullName;
