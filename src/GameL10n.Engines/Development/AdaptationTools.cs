@@ -35,7 +35,7 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
             """{"kind":{"type":"string","enum":["exploring","breakthrough","implementing","correction"]},"message":{"type":"string","minLength":1,"maxLength":400}}""", "kind", "message"),
         Define("inspect_engine_knowledge", "Search shared engine/format experience from previous projects. With id, read conditional guidance and helper index. Without id, query searches engine names/aliases; empty query lists this game's candidates (exact matches first, then related variants). offset pages through candidates. Verify conditions locally; a family match does not prove variant compatibility, and no match does not mean unsupported.",
             """{"query":{"type":"string"},"id":{"type":"string"},"offset":{"type":"integer","minimum":0,"maximum":100000}}""", []),
-        Define("copy_engine_knowledge_tools", "Copy one shared source helper into work/ without overwriting edits. Requires id and tool name from inspect_engine_knowledge. Inspect applicability and dependencies, then use run_csharp/run_engine_python on current samples. Does not execute, validate or publish an adapter. Call alone.",
+        Define("copy_engine_knowledge_tools", "Copy one shared source helper into work/ without overwriting edits. Requires id and tool name from inspect_engine_knowledge. Inspect applicability and dependencies, then use run_engine_python on current samples. Does not execute, validate or publish an adapter. Call alone.",
             """{"id":{"type":"string"},"tool":{"type":"string"}}""", "id", "tool"),
         Define("list_files", "List game or workspace files with sizes. Pagination, no file contents.",
             """{"root":{"type":"string","enum":["game","workspace"]},"path":{"type":"string"},"offset":{"type":"integer","minimum":0,"maximum":1000000},"limit":{"type":"integer","minimum":1,"maximum":200}}""", "root"),
@@ -77,8 +77,8 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
             """{"query":{"type":"string"}}""", "query"),
         Define("inspect_engine_reference", "Read one engine guide or a bounded source slice from the shared GalTransl Python toolkit. Uses the fixed source bundled with the app or already installed locally; no automatic download. Returns public function names, module paths and reuse instructions. engine is an exact ID from search_engine_references. Optional query/offset/length locate a relevant section. retryDownload retries local preparation after missing tool files are restored. Call alone.",
             """{"engine":{"type":"string"},"path":{"type":"string"},"query":{"type":"string"},"offset":{"type":"integer"},"length":{"type":"integer"},"retryDownload":{"type":"boolean"}}""", "engine"),
-        Define("run_engine_python", "Run exactly one script (work/*.py or src/tools/*.py) OR module (python.engines.* / python.archives.* from the pinned library). module calls an existing CLI directly, e.g. arguments=[--help], without writing a wrapper. Shared portable Python, no system Python, pip or pycache. Use staged samples and concise output. Can follow write_file calls in one ordered batch.",
-            """{"script":{"type":"string","description":"Existing work/*.py or src/tools/*.py. Omit when module is supplied."},"module":{"type":"string","description":"Exact pinned module name, such as python.engines.kirikiri_hxv4_text. Omit when script is supplied."},"arguments":{"type":"array","maxItems":128,"items":{"type":"string"}},"stdin":{"type":"string"},"timeoutSeconds":{"type":"integer","minimum":1,"maximum":600,"default":120}}""", []),
+        Define("run_engine_python", "Run exactly one script (work/*.py or src/tools/*.py) OR module (python.engines.* / python.archives.* from the pinned library). module calls an existing CLI directly, e.g. arguments=[--help], without writing a wrapper. Use this for all temporary analysis scripts. Bundled portable Python, no downloads, system Python, pip or pycache. UTF-8 stdin/stdout/stderr; workingDirectory defaults to the workspace root. Use staged samples and concise output. Can follow write_file calls in one ordered batch.",
+            """{"script":{"type":"string","description":"Existing work/*.py or src/tools/*.py. Omit when module is supplied."},"module":{"type":"string","description":"Exact pinned module name, such as python.engines.kirikiri_hxv4_text. Omit when script is supplied."},"arguments":{"type":"array","maxItems":128,"items":{"type":"string"}},"workingDirectory":{"type":"string"},"stdin":{"type":"string"},"timeoutSeconds":{"type":"integer","minimum":1,"maximum":600,"default":120}}""", []),
         Define("inspect_engine_component", "List fixed callable archive components or inspect one id. Returns supported formats, read/write operations, budgets and dependency contract. No downloads or source reading. Prefer run_engine_component over writing a Python wrapper for a supported format.",
             """{"id":{"type":"string"}}"""),
         Define("run_engine_component", "Directly inspect/extract/rebuild a staged archive using a fixed component, without writing code. Input under resources/ or work/; output is a NEW work/ directory. Returns bounded entries plus full manifest.json. Optional members/extensions select extraction. Rebuild replacements map exact archive names to work/ files; untouched members are verified. Uses pinned local shared Python/library, no pip/download. XP3 requires independently confirmed filter=none. Call alone.",
@@ -94,16 +94,14 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
             """{"url":{"type":"string"},"path":{"type":"string"},"releaseRole":{"type":"string","enum":["runtime","asset","license"]},"purpose":{"type":"string","maxLength":240},"refresh":{"type":"boolean"}}""", "url", "path"),
         Define("stage_resources", "Copy selected original game resources into resources for local tools. Reuses unchanged copies.",
             """{"files":{"type":"array","items":{"type":"string"}}}""", "files"),
-        Define("write_file", "Write UTF-8 code or analysis files under src/ or work/, replacing without backup. New src/*.cs files auto-register as release source. For tools set releaseRole and purpose once; edits inherit existing registration. Analysis probes belong in work/. Batch known writes followed by one run_csharp/run_engine_python/run_tool to execute in order; failure skips remaining calls. Reuse existing probe scripts and one findings file rather than adding a file per small check.",
+        Define("write_file", "Write UTF-8 code or analysis files under src/ or work/, replacing without backup. New src/*.cs files auto-register as release source. For tools set releaseRole and purpose once; edits inherit existing registration. Temporary analysis scripts must be Python under work/. Batch known writes followed by one run_engine_python/run_tool to execute in order; failure skips remaining calls. Reuse existing probe scripts and one findings file rather than adding a file per small check.",
             """{"path":{"type":"string"},"content":{"type":"string"},"releaseRole":{"type":"string","enum":["source","runtime","asset","license"]},"purpose":{"type":"string","maxLength":240}}""", "path", "content"),
         Define("replace_text", "Change one exact, unique text fragment in an existing UTF-8 src/ or work/ file. Prefer this for local edits instead of rewriting whole files. oldText must match exactly once (including whitespace/newlines); otherwise nothing changes. Preserves UTF-8 BOM and other bytes. Can batch with writes followed by one local run.",
             """{"path":{"type":"string"},"oldText":{"type":"string"},"newText":{"type":"string"}}""", "path", "oldText", "newText"),
         Define("remove_file", "Remove one obsolete file under src/ or work/. Cannot delete directories or originals.",
             """{"path":{"type":"string"}}""", "path"),
-        Define("run_tool", "Run dotnet, powershell, or a workspace executable. Pass arguments as an array. Use resources copies; never edit original game. Output bounded.",
+        Define("run_tool", "Run existing dotnet/powershell tools or a workspace executable. For analysis scripts use run_engine_python; do not compile C# probes. Pass arguments as an array. Use resources copies; never edit original game. Output bounded.",
             """{"executable":{"type":"string"},"arguments":{"type":"array","maxItems":128,"items":{"type":"string"}},"workingDirectory":{"type":"string"},"stdin":{"type":"string"},"timeoutSeconds":{"type":"integer","minimum":1,"maximum":600,"default":120}}""", "executable", "arguments"),
-        Define("run_csharp", "Compile and run explicitly selected UTF-8 .cs files under work/ or src/ with pinned .NET 10. Use a work/ test entry point plus existing src/ parser helpers; do not copy helpers or include an unrelated Program.cs. No directory-wide compilation. Main or top-level statements, explicit using directives. Optional references lists local managed DLLs under work/ or src/tools/ (include dependencies). No project/restore/NuGet. Default workingDirectory is workspace root; arguments/stdin/stdout/stderr use UTF-8. Register CodePagesEncodingProvider for cp932/cp936. Timeout defaults to 120s (1-600); compiler capped at 120s. Returns compiled, exitCode, stdout, stderr; temporary build files are deleted, sources retained. Use staged resources; never modify originals.",
-            """{"sourceFiles":{"type":"array","minItems":1,"maxItems":64,"items":{"type":"string"}},"references":{"type":"array","maxItems":64,"items":{"type":"string"}},"arguments":{"type":"array","maxItems":128,"items":{"type":"string"}},"workingDirectory":{"type":"string"},"stdin":{"type":"string"},"timeoutSeconds":{"type":"integer","minimum":1,"maximum":600,"default":120}}""", "sourceFiles"),
         Define("test_adapter", "Compile and verify the saved release selection. Identical inputs reuse the last completed result (reused=true), including deterministic failures; change the relevant implementation or evidence before retesting. Omit releaseFiles to reuse it; supplying releaseFiles replaces the entire selection. New src C# files and copied built-in dependencies are registered automatically. Use update_release_files only for dependency changes or exclusions. Paths are FINAL PACKAGE paths: src/Program.cs maps to workspace src/Program.cs; tools/parser.py maps to workspace src/tools/parser.py. No globs or automatic directory inclusion. Exclude probes, samples, logs, unused tools and old implementations. Test this exact release before finish. Check discovery against real game/staged samples and independently verify extraction/roundtrip; repair also checks the existing baseline. discoveryOnly=true cannot publish. Optional recognition declares proven required file/signature facts and nonblocking hints; omit to retain the saved declaration. It is independent of resourcePatterns. Do not invent game-specific filenames or do extra research solely to fill it.",
             """{"kind":{"type":"string","enum":["engine","template"]},"key":{"type":"string"},"name":{"type":"string"},"resourcePatterns":{"type":"array","items":{"type":"string"}},"releaseFiles":{"type":"array","minItems":1,"maxItems":512,"items":{"type":"object","properties":{"path":{"type":"string","maxLength":512},"role":{"type":"string","enum":["source","runtime","asset","license"]},"purpose":{"type":"string","minLength":1,"maxLength":240}},"required":["path","role","purpose"],"additionalProperties":false}},"discoveryOnly":{"type":"boolean"},"recognition":""" + AdapterRecognition.JsonSchema + "}", "kind", "key", "name", "resourcePatterns"),
         Define("update_release_files", "Inspect or incrementally update the saved release selection. files upserts exact PACKAGE paths with source/runtime/asset/license roles and purposes; remove excludes paths without deleting files. No arguments lists selection and unregistered files. Use only for changed dependencies or exclusions; test_adapter reuses this state across failures/restarts/checkpoints. Game originals belong to resources, modified game files to patch output, never release assets.",
@@ -123,7 +121,7 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
     // One ordered local edit/run step. Publication, staging and verification stay separate.
     internal static bool IsWriteRunBatch(IReadOnlyList<AgentToolCall> calls) => calls.Count is >= 2 and <= 8
         && calls.Take(calls.Count - 1).All(call => call.Name is "write_file" or "replace_text")
-        && calls[^1].Name is "write_file" or "replace_text" or "run_csharp" or "run_engine_python" or "run_tool";
+        && calls[^1].Name is "write_file" or "replace_text" or "run_engine_python" or "run_tool";
 
     public static string Stage(string tool) => tool switch
     {
@@ -153,7 +151,7 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
     {
         "test_adapter" => "正在编译并检查文本提取、原文回填和中文写入。",
         "finish" => "正在保存已通过资源验证的引擎适配器。",
-        "run_tool" or "run_csharp" or "run_engine_python" => "正在运行本地资源分析工具。",
+        "run_tool" or "run_engine_python" => "正在运行本地资源分析工具。",
         "inspect_engine_reference" or "use_engine_reference" => "正在检查发行包中的共享引擎工具。",
         _ => Stage(tool) + "。"
     };
@@ -208,7 +206,6 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
             "replace_text" => await ReplaceTextAsync(args, ct),
             "remove_file" => RemoveFile(args),
             "run_tool" => await RunAsync(args, ct),
-            "run_csharp" => await RunCSharpAsync(args, ct),
             "update_release_files" => UpdateReleaseFiles(args),
             "test_adapter" => await TestAsync(args, ct),
             "finish" => await FinishAsync(args, ct),
@@ -665,41 +662,6 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
             Text(args, "stdin", ""), TimeSpan.FromSeconds(Number(args, "timeoutSeconds", 120, 1, 600)), 1024 * 1024,
             VnTextPatchAssemblyPath: await AnalysisParserPathAsync(ct)), ct);
         return new { result.ExitCode, stdout = Limit(result.StandardOutput, 16_000), stderr = Limit(result.StandardError, 8000) };
-    }
-
-    private async Task<object> RunCSharpAsync(JsonElement args, CancellationToken ct)
-    {
-        var sources = Strings(args, "sourceFiles");
-        var references = args.TryGetProperty("references", out _) ? Strings(args, "references") : [];
-        var arguments = args.TryGetProperty("arguments", out _) ? Strings(args, "arguments") : [];
-        if (sources.Count is < 1 or > 64 || references.Count > 64)
-            throw new InvalidDataException("每次运行 1 到 64 个 C# 源文件，最多引用 64 个本地 DLL。");
-        if (arguments.Count > 128 || arguments.Sum(value => value.Length) > 64 * 1024)
-            throw new InvalidDataException("工具命令参数过大。");
-        string ResolveInput(string relative, bool source)
-        {
-            relative = relative.Replace('\\', '/');
-            var allowedDirectory = relative.StartsWith("work/", StringComparison.Ordinal)
-                || relative.StartsWith(source ? "src/" : "src/tools/", StringComparison.Ordinal);
-            if (!allowedDirectory || !relative.EndsWith(source ? ".cs" : ".dll", StringComparison.OrdinalIgnoreCase))
-                throw new InvalidDataException(source ? "分析源码必须是 work/ 或 src/ 中显式选择的 .cs 文件。" : "引用必须是 work/ 或 src/tools/ 中的 .dll 文件。");
-            var path = WorkspaceFiles.Resolve(workspace, relative);
-            var normalized = Path.GetRelativePath(workspace, path).Replace('\\', '/');
-            if (!normalized.StartsWith("work/", StringComparison.Ordinal)
-                && !normalized.StartsWith(source ? "src/" : "src/tools/", StringComparison.Ordinal))
-                throw new InvalidDataException("C# 分析输入超出允许的源码或引用目录。");
-            if (!File.Exists(path)) throw new FileNotFoundException("C# 分析文件不存在：" + relative);
-            return path;
-        }
-        var sourcePaths = sources.Select(path => ResolveInput(path, true)).ToArray();
-        var referencePaths = references.Select(path => ResolveInput(path, false)).ToArray();
-        var working = Text(args, "workingDirectory", ".");
-        working = working == "." ? workspace : WorkspaceFiles.Resolve(workspace, working);
-        Directory.CreateDirectory(working);
-        var (compiled, result) = await compiler.RunCSharpAsync(workspace, sourcePaths, referencePaths, arguments, working,
-            Text(args, "stdin", ""), TimeSpan.FromSeconds(Number(args, "timeoutSeconds", 120, 1, 600)), ct,
-            await AnalysisParserPathAsync(ct));
-        return new { compiled, result.ExitCode, stdout = Limit(result.StandardOutput, 16_000), stderr = Limit(result.StandardError, 8000) };
     }
 
     private async Task<object> TestAsync(JsonElement args, CancellationToken ct)

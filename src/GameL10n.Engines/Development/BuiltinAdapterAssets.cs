@@ -145,8 +145,8 @@ public sealed partial class BuiltinAdapterAssets(string? assetsDirectory = null)
             librarySourceFiles = editableSource ? files.Keys.Where(path => path.EndsWith(".cs", StringComparison.OrdinalIgnoreCase))
                 .Order(StringComparer.Ordinal).ToArray() : null,
             analysisUsage = editableSource
-                ? "For run_csharp, use sourceFiles=[your work/Probe.cs entry point, ...librarySourceFiles]. Include the entire returned list (including generated/GlobalUsings.cs); do not rediscover dependencies or include src/Program.cs. Existing parser modifications remain available."
-                : "Use the copied binary bridge with test_adapter. For in-process run_csharp probes requiring parser changes, copy editableSource=true and use its librarySourceFiles."
+                ? "Use librarySourceFiles as formal adapter sources (including generated/GlobalUsings.cs), then verify changes through test_adapter. Use work/*.py with run_engine_python for temporary resource analysis; do not compile C# probes."
+                : "Use try_builtin_adapter for bundled parser trials and test_adapter for the copied binary bridge. Temporary resource analysis belongs in work/*.py with run_engine_python."
         };
     }
 

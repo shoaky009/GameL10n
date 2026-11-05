@@ -184,8 +184,8 @@ public sealed class EngineReviewEvidence
     {
         path = path.Replace('\\', '/');
         if (!inspected.Contains(path) || !path.StartsWith("adaptation/current/", StringComparison.Ordinal)
-            || Path.GetExtension(path) is not (".cs" or ".py"))
-            throw new InvalidDataException("只能复用已经读取过的项目 C#／Python 辅助源码。");
+            || Path.GetExtension(path) != ".py")
+            throw new InvalidDataException("只能复用已经读取过的项目 Python 辅助源码。");
         var text = await ReadTextAsync(path, ct);
         if (text.Length > 64 * 1024 || new[] { project, gameDirectory }.Where(path => !string.IsNullOrWhiteSpace(path))
             .Any(path => new[] { path!, path!.Replace("\\", "\\\\"), path.Replace('\\', '/') }

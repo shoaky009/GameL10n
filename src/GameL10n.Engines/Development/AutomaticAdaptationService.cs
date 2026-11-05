@@ -325,7 +325,7 @@ public sealed class AutomaticAdaptationService(Func<IAdaptationAgentModel> creat
                 {
                     await TraceAsync(new { operation = "tool-batch-rejected", tools = state.PendingCalls.Select(call => call.Name).ToArray() });
                     foreach (var call in state.PendingCalls)
-                        state.Messages.Add(new("tool", """{"success":false,"error":"本批未执行：可批量独立读取，或按顺序提交最多 8 项 write_file/replace_text（末项可为一次 run_csharp/run_engine_python/run_tool）。其他操作，尤其验证、发布、checkpoint 和停止，请单独调用。"}""", ToolCallId: call.Id));
+                        state.Messages.Add(new("tool", """{"success":false,"error":"本批未执行：可批量独立读取，或按顺序提交最多 8 项 write_file/replace_text（末项可为一次 run_engine_python/run_tool）。其他操作，尤其验证、发布、checkpoint 和停止，请单独调用。"}""", ToolCallId: call.Id));
                     state.PendingCalls.Clear();
                     state.PendingCallsAreSequential = false;
                     await SaveAsync();
@@ -371,7 +371,7 @@ public sealed class AutomaticAdaptationService(Func<IAdaptationAgentModel> creat
                     }
                     toolTimer.Stop();
                     var outcome = ToolOutcome(output);
-                    if (outcome.Status == "completed" && call.Name is "run_csharp" or "run_engine_python"
+                    if (outcome.Status == "completed" && call.Name == "run_engine_python"
                         && Encoding.UTF8.GetByteCount(call.Arguments) <= 8192)
                     {
                         state.SuccessfulProbes.RemoveAll(item => item.Tool == call.Name && item.Arguments == call.Arguments);
@@ -435,7 +435,7 @@ public sealed class AutomaticAdaptationService(Func<IAdaptationAgentModel> creat
                         + "若已有关键突破或路线已明确，可在同一响应用 report_progress 简短说明，然后继续实际操作。"
                         + "保留真实限制，不降低原文、中文回填和发布验收要求。已通过完整验收时，根据本次目标直接 finish；长会话可先 checkpoint，勿重复调查或增加其他类别。\n"
                         + $"主程序记录：最近实现/验收在第 {state.LastImplementationTurn} 轮；当前{(state.VerifiedPackage is null ? "尚无通过完整验收的产物" : "已有通过完整验收的产物")}。"
-                        + "已复制的解析组件用 copy_adapter 返回的完整 librarySourceFiles 编译探针，不要重新逐个拼接依赖。"
+                        + "临时资源分析使用 work/*.py 和 run_engine_python；已复制的解析组件修改后通过 test_adapter 验证。"
                         + ProbeContext(state) : "";
                     if (reviewVerification)
                         review += (review.Length == 0 ? "" : "\n")
@@ -718,10 +718,14 @@ public sealed class AutomaticAdaptationService(Func<IAdaptationAgentModel> creat
         }, ContextJson) + WorkspaceInventory(directory) + ProgressContext(state) + ProbeContext(state) + ProtocolContext(state) + state.TextCoverage.Context();
     }
 
-    private static string ProbeContext(AdaptationSession state) => state.SuccessfulProbes.Count == 0 ? ""
-        : "\n最近成功执行的本地探针调用（历史执行成功不代表当前输入未变或游戏验证通过）："
-            + JsonSerializer.Serialize(state.SuccessfulProbes.TakeLast(3), ContextJson)
+    private static string ProbeContext(AdaptationSession state)
+    {
+        var probes = state.SuccessfulProbes.Where(probe => probe.Tool == "run_engine_python").TakeLast(3).ToArray();
+        return probes.Length == 0 ? ""
+            : "\n最近成功执行的本地探针调用（历史执行成功不代表当前输入未变或游戏验证通过）："
+            + JsonSerializer.Serialize(probes, ContextJson)
             + "\n复用这些文件及完整调用参数。已有结论可直接接入实现；仅输入或相关代码变化、或确需新证据时再运行，不要重新整理同一套依赖。";
+    }
 
     private static string ReuseFailureContext(AdaptationSession state) => state.ReuseFailures.Count == 0 ? ""
         : "\n主程序已检查的外置适配器复用失败记录（仅代表本次游戏，不否定整个引擎的支持）：\n"
@@ -891,12 +895,13 @@ public sealed class AutomaticAdaptationService(Func<IAdaptationAgentModel> creat
         - Batch independent reads/searches (prefer 2-6 calls). Results are saved in order.
         - Prefer replace_text for local changes: supply one exact unique oldText and its replacement; unchanged text stays intact.
           Split new implementations into small files and deliver one compilable piece at a time rather than generating the full adapter in one turn.
-        - Batch up to 8 known write_file/replace_text calls, optionally ending with ONE run_csharp, run_engine_python or run_tool. Writes run first;
+        - Batch up to 8 known write_file/replace_text calls, optionally ending with ONE run_engine_python or run_tool. Writes run first;
           a failure/uncertain interruption skips the dependent operations. Wait for results before deciding further work.
         - Staging, copying dependencies, test_adapter, finish, checkpoint and report_blocker each require a standalone call.
-        - For C# probes use a work/ entry point and existing src/ helpers with run_csharp; list only required files, not unrelated Program.cs.
-          The host compiles with pinned .NET 10 and framework references. No hand-written MSBuild/project/restore/compiler shell scaffolding.
-          Use readable source lines: runtime errors include file/line locations. Inspect that line and its bounds before retrying;
+        - Temporary analysis/probe scripts must be work/*.py, executed with run_engine_python and the bundled shared interpreter.
+          Reuse standard-library and pinned engine APIs. C# is for formal src/ adapter code verified by test_adapter;
+          never compile analysis scripts or create MSBuild/project/restore/compiler shell scaffolding.
+          Keep readable source lines. Inspect the reported traceback line and bounds before retrying;
           don't guess layout changes repeatedly after the same exception. Preserve partial findings when a later probe fails.
         - run_tool PowerShell is Windows PowerShell 5.1, not PowerShell 7 or modern .NET. Tools run as the current user; respect scoped paths.
         - src/ holds adapter code/dependencies, resources/ holds chosen original copies, work/ holds probes/results, build/ is host output.

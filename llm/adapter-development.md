@@ -114,11 +114,11 @@ XP3 必须由独立证据确认没有过滤器，再显式传 `filter: "none"`�
 
 ## 本地探针与工作目录
 
-临时 C# 分析入口放在 `work/`，通过 `run_csharp` 使用自带的 .NET 10 编译运行。`sourceFiles` 可同时列出 `work/` 测试入口和 `src/` 中已有解析代码，无需复制；只编译明确列出的文件，不自动包含其他 `Program.cs`。可显式引用 `work/` 或 `src/tools/` 下的 DLL；工具返回编译诊断、退出码及 UTF-8 输出。临时编译产物在本次执行结束后移除，源码和分析结果保留；测试入口不会参与适配器发布。Windows PowerShell 5.1 可用于文件与工具编排，其 `Add-Type` 不提供现代 .NET 编译环境。
+临时分析和处理脚本统一放在 `work/*.py`，通过 `run_engine_python` 使用发行包中的共享 Python 解释器运行，也可直接调用固定工具库的模块。参数及标准输入输出使用 UTF-8，可用 `workingDirectory` 指定工作区内的运行目录；不使用系统 Python、pip 或临时下载的运行时。C# 仅用于 `src/` 中的正式适配器代码及其依赖，修改后通过 `test_adapter` 编译验收，不编译临时 C# 探针。`run_tool` 用于调用已有工具和文件编排。
 
 Python 探针使用 `run_engine_python`，其他本地工具使用 `run_tool`。临时脚本、报告和解包结果放在 `work/`；原始资源副本放在 `resources/`。只有正式解析代码和运行依赖进入 `src/` 及 `src/tools/`。完整路径和保留规则见[产物说明](../docs/adapters/artifacts.md)。
 
-独立的只读查询可以批量提交。写入与运行批次最多 8 项，前面的项为 `write_file` 或 `replace_text`，最后一项也可为一次 `run_csharp`、`run_engine_python` 或 `run_tool`。前项失败或中断时先核对结果，再继续。暂存、依赖复制、验收、发布和 `checkpoint` 单独调用。
+独立的只读查询可以批量提交。写入与运行批次最多 8 项，前面的项为 `write_file` 或 `replace_text`，最后一项也可为一次 `run_engine_python` 或 `run_tool`。前项失败或中断时先核对结果，再继续。暂存、依赖复制、验收、发布和 `checkpoint` 单独调用。
 
 ## 验收与发布文件
 

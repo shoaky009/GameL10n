@@ -9,18 +9,20 @@ public sealed partial class AutomaticAdaptationTests
     public async Task LocalToolTimeoutReachesModelWithoutCopyingOutputIntoTimingLog()
     {
         var store = new LocalAdapterPackageStore(Path.Combine(root, "store"));
+        using var fixture = new EngineArchiveFixture();
+        await fixture.PrepareSharedToolsAsync(store.RootDirectory);
         var turn = 0;
         var model = new FakeModel(context => turn++ switch
         {
             0 => new(new("assistant", ToolCalls: [new("write", "write_file",
-                """{"path":"work/probe.cs","content":"System.Console.WriteLine(1);"}""")]), new(100, 20)),
-            1 => new(new("assistant", ToolCalls: [new("probe", "run_csharp",
-                """{"sourceFiles":["work/probe.cs"]}""")]), new(100, 20)),
+                """{"path":"work/probe.py","content":"print(1)"}""")]), new(100, 20)),
+            1 => new(new("assistant", ToolCalls: [new("probe", "run_engine_python",
+                """{"script":"work/probe.py"}""")]), new(100, 20)),
             _ => InspectTimeout(context)
         });
         var runner = new ScriptedRunner { ObserveRequest = request =>
         {
-            if (Path.GetFileName(request.Arguments[0]) == "analysis.dll")
+            if (Path.GetFileName(request.ExecutablePath) == "python.exe")
                 throw new AdapterProcessLimitException("fixture timeout", timedOut: true,
                     standardOutput: "private-timeout-output", standardError: "private-timeout-error");
         } };

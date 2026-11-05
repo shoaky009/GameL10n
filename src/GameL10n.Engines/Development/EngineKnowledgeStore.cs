@@ -229,6 +229,7 @@ public sealed class EngineKnowledgeStore(string directory)
             foreach (var (path, source) in tool.Files)
             {
                 _ = Isolation.WorkspaceFiles.Resolve(Path.GetTempPath(), path);
+                // Historical C# helpers remain readable as references; reviews only export Python helpers.
                 if (Path.GetExtension(path) is not (".cs" or ".py") || source is null || source.Length > 64 * 1024)
                     throw new InvalidDataException("共享工具只接受有界的 C# 或 Python 源码。");
                 sourceBytes += System.Text.Encoding.UTF8.GetByteCount(source);

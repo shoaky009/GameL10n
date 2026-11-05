@@ -75,6 +75,9 @@ public sealed partial class AdaptationTools
             if (!File.Exists(target)) await File.WriteAllTextAsync(target, content, new UTF8Encoding(false), ct);
         }
         return new { entry.Id, entry.Revision, tool.Usage, files = files.Select(file => file.Path),
-            next = "核对资源条件和输入路径后，用 run_csharp/run_engine_python 在当前样本上运行。工具源码不代表适配器已验收；回填仍须 test_adapter。" };
+            next = (tool.Files.Keys.Any(path => Path.GetExtension(path) == ".cs")
+                ? "历史 C# 辅助源码仅供参考，请将需要的分析逻辑改为 work/*.py 后用 run_engine_python 运行。"
+                : "核对资源条件和输入路径后，用 run_engine_python 在当前样本上运行。")
+                + "工具源码不代表适配器已验收；回填仍须 test_adapter。" };
     }
 }

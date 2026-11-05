@@ -61,6 +61,9 @@ public sealed partial class AdaptationTools
                 || !relative.EndsWith(".py", StringComparison.OrdinalIgnoreCase))
                 throw new InvalidDataException("Python 脚本必须在 work/ 或 src/tools/ 中。");
             script = WorkspaceFiles.Resolve(workspace, relative);
+            var normalized = Path.GetRelativePath(workspace, script).Replace('\\', '/');
+            if (!normalized.StartsWith("work/", StringComparison.Ordinal) && !normalized.StartsWith("src/tools/", StringComparison.Ordinal))
+                throw new InvalidDataException("Python 脚本必须在 work/ 或 src/tools/ 中。");
             if (!File.Exists(script)) throw new FileNotFoundException("请先写入 Python 连接脚本。", relative);
         }
         else if (!(module.StartsWith("python.engines.", StringComparison.Ordinal) || module.StartsWith("python.archives.", StringComparison.Ordinal))
@@ -72,11 +75,24 @@ public sealed partial class AdaptationTools
             throw new InvalidDataException("Python 参数过大。");
         var prepared = await Development.PythonAsync(ct);
         if (script is null) _ = EngineToolkit.Read(prepared.Dependency.Reference, module.Replace('.', '/') + ".py");
+        var working = Text(args, "workingDirectory", ".");
+        working = working == "." ? workspace : WorkspaceFiles.Resolve(workspace, working);
+        Directory.CreateDirectory(working);
         reportProgress?.Invoke("分析游戏资源", "解析工具已就绪，正在运行资源分析脚本。");
-        var result = await compiler.Runner.RunAsync(new(prepared.Paths.Python,
-            script is null ? EngineReferenceToolkit.PythonModuleArguments(prepared.Paths, module, arguments)
-                : EngineReferenceToolkit.PythonArguments(prepared.Paths, script, arguments), workspace, Text(args, "stdin", ""),
-            TimeSpan.FromSeconds(Number(args, "timeoutSeconds", 120, 1, 600)), 1024 * 1024), ct);
+        AdapterProcessResult result;
+        try
+        {
+            result = await compiler.Runner.RunAsync(new(prepared.Paths.Python,
+                script is null ? EngineReferenceToolkit.PythonModuleArguments(prepared.Paths, module, arguments)
+                    : EngineReferenceToolkit.PythonArguments(prepared.Paths, script, arguments), working, Text(args, "stdin", ""),
+                TimeSpan.FromSeconds(Number(args, "timeoutSeconds", 120, 1, 600)), 1024 * 1024), ct);
+        }
+        catch (AdapterProcessLimitException error)
+        {
+            ct.ThrowIfCancellationRequested();
+            throw new AdapterProcessLimitException(error.Message, "run", error.TimedOut,
+                error.StandardOutput, error.StandardError, error);
+        }
         return new { revision = prepared.Dependency.Reference.Revision, result.ExitCode,
             stdout = Limit(result.StandardOutput, 12000), stderr = Limit(result.StandardError, 6000) };
     }

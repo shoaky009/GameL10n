@@ -236,7 +236,7 @@ public sealed class BuiltinAdapterAssetsTests : IDisposable
     [Theory]
     [InlineData("SilkysMes")]
     [InlineData("Renpy")]
-    public async Task ReturnedLibrarySourceListCompilesProbesWithoutIncludingAdapterEntryPoint(string format)
+    public async Task ReturnedLibrarySourceListCompilesAsSelectedFormalAdapterSources(string format)
     {
         var assets = CreateAssets();
         string workspace = Path.Combine(root, "workspace");
@@ -245,16 +245,15 @@ public sealed class BuiltinAdapterAssetsTests : IDisposable
         Assert.Contains("src/BuiltinVnTextPatch/generated/GlobalUsings.cs", sources);
         Assert.Equal(Directory.GetFiles(Path.Combine(workspace, "src"), "*.cs", SearchOption.AllDirectories)
             .Select(path => Path.GetRelativePath(workspace, path).Replace('\\', '/')).Order(StringComparer.Ordinal), sources);
-        await File.WriteAllTextAsync(Path.Combine(workspace, "src/Program.cs"), "This deliberately invalid adapter entry point must not be compiled.");
-        Directory.CreateDirectory(Path.Combine(workspace, "work"));
-        string probe = Path.Combine(workspace, "work/Probe.cs");
-        await File.WriteAllTextAsync(probe, "System.Console.Write(typeof(BuiltinScriptParser).Name);");
-        var compiler = new GeneratedAdapterCompiler(new(Path.Combine(Repository(), ".tools/dotnet"), "10.0.402", "10.0.13"), new AdapterProcessRunner());
-        var result = await compiler.RunCSharpAsync(workspace, [probe, .. sources.Select(path => Path.Combine(workspace, path))],
-            [], [], workspace, "", TimeSpan.FromSeconds(60));
-        Assert.True(result.Compiled, result.Result.StandardError);
-        Assert.Equal(0, result.Result.ExitCode);
-        Assert.Equal("BuiltinScriptParser", result.Result.StandardOutput);
+        await File.WriteAllTextAsync(Path.Combine(workspace, "src/Program.cs"), "System.Console.Write(typeof(BuiltinScriptParser).Name);");
+        var toolchain = new PinnedDotNetToolchain(Path.Combine(Repository(), ".tools/dotnet"), "10.0.402", "10.0.13");
+        var runner = new AdapterProcessRunner();
+        var compiler = new GeneratedAdapterCompiler(toolchain, runner);
+        var package = await compiler.CompileWorkspaceAsync(Path.Combine(workspace, "src"), Path.Combine(workspace, "build"),
+            ["*.dat"], sources.Append("src/Program.cs").Select(path => new AdapterReleaseFile(path, "source", "Parser implementation")).ToArray());
+        var result = await runner.RunAsync(new(toolchain.ExecutablePath, [Path.Combine(package.DirectoryPath, "adapter.dll")], workspace), default);
+        Assert.Equal(0, result.ExitCode);
+        Assert.Equal("BuiltinScriptParser", result.StandardOutput);
     }
 
     [Fact]

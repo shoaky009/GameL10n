@@ -28,7 +28,8 @@ public sealed partial class AutomaticAdaptationTests
                 case 2:
                     Assert.DoesNotContain(context.Tools, tool => tool.Name == "test_adapter");
                     Assert.DoesNotContain(context.Tools, tool => tool.Name == "inspect_pe_code");
-                    Assert.Contains(context.Tools, tool => tool.Name == "run_engine_python");
+                    Assert.Contains(context.Tools, tool => tool.Name == "inspect_engine_reference");
+                    Assert.DoesNotContain(context.Tools, tool => tool.Name == "run_engine_python");
                     call = new("checkpoint", "checkpoint", """{"summary":"Keep working from existing source."}""");
                     break;
                 default:

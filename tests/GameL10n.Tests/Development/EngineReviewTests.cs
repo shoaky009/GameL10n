@@ -18,15 +18,15 @@ public sealed partial class EngineReviewTests : IDisposable
         var project = await ProjectAsync();
         var reads = 0;
         var model = new Model(_ => ++reads == 1
-            ? Call("read_evidence", new { path = "adaptation/current/work/probe.cs" })
+            ? Call("read_evidence", new { path = "adaptation/current/work/probe.py" })
             : Call("finish_review", new
             {
                 summary = "已提炼同类 YBN 的探测方式。", mainProgramSuggestions = Array.Empty<string>(),
                 improvement = new { key = "ybn-layout", family = new AdapterFamily("engine", "yuris", "YU-RIS"), aliases = new[] { "Yuris" },
                     conditions = "YBN v480；应核对版本和字段结构。", summary = "先验证文本布局", guidance = "先运行结构探测，再对当前样本做原文回填。",
-                    evidence = new[] { "adaptation/current/work/probe.cs" },
-                    tools = new[] { new { name = "probe", description = "结构探测", usage = "使用 run_csharp，以 args[0] 传入当前样本。",
-                        sourceFiles = new[] { "adaptation/current/work/probe.cs" } } } }
+                    evidence = new[] { "adaptation/current/work/probe.py" },
+                    tools = new[] { new { name = "probe", description = "结构探测", usage = "使用 run_engine_python，以 arguments 传入当前样本。",
+                        sourceFiles = new[] { "adaptation/current/work/probe.py" } } } }
             }));
         var service = new EngineReviewService(model, Store);
         var report = await service.ReviewAsync(project, "one", "First game");
@@ -34,13 +34,13 @@ public sealed partial class EngineReviewTests : IDisposable
         Assert.Equal("created", report.ChangeKind);
         Assert.Equal(2, model.Calls);
         var global = Assert.Single(Store.ReadAll());
-        Assert.Contains("work/probe.cs", Assert.Single(global.Tools).Files.Keys);
+        Assert.Contains("work/probe.py", Assert.Single(global.Tools).Files.Keys);
         Assert.Single(Directory.GetFiles(Store.DirectoryPath));
         Assert.False(Directory.Exists(Path.Combine(project, "engine-knowledge")));
         Assert.True((await service.ReviewAsync(project, "one", "First game", limits: new(MaximumTokens: 20_000_000))).Reused);
         Assert.Equal(2, model.Calls);
 
-        await File.AppendAllTextAsync(Path.Combine(project, "adaptation/current/work/probe.cs"), "\n// new observed result");
+        await File.AppendAllTextAsync(Path.Combine(project, "adaptation/current/work/probe.py"), "\n# new observed result");
         var noImprovement = new Model(_ => Call("finish_review", new
         { summary = "现有经验已涵盖这些结果，没有新增优化空间。", improvement = (object?)null, mainProgramSuggestions = new[] { "宿主性能需单独测量。" } }));
         var second = new EngineReviewService(noImprovement, Store);
@@ -65,7 +65,7 @@ public sealed partial class EngineReviewTests : IDisposable
         {
             Assert.Equal(useOverrides ? 24_000 : 10_000, request.MaximumOutputTokens);
             var reply = ++calls < 18
-                ? Call("read_evidence", new { path = "adaptation/current/work/probe.cs" })
+                ? Call("read_evidence", new { path = "adaptation/current/work/probe.py" })
                 : Call("finish_review", new { summary = "没有新增可靠结论。", improvement = (object?)null });
             return reply with { Usage = new(6000, 1000) };
         });
@@ -84,7 +84,7 @@ public sealed partial class EngineReviewTests : IDisposable
         int maximumTurns, long maximumTokens, int expectedCalls, string errorText)
     {
         var project = await ProjectAsync();
-        var model = new Model(_ => Call("read_evidence", new { path = "adaptation/current/work/probe.cs" })
+        var model = new Model(_ => Call("read_evidence", new { path = "adaptation/current/work/probe.py" })
             with { Usage = new(10_000, 10_000) });
 
         var error = await Assert.ThrowsAsync<InvalidDataException>(() => new EngineReviewService(model, Store)
@@ -118,7 +118,7 @@ public sealed partial class EngineReviewTests : IDisposable
         var args = JsonSerializer.Serialize(new { id = entry.Id, tool = "probe" });
         using var copied = JsonDocument.Parse(await related.ExecuteAsync(new("copy", "copy_engine_knowledge_tools", args), default));
         var relative = copied.RootElement.GetProperty("result").GetProperty("files")[0].GetString()!;
-        Assert.Equal("Console.WriteLine(args[0]);", await File.ReadAllTextAsync(Path.Combine(root, "other-workspace", relative)));
+        Assert.Equal("import sys; print(sys.argv[1])", await File.ReadAllTextAsync(Path.Combine(root, "other-workspace", relative)));
         await Store.SetEnabledAsync(entry.Id, false);
         Assert.Empty(EngineKnowledgeStore.Match(Store.ReadAll(), ["Yuris"]));
         // An ongoing adaptation keeps its captured references; the next task observes the disable.
@@ -178,24 +178,24 @@ public sealed partial class EngineReviewTests : IDisposable
         var project = await ProjectAsync();
         var evidence = await EngineReviewEvidence.LoadAsync(project, default);
         await Assert.ThrowsAsync<InvalidDataException>(() => evidence.ReadAsync("../secret.txt", 0, 100, default));
-        await Assert.ThrowsAsync<InvalidDataException>(() => evidence.ToolSourceAsync("adaptation/current/work/probe.cs", default));
-        await evidence.ReadAsync("adaptation/current/work/probe.cs", 0, 100, default);
-        await File.WriteAllTextAsync(Path.Combine(project, "adaptation/current/work/probe.cs"), "changed");
+        await Assert.ThrowsAsync<InvalidDataException>(() => evidence.ToolSourceAsync("adaptation/current/work/probe.py", default));
+        await evidence.ReadAsync("adaptation/current/work/probe.py", 0, 100, default);
+        await File.WriteAllTextAsync(Path.Combine(project, "adaptation/current/work/probe.py"), "changed");
         await Assert.ThrowsAsync<IOException>(() => evidence.EnsureUnchangedAsync(default));
-        await Assert.ThrowsAsync<IOException>(() => evidence.ToolSourceAsync("adaptation/current/work/probe.cs", default));
+        await Assert.ThrowsAsync<IOException>(() => evidence.ToolSourceAsync("adaptation/current/work/probe.py", default));
     }
 
     private async Task<string> ProjectAsync()
     {
         var project = Path.Combine(root, "project");
         Directory.CreateDirectory(Path.Combine(project, "adaptation/current/work"));
-        await File.WriteAllTextAsync(Path.Combine(project, "adaptation/current/work/probe.cs"), "Console.WriteLine(args[0]);");
+        await File.WriteAllTextAsync(Path.Combine(project, "adaptation/current/work/probe.py"), "import sys; print(sys.argv[1])");
         return project;
     }
 
     private static EngineKnowledgeEntry Entry() => new("ybn-layout", new("engine", "yuris", "YU-RIS"), ["Yuris"],
         "YBN v480，先核对结构。", "检查文本布局", "检查字段边界和原文字节回填。",
-        [new("probe", "结构检查", "run_csharp with a sample path", new Dictionary<string, string> { ["work/probe.cs"] = "Console.WriteLine(args[0]);" })],
+        [new("probe", "结构检查", "run_engine_python with a sample path", new Dictionary<string, string> { ["work/probe.py"] = "import sys; print(sys.argv[1])" })],
         [new("one", "First game", "hash-1", ["overview"])]);
     private static AgentTurn Call(string name, object args) => new(new("assistant", ToolCalls: [new(Guid.NewGuid().ToString("N"), name, JsonSerializer.Serialize(args, Json))]), new(20, 10));
     private sealed class Model(Func<AgentRequest, AgentTurn> reply) : IAdaptationAgentModel

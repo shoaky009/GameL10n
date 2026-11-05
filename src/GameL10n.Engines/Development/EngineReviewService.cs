@@ -250,7 +250,8 @@ public sealed class EngineReviewService(IAdaptationAgentModel model, EngineKnowl
         Explain the concrete work saved; a reusable negative finding is valid when backed by evidence.
         State limits. Do not copy the project chronology or recommend blindly skipping checks. Main-program fixes belong ONLY in
         mainProgramSuggestions; guidance cannot fix compiled host code. One project's success does not prove an entire engine.
-        Optional tools reuse ONLY inspected existing .cs/.py files with parameterized inputs and self-contained source dependencies.
+        Optional tools reuse ONLY inspected existing .py files with parameterized inputs and self-contained source dependencies.
+        Analysis scripts run through run_engine_python; C# is reserved for formal adapter code verified by test_adapter.
         Do not export game-specific absolute paths, fixed filenames/offsets, credentials, resource/text dumps or downloaded code
         without its required attribution. Empty tools is fine. Captured sources remain reference helpers: callers must inspect
         applicability and run sample checks using existing runners before using them in an adapter. These are NOT trusted adapters.

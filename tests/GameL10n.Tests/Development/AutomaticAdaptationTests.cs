@@ -321,10 +321,12 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
     public async Task SuccessfulProbeArgumentsSurviveCheckpointAndRestartWithoutAutomaticRerun()
     {
         var store = new LocalAdapterPackageStore(Path.Combine(root, "store"));
+        using var fixture = new EngineArchiveFixture();
+        await fixture.PrepareSharedToolsAsync(store.RootDirectory);
         var workspace = Path.Combine(store.WorkDirectory, "current");
         Directory.CreateDirectory(Path.Combine(workspace, "work"));
-        await File.WriteAllTextAsync(Path.Combine(workspace, "work/Probe.cs"), "System.Console.Write(42);");
-        const string arguments = """{"sourceFiles":["work/Probe.cs"],"arguments":["--known-boundary"]}""";
+        await File.WriteAllTextAsync(Path.Combine(workspace, "work/probe.py"), "print(42)");
+        const string arguments = """{"script":"work/probe.py","arguments":["--known-boundary"]}""";
         var runs = 0;
         var runner = new ScriptedRunner { LocalProbe = () => runs++ };
         var round = 0;
@@ -334,15 +336,16 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
             {
                 case 0:
                     Assert.Contains(context.Tools, tool => tool.Name == "load_tool_groups");
-                    Assert.DoesNotContain(context.Tools, tool => tool.Name == "run_csharp");
-                    Assert.Contains("run_csharp", context.KnownToolNames!);
+                    Assert.DoesNotContain(context.Tools, tool => tool.Name == "run_engine_python");
+                    Assert.Contains("run_engine_python", context.KnownToolNames!);
+                    Assert.DoesNotContain("run_csharp", context.KnownToolNames!);
                     Assert.Contains("development:", context.Instructions);
                     return new(new("assistant", ToolCalls: [new("load", "load_tool_groups", """{"groups":["development"]}""")]), new(100, 20));
                 case 1:
-                    Assert.Contains(context.Tools, tool => tool.Name == "run_csharp");
+                    Assert.Contains(context.Tools, tool => tool.Name == "run_engine_python");
                     Assert.DoesNotContain(context.Tools, tool => tool.Name == "inspect_pe_code");
                     Assert.Contains("\"success\":true", Assert.Single(context.Messages, message => message.ToolCallId == "load").Content);
-                    return new(new("assistant", ToolCalls: [new("probe", "run_csharp", arguments)]), new(100, 20));
+                    return new(new("assistant", ToolCalls: [new("probe", "run_engine_python", arguments)]), new(100, 20));
                 case 2:
                     return new(new("assistant", ToolCalls: [new("checkpoint", "checkpoint", """{"summary":"已确认布局，下一步接入适配入口。"}""")]), new(100, 20));
                 default: return CheckContext(context);
@@ -350,11 +353,12 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         });
         AgentTurn CheckContext(AgentRequest context)
         {
-            Assert.Contains(context.Tools, tool => tool.Name == "run_csharp");
+            Assert.Contains(context.Tools, tool => tool.Name == "run_engine_python");
             Assert.DoesNotContain(context.Tools, tool => tool.Name == "inspect_pe_code");
             var user = context.Messages.Last(message => message.Role == "user").Content;
-            Assert.Contains("work/Probe.cs", user);
+            Assert.Contains("work/probe.py", user);
             Assert.Contains("--known-boundary", user);
+            Assert.DoesNotContain("run_csharp", user);
             Assert.Contains("历史执行成功不代表", user);
             return Blocked("needs_input", "需要显示反馈。", "提供画面后继续。");
         }
@@ -364,6 +368,8 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         var state = await GameL10n.Core.Storage.LocalFiles.ReadJsonAsync<AdaptationSession>(Path.Combine(workspace, "session.json"));
         Assert.Equal(arguments, Assert.Single(state!.SuccessfulProbes).Arguments);
         Assert.Contains("development", state.EnabledToolGroups);
+        state.SuccessfulProbes.Add(new("run_csharp", "{\"sourceFiles\":[\"work/legacy.cs\"]}", 0));
+        await GameL10n.Core.Storage.LocalFiles.WriteJsonAsync(Path.Combine(workspace, "session.json"), state);
         await new AutomaticAdaptationService(new FakeModel(CheckContext), Compiler(runner), store).AdaptAsync(request);
         Assert.Equal(1, runs);
     }
@@ -2509,7 +2515,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
                 return Task.FromResult(new AdapterProcessResult(0, "probe complete", ""));
             }
             if (request.Arguments[0] == "--info") return Task.FromResult(new AdapterProcessResult(0, "trusted toolchain", ""));
-            if (Path.GetFileName(request.Arguments[0]) == "analysis.dll")
+            if (Path.GetFileName(request.ExecutablePath) == "python.exe")
             {
                 LocalProbe?.Invoke();
                 return Task.FromResult(new AdapterProcessResult(0, "confirmed layout", ""));

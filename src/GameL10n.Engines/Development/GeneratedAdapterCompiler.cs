@@ -100,80 +100,8 @@ public sealed partial class GeneratedAdapterCompiler(PinnedDotNetToolchain toolc
             resourceFiles.ToArray(), sourceHash, GeneratedAdapterResources.HashFile(Path.Combine(build, "adapter.dll")), family);
     }
 
-    public async Task<(bool Compiled, AdapterProcessResult Result)> RunCSharpAsync(string workspace,
-        IReadOnlyList<string> sources, IReadOnlyList<string> references, IReadOnlyList<string> arguments,
-        string workingDirectory, string standardInput, TimeSpan timeout, CancellationToken cancellationToken = default, string? vnTextPatchAssemblyPath = null)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        var build = WorkspaceFiles.Resolve(workspace, "work/.run-csharp-" + Guid.NewGuid().ToString("N"));
-        using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        lifetime.CancelAfter(timeout);
-        var phase = "prepare";
-        try
-        {
-            Directory.CreateDirectory(build);
-            // Put explicitly supplied dependencies beside the executable so runtime resolution matches compilation.
-            var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "analysis.dll" };
-            var localReferences = new List<string>();
-            foreach (var reference in references)
-            {
-                var name = Path.GetFileName(reference);
-                if (!names.Add(name)) throw new InvalidDataException("C# 引用 DLL 文件名重复或与 analysis.dll 冲突：" + name);
-                var target = WorkspaceFiles.Resolve(build, name);
-                await GeneratedAdapterResources.CopyAsync(reference, target, lifetime.Token);
-                localReferences.Add(target);
-            }
-            // Redirected console handles still use the Windows code page unless the child selects UTF-8.
-            var consoleSetup = Path.Combine(build, "HostConsole.cs");
-            await File.WriteAllTextAsync(consoleSetup, """
-                namespace GameL10n.AnalysisHost
-                {
-                    internal static class ConsoleSetup
-                    {
-                        [System.Runtime.CompilerServices.ModuleInitializer]
-                        internal static void Initialize()
-                        {
-                            System.Console.InputEncoding = new System.Text.UTF8Encoding(false);
-                            System.Console.OutputEncoding = new System.Text.UTF8Encoding(false);
-                        }
-                    }
-                }
-                """, new UTF8Encoding(false), lifetime.Token);
-            lifetime.Token.ThrowIfCancellationRequested();
-            phase = "compile";
-            var compilation = await CompileSourcesAsync([.. sources, consoleSetup], build, workingDirectory, lifetime.Token, localReferences, "analysis");
-            if (compilation.ExitCode != 0) return (false, compilation);
-            lifetime.Token.ThrowIfCancellationRequested();
-            phase = "run";
-            var result = await Runner.RunAsync(new(Toolchain.ExecutablePath,
-                new[] { Path.Combine(build, "analysis.dll") }.Concat(arguments).ToArray(), workingDirectory,
-                standardInput, timeout, 1024 * 1024, VnTextPatchAssemblyPath: vnTextPatchAssemblyPath), lifetime.Token);
-            return (true, result);
-        }
-        catch (OperationCanceledException error) when (!cancellationToken.IsCancellationRequested && lifetime.IsCancellationRequested)
-        {
-            var canceled = error as AdapterProcessCanceledException;
-            throw new AdapterProcessLimitException(TimeoutMessage(), phase, timedOut: true,
-                standardOutput: canceled?.StandardOutput ?? "", standardError: canceled?.StandardError ?? "", inner: error);
-        }
-        catch (AdapterProcessLimitException error)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            throw new AdapterProcessLimitException(error.TimedOut ? TimeoutMessage() : error.Message,
-                phase, error.TimedOut, error.StandardOutput, error.StandardError, error);
-        }
-        finally { GeneratedGameAdapter.DeleteStagedTree(build); }
-
-        string TimeoutMessage() => phase switch
-        {
-            "prepare" => "C# 准备阶段超时，尚未运行分析程序。",
-            "compile" => "C# 编译阶段超时，进程已停止。",
-            _ => "C# 运行阶段超时，进程已停止。请先用小样定位游标不前进等无进展循环，不要仅延长 timeout 原样重试。"
-        };
-    }
-
     private async Task<AdapterProcessResult> CompileSourcesAsync(IReadOnlyList<string> sources, string build, string workingDirectory,
-        CancellationToken cancellationToken, IReadOnlyList<string>? additionalReferences = null, string assemblyName = "adapter")
+        CancellationToken cancellationToken)
     {
         if (!VersionPattern().IsMatch(Toolchain.SdkVersion) || !VersionPattern().IsMatch(Toolchain.RuntimeVersion)
             || !Toolchain.RuntimeVersion.StartsWith("10.", StringComparison.Ordinal))
@@ -189,13 +117,12 @@ public sealed partial class GeneratedAdapterCompiler(PinnedDotNetToolchain toolc
         var arguments = new List<string>
         {
             "/nologo", "/nostdlib+", "/target:exe", "/langversion:latest", "/nullable:enable", "/codepage:65001", "/utf8output",
-            // Embedded symbols give failed probes source lines without keeping separate PDB files.
-            "/debug:embedded", assemblyName == "analysis" ? "/optimize-" : "/optimize+",
-            "/deterministic+", "/unsafe-", "/out:\"" + Path.Combine(build, assemblyName + ".dll") + "\"",
+            // Embedded symbols give adapter failures source lines without keeping separate PDB files.
+            "/debug:embedded", "/optimize+",
+            "/deterministic+", "/unsafe-", "/out:\"" + Path.Combine(build, "adapter.dll") + "\"",
             "/pathmap:\"" + build + "=/adapter\""
         };
         arguments.AddRange(references.Select(path => "/reference:\"" + path + "\""));
-        if (additionalReferences is not null) arguments.AddRange(additionalReferences.Select(path => "/reference:\"" + path + "\""));
         arguments.AddRange(sources.Select(path => "\"" + path + "\""));
         var responseFile = Path.Combine(build, "compiler.rsp");
         await File.WriteAllLinesAsync(responseFile, arguments, new UTF8Encoding(false), cancellationToken);
@@ -205,10 +132,10 @@ public sealed partial class GeneratedAdapterCompiler(PinnedDotNetToolchain toolc
             result = await Runner.RunAsync(new AdapterProcessRequest(Toolchain.ExecutablePath,
                 [compiler, "/noconfig", "@" + responseFile], workingDirectory, Timeout: TimeSpan.FromMinutes(2)), cancellationToken);
             if (result.ExitCode != 0) return result;
-            if (!File.Exists(Path.Combine(build, assemblyName + ".dll"))) throw new GeneratedAdapterException("The compiler produced no executable assembly.");
+            if (!File.Exists(Path.Combine(build, "adapter.dll"))) throw new GeneratedAdapterException("The compiler produced no executable assembly.");
         }
         finally { File.Delete(responseFile); }
-        await File.WriteAllTextAsync(Path.Combine(build, assemblyName + ".runtimeconfig.json"), JsonSerializer.Serialize(new
+        await File.WriteAllTextAsync(Path.Combine(build, "adapter.runtimeconfig.json"), JsonSerializer.Serialize(new
         {
             runtimeOptions = new { tfm = "net10.0", rollForward = "Disable", framework = new { name = "Microsoft.NETCore.App", version = Toolchain.RuntimeVersion } }
         }), cancellationToken);
