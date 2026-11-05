@@ -113,6 +113,47 @@ public sealed class AdapterTemplateTests : IDisposable
     }
 
     [Fact]
+    public async Task LargeMediaArchivePublishesWithoutModelAndOnlyReadsScriptPayloadsBeforeVerification()
+    {
+        var game = Directory.CreateDirectory(Path.Combine(fixture.Root, "game")).FullName;
+        var archive = await fixture.CreateArchiveAsync("archive.rpa3", mediaLength: 256L * 1024 * 1024 + 1);
+        File.Copy(archive, Path.Combine(game, "scripts.rpa"));
+        var (_, _, store, _, runtime, assets) = await ToolsAsync(game, archive: true);
+        var result = await new AutomaticAdaptationService(() => throw new Xunit.Sdk.XunitException("This archive needs no model"),
+            runtime, store, builtinAssets: assets).AdaptAsync(new("game", game, []));
+        Assert.Equal(AdaptationStatus.Activated, result.Status);
+        Assert.Equal(0, result.Usage.TotalTokens);
+        var workspace = Path.Combine(store.WorkDirectory, "current");
+        var state = JsonSerializer.Deserialize<AdaptationSession>(await File.ReadAllTextAsync(Path.Combine(workspace, "session.json")), Json)!;
+        Assert.True(state.AutomaticTemplate!.ResourceBytes > 256L * 1024 * 1024);
+        Assert.True(state.AutomaticTemplate.SelectedBytes < 1024);
+        Assert.True(state.AutomaticTemplate.ArchiveReadBytes < 4096);
+        Assert.Contains(state.VerificationDiagnostics, diagnostic => diagnostic.Contains("distinct Unicode translations", StringComparison.Ordinal));
+        using var manifest = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(workspace, Assert.Single(state.AutomaticTemplate.EvidenceFiles))));
+        Assert.False(manifest.RootElement.GetProperty("allContentsVerified").GetBoolean());
+
+        // Normal extraction must also leave the media unread. Final validation
+        // still hashes it: tampering in this member cannot escape acceptance.
+        var extracted = await fixture.InvokeAsync("archive.rpa3", "extract", archive, extensions: [".rpy"]);
+        Assert.True(extracted.GetProperty("success").GetBoolean(), extracted.ToString());
+        Assert.True(extracted.GetProperty("readBytes").GetInt64() < 4096);
+        var media = Assert.Single(extracted.GetProperty("entries").EnumerateArray(), entry => entry.GetProperty("name").GetString() == "images/logo.bin");
+        Assert.Equal(JsonValueKind.Null, media.GetProperty("sha256").ValueKind);
+        var toolkit = new EngineReferenceToolkit(Path.Combine(store.RootDirectory, "engine-tools"), parserAssets: assets);
+        var adapter = new GeneratedGameAdapter(state.VerifiedPackage!, runtime.Toolchain, fixture.Runner, store.WorkDirectory, toolkit);
+        var patch = Directory.CreateDirectory(Path.Combine(fixture.Root, "tampered")).FullName;
+        var patched = Path.Combine(patch, "scripts.rpa");
+        File.Copy(archive, patched);
+        await using (var file = new FileStream(patched, FileMode.Open, FileAccess.Write))
+        {
+            file.Position = 34 + System.Text.Encoding.UTF8.GetByteCount("label start:\n    \"こんにちは。\"\n") + 128;
+            file.WriteByte(42);
+        }
+        var error = await Assert.ThrowsAsync<GeneratedAdapterException>(() => adapter.ValidatePatchAsync(game, patch));
+        Assert.Contains("未选择的封包成员", error.Message);
+    }
+
+    [Fact]
     public async Task CompiledArchiveMemberAndVerificationFailureRetainEvidenceForTheModelAndResume()
     {
         var game = Directory.CreateDirectory(Path.Combine(fixture.Root, "game")).FullName;

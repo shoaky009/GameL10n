@@ -80,7 +80,7 @@ internal static class ScriptComponentAdapter
                 return response;
             }
             Directory.CreateDirectory(scratch);
-            var original = Load(source, files, "original");
+            var original = Load(source, files, "original", verifyContents: operation == "validate");
             return operation switch
             {
                 "extract" => Success("extraction", new JsonObject
@@ -127,13 +127,13 @@ internal static class ScriptComponentAdapter
             });
         }
 
-        private List<Container> Load(string source, string[] files, string phase)
+        private List<Container> Load(string source, string[] files, string phase, bool verifyContents = false)
         {
             var containers = new List<Container>();
             foreach (var file in files)
             {
                 var directory = Path.Combine(scratch, phase, containers.Count.ToString("D4"));
-                var report = Archive("extract", Resolve(source, file), directory, null, null);
+                var report = Archive("extract", Resolve(source, file), directory, null, null, verifyContents);
                 var scripts = report["extractedFiles"]!.AsArray().Select(node => node!.GetValue<string>()).Order(StringComparer.Ordinal).ToArray();
                 var units = scripts.Length == 0 ? new JsonArray()
                     : Parser("extract", directory, scripts)["extraction"]!["units"]!.AsArray();
@@ -201,7 +201,7 @@ internal static class ScriptComponentAdapter
 
         private JsonObject Validate(string[] files, List<Container> original)
         {
-            var patched = Load(Text(request, "outputDirectory"), files, "patched");
+            var patched = Load(Text(request, "outputDirectory"), files, "patched", verifyContents: true);
             var issues = new JsonArray();
             for (var i = 0; i < original.Count; i++)
             {
@@ -229,7 +229,8 @@ internal static class ScriptComponentAdapter
             });
         }
 
-        private JsonObject Archive(string operation, string archive, string? directory, string? output, Dictionary<string, string>? replacements)
+        private JsonObject Archive(string operation, string archive, string? directory, string? output, Dictionary<string, string>? replacements,
+            bool verifyContents = false)
         {
             var responsePath = Path.Combine(scratch, "component-" + componentCalls++ + ".json");
             var input = JsonSerializer.SerializeToNode(new JsonObject
@@ -242,6 +243,7 @@ internal static class ScriptComponentAdapter
                 ["outputDirectory"] = directory,
                 ["outputFile"] = output,
                 ["filter"] = config.Filter,
+                ["verifyContents"] = verifyContents,
                 ["extensions"] = AdapterHostJson.Node(config.ScriptExtensions, Json),
                 ["replacements"] = AdapterHostJson.Node(replacements, Json)
             }, AdapterHostJson.TypeInfo<JsonObject>(Json))!.AsObject();

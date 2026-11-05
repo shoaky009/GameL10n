@@ -5,7 +5,8 @@ using GameL10n.Core.Isolation;
 namespace GameL10n.Core.Development;
 
 public sealed record AutomaticTemplateReport(int Revision, string Status, string? TemplateId, string Stage,
-    IReadOnlyList<string> Diagnostics, IReadOnlyList<string> EvidenceFiles);
+    IReadOnlyList<string> Diagnostics, IReadOnlyList<string> EvidenceFiles,
+    long? ResourceBytes = null, long? SelectedBytes = null, long? ArchiveReadBytes = null);
 
 public sealed partial class AdapterDevelopmentWorkflow
 {
@@ -36,6 +37,7 @@ public sealed partial class AdapterDevelopmentWorkflow
         var diagnostics = new List<string>();
         var evidence = new List<string>();
         AdapterTemplateDefinition? template = null;
+        long? resourceBytes = null, selectedBytes = null, archiveReadBytes = null;
         var stage = "resources";
         try
         {
@@ -75,8 +77,10 @@ public sealed partial class AdapterDevelopmentWorkflow
 
             var lengths = resources.ToDictionary(path => path, path => new FileInfo(WorkspaceFiles.Resolve(request.GameDirectory, path)).Length,
                 StringComparer.OrdinalIgnoreCase);
-            if (lengths.Values.Any(length => length < 0 || length > AutomaticTemplateBytes) || lengths.Values.Sum() > AutomaticTemplateBytes)
-                throw new InvalidDataException("完整资源超过自动组合的 256 MiB 输入预算，未缩小为少量样本发布。");
+            resourceBytes = lengths.Values.Sum();
+            var inputBudget = template.ArchiveComponent is null ? AutomaticTemplateBytes : EngineArchiveComponents.RpaMaximumArchiveBytes;
+            if (lengths.Values.Any(length => length < 0 || length > inputBudget) || resourceBytes > inputBudget)
+                throw new InvalidDataException($"完整资源超过自动组合的 {inputBudget / (1024 * 1024):N0} MiB 输入预算，未缩小为少量样本发布。");
             var hashes = await SampleHashesAsync(request.GameDirectory, lengths, token);
             stage = "stage";
             await RecordAsync("running");
@@ -85,7 +89,8 @@ public sealed partial class AdapterDevelopmentWorkflow
             {
                 stage = "archive-inspection";
                 await RecordAsync("running");
-                long decodedBytes = 0;
+                selectedBytes = 0;
+                archiveReadBytes = 0;
                 var entries = 0;
                 var scripts = 0;
                 var inspection = "work/automatic-template-" + Guid.NewGuid().ToString("N");
@@ -93,7 +98,7 @@ public sealed partial class AdapterDevelopmentWorkflow
                 {
                     reportProgress?.Invoke("检查自动组合封包", "正在检查 " + resource + " 的全部成员及支持条件。");
                     var output = inspection + "/" + evidence.Count.ToString("D2");
-                    // The fixed component checks the exact RPA version, safe names and bounded decoded members.
+                    // Inspect the complete index; media payloads do not consume the script budget.
                     var prepared = await PythonAsync(token);
                     var outputPath = WorkspaceFiles.Resolve(workspace, output);
                     var inspected = await new EngineArchiveComponentClient(runtime.Runner).InvokeAsync(prepared.Paths,
@@ -106,9 +111,13 @@ public sealed partial class AdapterDevelopmentWorkflow
                     using var manifest = JsonDocument.Parse(WorkspaceFiles.ReadBounded(workspace, evidence[^1], 8 * 1024 * 1024));
                     var members = manifest.RootElement.GetProperty("entries").EnumerateArray().ToArray();
                     entries += members.Length;
-                    decodedBytes += members.Sum(member => member.GetProperty("length").GetInt64());
-                    if (entries > 10_000 || decodedBytes > AutomaticTemplateBytes)
-                        throw new InvalidDataException("全部封包合计超过自动组合的 10,000 成员／256 MiB 解码预算。");
+                    selectedBytes += manifest.RootElement.GetProperty("selectedBytes").GetInt64();
+                    archiveReadBytes += manifest.RootElement.GetProperty("readBytes").GetInt64();
+                    if (entries > 10_000 || selectedBytes > AutomaticTemplateBytes)
+                        throw new InvalidDataException("全部封包合计超过自动组合的 10,000 成员／256 MiB 脚本预算。");
+                    if (members.Any(member => template.ScriptExtensions.Contains(Path.GetExtension(member.GetProperty("name").GetString()!), StringComparer.OrdinalIgnoreCase)
+                        && member.GetProperty("length").GetInt64() > 64L * 1024 * 1024))
+                        throw new InvalidDataException("单个脚本超过封包组件的 64 MiB 读取预算。");
                     RequireSupportedPaths(members.Select(member => member.GetProperty("name").GetString()!), allowArchives: false, resource + " → ");
                     scripts += manifest.RootElement.GetProperty("selectedCount").GetInt32();
                 }
@@ -164,8 +173,9 @@ public sealed partial class AdapterDevelopmentWorkflow
 
         async Task RecordAsync(string status)
         {
-            session.AutomaticTemplate = new(1, status, template?.Id, stage,
-                diagnostics.TakeLast(12).Select(item => Limit(item, 2000)).ToArray(), evidence.ToArray());
+            session.AutomaticTemplate = new(2, status, template?.Id, stage,
+                diagnostics.TakeLast(12).Select(item => Limit(item, 2000)).ToArray(), evidence.ToArray(),
+                resourceBytes, selectedBytes, archiveReadBytes);
             await save();
         }
 

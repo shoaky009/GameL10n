@@ -269,7 +269,10 @@ public sealed class AutomaticAdaptationService(Func<IAdaptationAgentModel> creat
                     ["operation"] = "automatic-template",
                     ["status"] = automaticTemplate.Status,
                     ["templateId"] = automaticTemplate.TemplateId,
-                    ["stage"] = automaticTemplate.Stage
+                    ["stage"] = automaticTemplate.Stage,
+                    ["resourceBytes"] = automaticTemplate.ResourceBytes,
+                    ["selectedBytes"] = automaticTemplate.SelectedBytes,
+                    ["archiveReadBytes"] = automaticTemplate.ArchiveReadBytes
                 });
             if (tools.PublishedAdapter is { } automaticAdapter)
                 return await CompleteAsync(AdaptationStatus.Activated, state.Summary, automaticAdapter);

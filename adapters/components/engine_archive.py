@@ -1,22 +1,42 @@
 """Versioned archive entry point over the pinned, shared engine library.
 
-Only standard-library dependencies are used. Format algorithms and their
-licenses remain in python.archives; this file supplies paths, budgets and IPC.
+Only standard-library dependencies are used. Safe index/format decoding stays
+in python.archives; this file supplies bounded file I/O, rebuilds and IPC.
 """
 import hashlib
 import importlib
 import json
 import os
 from pathlib import Path
+import pickle
 import stat
 import sys
 import unicodedata
+import zlib
 
 VERSION = 1
 MAX_ARCHIVE = 512 << 20
 MAX_FILE = 64 << 20
 MAX_TOTAL = 256 << 20
 MAX_ENTRIES = 10_000
+RPA_MAX_ARCHIVE = 2 << 30
+
+
+class ArchiveInput:
+    """Count actual source reads, including the shared index parser's reads."""
+    def __init__(self, stream):
+        self.stream, self.bytes_read = stream, 0
+
+    def read(self, size=-1):
+        data = self.stream.read(size)
+        self.bytes_read += len(data)
+        return data
+
+    def seek(self, offset, whence=0):
+        return self.stream.seek(offset, whence)
+
+    def tell(self):
+        return self.stream.tell()
 
 
 def checked_path(value):
@@ -82,10 +102,7 @@ def read_file(path, maximum):
 def load_archive(component, data, filter_name):
     limits = dict(max_entries=MAX_ENTRIES, max_file_size=MAX_FILE,
                   max_total_size=MAX_TOTAL, max_archive_size=MAX_ARCHIVE)
-    if component == "archive.rpa3":
-        module = importlib.import_module("python.archives.rpa")
-        entries = module.extract(data, **limits)
-    elif component == "archive.xp3":
+    if component == "archive.xp3":
         if filter_name != "none":
             raise ValueError("XP3 requires an explicitly established filter=none; zero flags are not proof")
         module = importlib.import_module("python.archives.xp3")
@@ -96,17 +113,7 @@ def load_archive(component, data, filter_name):
     return module, entries
 
 
-def execute(request):
-    if request.get("protocolVersion") != VERSION:
-        raise ValueError("unsupported archive component protocol")
-    component, operation = request["component"], request["operation"]
-    if operation not in ("inspect", "extract", "rebuild"):
-        raise ValueError("unsupported archive component operation")
-    source = checked_path(request["archive"])
-    data = read_file(source, MAX_ARCHIVE)
-    module, entries = load_archive(component, data, request.get("filter"))
-    report = dict(protocolVersion=VERSION, success=True, component=component,
-                  operation=operation, inputSha256=digest(data), entryCount=len(entries))
+def select_entries(request, entries):
     members = request.get("members")
     extensions = request.get("extensions")
     if members is not None and (not isinstance(members, list) or not members or len(members) > MAX_ENTRIES):
@@ -116,8 +123,193 @@ def execute(request):
         raise ValueError("invalid member extension selection")
     if members is not None and set(members) - {entry.name for entry in entries}:
         raise ValueError("selected archive member does not exist")
-    selected = [entry for entry in entries if (members is None or entry.name in members)
-                and (extensions is None or Path(member_name(entry.name)).suffix.lower() in extensions)]
+    return [entry for entry in entries if (members is None or entry.name in members)
+            and (extensions is None or Path(member_name(entry.name)).suffix.lower() in extensions)]
+
+
+def chunks(stream, offset, length):
+    stream.seek(offset)
+    while length:
+        data = stream.read(min(length, 1 << 20))
+        if not data:
+            raise ValueError("truncated archive payload")
+        length -= len(data)
+        yield data
+
+
+def hash_range(stream, offset, length, prefix=b""):
+    result = hashlib.sha256(prefix)
+    for data in chunks(stream, offset, length):
+        result.update(data)
+    return result.hexdigest()
+
+
+def copy_range(stream, output, offset, length):
+    for data in chunks(stream, offset, length):
+        output.write(data)
+
+
+def rpa_index(module, stream):
+    # Media remains in the archive. Only selected scripts/replacements have the
+    # smaller allocation budget; the shared reader still validates ALL ranges.
+    index = module.read_index(stream, max_entries=MAX_ENTRIES, max_file_size=RPA_MAX_ARCHIVE,
+                              max_total_size=RPA_MAX_ARCHIVE, max_archive_size=RPA_MAX_ARCHIVE)
+    validate_names(index.entries)
+    return index
+
+
+def rpa_rebuild(request, source, stream, module, index):
+    output = checked_path(request["outputFile"])
+    separate(source, output)
+    if output.exists():
+        raise ValueError("rebuild output already exists")
+    replacements = request.get("replacements")
+    if replacements is None:
+        replacements = {}
+    if not isinstance(replacements, dict) or len(replacements) > MAX_ENTRIES:
+        raise ValueError("invalid replacement mapping")
+    by_name = {entry.name: entry for entry in index.entries}
+    if replacements.keys() - by_name.keys():
+        raise ValueError("unknown replacement member")
+    changed, total = {}, 0
+    for name, path in replacements.items():
+        replacement = checked_path(path)
+        separate(replacement, output)
+        value = read_file(replacement, MAX_FILE)
+        total += len(value)
+        if total > MAX_TOTAL:
+            raise ValueError("replacement budget exceeded")
+        entry = by_name[name]
+        original = hash_range(stream, entry.offset, entry.length - len(entry.prefix), entry.prefix)
+        if digest(value) != original:
+            changed[name] = value
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    created = False
+    try:
+        with output.open("xb") as target:
+            created = True
+            if not changed:
+                copy_range(stream, target, 0, index.size)
+            else:
+                target.write(index.header)
+                cursor, mapping = 34, {}
+                for entry in sorted(index.entries, key=lambda item: item.offset):
+                    copy_range(stream, target, cursor, entry.offset - cursor)
+                    offset = target.tell()
+                    if entry.name in changed:
+                        value = changed[entry.name]
+                        prefix = value[:min(len(entry.prefix), len(value))]
+                        target.write(value[len(prefix):])
+                        length = len(value)
+                    else:
+                        prefix, length = entry.prefix, entry.length
+                        copy_range(stream, target, entry.offset, length - len(prefix))
+                    chunk = (offset ^ index.key, length ^ index.key)
+                    if len(entry.chunk) == 3:
+                        chunk += (prefix.decode("latin-1") if isinstance(entry.chunk[2], str) else prefix,)
+                    mapping[entry.raw_name] = [chunk]
+                    cursor = entry.offset + entry.length - len(entry.prefix)
+                    if target.tell() > RPA_MAX_ARCHIVE:
+                        raise ValueError("rebuilt RPA size limit exceeded")
+                copy_range(stream, target, cursor, index.offset - cursor)
+                offset = target.tell()
+                # Serialize only data reconstructed from the shared safe reader.
+                ordered = {entry.raw_name: mapping[entry.raw_name] for entry in index.entries}
+                packed = zlib.compress(pickle.dumps(ordered, protocol=3))
+                if offset + len(packed) > RPA_MAX_ARCHIVE:
+                    raise ValueError("rebuilt RPA size limit exceeded")
+                target.write(packed)
+                target.seek(8)
+                target.write(f"{offset:016x}".encode("ascii"))
+
+        hashes = {}
+        with output.open("rb") as rebuilt:
+            verified = rpa_index(module, rebuilt)
+            after = {entry.name: entry for entry in verified.entries}
+            if set(after) != set(by_name):
+                raise ValueError("rebuilt RPA changed member names")
+            for entry in index.entries:
+                original = hash_range(stream, entry.offset, entry.length - len(entry.prefix), entry.prefix)
+                hashes[entry.name] = original
+                expected = digest(changed[entry.name]) if entry.name in changed else original
+                actual = after[entry.name]
+                if hash_range(rebuilt, actual.offset, actual.length - len(actual.prefix), actual.prefix) != expected:
+                    raise ValueError("rebuilt RPA changed untouched members or lost replacements")
+            output_hash = hash_range(rebuilt, 0, verified.size)
+        input_hash = hash_range(stream, 0, index.size)
+        if not changed and input_hash != output_hash:
+            raise ValueError("unchanged RPA build changed archive bytes")
+        return hashes, dict(inputSha256=input_hash, outputSha256=output_hash,
+                            changedCount=len(changed), byteIdentical=input_hash == output_hash)
+    except BaseException:
+        if created:
+            output.unlink(missing_ok=True)
+        raise
+
+
+def execute_rpa(request, source):
+    module = importlib.import_module("python.archives.rpa")
+    operation = request["operation"]
+    verify = request.get("verifyContents", False)
+    if not isinstance(verify, bool):
+        raise ValueError("verifyContents must be a boolean")
+    with source.open("rb") as raw:
+        before = os.fstat(raw.fileno())
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError("component input must be a regular file")
+        stream = ArchiveInput(raw)
+        index = rpa_index(module, stream)
+        selected = select_entries(request, index.entries)
+        selected_bytes = sum(entry.length for entry in selected)
+        if operation == "extract" and (any(entry.length > MAX_FILE for entry in selected) or selected_bytes > MAX_TOTAL):
+            raise ValueError("selected member size limit exceeded (64 MiB/member, 256 MiB total)")
+        hashes = {}
+        report = dict(protocolVersion=VERSION, success=True, component="archive.rpa3", operation=operation,
+                      inputSha256=None, inputBytes=index.size, indexBytes=34 + index.size - index.offset,
+                      entryCount=len(index.entries), selectedCount=len(selected), selectedBytes=selected_bytes)
+        if operation == "rebuild":
+            hashes, rebuilt = rpa_rebuild(request, source, stream, module, index)
+            report.update(rebuilt)
+        elif operation == "extract":
+            output = checked_path(request["outputDirectory"])
+            separate(source, output)
+            if output.exists() and (not output.is_dir() or any(output.iterdir())):
+                raise ValueError("extraction output must be a new or empty directory")
+            destinations = [(entry, checked_path(output / member_name(entry.name))) for entry in selected]
+            for entry, path in destinations:
+                data = module.read_entry(stream, entry)
+                hashes[entry.name] = digest(data)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with path.open("xb") as target:
+                    target.write(data)
+            report["extractedFiles"] = [member_name(entry.name) for entry in selected]
+        if verify:
+            for entry in index.entries:
+                if entry.name not in hashes:
+                    hashes[entry.name] = hash_range(stream, entry.offset, entry.length - len(entry.prefix), entry.prefix)
+        after = os.fstat(raw.fileno())
+        if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+            raise ValueError("archive changed during component operation")
+        report.update(entries=[dict(name=entry.name, length=entry.length, sha256=hashes.get(entry.name)) for entry in index.entries],
+                      readBytes=stream.bytes_read, verifiedEntries=len(hashes), allContentsVerified=len(hashes) == len(index.entries))
+        return report
+
+
+def execute(request):
+    if request.get("protocolVersion") != VERSION:
+        raise ValueError("unsupported archive component protocol")
+    component, operation = request["component"], request["operation"]
+    if operation not in ("inspect", "extract", "rebuild"):
+        raise ValueError("unsupported archive component operation")
+    source = checked_path(request["archive"])
+    if component == "archive.rpa3":
+        return execute_rpa(request, source)
+    data = read_file(source, MAX_ARCHIVE)
+    module, entries = load_archive(component, data, request.get("filter"))
+    report = dict(protocolVersion=VERSION, success=True, component=component,
+                  operation=operation, inputSha256=digest(data), inputBytes=len(data), entryCount=len(entries))
+    selected = select_entries(request, entries)
     report["entries"] = [dict(name=e.name, length=len(e.data), sha256=digest(e.data)) for e in entries]
     report["selectedCount"] = len(selected)
     if operation == "extract":
@@ -158,8 +350,6 @@ def execute(request):
         # XP3's writer normalizes layout; keep the original archive for an unchanged build.
         if not changed:
             rebuilt = data
-        elif component == "archive.rpa3":
-            rebuilt = module.rebuild(data, changed)
         else:
             rebuilt = module.build([(e.name, changed.get(e.name, e.data)) for e in entries], filter_name="none",
                                    max_entries=MAX_ENTRIES, max_total_size=MAX_TOTAL, max_archive_size=MAX_ARCHIVE)

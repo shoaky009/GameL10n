@@ -19,12 +19,23 @@ public sealed class EngineArchiveComponentTests : IDisposable
         var inspected = await fixture.InvokeAsync(component, "inspect", archive);
         Assert.True(inspected.GetProperty("success").GetBoolean(), inspected.ToString());
         Assert.Equal(2, inspected.GetProperty("entryCount").GetInt32());
+        if (component == "archive.rpa3")
+        {
+            Assert.False(inspected.GetProperty("allContentsVerified").GetBoolean());
+            Assert.All(inspected.GetProperty("entries").EnumerateArray(), entry => Assert.Equal(JsonValueKind.Null, entry.GetProperty("sha256").ValueKind));
+        }
         var extracted = await fixture.InvokeAsync(component, "extract", archive, extensions: [".rpy"]);
         Assert.True(extracted.GetProperty("success").GetBoolean(), extracted.ToString());
         Assert.Single(extracted.GetProperty("extractedFiles").EnumerateArray());
         var script = Path.Combine(fixture.LastOutput, "files", "script.rpy");
         Assert.Contains("こんにちは", await File.ReadAllTextAsync(script));
         Assert.False(File.Exists(Path.Combine(fixture.LastOutput, "files", "images", "logo.bin")));
+        if (component == "archive.rpa3")
+        {
+            var fullCheck = await fixture.InvokeAsync(component, "inspect", archive, verifyContents: true);
+            Assert.True(fullCheck.GetProperty("allContentsVerified").GetBoolean());
+            Assert.All(fullCheck.GetProperty("entries").EnumerateArray(), entry => Assert.Equal(JsonValueKind.String, entry.GetProperty("sha256").ValueKind));
+        }
 
         var roundtrip = await fixture.InvokeAsync(component, "rebuild", archive);
         Assert.True(roundtrip.GetProperty("success").GetBoolean(), roundtrip.ToString());
@@ -233,7 +244,8 @@ internal sealed class EngineArchiveFixture : IDisposable
         throw new InvalidOperationException("Set GAMEL10N_TEST_PYTHON to a Python 3.10+ executable for offline archive integration tests.");
     }
 
-    public async Task<string> CreateArchiveAsync(string component, string otherName = "images/logo.bin", string? script = null, string scriptName = "script.rpy")
+    public async Task<string> CreateArchiveAsync(string component, string otherName = "images/logo.bin", string? script = null, string scriptName = "script.rpy",
+        long? mediaLength = null)
     {
         var archive = Path.Combine(Root, Guid.NewGuid().ToString("N") + (component == "archive.rpa3" ? ".rpa" : ".xp3"));
         var make = Path.Combine(Root, "make.py");
@@ -242,13 +254,31 @@ internal sealed class EngineArchiveFixture : IDisposable
             from python.archives import xp3
             args = json.load(sys.stdin)
             files = [(args["scriptName"], args["script"].encode("utf-8")), (args["otherName"], bytes([0, 1, 255, 10]))]
+            if args["mediaLength"] is not None:
+                assert args["component"] == "archive.rpa3"
+                key, mapping = 0x12345678, {}
+                with open(args["archive"], "xb") as f:
+                    f.write(b"RPA-3.0 " + b"0"*16 + b" 12345678\n")
+                    for name, value in files:
+                        length = args["mediaLength"] if name == args["otherName"] else len(value)
+                        mapping[name] = [(f.tell() ^ key, length ^ key, b"")]
+                        f.write(value)
+                        f.seek(length - len(value), 1)
+                    offset = f.tell()
+                    f.write(zlib.compress(pickle.dumps(mapping, protocol=3)))
+                    f.seek(8)
+                    f.write(f"{offset:016x}".encode("ascii"))
+                sys.exit(0)
             if args["component"] == "archive.xp3":
                 data = xp3.build(files, filter_name="none", compress_index=False)
             else:
                 data, mapping, key = bytearray(b"RPA-3.0 " + b"0"*16 + b" 12345678\n"), {}, 0x12345678
                 for name, value in files:
-                    mapping[name] = [(len(data)^key, len(value)^key, b"")]
-                    data.extend(value)
+                    prefix = value[:2]
+                    # Exercise byte-string names and both supported prefix types.
+                    stored_prefix = prefix.decode("latin-1") if name == args["otherName"] else prefix
+                    mapping[name.encode("utf-8")] = [(len(data)^key, len(value)^key, stored_prefix)]
+                    data.extend(value[len(prefix):])
                 offset = len(data)
                 data[8:24] = f"{offset:016x}".encode("ascii")
                 data.extend(zlib.compress(pickle.dumps(mapping, protocol=3)))
@@ -256,19 +286,19 @@ internal sealed class EngineArchiveFixture : IDisposable
             """);
         var result = await new AdapterProcessRunner().RunAsync(new(Paths.Python,
             EngineReferenceToolkit.PythonArguments(Paths, make, []), Root,
-            JsonSerializer.Serialize(new { component, archive, otherName, scriptName, script = script ?? "label start:\n    \"こんにちは。\"\n" })), default);
+            JsonSerializer.Serialize(new { component, archive, otherName, scriptName, mediaLength, script = script ?? "label start:\n    \"こんにちは。\"\n" })), default);
         Assert.Equal(0, result.ExitCode);
         return archive;
     }
 
     public async Task<JsonElement> InvokeAsync(string component, string operation, string archive,
-        IReadOnlyList<string>? extensions = null, IReadOnlyDictionary<string, string>? replacements = null)
+        IReadOnlyList<string>? extensions = null, IReadOnlyDictionary<string, string>? replacements = null, bool verifyContents = false)
     {
         LastOutput = Path.Combine(Root, Guid.NewGuid().ToString("N"));
         return await new EngineArchiveComponentClient(new AdapterProcessRunner()).InvokeAsync(Paths,
             new(1, component, operation, archive, Path.Combine(LastOutput, "manifest.json"), Path.Combine(LastOutput, "files"),
                 Path.Combine(LastOutput, "rebuilt.bin"), component == "archive.xp3" ? "none" : null,
-                Extensions: extensions, Replacements: replacements), Root);
+                Extensions: extensions, Replacements: replacements, VerifyContents: verifyContents), Root);
     }
     public void Dispose() => GeneratedGameAdapter.DeleteStagedTree(Root);
 }

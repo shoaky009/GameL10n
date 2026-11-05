@@ -21,7 +21,8 @@ public sealed partial class AdaptationTools
             throw new InvalidDataException("封包组件只读取 resources/ 或 work/ 中的副本。");
         var archive = WorkspaceFiles.Resolve(workspace, archiveRelative);
         if (!File.Exists(archive)) throw new FileNotFoundException("请先暂存原始封包。", archiveRelative);
-        if (new FileInfo(archive).Length > 512L * 1024 * 1024) throw new InvalidDataException("封包超过组件的 512 MiB 输入限制。");
+        var maximumBytes = id == "archive.rpa3" ? EngineArchiveComponents.RpaMaximumArchiveBytes : 512L * 1024 * 1024;
+        if (new FileInfo(archive).Length > maximumBytes) throw new InvalidDataException($"封包超过组件的 {maximumBytes / (1024 * 1024):N0} MiB 输入限制。");
         var outputRelative = Text(args, "output").Replace('\\', '/');
         if (!outputRelative.StartsWith("work/", StringComparison.Ordinal)) throw new InvalidDataException("组件输出必须是 work/ 下的新目录。");
         var output = WorkspaceFiles.Resolve(workspace, outputRelative);
@@ -51,7 +52,8 @@ public sealed partial class AdaptationTools
         if (prepared.Dependency.Reference.Kind != "galtransl") throw new InvalidDataException("此组件需要 GalTransl 共享工具库。");
         var response = await new EngineArchiveComponentClient(runtime.Runner).InvokeAsync(prepared.Paths,
             new(1, id, operation, archive, Path.Combine(output, "manifest.json"), Path.Combine(output, "files"),
-                Path.Combine(output, "rebuilt", Path.GetFileName(archive)), filter, members, extensions, replacements), workspace, ct);
+                Path.Combine(output, "rebuilt", Path.GetFileName(archive)), filter, members, extensions, replacements,
+                Boolean(args, "verifyContents", false)), workspace, ct);
         var success = response.GetProperty("success").GetBoolean();
         return new JsonObject
         {
@@ -64,6 +66,10 @@ public sealed partial class AdaptationTools
             ["error"] = success ? null : response.GetProperty("error").GetString(),
             ["entryCount"] = success ? response.GetProperty("entryCount").GetInt32() : (int?)null,
             ["selectedCount"] = success ? response.GetProperty("selectedCount").GetInt32() : (int?)null,
+            ["inputBytes"] = success ? response.GetProperty("inputBytes").GetInt64() : (long?)null,
+            ["selectedBytes"] = response.TryGetProperty("selectedBytes", out var selectedBytes) ? selectedBytes.GetInt64() : (long?)null,
+            ["readBytes"] = response.TryGetProperty("readBytes", out var readBytes) ? readBytes.GetInt64() : (long?)null,
+            ["allContentsVerified"] = response.TryGetProperty("allContentsVerified", out var allVerified) ? allVerified.GetBoolean() : (bool?)null,
             ["entries"] = EngineJson.Node(success ? response.GetProperty("entries").EnumerateArray().Take(12).Select(item => item.Clone()).ToArray() : [], EngineJson.Web),
             ["extractedDirectory"] = success && operation == "extract" ? outputRelative + "/files" : null,
             ["rebuiltArchive"] = success && operation == "rebuild" ? outputRelative + "/rebuilt/" + Path.GetFileName(archive) : null,

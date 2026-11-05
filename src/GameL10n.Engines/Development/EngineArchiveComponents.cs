@@ -12,9 +12,10 @@ public sealed record EngineArchiveComponent(string Id, int Version, string Forma
 public static class EngineArchiveComponents
 {
     public const string ScriptPath = "tools/engine_archive.py";
+    public const long RpaMaximumArchiveBytes = 2L * 1024 * 1024 * 1024;
     public static IReadOnlyList<EngineArchiveComponent> All { get; } =
     [
-        new("archive.rpa3", 1, "RPA/ARC 3.0 single-chunk", "python.archives.rpa", ["inspect", "extract", "rebuild"],
+        new("archive.rpa3", 2, "RPA/ARC 3.0 single-chunk", "python.archives.rpa", ["inspect", "extract", "rebuild"],
             ["RPA 2/4, multi-chunk entries, scrambled archives and compiled RPYC are unsupported.",
              "Only a data-only pickle index is accepted; executable pickle operations are rejected."]),
         new("archive.xp3", 1, "Standard XP3 v1, filter=none", "python.archives.xp3", ["inspect", "extract", "rebuild"],
@@ -33,15 +34,20 @@ public static class EngineArchiveComponents
             "Hash-pinned shared GalTransl library; standard library only, no pip or runtime downloads." }, EngineJson.Web),
         ["limits"] = new JsonObject
         {
-            ["archiveMiB"] = 512,
-            ["memberMiB"] = 64,
-            ["totalDecodedMiB"] = 256,
+            ["rpaArchiveMiB"] = RpaMaximumArchiveBytes / (1024 * 1024),
+            ["rpaSelectedMemberMiB"] = 64,
+            ["rpaSelectedTotalMiB"] = 256,
+            ["xp3ArchiveMiB"] = 512,
+            ["xp3MemberMiB"] = 64,
+            ["xp3TotalDecodedMiB"] = 256,
             ["entries"] = 10000,
             ["memberNamesMiB"] = 2
         },
         ["input"] = "run_engine_component: id, operation, archive (resources/ or work/), output (new work/ directory). "
             + "Optional members or lowercase extensions select extraction; rebuild replacements map exact member names to work/ files. XP3 requires filter=none.",
-        ["output"] = "Bounded summary plus work/<output>/manifest.json containing every member's name, length and SHA256. "
+        ["output"] = "Bounded summary plus work/<output>/manifest.json containing every member's name and length. "
+            + "RPA inspect reads only the index; extract reads selected payloads. Unread member SHA256 is null. "
+            + "verifyContents=true hashes every member with bounded buffers. readBytes records actual source reads. "
             + "extract writes files/; rebuild writes rebuilt/<original filename>, verifies all members, and preserves original bytes when unchanged.",
         ["usage"] = "Stage a real archive, then call the component directly; no Python wrapper or model-generated parser is needed. "
             + "Use try_builtin_adapter on extracted scripts. Component success is structural evidence, not runtime or adapter acceptance."
@@ -62,7 +68,7 @@ public static class EngineArchiveComponents
 public sealed record EngineArchiveRequest(int ProtocolVersion, string Component, string Operation, string Archive,
     string ResponseFile, string? OutputDirectory = null, string? OutputFile = null, string? Filter = null,
     IReadOnlyList<string>? Members = null, IReadOnlyList<string>? Extensions = null,
-    IReadOnlyDictionary<string, string>? Replacements = null);
+    IReadOnlyDictionary<string, string>? Replacements = null, bool VerifyContents = false);
 
 public sealed class EngineArchiveComponentClient(IAdapterProcessRunner runner)
 {
