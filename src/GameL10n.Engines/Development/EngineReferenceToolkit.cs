@@ -13,7 +13,7 @@ public sealed record EngineReferencePin(string Revision, string SourceSha256, st
 public sealed record EnginePythonDependency(EngineReferencePin Reference, string PythonVersion, string PythonSha256);
 public sealed record EnginePythonPaths(string Python, string EngineLibrary);
 public sealed record AdapterToolPaths(string? Python, string? EngineLibrary, string? VnTextPatch,
-    IReadOnlyList<string>? HostCommand = null);
+    IReadOnlyList<string>? HostCommand = null, IReadOnlyList<string>? VnTextPatchCommand = null);
 
 /// <summary>One shared source archive and portable interpreter, outside game/project directories.</summary>
 public sealed class EngineReferenceToolkit(string rootDirectory, HttpClient? httpClient = null,
@@ -236,16 +236,30 @@ public sealed class EngineReferenceToolkit(string rootDirectory, HttpClient? htt
         return await (assets ?? parserAssets ?? new BuiltinAdapterAssets()).ResolveSharedAsync(root, dependency, ct);
     }
 
-    public async Task<AdapterToolPaths?> ResolvePackageAsync(string packageDirectory, CancellationToken ct)
+    public async Task<AdapterToolPaths?> ResolvePackageAsync(string packageDirectory, CancellationToken ct,
+        PinnedDotNetToolchain? toolchain = null)
     {
-        var parser = await ResolveVnTextPatchAsync(packageDirectory, ct);
+        var parserTool = toolchain is null ? null : await ResolveParserAsync(packageDirectory, toolchain, ct);
+        var parser = toolchain is null ? await ResolveVnTextPatchAsync(packageDirectory, ct) : parserTool?.Path;
         var path = WorkspaceFiles.Resolve(packageDirectory, DependencyPath);
-        if (!File.Exists(path)) return parser is null ? null : new(null, null, parser);
+        if (!File.Exists(path)) return parser is null ? null : new(null, null, parser, VnTextPatchCommand: parserTool?.Command);
         var dependency = await LocalFiles.ReadJsonAsync<EnginePythonDependency>(path, EngineJson.TypeInfo<EnginePythonDependency>(EngineJson.Storage), ct)
             ?? throw new InvalidDataException("引擎工具依赖记录无效。");
         await EnsureReferenceAsync(dependency.Reference, ct);
         var paths = (await EnsurePythonAsync(dependency.Reference, dependency, ct)).Paths;
-        return new(paths.Python, paths.EngineLibrary, parser);
+        return new(paths.Python, paths.EngineLibrary, parser, VnTextPatchCommand: parserTool?.Command);
+    }
+
+    public async Task<ResolvedParserTool?> ResolveParserAsync(string packageDirectory, PinnedDotNetToolchain toolchain,
+        CancellationToken ct, BuiltinAdapterAssets? assets = null, string? legacyHostPath = null)
+    {
+        var path = WorkspaceFiles.Resolve(packageDirectory, BuiltinAdapterAssets.SharedDependencyPath);
+        if (!File.Exists(path)) return null;
+        var dependency = await LocalFiles.ReadJsonAsync<BuiltinParserDependency>(path,
+            EngineJson.TypeInfo<BuiltinParserDependency>(EngineJson.Storage), ct)
+            ?? throw new InvalidDataException("共享 VNTextPatch 依赖记录无效。");
+        return await (assets ?? parserAssets ?? new BuiltinAdapterAssets()).ResolveToolAsync(root, dependency,
+            toolchain, ct, legacyHostPath);
     }
 
     public static IReadOnlyList<string> PythonArguments(EnginePythonPaths paths, string script, IReadOnlyList<string> arguments) =>

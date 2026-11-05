@@ -11,6 +11,7 @@
     <ProjectReference Include="../../src/GameL10n.Core/GameL10n.Core.csproj" />
     <ProjectReference Include="../../tools/GameL10n.VnTextPatch/GameL10n.VnTextPatch.csproj" />
     <ProjectReference Include="../../tools/GameL10n.AdapterHost/GameL10n.AdapterHost.csproj" />
+    <ProjectReference Include="../../tools/GameL10n.ParserCompat/GameL10n.ParserCompat.csproj" />
     <Using Include="Xunit" />
     <EmbeddedResource Include="Fixtures/engine-archives-e9b8018.zip" LogicalName="EngineArchiveReference.zip" />
     <EmbeddedResource Include="Fixtures/renpy-rpyc-reference-e9b8018.zip" LogicalName="RenpyRpycReference.zip" />

@@ -39,9 +39,6 @@ internal static class ScriptComponentAdapter
                 ?? throw new InvalidDataException("缺少模板配置。");
             if (config.SchemaVersion != 1 || config.TemplateVersion != 1 || config.Format != BuiltinScriptParser.Format
                 || config.ScriptExtensions.Length == 0) throw new InvalidDataException("模板与组件配置版本不一致。");
-            var parser = request["toolPaths"]?["vnTextPatch"]?.GetValue<string>();
-            if (string.IsNullOrWhiteSpace(parser)) throw new InvalidDataException("缺少固定版本的共享脚本解析器。");
-            Environment.SetEnvironmentVariable("GAMEL10N_VNTEXTPATCH", parser);
             using var adapter = new Invocation(request, config);
             response = adapter.Run();
         }

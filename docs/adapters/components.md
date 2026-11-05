@@ -24,7 +24,11 @@
 
 复制组件后先用 `run_engine_python` 执行 `src/tools/kirikiri_scn_text.py`，stdin 为 `{"operation":"verify","input":"work/sample.scn"}`。它检查原字节往返及一条正文的中文修改，输出有界摘要；不运行游戏。正式适配器用 `use_engine_reference` 固定依赖，再导入组件处理已解包字节。Hxv4 等封包过滤、覆盖优先级、字体与游戏显示分别验证。
 
-`run_engine_python` 也支持 `module` 参数直接调用固定库中的 `python.engines.*` / `python.archives.*` CLI。连接内置脚本解析器时，使用 `from tools.gamel10n_host import parser`，再调用 `parser(request, 'Renpy')` 等固定格式接口；资源发现由 Python 独立实现。宿主命令和固定解析器路径由应用提供，JSON 输入输出统一使用 UTF-8。
+`run_engine_python` 也支持 `module` 参数直接调用固定库中的 `python.engines.*` / `python.archives.*` CLI。连接内置脚本解析器时，使用 `from tools.gamel10n_host import parser`，再调用 `parser(request, 'Renpy')` 等固定格式接口；资源发现由 Python 独立实现。宿主及解析器命令由应用提供，JSON 输入输出统一使用 UTF-8。解析器按资源批次启动进程，不按文本条目调用。
+
+`tools/vntextpatch-reference.json` 的 schema 2 锁定完整工具的文件哈希、`entryPoint` 和 `runtime`（`dotnet` 或 `native`）。托管工具同时包含 DLL、`.deps.json`、`.runtimeconfig.json` 及许可声明；启动命令由依赖解析层生成。组件宿主不加载解析器 DLL，也不推测工具路径。中间响应写入调用工作区的独立文件，完成后移除，不能覆盖适配器最终的 `responseFile`。
+
+已发布 schema 1 清单继续锁定原 DLL；它们通过独立的 `tools/parser-compat` 托管进程调用，需要共享 .NET 运行时。旧清单和包哈希保持原样，不自动改指向新版工具。版本缺失或文件被修改时应恢复原锁定文件，或在独立工作区迁移、验收并发布新适配器版本。
 
 ## CP932 映射
 

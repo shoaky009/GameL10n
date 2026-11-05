@@ -130,7 +130,8 @@ public sealed class GeneratedGameAdapter(
         var dependency = WorkspaceFiles.Resolve(package.DirectoryPath, EngineReferenceToolkit.DependencyPath);
         if ((File.Exists(dependency) || File.Exists(WorkspaceFiles.Resolve(package.DirectoryPath, BuiltinAdapterAssets.SharedDependencyPath))) && engineToolkit is null)
             throw new GeneratedAdapterException("该适配器依赖共享引擎工具，请通过完整应用加载。");
-        var toolPaths = engineToolkit is null ? null : await engineToolkit.ResolvePackageAsync(package.DirectoryPath, cancellationToken);
+        var toolPaths = engineToolkit is null ? null : await engineToolkit.ResolvePackageAsync(package.DirectoryPath, cancellationToken,
+            package.IsPython ? toolchain : null);
         if (package.IsPython && toolPaths is not null)
             toolPaths = toolPaths with { HostCommand = EngineReferenceToolkit.AdapterHostCommand(toolchain) };
         var python = package.IsPython ? toolPaths is { Python: not null, EngineLibrary: not null }
@@ -233,7 +234,7 @@ public sealed class GeneratedGameAdapter(
                     python is null ? [Path.Combine(package.DirectoryPath, "adapter.dll")]
                         : EngineReferenceToolkit.PythonArguments(python, WorkspaceFiles.Resolve(package.DirectoryPath, package.EntryFile), []), workspace, request,
                     Timeout: TimeSpan.FromMinutes(10), MaximumOutputBytes: package.ManifestVersion >= 2 ? 8L * 1024 * 1024 : 128L * 1024 * 1024,
-                    VnTextPatchAssemblyPath: toolPaths?.VnTextPatch), cancellationToken);
+                    VnTextPatchAssemblyPath: toolPaths?.VnTextPatch, VnTextPatchCommand: toolPaths?.VnTextPatchCommand), cancellationToken);
                 reportProgress?.Invoke(stage, "资源处理完成，正在校验结果与原文件完整性。");
                 if (!HashesEqual(baseline, await ResourceHashesAsync(source, resources, cancellationToken)))
                     throw new GeneratedAdapterException("The adapter modified host source resources.");

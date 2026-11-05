@@ -7,7 +7,8 @@ namespace GameL10n.Core.Development;
 
 public sealed record AdapterProcessRequest(string ExecutablePath, IReadOnlyList<string> Arguments,
     string WorkspacePath, string StandardInput = "", TimeSpan? Timeout = null, long? MaximumOutputBytes = 1024 * 1024,
-    string? VnTextPatchAssemblyPath = null, IReadOnlyList<string>? AdapterHostCommand = null);
+    string? VnTextPatchAssemblyPath = null, IReadOnlyList<string>? AdapterHostCommand = null,
+    IReadOnlyList<string>? VnTextPatchCommand = null);
 
 public sealed record AdapterProcessResult(int ExitCode, string StandardOutput, string StandardError);
 
@@ -69,6 +70,8 @@ public sealed class AdapterProcessRunner : IAdapterProcessRunner
         start.Environment["DOTNET_SKIP_FIRST_TIME_EXPERIENCE"] = "1";
         if (request.AdapterHostCommand is { } hostCommand)
             start.Environment["GAMEL10N_ADAPTER_HOST"] = System.Text.Json.JsonSerializer.Serialize(hostCommand, EngineJson.TypeInfo<IReadOnlyList<string>>(EngineJson.Default));
+        if (request.VnTextPatchCommand is { } parserCommand)
+            start.Environment["GAMEL10N_VNTEXTPATCH_COMMAND"] = System.Text.Json.JsonSerializer.Serialize(parserCommand, EngineJson.TypeInfo<IReadOnlyList<string>>(EngineJson.Default));
         if (request.VnTextPatchAssemblyPath is { } parserPath)
         {
             start.Environment["GAMEL10N_VNTEXTPATCH"] = Path.GetFullPath(parserPath);

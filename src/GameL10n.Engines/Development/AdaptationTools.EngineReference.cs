@@ -9,9 +9,9 @@ namespace GameL10n.Core.Development;
 public sealed partial class AdaptationTools
 {
     private EngineReferenceToolkit EngineToolkit => Development.EngineToolkit;
-    private Task<string?> AnalysisParserPathAsync(CancellationToken ct) => session.ReleaseFiles is not null
+    private Task<ResolvedParserTool?> AnalysisParserAsync(CancellationToken ct) => session.ReleaseFiles is not null
         && !session.ReleaseFiles.Any(file => file.Path == BuiltinAdapterAssets.SharedDependencyPath)
-        ? Task.FromResult<string?>(null) : EngineToolkit.ResolveVnTextPatchAsync(SourceDirectory, ct, BuiltinAssets);
+        ? Task.FromResult<ResolvedParserTool?>(null) : EngineToolkit.ResolveParserAsync(SourceDirectory, runtime.Toolchain, ct, BuiltinAssets);
 
     private async Task<object> InspectEngineReferenceAsync(JsonElement args, CancellationToken ct)
     {
@@ -90,12 +90,14 @@ public sealed partial class AdaptationTools
         AdapterProcessResult result;
         try
         {
+            var parser = await AnalysisParserAsync(ct);
             result = await runtime.Runner.RunAsync(new(prepared.Paths.Python,
                 script is null ? EngineReferenceToolkit.PythonModuleArguments(prepared.Paths, module, arguments)
                     : EngineReferenceToolkit.PythonArguments(prepared.Paths, script, arguments), working, Text(args, "stdin", ""),
                 TimeSpan.FromSeconds(Number(args, "timeoutSeconds", 120, 1, 600)), 1024 * 1024,
-                VnTextPatchAssemblyPath: await AnalysisParserPathAsync(ct),
-                AdapterHostCommand: EngineReferenceToolkit.AdapterHostCommand(runtime.Toolchain)), ct);
+                VnTextPatchAssemblyPath: parser?.Path,
+                AdapterHostCommand: EngineReferenceToolkit.AdapterHostCommand(runtime.Toolchain),
+                VnTextPatchCommand: parser?.Command), ct);
         }
         catch (AdapterProcessLimitException error)
         {

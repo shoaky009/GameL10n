@@ -1,8 +1,8 @@
-# 固定版本脚本解析器改为进程调用
+# 固定版本脚本解析器进程调用
 
 ## 目标与范围
 
-消除 `GameL10n.AdapterHost` 对托管解析器 DLL 的动态加载，为 Native AOT 发布准备调用边界。复用 VNTextPatch 已有的命令行 JSON 协议，保留适配器锁定解析器版本、文件完整性校验、共享本地工具缓存和离线运行的约定。
+`GameL10n.AdapterHost` 通过进程协议调用固定解析器，不再动态加载托管解析器 DLL。调用沿用 VNTextPatch 的命令行 JSON 协议，保留适配器锁定解析器版本、文件完整性校验、共享本地工具缓存和离线运行的约定。
 
 运行链路为：Python 适配器 → AdapterHost → 固定版本的 VNTextPatch 可执行工具。解析算法继续由 VNTextPatch 维护，Python 的 `parser(request, format=...)` 接口保持稳定。工具在构建及打包阶段准备，分析阶段解析并校验本地依赖。
 
@@ -10,16 +10,17 @@
 
 ## 当前实现与入口
 
-- `tools/GameL10n.AdapterHost/BuiltinScriptParser.cs`：用 `Assembly.LoadFrom`、`GetType`、`GetMethod` 和 `Invoke` 调用固定 DLL 的 `Worker.ExecuteJson`。
+- `tools/GameL10n.AdapterHost/BuiltinScriptParser.cs`：执行已解析的 `toolPaths.vnTextPatchCommand`，使用独立响应文件，保留协议、错误、诊断、超时和输出限制。旧 Python 辅助模块可从宿主提供的 `GAMEL10N_VNTEXTPATCH_COMMAND` 获取同一命令。
 - `tools/GameL10n.VnTextPatch/Program.cs`、`Protocol.cs`：已有单请求命令行入口，stdin 接收 JSON，stdout 返回 JSON 或响应文件状态，stderr 输出诊断。
-- `src/GameL10n.Engines/Development/BuiltinAdapterAssets.Shared.cs`：`tools/vntextpatch-reference.json` 目前使用 schema 1，锁定 DLL 和许可证文件的 SHA-256，按文件清单哈希共享缓存。缺失锁定版本时拒绝用当前版本替代。
+- `src/GameL10n.Engines/Development/BuiltinAdapterAssets.Shared.cs`：新生成的 `tools/vntextpatch-reference.json` 使用 schema 2，声明 `entryPoint`、`runtime` 及完整文件的 SHA-256，按文件清单哈希共享缓存。schema 1 继续锁定原 DLL，缺失版本时拒绝用当前版本替代。
 - `src/GameL10n.Engines/Development/EngineReferenceToolkit.cs`：解析依赖并提供 `toolPaths`。
 - `adapters/components/gamel10n_host.py`：Python 组件入口。
 - `adapters/templates/ScriptComponentAdapter.cs`：模板可能多次解析容器内容，然后转换条目标识和处理结果。
 - `src/GameL10n.Engines/Adapters/VnTextPatchClient.cs`：常规解析已使用进程协议，可参考其响应文件、诊断及目录隔离约定。
-- `scripts/package-vntextpatch-assets.ps1`、`scripts/publish.ps1`：目前分别打包可复用 DLL 和完整命令行工具。
+- `scripts/package-vntextpatch-assets.ps1`、`scripts/publish.ps1`：准备完整的托管解析工具及 `parser-tool.json` 清单；兼容工具单独发布到 `tools/parser-compat`。
+- `tools/GameL10n.ParserCompat`：旧 DLL 的独立托管兼容入口，保留反射 JSON；组件宿主的反射 JSON 默认关闭。兼容工具不作为 Native AOT 组件。
 
-## 实施要求
+## 维护约束
 
 1. 为完整可执行工具定义新的依赖清单版本，明确入口和所需文件；每个文件继续校验哈希。复用资源打包脚本必须产出完整工具包，不能仅把 DLL 文件名替换成 EXE。
 2. 依赖解析层负责版本选择、缓存、完整性和启动命令。组件桥接只负责执行已解析命令及转发协议，不猜测 DLL、EXE 或 `dotnet` 路径。

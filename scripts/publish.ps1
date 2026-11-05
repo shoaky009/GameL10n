@@ -45,6 +45,8 @@ if (-not $SkipBuild) {
     if ($LASTEXITCODE -ne 0) { throw 'Data tool publish failed.' }
     & (Join-Path $PSScriptRoot 'dotnet.ps1') publish (Join-Path $repoRoot 'tools/GameL10n.AdapterHost/GameL10n.AdapterHost.csproj') -c Release -r win-x64 @sharedRuntimeArguments "-p:RuntimeFrameworkVersion=$runtimeVersion" '-p:AppHostRelativeDotNet=../../toolchain' -o (Join-Path $output 'tools/adapter-host')
     if ($LASTEXITCODE -ne 0) { throw 'Adapter component host publish failed.' }
+    & (Join-Path $PSScriptRoot 'dotnet.ps1') publish (Join-Path $repoRoot 'tools/GameL10n.ParserCompat/GameL10n.ParserCompat.csproj') -c Release -r win-x64 @sharedRuntimeArguments "-p:RuntimeFrameworkVersion=$runtimeVersion" '-p:AppHostRelativeDotNet=../../toolchain' -o (Join-Path $output 'tools/parser-compat')
+    if ($LASTEXITCODE -ne 0) { throw 'Legacy parser compatibility tool publish failed.' }
     & (Join-Path $PSScriptRoot 'dotnet.ps1') publish (Join-Path $repoRoot 'tools/GameL10n.VnTextPatch/GameL10n.VnTextPatch.csproj') -c Release -r win-x64 @sharedRuntimeArguments "-p:RuntimeFrameworkVersion=$runtimeVersion" '-p:AppHostRelativeDotNet=../../toolchain' '-p:PublishSingleFile=true' '-p:IncludeNativeLibrariesForSelfExtract=false' '-p:DebugType=None' '-p:DebugSymbols=false' -o (Join-Path $output 'tools/vntextpatch')
     if ($LASTEXITCODE -ne 0) { throw 'Built-in script tool publish failed.' }
 }
@@ -52,7 +54,7 @@ $desktopRuntime = Get-Content -LiteralPath (Join-Path $output 'GameL10n.Desktop.
 if ($desktopRuntime.runtimeOptions.framework.name -ne 'Microsoft.NETCore.App' -or $desktopRuntime.runtimeOptions.framework.version -ne $runtimeVersion) {
     throw 'The desktop runtime configuration does not match the packaged .NET runtime. Rebuild with the pinned SDK.'
 }
-foreach ($relative in @('.', 'tools/data', 'tools/vntextpatch', 'tools/adapter-host')) {
+foreach ($relative in @('.', 'tools/data', 'tools/vntextpatch', 'tools/adapter-host', 'tools/parser-compat')) {
     if (Test-Path -LiteralPath (Join-Path $output "$relative/coreclr.dll")) {
         throw 'Duplicate runtime files remain in the output. Run publish.ps1 without -SkipBuild to rebuild the package.'
     }
@@ -65,6 +67,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Shared engine tools are missing; publishing st
 if (-not (Test-Path -LiteralPath (Join-Path $output 'GameL10n.Desktop.exe'))) { throw 'The desktop executable is missing.' }
 if (-not (Test-Path -LiteralPath (Join-Path $output 'tools/data/GameL10n.DataTool.exe'))) { throw 'The data tool is missing.' }
 if (-not (Test-Path -LiteralPath (Join-Path $output 'tools/adapter-host/GameL10n.AdapterHost.dll'))) { throw 'The precompiled adapter host is missing.' }
+if (-not (Test-Path -LiteralPath (Join-Path $output 'tools/parser-compat/GameL10n.ParserCompat.dll'))) { throw 'The legacy parser compatibility tool is missing.' }
 if (-not (Test-Path -LiteralPath (Join-Path $output 'tools/vntextpatch/GameL10n.VnTextPatch.exe'))) { throw 'The built-in script tool is missing.' }
 if (Test-Path -LiteralPath $toolchainTarget) { Remove-Item -LiteralPath $toolchainTarget -Recurse -Force }
 foreach ($relative in $toolchainItems) {

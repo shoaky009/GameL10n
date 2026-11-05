@@ -13,6 +13,9 @@ def invoke(kind, request):
     parser = paths.get("vnTextPatch") or os.environ.get("GAMEL10N_VNTEXTPATCH")
     if parser:
         paths["vnTextPatch"] = parser
+    parser_command = paths.get("vnTextPatchCommand") or json.loads(os.environ.get("GAMEL10N_VNTEXTPATCH_COMMAND", "null"))
+    if parser_command:
+        paths["vnTextPatchCommand"] = parser_command
     payload = dict(request, protocolVersion=1, toolPaths=paths)
     process = subprocess.run([*command, kind], input=json.dumps(payload, ensure_ascii=False),
                              encoding="utf-8", stdout=subprocess.PIPE, stderr=subprocess.PIPE)

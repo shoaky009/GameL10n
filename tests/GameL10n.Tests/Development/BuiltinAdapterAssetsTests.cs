@@ -1,5 +1,6 @@
 using System.IO.Compression;
 using System.Reflection;
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using GameL10n.Core.Adapters;
@@ -67,10 +68,17 @@ public sealed class BuiltinAdapterAssetsTests : IDisposable
         Assert.Empty(Directory.EnumerateFiles(second, "*.dll", SearchOption.AllDirectories));
         var dependency = (await GameL10n.Core.Storage.LocalFiles.ReadJsonAsync<BuiltinParserDependency>(
             Path.Combine(first, "src", BuiltinAdapterAssets.SharedDependencyPath), FixtureJson.TypeInfo<global::GameL10n.Core.Development.BuiltinParserDependency>(FixtureJson.Storage)))!;
-        var legacyFiles = dependency.Files.ToDictionary(pair => pair.Key.Replace("GameL10n.VnTextPatch.dll", "AvgTranslator.VnTextPatch.dll"), pair => pair.Value);
+        Assert.Equal(2, dependency.SchemaVersion);
+        await Assert.ThrowsAsync<InvalidDataException>(() => assets.ResolveSharedAsync(Path.Combine(root, "incomplete-tool"),
+            dependency with { Files = dependency.Files.Where(pair => !pair.Key.EndsWith(".runtimeconfig.json")).ToDictionary() }));
+        Assert.False(Directory.Exists(Path.Combine(root, "incomplete-tool")));
+        var command = await toolkit.ResolveParserAsync(Path.Combine(first, "src"), ParserToolFixture.Toolchain, default);
+        Assert.Equal(new[] { ParserToolFixture.Toolchain.ExecutablePath, parser! }, command!.Command);
+        var legacyFiles = dependency.Files.Where(pair => pair.Key is "GameL10n.VnTextPatch.dll" or "VNTextPatch.LICENSE" or "VNTextPatch.NOTICE.md")
+            .ToDictionary(pair => pair.Key.Replace("GameL10n.VnTextPatch.dll", "AvgTranslator.VnTextPatch.dll"), pair => pair.Value);
         var legacyDirectory = Path.Combine(shared, "vntextpatch", GeneratedAdapterResources.HashEntries(legacyFiles));
         Directory.CreateDirectory(legacyDirectory);
-        foreach (var file in dependency.Files.Keys)
+        foreach (var file in dependency.Files.Keys.Where(file => file is "GameL10n.VnTextPatch.dll" or "VNTextPatch.LICENSE" or "VNTextPatch.NOTICE.md"))
             File.Copy(Path.Combine(Path.GetDirectoryName(parser!)!, file),
                 Path.Combine(legacyDirectory, file.Replace("GameL10n.VnTextPatch.dll", "AvgTranslator.VnTextPatch.dll")));
         var legacyDependency = new BuiltinParserDependency(1, legacyFiles);
@@ -176,9 +184,11 @@ public sealed class BuiltinAdapterAssetsTests : IDisposable
     }
 
     [Theory]
-    [InlineData("Renpy")]
-    [InlineData("KirikiriKs")]
-    public async Task CopiedPythonHelperCallsPrecompiledParserAndWritesChinese(string format)
+    [InlineData("Renpy", 2)]
+    [InlineData("KirikiriKs", 2)]
+    [InlineData("Renpy", 1)]
+    [InlineData("KirikiriKs", 1)]
+    public async Task CopiedPythonHelperCallsPrecompiledParserAndWritesChinese(string format, int schemaVersion)
     {
         var assets = CreateAssets();
         string workspace = Path.Combine(root, "workspace");
@@ -200,13 +210,23 @@ public sealed class BuiltinAdapterAssetsTests : IDisposable
         string script = format == "Renpy" ? $"label start:\n    \"{sourceText}\"\n" : $"*start\r\n{sourceText}[p]\r\n";
         Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
         await File.WriteAllTextAsync(Path.Combine(resources, file), script, format == "Renpy" ? new UTF8Encoding(false) : Encoding.GetEncoding(932));
+        if (schemaVersion == 1)
+        {
+            var legacy = new BuiltinParserDependency(1, ParserToolFixture.Files.Where(name => name.EndsWith(".dll") || name.StartsWith("VNTextPatch."))
+                .ToDictionary(name => name, name => GeneratedAdapterResources.HashFile(Path.Combine(root, "assets", name))));
+            await File.WriteAllTextAsync(Path.Combine(source, BuiltinAdapterAssets.SharedDependencyPath), JsonSerializer.Serialize(legacy, Json));
+        }
         var sharedParser = await new EngineReferenceToolkit(Path.Combine(root, "shared"), parserAssets: assets)
-            .ResolveVnTextPatchAsync(source, default);
+            .ResolveParserAsync(source, ParserToolFixture.Toolchain, default, legacyHostPath: typeof(GameL10n.ParserCompat.Program).Assembly.Location);
+        var finalResponse = Path.Combine(root, "adapter-final.json");
+        await File.WriteAllTextAsync(finalResponse, "final response is not an intermediate parser response");
         async Task<AdapterProcessResult> Invoke(object request)
         {
             var payload = JsonSerializer.SerializeToNode(request, Json)!;
             payload["format"] = format;
-            payload["toolPaths"] = JsonSerializer.SerializeToNode(new { hostCommand = EngineArchiveFixture.HostCommand, vnTextPatch = sharedParser }, Json);
+            payload["responseFile"] = finalResponse;
+            payload["toolPaths"] = JsonSerializer.SerializeToNode(new { hostCommand = EngineArchiveFixture.HostCommand,
+                vnTextPatch = sharedParser!.Path, vnTextPatchCommand = sharedParser.Command }, Json);
             return await runner.RunAsync(new(fixture.Paths.Python,
                 EngineReferenceToolkit.PythonArguments(fixture.Paths, entry, []), source, payload.ToJsonString()), default);
         }
@@ -221,10 +241,67 @@ public sealed class BuiltinAdapterAssetsTests : IDisposable
         using var built = JsonDocument.Parse(build.StandardOutput);
         Assert.True(built.RootElement.GetProperty("success").GetBoolean(), build.StandardOutput);
         Assert.Equal(script.Replace(sourceText, targetText), await File.ReadAllTextAsync(Path.Combine(output, file)));
+        Assert.Equal("final response is not an intermediate parser response", await File.ReadAllTextAsync(finalResponse));
+        Assert.Empty(Directory.EnumerateDirectories(source, "parser-*"));
         if (format == "KirikiriKs") Assert.True(File.ReadAllBytes(Path.Combine(output, file)).AsSpan().StartsWith(Encoding.Unicode.GetPreamble()));
         var probe = await Invoke(new { protocolVersion = 1, operation = "probe", sourceDirectory = resources });
         Assert.NotEqual(0, probe.ExitCode);
         Assert.Contains("有界范围", probe.StandardError);
+
+        var host = EngineArchiveFixture.HostCommand;
+        var failure = await runner.RunAsync(new(host[0], host.Skip(1).Append("parser").ToArray(), source,
+            JsonSerializer.Serialize(new { protocolVersion = 1, operation = "unknown", sourceDirectory = resources, format }, Json),
+            VnTextPatchCommand: sharedParser!.Command), default);
+        Assert.NotEqual(0, failure.ExitCode);
+        using var failed = JsonDocument.Parse(failure.StandardOutput);
+        Assert.False(failed.RootElement.GetProperty("success").GetBoolean());
+        Assert.Equal(1, failed.RootElement.GetProperty("protocolVersion").GetInt32());
+        Assert.Equal(JsonValueKind.Object, failed.RootElement.GetProperty("diagnostic").ValueKind);
+    }
+
+    [Fact]
+    public async Task CancelingTheHostStopsParserAndItsChildren()
+    {
+        using var fixture = new EngineArchiveFixture();
+        var source = Directory.CreateDirectory(Path.Combine(fixture.Root, "resources")).FullName;
+        var marker = Path.Combine(fixture.Root, "child-pids.json");
+        var script = Path.Combine(fixture.Root, "waiting-parser.py");
+        await File.WriteAllTextAsync(script, """
+            import json, os, subprocess, sys, time
+            request = json.load(sys.stdin)
+            child = subprocess.Popen([sys.executable, '-I', '-c', 'import time; time.sleep(120)'])
+            with open(sys.argv[1] + '.tmp', 'w', encoding='utf-8') as output:
+                json.dump([os.getpid(), child.pid], output)
+            os.replace(sys.argv[1] + '.tmp', sys.argv[1])
+            time.sleep(120)
+            """);
+        var host = EngineArchiveFixture.HostCommand;
+        using var cancel = new CancellationTokenSource();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        var execution = fixture.Runner.RunAsync(new(host[0], host.Skip(1).Append("parser").ToArray(), fixture.Root,
+            JsonSerializer.Serialize(new { protocolVersion = 1, operation = "extract", format = "Renpy", sourceDirectory = source,
+                toolPaths = new { vnTextPatchCommand = new[] { fixture.Paths.Python, "-I", "-B", script, marker } } }, Json)), cancel.Token);
+        try
+        {
+            while (!File.Exists(marker))
+            {
+                if (execution.IsCompleted) Assert.Fail((await execution).StandardError);
+                await Task.Delay(25, deadline.Token);
+            }
+            var ids = JsonSerializer.Deserialize<int[]>(await File.ReadAllTextAsync(marker))!;
+            using var parser = Process.GetProcessById(ids[0]);
+            using var child = Process.GetProcessById(ids[1]);
+            cancel.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => execution);
+            await Task.WhenAll(parser.WaitForExitAsync(), child.WaitForExitAsync()).WaitAsync(deadline.Token);
+            Assert.Empty(Directory.EnumerateFiles(source));
+        }
+        finally
+        {
+            cancel.Cancel();
+            try { await execution; }
+            catch (OperationCanceledException) { }
+        }
     }
 
     [Fact]
@@ -246,17 +323,15 @@ public sealed class BuiltinAdapterAssetsTests : IDisposable
 
     private BuiltinAdapterAssets CreateAssets()
     {
-        string assets = Directory.CreateDirectory(Path.Combine(root, "assets")).FullName;
-        File.Copy(typeof(Worker).Assembly.Location, Path.Combine(assets, "GameL10n.VnTextPatch.dll"));
+        string assets = Path.Combine(root, "assets");
+        var result = ParserToolFixture.Create(assets);
         string vendor = Path.Combine(Repository(), "third_party/VNTextPatch");
-        File.Copy(Path.Combine(vendor, "LICENSE"), Path.Combine(assets, "VNTextPatch.LICENSE"));
-        File.Copy(Path.Combine(vendor, "NOTICE.md"), Path.Combine(assets, "VNTextPatch.NOTICE.md"));
         using var archive = ZipFile.Open(Path.Combine(assets, "sources.zip"), ZipArchiveMode.Create);
         foreach (string path in Directory.EnumerateFiles(vendor, "*.cs", SearchOption.AllDirectories))
             archive.CreateEntryFromFile(path, "vendor/" + Path.GetRelativePath(vendor, path).Replace('\\', '/'));
         foreach (string name in new[] { "Worker.cs", "Protocol.cs", "Serialization/VnTextPatchJson.cs" })
             archive.CreateEntryFromFile(Path.Combine(Repository(), "tools/GameL10n.VnTextPatch", name), "worker/" + name);
-        return new(assets);
+        return result;
     }
     private static string Repository()
     {

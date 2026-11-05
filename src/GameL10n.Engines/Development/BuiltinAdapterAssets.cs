@@ -229,7 +229,7 @@ public sealed partial class BuiltinAdapterAssets(string? assetsDirectory = null)
     private static string Usage(VnTextPatchFormat format) =>
         $"在 src/adapter.py 实现协议入口。from tools.gamel10n_host import parser, write_response；parser(request, '{format.Key}') 调用固定解析器并返回响应字典。" +
         "先解包到独立工作目录，再传入该目录及相对 resourceFiles；build 的 outputDirectory 必须与 sourceDirectory 分开，随后把结果重新封包并声明所有最终输出。" +
-        "仅登记固定版本的共享 DLL，由预编译宿主加载，不复制到项目。解析器不支持的逻辑使用 Python 实现。" +
+        "仅登记固定版本的共享解析工具，由预编译宿主通过进程协议调用，不复制到项目。解析器不支持的逻辑使用 Python 实现。" +
         "最终响应用 write_response(request, response) 写入 responseFile；诊断写 stderr。probe 由入口独立实现，不能用整文件解析器猜测截断输入。";
 
     private static string Example(VnTextPatchFormat format) => $$"""

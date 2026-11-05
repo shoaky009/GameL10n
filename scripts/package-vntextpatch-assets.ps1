@@ -9,8 +9,8 @@ $output = [IO.Path]::GetFullPath([IO.Path]::Combine($repoRoot, $OutputDirectory)
 $project = Join-Path $repoRoot 'tools/GameL10n.VnTextPatch/GameL10n.VnTextPatch.csproj'
 $buildOutput = Join-Path $repoRoot "tools/GameL10n.VnTextPatch/obj/reuse-assets/$Configuration"
 if (-not $SkipBuild) {
-    & (Join-Path $PSScriptRoot 'dotnet.ps1') build $project -c $Configuration -o $buildOutput --no-self-contained '-p:UseAppHost=false' '-p:PublishSingleFile=false' '-p:DebugType=None' '-p:DebugSymbols=false'
-    if ($LASTEXITCODE -ne 0) { throw 'VNTextPatch reusable assembly build failed.' }
+    & (Join-Path $PSScriptRoot 'dotnet.ps1') publish $project -c $Configuration -o $buildOutput --no-self-contained '-p:UseAppHost=false' '-p:PublishSingleFile=false' '-p:DebugType=None' '-p:DebugSymbols=false'
+    if ($LASTEXITCODE -ne 0) { throw 'VNTextPatch reusable tool publish failed.' }
 }
 $assembly = Join-Path $buildOutput 'GameL10n.VnTextPatch.dll'
 if (-not (Test-Path -LiteralPath $assembly)) { throw 'The reusable parser assembly is missing; run without -SkipBuild.' }
@@ -18,6 +18,17 @@ New-Item -ItemType Directory -Path $output -Force | Out-Null
 Copy-Item -LiteralPath $assembly -Destination (Join-Path $output 'GameL10n.VnTextPatch.dll') -Force
 Copy-Item -LiteralPath (Join-Path $repoRoot 'third_party/VNTextPatch/LICENSE') -Destination (Join-Path $output 'VNTextPatch.LICENSE') -Force
 Copy-Item -LiteralPath (Join-Path $repoRoot 'third_party/VNTextPatch/NOTICE.md') -Destination (Join-Path $output 'VNTextPatch.NOTICE.md') -Force
+$toolFiles = [ordered]@{}
+foreach ($name in @('GameL10n.VnTextPatch.dll', 'GameL10n.VnTextPatch.deps.json', 'GameL10n.VnTextPatch.runtimeconfig.json', 'VNTextPatch.LICENSE', 'VNTextPatch.NOTICE.md')) {
+    if ($name -like 'GameL10n.VnTextPatch.*') {
+        $source = Join-Path $buildOutput $name
+        if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "The reusable parser tool is incomplete: $name" }
+        Copy-Item -LiteralPath $source -Destination (Join-Path $output $name) -Force
+    }
+    $toolFiles[$name] = (Get-FileHash -LiteralPath (Join-Path $output $name) -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+@{ schemaVersion = 2; files = $toolFiles; entryPoint = 'GameL10n.VnTextPatch.dll'; runtime = 'dotnet' } |
+    ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $output 'parser-tool.json') -Encoding utf8
 $zipPath = Join-Path $output 'sources.zip'
 $pendingZipPath = Join-Path $output ('.sources-' + [Guid]::NewGuid().ToString('N') + '.tmp')
 try {

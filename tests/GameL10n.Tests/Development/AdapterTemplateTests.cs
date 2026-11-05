@@ -398,11 +398,7 @@ public sealed class AdapterTemplateTests : IDisposable
     private async Task<(AdaptationTools Tools, AdaptationSession State, LocalAdapterPackageStore Store, string Workspace,
         AdapterRuntime Compiler, BuiltinAdapterAssets Assets)> ToolsAsync(string game, bool archive)
     {
-        var assetsDirectory = Directory.CreateDirectory(Path.Combine(fixture.Root, "assets")).FullName;
-        File.Copy(typeof(GameL10n.VnTextPatch.Worker).Assembly.Location, Path.Combine(assetsDirectory, "GameL10n.VnTextPatch.dll"));
-        await File.WriteAllTextAsync(Path.Combine(assetsDirectory, "VNTextPatch.LICENSE"), "fixture MIT license");
-        await File.WriteAllTextAsync(Path.Combine(assetsDirectory, "VNTextPatch.NOTICE.md"), "fixture attribution");
-        var assets = new BuiltinAdapterAssets(assetsDirectory);
+        var assets = ParserToolFixture.Create(Path.Combine(fixture.Root, "assets"));
         var workspace = Directory.CreateDirectory(Path.Combine(fixture.Root, "workspace")).FullName;
         var store = new LocalAdapterPackageStore(Path.Combine(fixture.Root, "store"));
         await fixture.PrepareSharedToolsAsync(store.RootDirectory);

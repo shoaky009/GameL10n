@@ -776,9 +776,10 @@ public sealed partial class AdaptationTools(AdaptationRequest request, Adaptatio
         var working = Text(args, "workingDirectory", ".");
         working = working == "." ? workspace : WorkspaceFiles.Resolve(workspace, working);
         Directory.CreateDirectory(working);
+        var parser = await AnalysisParserAsync(ct);
         var result = await runtime.Runner.RunAsync(new(executable, arguments, working,
             Text(args, "stdin", ""), TimeSpan.FromSeconds(Number(args, "timeoutSeconds", 120, 1, 600)), 1024 * 1024,
-            VnTextPatchAssemblyPath: await AnalysisParserPathAsync(ct)), ct);
+            VnTextPatchAssemblyPath: parser?.Path, VnTextPatchCommand: parser?.Command), ct);
         return new JsonObject
         {
             ["exitCode"] = result.ExitCode,

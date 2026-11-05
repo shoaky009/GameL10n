@@ -25,7 +25,8 @@ internal sealed class VnTextPatchClient(IAdapterProcessRunner runner, string? wo
     internal async Task<string> FingerprintAsync(CancellationToken ct)
     {
         var assembly = arguments.Count == 0 ? Path.ChangeExtension(executable, ".dll") : arguments[0];
-        var files = new List<string> { executable, assembly };
+        var files = new List<string> { executable };
+        if (arguments.Count > 0 || File.Exists(assembly)) files.Add(assembly);
         var runtime = Path.ChangeExtension(assembly, ".runtimeconfig.json");
         if (File.Exists(runtime)) files.Add(runtime);
         var hashes = new List<string>();
