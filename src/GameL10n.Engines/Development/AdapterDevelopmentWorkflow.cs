@@ -34,7 +34,8 @@ public sealed record AdapterTestResult(bool Passed, AdapterTestStage Stage, IRea
 /// <summary>Builds, verifies and publishes a development workspace independently of the agent tool protocol.</summary>
 public sealed partial class AdapterDevelopmentWorkflow(AdaptationRequest request, AdaptationSession session, string workspace,
     AdapterRuntime runtime, LocalAdapterPackageStore store, HttpClient? researchClient = null,
-    BuiltinAdapterAssets? builtinAssets = null, Action<string, string>? reportProgress = null)
+    BuiltinAdapterAssets? builtinAssets = null, Action<string, string>? reportProgress = null,
+    Func<object, Task>? trace = null)
 {
     private static readonly JsonSerializerOptions Json = new(EngineJson.Web)
         { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
@@ -122,7 +123,7 @@ public sealed partial class AdapterDevelopmentWorkflow(AdaptationRequest request
         timer.Restart();
         var verification = await new GeneratedAdapterVerifier().VerifyAsync(adapter, ResourceDirectory, verificationDirectory, ct,
             sourceIsSnapshot: true, coverage: session.TextCoverage,
-            baselineUnits: session.Objective == AdaptationObjective.Repair ? request.BaselineUnits : null);
+            baselineUnits: session.Objective == AdaptationObjective.Repair ? request.BaselineUnits : null, trace: trace);
         session.VerificationDiagnostics = verification.Diagnostics.ToArray();
         if (verification.OriginalRoundtripPassed)
             session.RecordVerificationProgress(AdapterVerificationMilestone.OriginalRoundtrip);

@@ -231,7 +231,7 @@ public sealed class AutomaticAdaptationService(Func<IAdaptationAgentModel> creat
             state.BuiltinProbes ??= [];
             state.SuccessfulProbes ??= [];
             var development = new AdapterDevelopmentWorkflow(request, state, directory, runtime, packageStore,
-                researchClient, builtinAssets, Report);
+                researchClient, builtinAssets, Report, TraceAsync);
             var tools = new AdaptationTools(request, state, directory, runtime, packageStore, researchClient,
                 builtinAssets: builtinAssets, builtinTrial: builtinTrial, reportProgress: Report, development: development);
             if (request.BuiltinProbes is { Count: > 0 }) state.BuiltinProbes = request.BuiltinProbes.TakeLast(6).ToArray();

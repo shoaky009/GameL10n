@@ -2156,6 +2156,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         var result = await new GeneratedAdapterVerifier().VerifyAsync(adapter, request.GameDirectory, Path.Combine(root, "verification"));
         Assert.True(result.Passed, string.Join("\n", result.Diagnostics));
         Assert.True(runner.SawUnicodeTranslations);
+        Assert.Equal([0, 1, 2], runner.ChangedUnitCounts);
         Assert.False(Directory.EnumerateDirectories(Path.Combine(root, "runs")).Any());
     }
 
@@ -2170,7 +2171,8 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         var failure = Assert.Single(result.Diagnostics, diagnostic => diagnostic.Contains("line-1", StringComparison.Ordinal));
         Assert.Contains("[partial-translation-re-extraction]", failure);
         Assert.Contains("expected=\"Second line\", actual=\"corrupted original text\"", failure);
-        Assert.True(runner.SawUnicodeTranslations);
+        Assert.False(runner.SawUnicodeTranslations);
+        Assert.Equal([0, 1], runner.ChangedUnitCounts);
     }
 
     [Fact]
@@ -2238,7 +2240,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         var adapter = new GeneratedGameAdapter(CreatePackage(), Toolchain(), runner, Path.Combine(root, "runs"));
         var result = await new GeneratedAdapterVerifier().VerifyAsync(adapter, request.GameDirectory, Path.Combine(root, "verification"));
         Assert.False(result.Passed);
-        var failure = Assert.Single(result.Diagnostics, diagnostic => diagnostic.Contains("[full-translation-validation]", StringComparison.Ordinal));
+        var failure = Assert.Single(result.Diagnostics, diagnostic => diagnostic.Contains("[partial-translation-validation]", StringComparison.Ordinal));
         Assert.Contains("校验说明", failure);
         if (claimsPassed)
         {
@@ -2521,6 +2523,7 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
         public Func<TranslationUnit[], TranslationUnit[]>? RewriteExtraction { get; init; }
         public ValidationResult ValidationResponse { get; init; } = new(true, [], "passed");
         public bool SawUnicodeTranslations { get; private set; }
+        public List<int> ChangedUnitCounts { get; } = [];
         public Task<AdapterProcessResult> RunAsync(AdapterProcessRequest request, CancellationToken cancellationToken)
         {
             ObserveRequest?.Invoke(request);
@@ -2571,8 +2574,14 @@ public sealed partial class AutomaticAdaptationTests : IDisposable
                 var translations = input.GetProperty("translations");
                 if (translations.ValueKind == JsonValueKind.Null)
                     translations = JsonSerializer.Deserialize<JsonElement>(File.ReadAllText(input.GetProperty("translationsFile").GetString()!));
+                var changed = 0;
                 for (var index = 0; index < lines.Length; index++)
-                    if (translations.TryGetProperty("line-" + index, out var value)) lines[index] = value.GetString()!;
+                    if (translations.TryGetProperty("line-" + index, out var value))
+                    {
+                        if (lines[index] != value.GetString()) changed++;
+                        lines[index] = value.GetString()!;
+                    }
+                ChangedUnitCounts.Add(changed);
                 if (CorruptUntouchedTrialText && translations.EnumerateObject().Count() < lines.Length)
                     lines[^1] = "corrupted original text";
                 SawUnicodeTranslations |= lines.Any(line => line.Contains("翻译", StringComparison.Ordinal));

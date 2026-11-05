@@ -105,17 +105,44 @@ public sealed class GeneratedAdapterVerifier
             diagnostics.Add("Original-text build reproduced every approved sample byte for byte.");
             originalRoundtripPassed = true;
 
-            // Change visible text, including duplicate strings, without moving resource syntax.
-            phase = "full-translation-build";
+            // Try a few actual edits before exercising the all-text rebuild path.
+            phase = "partial-translation-build";
             var samples = first.Units.Select((unit, index) => (Unit: unit, Index: index,
                 Text: VerificationTranslationText.Create(unit, index))).ToArray();
             var mutableSamples = samples.Where(sample => sample.Text != sample.Unit.SourceText).ToArray();
             if (mutableSamples.Length == 0)
                 throw new GeneratedAdapterException("所有提取文本均为保护标记或空白，无法生成有效测试译文；请提取可翻译的可见文字。");
+            var partialTexts = new Dictionary<string, string>(StringComparer.Ordinal);
+            var firstSample = mutableSamples[0];
+            partialTexts[firstSample.Unit.Id] = VerificationTranslationText.Create(firstSample.Unit, firstSample.Index, trial: true);
+            if (mutableSamples.Length > 3)
+            {
+                var middle = mutableSamples[mutableSamples.Length / 2];
+                partialTexts[middle.Unit.Id] = VerificationTranslationText.Create(middle.Unit, middle.Index, trial: true);
+            }
+            var expectedPartial = new Dictionary<string, string>(originalTexts, StringComparer.Ordinal);
+            foreach (var pair in partialTexts) expectedPartial[pair.Key] = pair.Value;
+            var partialDirectory = WorkspaceFiles.Resolve(verificationDirectory, "partial");
+            Directory.CreateDirectory(partialDirectory);
+            var partialBuild = await timing.MeasureAsync(phase, () => adapter.BuildPatchAsync(source, partialTexts, partialDirectory, cancellationToken),
+                new JsonObject { ["changedUnits"] = partialTexts.Count, ["totalUnits"] = first.Units.Count });
+            if (!expectedFiles.IsSubsetOf(partialBuild.Files.Select(Normalize)))
+                throw new GeneratedAdapterException("Partial translation build dropped a discovered source resource.");
+            phase = "partial-translation-re-extraction";
+            RequireSameUnits(first, await timing.MeasureAsync(phase, () => adapter.ExtractAsync(partialDirectory, cancellationToken)), expectedPartial);
+            phase = "partial-translation-validation";
+            var partialValidation = await timing.MeasureAsync(phase, () => adapter.ValidatePatchAsync(source, partialDirectory, cancellationToken));
+            if (!partialValidation.Passed)
+                throw new GeneratedAdapterException("Partial translation validation failed: "
+                    + string.Join("; ", partialValidation.Issues.Select(issue => issue.Message)));
+            diagnostics.Add("Partial trial edits survived re-extraction; every untouched translation unit retained its original text and identity.");
+
+            phase = "full-translation-build";
             var translatedTexts = samples.ToDictionary(sample => sample.Unit.Id, sample => sample.Text, StringComparer.Ordinal);
             var translated = WorkspaceFiles.Resolve(verificationDirectory, "translated");
             Directory.CreateDirectory(translated);
-            var translatedBuild = await timing.MeasureAsync(phase, () => adapter.BuildPatchAsync(source, translatedTexts, translated, cancellationToken));
+            var translatedBuild = await timing.MeasureAsync(phase, () => adapter.BuildPatchAsync(source, translatedTexts, translated, cancellationToken),
+                new JsonObject { ["changedUnits"] = mutableSamples.Length, ["totalUnits"] = first.Units.Count });
             if (!expectedFiles.IsSubsetOf(translatedBuild.Files.Select(Normalize)))
                 throw new GeneratedAdapterException("Translated build dropped a discovered source resource.");
             foreach (var profile in resources.Where(path => path.EndsWith(".exe.le.config", StringComparison.OrdinalIgnoreCase)))
@@ -131,32 +158,6 @@ public sealed class GeneratedAdapterVerifier
                 + string.Join("; ", validation.Issues.Select(issue => issue.Message)));
             diagnostics.Add($"{mutableSamples.Length} distinct Unicode translations survived build and re-extraction with stable IDs, resource paths, and locators."
                 + $" {samples.Length - mutableSamples.Length} units containing only protected syntax or spacing were checked unchanged.");
-
-            // Trials supply only selected translations. Exercise that path and observe untouched units in the rebuilt resources.
-            phase = "partial-translation-build";
-            var partialTexts = new Dictionary<string, string>(StringComparer.Ordinal);
-            var firstSample = mutableSamples[0];
-            partialTexts[firstSample.Unit.Id] = VerificationTranslationText.Create(firstSample.Unit, firstSample.Index, trial: true);
-            if (mutableSamples.Length > 3)
-            {
-                var middle = mutableSamples[mutableSamples.Length / 2];
-                partialTexts[middle.Unit.Id] = VerificationTranslationText.Create(middle.Unit, middle.Index, trial: true);
-            }
-            var expectedPartial = new Dictionary<string, string>(originalTexts, StringComparer.Ordinal);
-            foreach (var pair in partialTexts) expectedPartial[pair.Key] = pair.Value;
-            var partialDirectory = WorkspaceFiles.Resolve(verificationDirectory, "partial");
-            Directory.CreateDirectory(partialDirectory);
-            var partialBuild = await timing.MeasureAsync(phase, () => adapter.BuildPatchAsync(source, partialTexts, partialDirectory, cancellationToken));
-            if (!expectedFiles.IsSubsetOf(partialBuild.Files.Select(Normalize)))
-                throw new GeneratedAdapterException("Partial translation build dropped a discovered source resource.");
-            phase = "partial-translation-re-extraction";
-            RequireSameUnits(first, await timing.MeasureAsync(phase, () => adapter.ExtractAsync(partialDirectory, cancellationToken)), expectedPartial);
-            phase = "partial-translation-validation";
-            var partialValidation = await timing.MeasureAsync(phase, () => adapter.ValidatePatchAsync(source, partialDirectory, cancellationToken));
-            if (!partialValidation.Passed)
-                throw new GeneratedAdapterException("Partial translation validation failed: "
-                    + string.Join("; ", partialValidation.Issues.Select(issue => issue.Message)));
-            diagnostics.Add("Partial trial edits survived re-extraction; every untouched translation unit retained its original text and identity.");
             diagnostics.Add("Resource checks passed. Game runtime compatibility has not been tested.");
             return new GeneratedAdapterVerification(true, diagnostics, originalRoundtripPassed);
         }
