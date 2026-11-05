@@ -247,6 +247,7 @@ internal sealed class EngineArchiveFixture : IDisposable
     public async Task<string> CreateArchiveAsync(string component, string otherName = "images/logo.bin", string? script = null, string scriptName = "script.rpy",
         long? mediaLength = null)
     {
+        if (scriptName.EndsWith(".rpyc", StringComparison.OrdinalIgnoreCase)) await PrepareRpycFixtureAsync();
         var archive = Path.Combine(Root, Guid.NewGuid().ToString("N") + (component == "archive.rpa3" ? ".rpa" : ".xp3"));
         var make = Path.Combine(Root, "make.py");
         await File.WriteAllTextAsync(make, """
@@ -254,6 +255,9 @@ internal sealed class EngineArchiveFixture : IDisposable
             from python.archives import xp3
             args = json.load(sys.stdin)
             files = [(args["scriptName"], args["script"].encode("utf-8")), (args["otherName"], bytes([0, 1, 255, 10]))]
+            if args["scriptName"].endswith(".rpyc"):
+                from renpy_rpyc_fixture import sample
+                files[0] = (args["scriptName"], sample())
             if args["mediaLength"] is not None:
                 assert args["component"] == "archive.rpa3"
                 key, mapping = 0x12345678, {}
@@ -289,6 +293,23 @@ internal sealed class EngineArchiveFixture : IDisposable
             JsonSerializer.Serialize(new { component, archive, otherName, scriptName, mediaLength, script = script ?? "label start:\n    \"こんにちは。\"\n" })), default);
         Assert.Equal(0, result.ExitCode);
         return archive;
+    }
+
+    private async Task PrepareRpycFixtureAsync()
+    {
+        using var source = typeof(EngineArchiveFixture).Assembly.GetManifestResourceStream("RenpyRpycFixture.py")!;
+        await using var target = File.Create(Path.Combine(Root, "renpy_rpyc_fixture.py"));
+        await source.CopyToAsync(target);
+    }
+
+    public async Task CreateCompiledScriptAsync(string path)
+    {
+        await PrepareRpycFixtureAsync();
+        var make = Path.Combine(Root, "make-rpyc.py");
+        await File.WriteAllTextAsync(make, "from pathlib import Path\nimport sys\nfrom renpy_rpyc_fixture import sample\nPath(sys.argv[1]).write_bytes(sample())\n");
+        var result = await new AdapterProcessRunner().RunAsync(new(Paths.Python,
+            EngineReferenceToolkit.PythonArguments(Paths, make, [path]), Root), default);
+        Assert.True(result.ExitCode == 0, result.StandardError);
     }
 
     public async Task<JsonElement> InvokeAsync(string component, string operation, string archive,

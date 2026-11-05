@@ -19,6 +19,7 @@ internal static class EngineToolsPackage
             var toolkit = new EngineReferenceToolkit(cache, reportProgress: (stage, message) => Console.WriteLine(stage + "：" + message),
                 bundledDirectory: Path.Combine(cache, ".no-bundle"), allowDownloads: true);
             var pin = await toolkit.EnsureReferenceAsync(null, default);
+            toolkit.RequireRenpyRpyc(pin);
             var python = await toolkit.EnsurePythonAsync(pin, null, default);
             Directory.CreateDirectory(output);
             var reference = Path.Combine(output, "references", pin.Revision);

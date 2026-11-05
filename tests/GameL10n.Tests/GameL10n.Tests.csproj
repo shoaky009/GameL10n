@@ -13,6 +13,9 @@
     <ProjectReference Include="../../tools/GameL10n.AdapterHost/GameL10n.AdapterHost.csproj" />
     <Using Include="Xunit" />
     <EmbeddedResource Include="Fixtures/engine-archives-e9b8018.zip" LogicalName="EngineArchiveReference.zip" />
+    <EmbeddedResource Include="Fixtures/renpy-rpyc-reference-e9b8018.zip" LogicalName="RenpyRpycReference.zip" />
+    <EmbeddedResource Include="Fixtures/renpy_rpyc_fixture.py" LogicalName="RenpyRpycFixture.py" />
+    <EmbeddedResource Include="Fixtures/check_renpy_rpyc_adapter.py" LogicalName="RenpyRpycAdapterCheck.py" />
     <EmbeddedResource Include="Fixtures/kirikiri-scn-reference-442ae2f.zip" LogicalName="KirikiriScnReference.zip" />
     <EmbeddedResource Include="Fixtures/check_kirikiri_scn_component.py" LogicalName="KirikiriScnComponentCheck.py" />
   </ItemGroup>

@@ -16,7 +16,7 @@ public static class EngineArchiveComponents
     public static IReadOnlyList<EngineArchiveComponent> All { get; } =
     [
         new("archive.rpa3", 2, "RPA/ARC 3.0 single-chunk", "python.archives.rpa", ["inspect", "extract", "rebuild"],
-            ["RPA 2/4, multi-chunk entries, scrambled archives and compiled RPYC are unsupported.",
+            ["RPA 2/4, multi-chunk entries and scrambled archives are unsupported; compiled scripts require the RPYC2 template.",
              "Only a data-only pickle index is accepted; executable pickle operations are rejected."]),
         new("archive.xp3", 1, "Standard XP3 v1, filter=none", "python.archives.xp3", ["inspect", "extract", "rebuild"],
             ["Explicit filter=none is required from independent engine evidence; zero flags do not establish this.",

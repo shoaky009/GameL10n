@@ -160,7 +160,7 @@ public sealed partial class AdaptationTools
                 ["name"] = template.Family.Name,
                 ["resourcePatterns"] = EngineJson.Node((composed.ResourcePatterns).ToArray(), EngineJson.Web)
             },
-            ["limitations"] = "只连接已声明的源脚本与封包组件。脚本编码沿用解析器；不生成未经当前游戏验证的字体、转区或运行时补丁。",
+            ["limitations"] = "只连接已声明的脚本与封包组件。RPYC2 保留非文本对象及源码摘要；其他脚本编码沿用解析器。不生成未经当前游戏验证的字体、转区或运行时补丁。",
             ["nextAction"] = "暂存与规则匹配的真实资源，用返回的 testArguments 调用完整 test_adapter。模板生成不代表已验证，也不会发布。"
         };
     }

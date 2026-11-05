@@ -10,6 +10,7 @@
     <EmbeddedResource Include="../../adapters/siglus/*.py" LogicalName="GameL10n.Siglus.%(Filename)%(Extension)" />
     <EmbeddedResource Include="../../adapters/siglus/*.json" LogicalName="GameL10n.Siglus.%(Filename)%(Extension)" />
     <EmbeddedResource Include="../../adapters/components/engine_archive.py" LogicalName="GameL10n.Components.engine_archive.py" />
+    <EmbeddedResource Include="../../adapters/components/renpy_rpyc_adapter.py" LogicalName="GameL10n.Components.renpy_rpyc_adapter.py" />
     <EmbeddedResource Include="../../adapters/components/kirikiri_scn_text.py" LogicalName="GameL10n.Components.kirikiri_scn_text.py" />
     <EmbeddedResource Include="../../adapters/components/gamel10n_host.py" LogicalName="GameL10n.Components.gamel10n_host.py" />
     <EmbeddedResource Include="../../adapters/components/EngineReferencePython.cs" LogicalName="GameL10n.Components.EngineReferencePython.cs" />

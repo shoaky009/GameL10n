@@ -54,7 +54,7 @@ public sealed partial class AutomaticAdaptationTests
         var store = new LocalAdapterPackageStore(Path.Combine(root, "store"));
         var workspace = Path.Combine(root, "workspace");
         var compiler = Runtime(new ScriptedRunner());
-        foreach (var blocker in new[] { "compiled.rpyc", "data.rpa", "data.xp3", "other.ks", "error.log" })
+        foreach (var blocker in new[] { "compiled.rpyc", "script_ren.py", "data.rpa", "data.xp3", "other.ks", "error.log" })
         {
             var path = Path.Combine(request.GameDirectory, blocker);
             await File.WriteAllTextAsync(path, "uninvestigated resource");

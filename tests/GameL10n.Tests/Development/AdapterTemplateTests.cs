@@ -7,11 +7,12 @@ namespace GameL10n.Tests.Development;
 
 public sealed class AdapterTemplateTests : IDisposable
 {
-    private readonly EngineArchiveFixture fixture = new();
+    private readonly EngineArchiveFixture fixture = new("RenpyRpycReference.zip");
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
     [Theory]
     [InlineData("rpa3-renpy", "archive.rpa3", ".rpa", "script.rpy")]
+    [InlineData("rpa3-renpy-rpyc", "archive.rpa3", ".rpa", "scripts\\story.rpyc")]
     [InlineData("xp3-kirikiri-ks", "archive.xp3", ".xp3", "scenario/start.ks")]
     public async Task ComposedArchiveAdaptersPassIndependentFullAndPartialChineseRoundtrips(string id, string component, string extension, string member)
     {
@@ -21,14 +22,17 @@ public sealed class AdapterTemplateTests : IDisposable
             : "\uFEFF;" + new string('x', 70000) + "\n*start\nこんにちは。[p]\n次の台詞です。[p]\n";
         var source = await fixture.CreateArchiveAsync(component, script: script, scriptName: member);
         File.Copy(source, Path.Combine(game, "first" + extension));
-        File.Copy(source, Path.Combine(game, "second" + extension));
+        var compiled = member.EndsWith(".rpyc", StringComparison.Ordinal);
+        File.Copy(compiled ? await fixture.CreateArchiveAsync(component, scriptName: "second/" + member) : source,
+            Path.Combine(game, "second" + extension));
+        var secondOriginal = await File.ReadAllBytesAsync(Path.Combine(game, "second" + extension));
         var original = await File.ReadAllBytesAsync(source);
         var (tools, state, store, workspace, compiler, assets) = await ToolsAsync(game, archive: true);
         var composition = await ComposeAsync(tools, id);
         Assert.Null(state.VerifiedPackage);
-        Assert.Equal(6, state.ReleaseFiles!.Count);
+        Assert.Equal(compiled ? 5 : 6, state.ReleaseFiles!.Count);
         Assert.Contains(state.ReleaseFiles, file => file.Path == EngineArchiveComponents.ScriptPath && file.Role == "runtime");
-        Assert.Contains(state.ReleaseFiles, file => file.Path == BuiltinAdapterAssets.SharedDependencyPath);
+        Assert.Equal(!compiled, state.ReleaseFiles.Any(file => file.Path == BuiltinAdapterAssets.SharedDependencyPath));
         Assert.Empty(Directory.EnumerateFiles(Path.Combine(workspace, "src"), "*.dll", SearchOption.AllDirectories));
         Assert.False(Directory.Exists(Path.Combine(workspace, "src", "python")));
         await tools.ExecuteAsync(new("stage", "stage_resources", JsonSerializer.Serialize(new { files = new[] { "first" + extension, "second" + extension } })), default);
@@ -45,16 +49,23 @@ public sealed class AdapterTemplateTests : IDisposable
         Assert.Equal(extracted.Units.Count, extracted.Units.Select(unit => unit.Id).Distinct().Count());
         Assert.Contains(extracted.Units, unit => unit.ResourcePath == "first" + extension);
         Assert.Contains(extracted.Units, unit => unit.ResourcePath == "second" + extension);
-        Assert.All(extracted.Units, unit => Assert.StartsWith("member:", unit.Locator));
+        Assert.All(extracted.Units, unit => Assert.StartsWith(compiled ? "rpyc:" : "member:", unit.Locator));
         var selected = extracted.Units[0];
         var patch = Path.Combine(fixture.Root, "partial");
-        await adapter.BuildPatchAsync(game, new Dictionary<string, string> { [selected.Id] = "这是单条中文修改。" }, patch);
+        var translation = "这是单条中文修改。" + string.Concat(selected.ProtectedTokens ?? []);
+        await adapter.BuildPatchAsync(game, new Dictionary<string, string> { [selected.Id] = translation }, patch);
         var after = await adapter.ExtractAsync(patch);
-        Assert.Equal("这是单条中文修改。", after.Units.Single(unit => unit.Id == selected.Id).SourceText);
-        Assert.All(after.Units.Where(unit => unit.Id != selected.Id), unit => Assert.Equal(extracted.Units.Single(before => before.Id == unit.Id), unit));
+        Assert.Equal(translation, after.Units.Single(unit => unit.Id == selected.Id).SourceText);
+        Assert.All(after.Units.Where(unit => unit.Id != selected.Id), unit =>
+        {
+            var before = extracted.Units.Single(before => before.Id == unit.Id);
+            Assert.Equal(before with { ProtectedTokens = null }, unit with { ProtectedTokens = null });
+            Assert.Equal(before.ProtectedTokens, unit.ProtectedTokens);
+        });
         Assert.Equal(original, await File.ReadAllBytesAsync(Path.Combine(game, "first" + extension)));
         var untouched = selected.ResourcePath == "first" + extension ? "second" + extension : "first" + extension;
-        Assert.Equal(original, await File.ReadAllBytesAsync(Path.Combine(patch, untouched)));
+        Assert.Equal(untouched.StartsWith("first", StringComparison.Ordinal) ? original : secondOriginal,
+            await File.ReadAllBytesAsync(Path.Combine(patch, untouched)));
         Assert.True((await adapter.ValidatePatchAsync(game, patch)).Passed);
         var unknown = await Assert.ThrowsAsync<GeneratedAdapterException>(() => adapter.BuildPatchAsync(game,
             new Dictionary<string, string> { ["unknown-unit"] = "错误映射" }, Path.Combine(fixture.Root, "unknown")));
@@ -74,12 +85,17 @@ public sealed class AdapterTemplateTests : IDisposable
     [InlineData("loose-renpy", ".rpy", "label start:\n    \"こんにちは。\"\n")]
     [InlineData("loose-kirikiri-ks", ".ks", "\uFEFFこんにちは。[p]\n")]
     [InlineData("rpa3-renpy", ".rpa", "label start:\n    \"こんにちは。\"\n")]
+    [InlineData("loose-renpy-rpyc", ".rpyc", "")]
+    [InlineData("rpa3-renpy-rpyc", ".rpa", "")]
     public async Task FreshSupportedCombinationsVerifyAllResourcesAndPublishWithoutModelRequests(string id, string extension, string content)
     {
         var game = Directory.CreateDirectory(Path.Combine(fixture.Root, "game")).FullName;
         var archive = extension == ".rpa";
+        var compiled = id.EndsWith("-rpyc", StringComparison.Ordinal);
         foreach (var name in new[] { "first", "second" })
-            if (archive) File.Copy(await fixture.CreateArchiveAsync("archive.rpa3", script: content), Path.Combine(game, name + extension));
+            if (archive) File.Copy(await fixture.CreateArchiveAsync("archive.rpa3", script: content,
+                scriptName: compiled ? name + ".rpyc" : "script.rpy"), Path.Combine(game, name + extension));
+            else if (compiled) await fixture.CreateCompiledScriptAsync(Path.Combine(game, name + extension));
             else await File.WriteAllTextAsync(Path.Combine(game, name + extension), content, new UTF8Encoding(false));
         var (_, _, store, _, compiler, assets) = await ToolsAsync(game, archive);
         var result = await new AutomaticAdaptationService(() => throw new InvalidOperationException("No analysis API configured"),
@@ -93,7 +109,7 @@ public sealed class AdapterTemplateTests : IDisposable
         Assert.Equal(id, state.AutomaticTemplate.TemplateId);
         Assert.Equal(archive ? 2 : 0, state.AutomaticTemplate.EvidenceFiles.Count);
         Assert.Equal(2, state.ResourceHashes.Count);
-        Assert.Equal(archive ? 6 : 5, state.ReleaseFiles!.Count);
+        Assert.Equal(archive && !compiled ? 6 : 5, state.ReleaseFiles!.Count);
         Assert.NotNull(state.VerifiedPackage);
         Assert.Equal(state.VerifiedPackage.Version, store.LoadActive("game")!.Version);
         Assert.Contains(state.VerificationDiagnostics, item => item.Contains("byte for byte", StringComparison.Ordinal));
@@ -228,6 +244,21 @@ public sealed class AdapterTemplateTests : IDisposable
         Assert.Null(state.VerifiedPackage);
         Assert.Null(store.LoadActive("game"));
         Assert.True(File.Exists(Path.Combine(workspace, "src", "adapter.py")));
+    }
+
+    [Fact]
+    public async Task CompiledScriptProtocolRejectsNonTextChangesAmbiguousArchivesAndUnsafePickleExecution()
+    {
+        var (tools, _, _, workspace, _, _) = await ToolsAsync(fixture.Root, archive: false);
+        await ComposeAsync(tools, "loose-renpy-rpyc");
+        await fixture.CreateCompiledScriptAsync(Path.Combine(fixture.Root, "sample.rpyc"));
+        var check = Path.Combine(fixture.Root, "check-rpyc.py");
+        using (var source = typeof(AdapterTemplateTests).Assembly.GetManifestResourceStream("RenpyRpycAdapterCheck.py")!)
+        await using (var target = File.Create(check)) await source.CopyToAsync(target);
+        var result = await fixture.Runner.RunAsync(new(fixture.Paths.Python,
+            EngineReferenceToolkit.PythonArguments(fixture.Paths, check, [Path.Combine(workspace, "src")]), fixture.Root), default);
+        Assert.True(result.ExitCode == 0, result.StandardOutput + result.StandardError);
+        Assert.Equal("rpyc-adapter-ok", result.StandardOutput.Trim());
     }
 
     [Fact]

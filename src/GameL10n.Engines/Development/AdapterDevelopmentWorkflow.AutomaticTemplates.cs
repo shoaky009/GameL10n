@@ -51,12 +51,16 @@ public sealed partial class AdapterDevelopmentWorkflow
                 throw new InvalidDataException("XP3 缺少独立的无过滤器证据，不能根据零标记或可解包推断 filter=none；保留模型流程确认：" + Describe(xp3));
             var archives = paths.Where(path => Path.GetExtension(path).Equals(".rpa", StringComparison.OrdinalIgnoreCase)).ToArray();
             var renpy = paths.Where(path => Path.GetExtension(path).Equals(".rpy", StringComparison.OrdinalIgnoreCase)).ToArray();
+            var compiledRenpy = paths.Where(path => Path.GetExtension(path).Equals(".rpyc", StringComparison.OrdinalIgnoreCase)).ToArray();
             var kirikiri = paths.Where(path => Path.GetExtension(path).Equals(".ks", StringComparison.OrdinalIgnoreCase)).ToArray();
-            if (archives.Length > 0 && (renpy.Length > 0 || kirikiri.Length > 0) || renpy.Length > 0 && kirikiri.Length > 0)
-                throw new InvalidDataException("发现封包与裸脚本或不同脚本格式混用，单个现有模板不能覆盖这些资源：" + Describe(archives.Concat(renpy).Concat(kirikiri)));
-            template = AdapterTemplates.Find(archives.Length > 0 ? "rpa3-renpy" : renpy.Length > 0 ? "loose-renpy" : "loose-kirikiri-ks");
+            if (archives.Length > 0 && (renpy.Length > 0 || compiledRenpy.Length > 0 || kirikiri.Length > 0)
+                || new[] { renpy.Length, compiledRenpy.Length, kirikiri.Length }.Count(count => count > 0) > 1)
+                throw new InvalidDataException("发现封包与裸脚本、源码与编译脚本或不同脚本格式混用，需先确认加载顺序："
+                    + Describe(archives.Concat(renpy).Concat(compiledRenpy).Concat(kirikiri)));
+            template = AdapterTemplates.Find(archives.Length > 0 ? "rpa3-renpy" : compiledRenpy.Length > 0 ? "loose-renpy-rpyc"
+                : renpy.Length > 0 ? "loose-renpy" : "loose-kirikiri-ks");
             var format = VnTextPatchFormatCatalog.All.Single(format => format.Key == template.Format);
-            if (disabledFamilies.Contains(template.Family.AdapterId) || disabledFamilies.Contains(format.Family.AdapterId))
+            if ((archives.Length == 0 && disabledFamilies.Contains(template.Family.AdapterId)) || disabledFamilies.Contains(format.Family.AdapterId))
                 throw new InvalidDataException("模板或其内置解析器已禁用，未自动组合：" + template.Id);
             var resources = inventory.Select(template.ResourcePatterns, token);
             if (resources.Count is < 1 or > 1024 || archives.Length > 16)
@@ -93,6 +97,9 @@ public sealed partial class AdapterDevelopmentWorkflow
                 archiveReadBytes = 0;
                 var entries = 0;
                 var scripts = 0;
+                var sourceScripts = new List<string>();
+                var compiledScripts = new List<string>();
+                var compiledNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 var inspection = "work/automatic-template-" + Guid.NewGuid().ToString("N");
                 foreach (var resource in resources)
                 {
@@ -103,7 +110,7 @@ public sealed partial class AdapterDevelopmentWorkflow
                     var outputPath = WorkspaceFiles.Resolve(workspace, output);
                     var inspected = await new EngineArchiveComponentClient(runtime.Runner).InvokeAsync(prepared.Paths,
                         new(1, template.ArchiveComponent, "inspect", WorkspaceFiles.Resolve(ResourceDirectory, resource),
-                            Path.Combine(outputPath, "manifest.json"), Extensions: template.ScriptExtensions), workspace, token);
+                            Path.Combine(outputPath, "manifest.json"), Extensions: [".rpy", ".rpyc"]), workspace, token);
                     evidence.Add(output + "/manifest.json");
                     await RecordAsync("running");
                     if (!inspected.GetProperty("success").GetBoolean())
@@ -115,13 +122,29 @@ public sealed partial class AdapterDevelopmentWorkflow
                     archiveReadBytes += manifest.RootElement.GetProperty("readBytes").GetInt64();
                     if (entries > 10_000 || selectedBytes > AutomaticTemplateBytes)
                         throw new InvalidDataException("全部封包合计超过自动组合的 10,000 成员／256 MiB 脚本预算。");
-                    if (members.Any(member => template.ScriptExtensions.Contains(Path.GetExtension(member.GetProperty("name").GetString()!), StringComparer.OrdinalIgnoreCase)
-                        && member.GetProperty("length").GetInt64() > 64L * 1024 * 1024))
-                        throw new InvalidDataException("单个脚本超过封包组件的 64 MiB 读取预算。");
-                    RequireSupportedPaths(members.Select(member => member.GetProperty("name").GetString()!), allowArchives: false, resource + " → ");
+                    if (members.Any(member => Path.GetExtension(member.GetProperty("name").GetString()!).ToLowerInvariant() switch
+                        { ".rpyc" => member.GetProperty("length").GetInt64() > 32L * 1024 * 1024,
+                          ".rpy" => member.GetProperty("length").GetInt64() > 64L * 1024 * 1024, _ => false }))
+                        throw new InvalidDataException("单个脚本超过读取预算（.rpy 为 64 MiB，RPYC2 为 32 MiB）。");
+                    var names = members.Select(member => member.GetProperty("name").GetString()!).ToArray();
+                    sourceScripts.AddRange(names.Where(name => Path.GetExtension(name).Equals(".rpy", StringComparison.OrdinalIgnoreCase))
+                        .Select(name => resource + " → " + name));
+                    foreach (var name in names.Where(name => Path.GetExtension(name).Equals(".rpyc", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        if (!compiledNames.Add(name.Replace('\\', '/')))
+                            throw new InvalidDataException("多个封包提供相同 RPYC 路径，需先确认覆盖顺序：" + name);
+                        compiledScripts.Add(resource + " → " + name);
+                    }
+                    RequireSupportedPaths(names, allowArchives: false, resource + " → ", allowCompiledRenpy: true);
                     scripts += manifest.RootElement.GetProperty("selectedCount").GetInt32();
                 }
-                if (scripts == 0) throw new InvalidDataException("全部封包中都没有模板支持的 .rpy 源脚本；未生成或发布适配器。");
+                if (sourceScripts.Count > 0 && compiledScripts.Count > 0)
+                    throw new InvalidDataException("封包内源码与编译脚本混用，需先确认加载顺序：" + Describe(sourceScripts.Concat(compiledScripts)));
+                if (scripts == 0) throw new InvalidDataException("全部封包中都没有模板支持的 .rpy 或 RPYC2 编译脚本；未生成或发布适配器。");
+                if (compiledScripts.Count > 0)
+                    template = AdapterTemplates.Find("rpa3-renpy-rpyc");
+                if (disabledFamilies.Contains(template.Family.AdapterId))
+                    throw new InvalidDataException("模板已禁用，未自动组合：" + template.Id);
             }
 
             stage = "compose";
@@ -132,15 +155,15 @@ public sealed partial class AdapterDevelopmentWorkflow
             { RuntimeChecks = session.TextCoverage.RuntimeChecks.Append(AutomaticTemplateRuntimeCheck).ToArray() };
             stage = "verification";
             await RecordAsync("running");
-            reportProgress?.Invoke("验证自动组合适配器", "正在对全部匹配资源检查原字节往返、完整中文回填及部分试译。");
+            reportProgress?.Invoke("验证自动组合适配器", "正在检查原字节往返，先做少量中文试写，通过后再验收全量中文回填。");
             var tested = await TestAsync(template.Family, template.ResourcePatterns, false, token);
             diagnostics.AddRange(session.VerificationDiagnostics);
             if (!tested.ReadyToPublish)
             { await RecordAsync("incomplete"); return; }
             stage = "publish";
             await RecordAsync("running");
-            await PublishAsync("已自动组合 " + template.Family.Name + "，全部匹配资源已通过提取、原字节往返、完整中文及部分中文回填验收。"
-                    + "支持范围仅为此模板选中的源脚本；独立文字覆盖" + (session.TextCoverage.Samples.Count == 0 ? "尚未评估" : "仅核对已保留样本")
+            await PublishAsync("已自动组合 " + template.Family.Name + "，全部匹配资源已通过提取、原字节往返、少量中文试写及全量中文回填验收。"
+                    + "支持范围仅为此模板选中的脚本文本；独立文字覆盖" + (session.TextCoverage.Samples.Count == 0 ? "尚未评估" : "仅核对已保留样本")
                     + "，不代表整款游戏文字已完整覆盖。", false, token, async publicationToken =>
             {
                 stage = "scope-recheck";
@@ -179,11 +202,13 @@ public sealed partial class AdapterDevelopmentWorkflow
             await save();
         }
 
-        void RequireSupportedPaths(IEnumerable<string> paths, bool allowArchives, string prefix = "")
+        void RequireSupportedPaths(IEnumerable<string> paths, bool allowArchives, string prefix = "", bool allowCompiledRenpy = false)
         {
-            var unsupported = paths.Where(path => AutomaticTemplateOtherResources.Contains(Path.GetExtension(path))
+            var unsupported = paths.Where(path => (AutomaticTemplateOtherResources.Contains(Path.GetExtension(path))
                 && !template!.ScriptExtensions.Contains(Path.GetExtension(path), StringComparer.OrdinalIgnoreCase)
-                && !(allowArchives && Path.GetExtension(path).Equals(".rpa", StringComparison.OrdinalIgnoreCase))).ToArray();
+                && !(allowCompiledRenpy && Path.GetExtension(path).Equals(".rpyc", StringComparison.OrdinalIgnoreCase))
+                && !(allowArchives && Path.GetExtension(path).Equals(".rpa", StringComparison.OrdinalIgnoreCase)))
+                || path.EndsWith("_ren.py", StringComparison.OrdinalIgnoreCase)).ToArray();
             if (unsupported.Length > 0)
                 throw new InvalidDataException("发现模板未覆盖的封包或脚本，需要继续确认，未自动发布：" + prefix + Describe(unsupported));
         }

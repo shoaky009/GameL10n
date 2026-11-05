@@ -7,7 +7,7 @@
 | `archive.rpa3` / 2 | RPA/ARC 3.0，单分块，安全数据型 pickle 索引，流式读写 | inspect、extract、rebuild |
 | `archive.xp3` / 1 | 标准 XP3 v1，已独立确认没有过滤器 | inspect、extract、rebuild |
 
-RPA 不支持多分块、混淆和编译后的 RPYC。XP3 不支持私有过滤器、加密、链式索引和 EXE 内嵌封包；标记为零不能证明没有过滤器，调用者必须提供 `filter: "none"`。组件成功只说明封包结构通过检查，不证明脚本覆盖、游戏补丁优先级或中文显示兼容。
+RPA 不支持多分块和混淆；它只负责封包读写，编译脚本由 [RPYC2 固定流程](engines/renpy-rpyc.md)处理。XP3 不支持私有过滤器、加密、链式索引和 EXE 内嵌封包；标记为零不能证明没有过滤器，调用者必须提供 `filter: "none"`。组件成功只说明封包结构通过检查，不证明脚本覆盖、游戏补丁优先级或中文显示兼容。
 
 ## 输入、输出与校验
 

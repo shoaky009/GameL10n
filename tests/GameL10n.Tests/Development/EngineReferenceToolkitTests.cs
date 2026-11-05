@@ -75,6 +75,9 @@ public sealed class EngineReferenceToolkitTests : IDisposable
         Assert.Equal(2, downloads.Count);
         Assert.Equal(Revision, pins[0].Revision);
         Assert.Equal("engine guide", first.Read(pins[0], "engines/fixture.md"));
+        var missing = Assert.Throws<InvalidDataException>(() => first.RequireRenpyRpyc(pins[0]));
+        Assert.Contains("缺少 RPYC2 模块", missing.Message);
+        Assert.Equal(2, downloads.Count);
         using (var zip = ZipFile.OpenRead(first.LibraryPath(pins[0])))
         {
             Assert.Null(zip.GetEntry("assets/hook.dll"));

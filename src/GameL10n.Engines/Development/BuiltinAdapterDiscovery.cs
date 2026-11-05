@@ -14,7 +14,7 @@ public sealed record BuiltinAdapterDiscoveryReport(int Revision, int FilesScanne
 /// <summary>Bounded, read-only format clues. A candidate is not a successful parser probe or a compatibility claim.</summary>
 public static class BuiltinAdapterDiscovery
 {
-    public const int Revision = 5;
+    public const int Revision = 6;
     internal const string BsscriptGuidance = "BSScript Rev.6 不是 Bishop GSC 或 KaGuYa 的同一脚本格式，不能按厂商或可见日文直接套解析器。"
         + "先确认头部各段边界、字符串偏移表与池；已有读写和原字节往返结论时直接复用，继续按指令引用区分对白、名称、选择项与资源路径。"
         + "严格 CP932 无法编码简体中文是预期限制；用 inspect_pe_imports 查询实际字体/编码导入和候选调用位置，再确认字节遍历、字符范围及字形路径。"
@@ -148,7 +148,7 @@ public static class BuiltinAdapterDiscovery
                 if (Identify(header, tail) is { } match)
                 {
                     Add(match.Key, sample.Path, match.Container ? "container-signature" : "script-signature",
-                        match.Signature, match.Container);
+                        match.Signature, match.Container, header.AsSpan().StartsWith("RENPY RPC2"u8));
                     identified.Add(sample.Path);
                 }
             }
@@ -166,7 +166,7 @@ public static class BuiltinAdapterDiscovery
             else if (extension.Equals(".rpa", StringComparison.OrdinalIgnoreCase))
                 Add("Renpy", file, "container-extension-hint", "只有 .rpa 后缀线索，未确认 RPA 签名", true);
             else if (extension.Equals(".rpyc", StringComparison.OrdinalIgnoreCase))
-                Add("Renpy", file, "extension-hint", ".rpyc 编译脚本后缀；内置解析器只处理 .rpy 源码", false, true);
+                Add("Renpy", file, "extension-hint", ".rpyc 编译脚本后缀；需确认是否为固定流程支持的 RPYC2", false, true);
             else if (!GenericExtensions.Contains(extension))
                 foreach (var format in VnTextPatchFormatCatalog.All.Where(format => format.Extensions.Contains(extension, StringComparer.OrdinalIgnoreCase)))
                     Add(format.Key, file, "extension-hint", $"只有 {extension.ToLowerInvariant()} 后缀线索，尚未解析内容", false);
@@ -214,6 +214,8 @@ public static class BuiltinAdapterDiscovery
         if (head.StartsWith(new byte[] { 0x58, 0x50, 0x33, 0x0D, 0x0A, 0x20, 0x0A, 0x1A, 0x8B, 0x67, 0x01 }))
             return ("KirikiriKs", "文件头匹配 XP3 签名（58 50 33 0D 0A 20 0A 1A 8B 67 01）", true);
         if (head.StartsWith("RPA-2.0 "u8) || head.StartsWith("RPA-3.0 "u8)) return ("Renpy", "文件头匹配 RPA-2.0／RPA-3.0 封包签名", true);
+        if (head.StartsWith("ARC-3.0 "u8)) return ("Renpy", "文件头匹配 ARC-3.0 封包签名", true);
+        if (head.StartsWith("RENPY RPC2"u8)) return ("Renpy", "文件头匹配 RPYC2；可通过固定模板验证编译脚本文本回填，无需反编译源码", false);
         if (tail.Length >= 28 && (tail[^28..].StartsWith("FilePackVer1.0"u8)
             || tail[^28..].StartsWith("FilePackVer2.0"u8) || tail[^28..].StartsWith("FilePackVer3.0"u8)
             || tail[^28..].StartsWith("FilePackVer3.1"u8)))
@@ -272,7 +274,7 @@ public static class BuiltinAdapterDiscovery
             var missing = new List<string> { "待验证：实际解析脚本并核对版本、指令与文本结构。", "待验证：游戏资源加载、中文编码、字体与排版。" };
             if (hasContainer) missing.Insert(0, "待补足：封包的解包／回包，或游戏可加载的松散资源覆盖方式；尚未检查封包内脚本。");
             if (hasContainer && Format.Key == "KirikiriKs") missing.Add("待确认：XP3 内是否为 KS／SOC／TJS；SCN 格式未内置。");
-            if (hasCompiledScript || hasContainer && Format.Key == "Renpy") missing.Add("待确认：是否有可用 .rpy 源码；只有 .rpyc 时需要额外反编译支持。");
+            if (hasCompiledScript || hasContainer && Format.Key == "Renpy") missing.Add("待确认：源码／编译脚本与加载顺序；RPYC2 可走固定模板，未知槽、对象结构或混用资源仍需调查。");
             return new(Format.Key, Format.Family.AdapterId, Format.Family.Name, evidence[0].Kind,
                 evidence.Select(item => item.Path + "：" + item.Evidence).ToArray(),
                 evidence.Select(item => item.Path).ToArray(), missing);

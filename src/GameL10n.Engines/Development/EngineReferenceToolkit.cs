@@ -126,6 +126,17 @@ public sealed class EngineReferenceToolkit(string rootDirectory, HttpClient? htt
         return reader.ReadToEnd();
     }
 
+    public void RequireRenpyRpyc(EngineReferencePin pin)
+    {
+        foreach (var path in new[] { "python/engines/renpy_rpyc.py", "python/engines/renpy_pickle.py",
+            "python/common/contract.py", "python/common/binary.py", "python/common/safety.py" })
+        {
+            try { _ = Read(pin, path); }
+            catch (FileNotFoundException error)
+            { throw new InvalidDataException("固定共享工具库缺少 RPYC2 模块，请使用包含该模块的完整发行包；分析期间不会补下载：" + path, error); }
+        }
+    }
+
     public async Task<(EnginePythonDependency Dependency, EnginePythonPaths Paths)> EnsurePythonAsync(
         EngineReferencePin pin, EnginePythonDependency? dependency, CancellationToken ct)
     {
