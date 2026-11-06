@@ -2,6 +2,8 @@ using System.Text;
 using System.Text.Json;
 using GameL10n.VnTextPatch;
 
+if (args.Length > 0) return await AdvancedOperations.RunAsync(args);
+
 Console.InputEncoding = new UTF8Encoding(false);
 Console.OutputEncoding = new UTF8Encoding(false);
 TextWriter protocolOutput = Console.Out;

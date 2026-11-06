@@ -3,10 +3,13 @@ param(
     [string]$RunId,
     [Nullable[datetimeoffset]]$Since,
     [datetimeoffset]$Until = [datetimeoffset]::Now,
+    [ValidateRange(0, 2147483647)][Nullable[int]]$FromTurn,
+    [ValidateRange(0, 2147483647)][Nullable[int]]$ToTurn,
     [switch]$Detail
 )
 $ErrorActionPreference = 'Stop'
 if ($Since -and $Since -gt $Until) { throw 'Since must not be later than Until.' }
+if ($null -ne $FromTurn -and $null -ne $ToTurn -and $FromTurn -gt $ToTurn) { throw 'FromTurn must not be later than ToTurn.' }
 $logDirectory = Join-Path ([IO.Path]::GetFullPath($ProjectDirectory)) 'logs'
 $invalidLines = 0
 $rows = @(foreach ($file in (Get-ChildItem -LiteralPath $logDirectory -Filter 'adaptation-*.jsonl' -File | Sort-Object Name)) {
@@ -39,15 +42,49 @@ $rows = @(foreach ($file in (Get-ChildItem -LiteralPath $logDirectory -Filter 'a
 $rows = @($rows | Sort-Object { ([datetimeoffset]$_.at) })
 
 function Sum-Field($items, [string]$field) {
-    [double](($items | ForEach-Object { $_.$field } | Measure-Object -Sum).Sum)
+    $values = @($items | ForEach-Object { if ($null -ne $_.$field) { $_.$field } })
+    if ($values.Count -gt 0) { [double](($values | Measure-Object -Sum).Sum) }
+    elseif (@($items).Count -eq 0) { 0 }
 }
-function Has-Usage($entry) { $null -ne $entry.inputTokens -and $null -ne $entry.outputTokens }
+function Get-Usage($entry) {
+    if ($null -ne $entry.usage.inputTokens -and $null -ne $entry.usage.outputTokens) { $entry.usage }
+    elseif ($null -ne $entry.inputTokens -and $null -ne $entry.outputTokens) { $entry }
+}
+function Seconds($milliseconds) {
+    if ($null -ne $milliseconds) { [Math]::Round($milliseconds / 1000, 2) }
+}
 function Limit-Text($value, [int]$length = 240) {
     $text = [string]$value
     $text.Substring(0, [Math]::Min($length, $text.Length))
 }
 function Event-Reference($row) {
     [ordered]@{ at = $row.at; runId = $row.runId; turn = $row.turn; callId = $row.entry.call.id }
+}
+
+# Rust logs tool starts and ends separately; only ends count as completed calls.
+# Keep selectors from starts when the matching end does not repeat them.
+$toolStarts = @{}
+foreach ($row in $rows) {
+    $entry = $row.entry
+    if ($entry.operation -notin @('tool-start', 'tool-end')) { continue }
+    $key = [string]$row.runId + ':' + [string]$entry.call.id
+    if ($entry.operation -eq 'tool-start') {
+        if ($entry.call.id) { $toolStarts[$key] = $row }
+        continue
+    }
+    $start = if ($entry.call.id) { $toolStarts[$key] }
+    if ($start) {
+        foreach ($field in @('name', 'selectors', 'argumentFingerprint')) {
+            if ($null -eq $entry.call.$field -and $null -ne $start.entry.call.$field) {
+                $entry.call | Add-Member -NotePropertyName $field -NotePropertyValue $start.entry.call.$field -Force
+            }
+        }
+        $toolStarts.Remove($key)
+    }
+    if (-not $entry.tool) { $entry | Add-Member -NotePropertyName tool -NotePropertyValue $entry.call.name -Force }
+    if (-not $entry.status -and $entry.success -is [bool]) {
+        $entry | Add-Member -NotePropertyName status -NotePropertyValue $(if ($entry.success) { 'completed' } else { 'failed' }) -Force
+    }
 }
 
 # Recovery events describe the previous failed attempt, not another model call.
@@ -59,26 +96,28 @@ foreach ($row in $rows) {
     $key = [string]$row.runId
     if ($row.entry.operation -eq 'model') {
         $attempt = [pscustomobject]@{ row = $row; usage = $null; usageSource = $null }
-        if (Has-Usage $row.entry) { $attempt.usage = $row.entry; $attempt.usageSource = 'model' }
+        $usage = Get-Usage $row.entry
+        if ($usage) { $attempt.usage = $usage; $attempt.usageSource = 'model' }
         $attempts.Add($attempt)
         $lastAttempt[$key] = $attempt
     }
-    elseif ($row.entry.operation -in @('output-limit-recovery', 'model-retry') -and (Has-Usage $row.entry)) {
+    elseif ($row.entry.operation -in @('output-limit-recovery', 'model-retry') -and ($usage = Get-Usage $row.entry)) {
         $previous = $lastAttempt[$key]
         if ($previous -and $previous.row.turn -eq $row.turn -and $previous.row.entry.status -in @('failed', 'cancelled')) {
-            if (-not $previous.usage) { $previous.usage = $row.entry; $previous.usageSource = $row.entry.operation }
+            if (-not $previous.usage) { $previous.usage = $usage; $previous.usageSource = $row.entry.operation }
         }
         else { $unmatchedUsageEvents += $row }
     }
 }
 function In-Window($row) {
-    (-not $RunId -or $row.runId -eq $RunId) -and (-not $Since -or ([datetimeoffset]$row.at) -ge $Since)
+    (-not $RunId -or $row.runId -eq $RunId) -and (-not $Since -or ([datetimeoffset]$row.at) -ge $Since) -and
+        ($null -eq $FromTurn -or $row.turn -ge $FromTurn) -and ($null -eq $ToTurn -or $row.turn -le $ToTurn)
 }
 $rows = @($rows | Where-Object { In-Window $_ })
 if ($rows.Count -eq 0) { throw 'No adaptation timing events found in the selected window.' }
 $attempts = @($attempts | Where-Object { In-Window $_.row })
 $modelRows = @($attempts | ForEach-Object { $_.row })
-$toolRows = @($rows | Where-Object { $_.entry.operation -eq 'tool' })
+$toolRows = @($rows | Where-Object { $_.entry.operation -in @('tool', 'tool-end') })
 
 function Usage-Summary($items) {
     $known = @($items | Where-Object { $_.usage })
@@ -89,8 +128,8 @@ function Usage-Summary($items) {
     [ordered]@{
         attempts = @($items).Count
         failed = @($items | Where-Object { $_.row.entry.status -in @('failed', 'cancelled') }).Count
-        inputTokens = Sum-Field $entries 'inputTokens'
-        outputTokens = Sum-Field $entries 'outputTokens'
+        inputTokens = if ($known.Count -gt 0 -or @($items).Count -eq 0) { Sum-Field $entries 'inputTokens' } else { $null }
+        outputTokens = if ($known.Count -gt 0 -or @($items).Count -eq 0) { Sum-Field $entries 'outputTokens' } else { $null }
         cachedTokens = $cached
         cacheMeasuredInputTokens = $cacheInput
         cacheHitRate = if ($cacheInput -gt 0) { [Math]::Round($cached / $cacheInput, 4) } else { $null }
@@ -104,23 +143,43 @@ function Usage-Summary($items) {
 function Tool-Reference($row) {
     $item = Event-Reference $row
     $item.tool = $row.entry.tool
-    $item.seconds = [Math]::Round($row.entry.elapsedMs / 1000, 2)
+    $item.seconds = Seconds $row.entry.elapsedMs
     $item.status = $row.entry.status
+    if ($null -ne $row.entry.outputBytes) { $item.outputBytes = $row.entry.outputBytes }
     if ($row.entry.call.selectors.path) { $item.path = $row.entry.call.selectors.path }
     if ($row.entry.result.stage) { $item.stage = $row.entry.result.stage }
     if ($row.entry.error -match '\[([a-z][a-z0-9-]+)\]') { $item.validationStage = $Matches[1] }
     if ($row.entry.result.phase) { $item.phase = $row.entry.result.phase }
     if ($null -ne $row.entry.result.timedOut) { $item.timedOut = $row.entry.result.timedOut }
     if ($null -ne $row.entry.result.passed) { $item.passed = $row.entry.result.passed }
+    if ($row.entry.tool -eq 'test_adapter') {
+        foreach ($field in @('reused', 'compileMs', 'discoveryMs', 'verificationMs', 'fingerprintMs', 'fingerprintStats', 'verificationStagesMs')) {
+            if ($null -ne $row.entry.result.$field) { $item[$field] = $row.entry.result.$field }
+        }
+    }
     if ($row.entry.error) { $item.error = Limit-Text $row.entry.error }
+    $item
+}
+function History-Transition($row) {
+    $before = $modelRows | Where-Object { $_.runId -eq $row.runId -and ([datetimeoffset]$_.at) -lt ([datetimeoffset]$row.at) } | Select-Object -Last 1
+    $after = $modelRows | Where-Object { $_.runId -eq $row.runId -and ([datetimeoffset]$_.at) -gt ([datetimeoffset]$row.at) } | Select-Object -First 1
+    $item = Event-Reference $row
+    if ($row.entry.reason) { $item.reason = $row.entry.reason }
+    $item.beforeVisibleBytes = $before.entry.visibleHistoryBytes; $item.afterVisibleBytes = $after.entry.visibleHistoryBytes
+    $item.beforeRetainedBytes = $before.entry.retainedHistoryBytes; $item.afterRetainedBytes = $after.entry.retainedHistoryBytes
+    $beforeUsage = if ($before) { Get-Usage $before.entry }
+    $afterUsage = if ($after) { Get-Usage $after.entry }
+    $item.beforeInputTokens = $beforeUsage.inputTokens; $item.afterInputTokens = $afterUsage.inputTokens
+    $item.beforeCachedTokens = $beforeUsage.cachedTokens; $item.afterCachedTokens = $afterUsage.cachedTokens
     $item
 }
 $tools = @($toolRows | Group-Object { $_.entry.tool } | ForEach-Object {
     $entries = @($_.Group | ForEach-Object { $_.entry })
     [pscustomobject]@{ tool = $_.Name; calls = $_.Count
-        seconds = [Math]::Round((Sum-Field $entries 'elapsedMs') / 1000, 2)
+        seconds = Seconds (Sum-Field $entries 'elapsedMs')
         failures = @($entries | Where-Object { $_.status -eq 'failed' }).Count
-        outputBytes = Sum-Field $entries 'outputBytes' }
+        outputBytes = Sum-Field $entries 'outputBytes'
+        resultCharacters = Sum-Field $entries 'resultCharacters' }
 } | Sort-Object seconds -Descending)
 $runs = @($rows | Where-Object { $_.runId } | Group-Object runId | ForEach-Object {
     $group = $_.Group
@@ -138,20 +197,37 @@ $runs = @($rows | Where-Object { $_.runId } | Group-Object runId | ForEach-Objec
         $item.fixedInstructionBytes = $start.entry.fixedInstructionBytes
         $item.registeredToolCount = $start.entry.registeredToolCount
     }
-    if ($end) { $item.hostRunTokens = $end.entry.tokens }
+    if ($end) {
+        $hostUsage = Get-Usage $end.entry
+        $item.hostRunTokens = if ($null -ne $end.entry.tokens) { $end.entry.tokens }
+            elseif ($hostUsage) { $hostUsage.inputTokens + $hostUsage.outputTokens } else { $null }
+        if ($hostUsage) {
+            $item.hostRunUsage = [ordered]@{ inputTokens = $hostUsage.inputTokens; outputTokens = $hostUsage.outputTokens
+                cachedTokens = $hostUsage.cachedTokens; estimated = $hostUsage.estimated }
+        }
+    }
     [pscustomobject]$item
 } | Sort-Object firstEvent)
 $writes = @($toolRows | Where-Object { $_.entry.tool -in @('write_file', 'replace_text') -and $_.entry.status -eq 'completed' })
 $sourceWrites = @($writes | Where-Object { $_.entry.call.selectors.path -match '^src[\\/]' -and $_.entry.result.changed -ne $false })
-$fullTests = @($toolRows | Where-Object { $_.entry.tool -eq 'test_adapter' -and $_.entry.call.selectors.discoveryOnly -ne $true -and $_.entry.result.stage -ne 'discovery' })
+function Verification-Scope($row) {
+    $selectors = $row.entry.call.selectors
+    $stage = $row.entry.result.stage
+    if ($selectors.discoveryOnly -eq $true -or $stage -eq 'discovery') { 'discovery' }
+    elseif ($stage -eq 'trial' -or $selectors.trialFilesCount -gt 0 -or ($null -ne $selectors.trialFiles -and @($selectors.trialFiles).Count -gt 0)) { 'trial' }
+    elseif ($stage -in @('full', 'verification', 'finish-ready') -or $null -ne $selectors) { 'full' }
+    else { 'unknown' }
+}
+$verificationTests = @($toolRows | Where-Object { $_.entry.tool -eq 'test_adapter' })
+$fullTests = @($verificationTests | Where-Object { (Verification-Scope $_) -eq 'full' })
 $lastTest = $fullTests | Select-Object -Last 1
 $result = [ordered]@{
     project = [IO.Path]::GetFullPath($ProjectDirectory)
-    window = [ordered]@{ since = $Since; until = $Until.ToString('o'); firstEvent = $rows[0].at; lastEvent = $rows[-1].at }
+    window = [ordered]@{ since = $Since; until = $Until.ToString('o'); fromTurn = $FromTurn; toTurn = $ToTurn; firstEvent = $rows[0].at; lastEvent = $rows[-1].at }
     usage = Usage-Summary $attempts
     timing = [ordered]@{
-        modelSeconds = [Math]::Round((Sum-Field @($modelRows | ForEach-Object { $_.entry }) 'elapsedMs') / 1000, 2)
-        toolSeconds = [Math]::Round((Sum-Field @($toolRows | ForEach-Object { $_.entry }) 'elapsedMs') / 1000, 2)
+        modelSeconds = Seconds (Sum-Field @($modelRows | ForEach-Object { $_.entry }) 'elapsedMs')
+        toolSeconds = Seconds (Sum-Field @($toolRows | ForEach-Object { $_.entry }) 'elapsedMs')
         toolCalls = $toolRows.Count
         rejectedToolBatches = @($rows | Where-Object { $_.entry.operation -eq 'tool-batch-rejected' }).Count
     }
@@ -159,7 +235,10 @@ $result = [ordered]@{
         skippedInvalidLines = $invalidLines
         legacyRows = @($rows | Where-Object { -not $_.schemaVersion -or $_.schemaVersion -lt 2 }).Count
         unmatchedUsageEvents = @($unmatchedUsageEvents | Where-Object { In-Window $_ }).Count
-        note = 'Tokens are recorded counters, including associated failed-attempt recovery usage once; absent/zero usage is not estimated. Host run totals may include estimates. Missing run-end does not establish activity. Invalid lines include an incomplete tail; metadata does not prove semantic progress.'
+        toolStartsWithoutEnd = @($toolStarts.Values | Where-Object { In-Window $_ }).Count
+        missingToolSelectors = @($toolRows | Where-Object { $null -eq $_.entry.call.selectors }).Count
+        missingModelHistory = @($modelRows | Where-Object { $null -eq $_.entry.visibleHistoryBytes }).Count
+        note = 'Tokens are recorded counters, including associated failed-attempt recovery usage once; absent/zero usage is not estimated. Host run totals may be cumulative across resumed runs and include estimates. Tool starts are not counted again as calls. Missing selectors/stage leave verification scope unknown. Missing run-end does not establish activity. Invalid lines include an incomplete tail; metadata does not prove semantic progress.'
     }
     runCount = $runs.Count
     runs = @($runs | Select-Object -Last 6 | ForEach-Object {
@@ -167,9 +246,15 @@ $result = [ordered]@{
     })
     milestones = [ordered]@{
         sourceEdits = $sourceWrites.Count
+        writesWithoutPath = @($writes | Where-Object { -not $_.entry.call.selectors.path }).Count
+        verificationCalls = $verificationTests.Count
         fullVerificationCalls = $fullTests.Count
+        discoveryVerificationCalls = @($verificationTests | Where-Object { (Verification-Scope $_) -eq 'discovery' }).Count
+        trialVerificationCalls = @($verificationTests | Where-Object { (Verification-Scope $_) -eq 'trial' }).Count
+        unknownVerificationCalls = @($verificationTests | Where-Object { (Verification-Scope $_) -eq 'unknown' }).Count
         checkpoints = @($toolRows | Where-Object { $_.entry.tool -eq 'checkpoint' -and $_.entry.status -eq 'completed' }).Count
         checkpointRequests = @($rows | Where-Object { $_.entry.operation -eq 'checkpoint-request' }).Count
+        automaticCompactions = @($rows | Where-Object { $_.entry.operation -eq 'history-compacted' }).Count
         implementationReviews = @($rows | Where-Object { $_.entry.operation -eq 'implementation-review' }).Count
         lastSourceEdit = if ($sourceWrites.Count) { Tool-Reference $sourceWrites[-1] } else { $null }
         lastFullVerification = if ($lastTest) { Tool-Reference $lastTest } else { $null }
@@ -177,12 +262,13 @@ $result = [ordered]@{
     }
     topToolsByTime = @($tools | Select-Object -First 5)
     slowestToolCalls = @($toolRows | Sort-Object { $_.entry.elapsedMs } -Descending | Select-Object -First 3 | ForEach-Object { Tool-Reference $_ })
-    recentFailures = @($rows | Where-Object { $_.entry.status -in @('failed', 'cancelled') -and $_.entry.operation -in @('model', 'tool') } | Select-Object -Last 3 | ForEach-Object {
-        if ($_.entry.operation -eq 'tool') { Tool-Reference $_ }
+    largestToolOutputs = @($toolRows | Where-Object { $_.entry.outputBytes -gt 0 } | Sort-Object { $_.entry.outputBytes } -Descending | Select-Object -First 3 | ForEach-Object { Tool-Reference $_ })
+    recentFailures = @($rows | Where-Object { $_.entry.status -in @('failed', 'cancelled') -and $_.entry.operation -in @('model', 'tool', 'tool-end') } | Select-Object -Last 3 | ForEach-Object {
+        if ($_.entry.operation -in @('tool', 'tool-end')) { Tool-Reference $_ }
         else {
             $item = Event-Reference $_
             $item.operation = 'model'; $item.status = $_.entry.status; $item.failureCode = $_.entry.failureCode
-            $item.seconds = [Math]::Round($_.entry.elapsedMs / 1000, 2)
+            $item.seconds = Seconds $_.entry.elapsedMs
             $item
         }
     })
@@ -198,19 +284,15 @@ if ($Detail) {
                 callIds = @($_.Group | Select-Object -First 4 | ForEach-Object { $_.entry.call.id }) }
         })
     $result.checkpointHistory = @($toolRows | Where-Object { $_.entry.tool -eq 'checkpoint' -and $_.entry.status -eq 'completed' } |
-        Select-Object -Last 3 | ForEach-Object {
-            $checkpoint = $_
-            $before = $modelRows | Where-Object { $_.runId -eq $checkpoint.runId -and ([datetimeoffset]$_.at) -lt ([datetimeoffset]$checkpoint.at) } | Select-Object -Last 1
-            $after = $modelRows | Where-Object { $_.runId -eq $checkpoint.runId -and ([datetimeoffset]$_.at) -gt ([datetimeoffset]$checkpoint.at) } | Select-Object -First 1
-            $item = Event-Reference $checkpoint
-            $item.beforeVisibleBytes = $before.entry.visibleHistoryBytes; $item.afterVisibleBytes = $after.entry.visibleHistoryBytes
-            $item.beforeRetainedBytes = $before.entry.retainedHistoryBytes; $item.afterRetainedBytes = $after.entry.retainedHistoryBytes
-            $item
-        })
+        Select-Object -Last 3 | ForEach-Object { History-Transition $_ })
+    $result.historyCompactions = @($rows | Where-Object { $_.entry.operation -eq 'history-compacted' } |
+        Select-Object -Last 6 | ForEach-Object { History-Transition $_ })
     $result.modelTurns = @($attempts | ForEach-Object {
         $item = Event-Reference $_.row
         $item.status = $_.row.entry.status; $item.usageSource = $_.usageSource
         $item.inputTokens = $_.usage.inputTokens; $item.outputTokens = $_.usage.outputTokens
+        $item.cachedTokens = $_.usage.cachedTokens
+        $item.seconds = Seconds $_.row.entry.elapsedMs
         $item.visibleHistoryBytes = $_.row.entry.visibleHistoryBytes
         $item.instructionBytes = $_.row.entry.instructionBytes; $item.toolDefinitionBytes = $_.row.entry.toolDefinitionBytes
         $item

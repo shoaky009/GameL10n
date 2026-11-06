@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text;
 using VNTextPatch.Shared.Util;
 
 namespace VNTextPatch.Shared.Scripts.Yuris
@@ -13,6 +14,14 @@ namespace VNTextPatch.Shared.Scripts.Yuris
         public string Extension => ".ybn";
 
         private byte[]? _data;
+        private readonly Encoding _readEncoding;
+        private readonly Encoding _writeEncoding;
+
+        public YurisConfigScript(Encoding? readEncoding = null, Encoding? writeEncoding = null)
+        {
+            _readEncoding = readEncoding ?? StringUtil.SjisEncoding;
+            _writeEncoding = writeEncoding ?? StringUtil.SjisTunnelEncoding;
+        }
 
         public void Load(ScriptLocation location)
         {
@@ -35,7 +44,7 @@ namespace VNTextPatch.Shared.Scripts.Yuris
                 yield break;
 
             int captionLength = BitConverter.ToInt16(_data, CaptionOffset);
-            string caption = StringUtil.SjisEncoding.GetString(_data, CaptionOffset + 2, captionLength);
+            string caption = _readEncoding.GetString(_data, CaptionOffset + 2, captionLength);
             yield return new ScriptString(caption, ScriptStringType.Message);
         }
 
@@ -48,7 +57,9 @@ namespace VNTextPatch.Shared.Scripts.Yuris
             if (caption == null)
                 throw new Exception("Exactly one translation line expected for yscfg.ybn");
 
-            byte[] captionBytes = StringUtil.SjisTunnelEncoding.GetBytes(caption);
+            byte[] captionBytes = _writeEncoding.GetBytes(caption);
+            if (captionBytes.Length > short.MaxValue)
+                throw new InvalidDataException("YU-RIS window caption exceeds its 16-bit byte length.");
 
             using Stream outputStream = File.Open(location.ToFilePath(), FileMode.Create, FileAccess.Write);
             BinaryWriter writer = new BinaryWriter(outputStream);

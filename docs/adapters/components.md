@@ -1,36 +1,31 @@
 # 文本与运行组件
 
-> 完整产品的能力与协议参考；Rust 宿主的实际接入范围见[开发文档](../development.md)。
-
-本文面向维护适配器的开发者，说明可复用的文本语义、编码、字体和启动实现。它们按能力或引擎模板提供，适配器负责资源发现、封包以及当前游戏的兼容验证。
+组件提供可复用能力，适配器负责资源发现、封包及当前游戏验证。
 
 | 组件 ID | 能力 | 适用条件 |
-|---|---|---|
-| `windows-font-metrics` | 主字体缺字、实际选中名称、字宽和字形包围框诊断 | Windows GDI；使用实际字体配置和代表性中文/原文样本，仅在分析时运行 |
-| `kaguya-tblstr` | ARC/ARI 结构、索引、CP932 和原字节往返检测；解析与变长重建 | XOR-FF、四字节最小对齐、类型 0/2/3 的 TBLSTR 变体；中文运行另验 |
-| `xp3-adler` | 有界读取索引和少数成员，校验 Adler 派生过滤器；分段相位 API | 至少两个不同受保护成员校验通过；未知索引块必须保留，不提供回包器 |
-| `sjis-tunnel` | VNTextProxy 兼容映射、容量及编码往返检查 | v0.0.41、最多 3422 个扩展 BMP 字符；字符遍历、字体与旁加载需另验 |
-| `kirikiri-scn-text` | PSB SCN 正文、显示姓名、选项、场景标题；缓存及长度自动重算 | 已解密、无资源的 PSB v2/v3 SCN，明确选择语言槽；依赖固定共享 Python 工具库 |
-| `cp932-glyph-map` | 全补丁字符映射、严格编解码、复用已有映射 | 已确认脚本使用 CP932，且运行时与字库接受指定码位 |
-| `qlie-sfnt-font` | 添加 SFNT 字形别名、调整字体名称及度量 | 已确认的 QLIE system 字体列表、MS Gothic／Mincho 替换策略、单字体 SFNT |
-| `system4-fnl-glyph` | 用宋体生成与参考字形尺寸匹配的单色位图 | Windows GDI、BMP 字符及对应 FNL 位图布局；本机须有 SimSun |
-| `qlie-japanese-font-launcher` | 独立启动器、临时字体加载、日语 Locale Emulator 启动 | QLIE 的字体枚举规则，以及 LEProc 等待实际游戏退出的启动链 |
-
-组件提供版本、来源、接口示例和适用限制，不代表所有同名引擎版本都兼容。字体、FNL 容器和 EXE 码位处理属于不同能力；不能仅因 CP932 编码成功就认定原引擎可以显示新增字形。
+| --- | --- | --- |
+| `windows-font-metrics` | 缺字、字体尺寸及 GDI+ 字体创建路径对比 | Windows，仅分析时使用 |
+| `kaguya-tblstr` | ARC/ARI 检测、解析和变长重建 | XOR-FF、四字节最小对齐、类型 0/2/3 |
+| `xp3-adler` | 索引、成员与 Adler 派生过滤器检查 | 至少两个受保护成员通过；不提供回包器 |
+| `sjis-tunnel` | VNTextProxy 映射、容量与往返检查 | v0.0.41，最多 3422 个扩展 BMP 字符 |
+| `vntextproxy-runtime` | 固定代理 DLL 检查和准备 | Windows x86，确认代理加载链 |
+| `gdiplus-font-bridge` | 固定 GDI+ 私有字体创建与导入重定向 | x86 普通导入、明确字体匹配与实际创建路径 |
+| `kirikiri-scn-text` | SCN 正文、显示姓名、选项和标题 | 已解密、无资源 PSB v2/v3，明确语言槽 |
+| `kirikiri-tft` | 预渲染字库覆盖检查和缺字补充 | Unicode TFT v1、BMP；生成字形需要 Windows GDI |
+| `cp932-glyph-map` | 字符映射和严格编解码 | CP932，运行时与字体接受所选码位 |
+| `qlie-sfnt-font` | SFNT 字形别名、名称和度量 | 已确认的 QLIE 字体列表，单字体 SFNT |
+| `system4-fnl-glyph` | 参考尺寸的宋体单色位图 | Windows GDI、BMP、对应 FNL 布局与 SimSun |
+| `qlie-japanese-font-launcher` | 临时字体与日语转区启动 | 已确认的 QLIE 枚举及 Locale Emulator 启动链 |
 
 ## 接入与版本管理
 
-新适配器使用 Python。编码和字体组件通过 `tools/gamel10n_host.py` 调用应用预编译宿主，不在分析或适配时编译 C#。启动器提供现成 EXE；辅助模块和启动素材放在 `src/tools/`，按用途登记到发布清单。
+Python 适配器通过 `tools/gamel10n_host.py` 调用预编译宿主。运行依赖和素材放在 `src/tools/` 并登记发布清单，仅分析用的组件放在 `work/`。
 
-仅供分析的组件放在 `work/`，不登记为发布文件；复制这类组件不使已有适配器验收失效。
-
-复制前检查所有目标文件，相同内容复用，不同内容保留现有修改并报告冲突。多个组件共用同一辅助模块，只复制一份。辅助文件及哈希纳入适配器包；解析器依赖单独固定，预编译宿主随应用更新。
+复制前检查全部目标，相同文件复用，不同内容保留并报告冲突。辅助模块按哈希入包，共用文件只保留一份；解析器版本单独固定。
 
 ## 结构与编码检测
 
-`inspect_engine_knowledge(id)` 返回相关组件、内置解析器和已发布适配器的具体调用入口。关联按引擎族提供，只是待核对的候选；先用当前游戏样本验证格式，再按实际脚本消费者确认显示规则。发布版本从轻量索引读取，复制或使用时才校验文件，不在查询经验时扫描包内容。
-
-复制相应组件后，可直接调用以下入口，无需编写包装脚本：
+`inspect_engine_knowledge(id)` 提供相关组件和解析器入口，候选须用当前样本确认。复制组件后可直接运行：
 
 ```text
 run_engine_python(script="src/tools/kaguya_tblstr.py", stdin='{"operation":"probe","input":"resources/table.arc","index":"resources/table.ari"}')
@@ -38,56 +33,84 @@ run_engine_python(script="src/tools/xp3_adler.py", stdin='{"operation":"probe","
 run_engine_python(script="src/tools/sjis_tunnel.py", stdin='{"operation":"check","texts":["原文かな","简体中文译文"]}')
 ```
 
-格式探针返回 `matched`、`rejected` 或 `needs-evidence`。TBLSTR 的结构匹配与中文编码能力分开报告；CP932 无法表示试验中文不使结构识别失效。未修改记录保留非零填充；终止符后超过最小对齐的尾部不按此变体接受。
+探针返回 `matched`、`rejected` 或 `needs-evidence`。TBLSTR 结构与中文编码分别报告，保留未修改记录填充，不接受超出最小对齐的未知尾部。
 
-XP3 检测读取索引与少量成员，不解包整个游戏。`matched` 只确认已检测的 Adler 派生过滤器；自定义注音、角色名标签、显示表格和覆盖顺序分别确认。遇到未知索引块，返回 `rebuildRequiresPreservation=true`；后续重建须保留这些信息或停止。对独立分段缓冲区使用 `apply_key_in_place(..., member_offset=...)`，相位为本次范围首字节在成员内的位置。
+XP3 检测只确认已验证的派生过滤器。未知索引块返回 `rebuildRequiresPreservation=true`，重建须保留；分段解码使用 `apply_key_in_place(..., member_offset=...)` 指定成员内相位。
 
-SJIS 检测只在内存中检查完整文本集所需的映射及往返，不写映射、不下载 DLL。正式构建通过 `Tunnel.serialize()` 保存映射，并将译文和保留原文一起纳入字符规划。映射容量通过不代表原引擎能够遍历隧道尾字节，也不能替代字体和运行验证。
+SJIS 检查在内存中规划全部译文与保留原文，构建通过 `Tunnel.serialize()` 保存映射。编码容量与往返检查不包含运行时字符遍历和字体验证。
+
+## VNTextProxy 运行文件准备
+
+固定代理下载、选择、映射和分发见[VNTextProxy 组件](components/vntextproxy-runtime.md)。
+
+GDI+ 私有集合成功而原字体创建失败时，先检查[字体桥接组件](components/gdiplus-font-bridge.md)的适用条件；它独立于 VNTextProxy，不提供文本解码。
 
 ## SCN 文本语义
 
-`kirikiri-scn-text` 连接共享库的 `kirikiri_psb` / `kirikiri_scn` 读写器。`SceneText` 的字段位置沿用原树路径，去除派生缓存不会重排正文 ID；内部 speaker ID 默认只作上下文，不能当作显示姓名翻译。只修改选中的正文及其朗读、搜索和可见长度字段，回填后复提比较译文、保留字段及其他数据。未知布局或缓存规则会报错。
+`kirikiri-scn-text` 使用共享库 `kirikiri_psb`／`kirikiri_scn`。`SceneText` 按原树路径定位，内部 speaker ID 只作上下文。修改选中正文及其朗读、搜索和长度缓存，保留其余字段；未知布局报错。
 
-复制组件后先用 `run_engine_python` 执行 `src/tools/kirikiri_scn_text.py`，stdin 为 `{"operation":"verify","input":"work/sample.scn"}`。它检查原字节往返及一条正文的中文修改，输出有界摘要；不运行游戏。正式适配器用 `use_engine_reference` 固定依赖，再导入组件处理已解包字节。Hxv4 等封包过滤、覆盖优先级、字体与游戏显示分别验证。
+`src/tools/kirikiri_scn_text.py` 的 `{"operation":"verify","input":"work/sample.scn"}` 检查原字节往返与一条中文修改。正式适配器用 `use_engine_reference` 固定依赖；外层过滤器、加载优先级和字体单独验证。
 
-`run_engine_python` 也支持 `module` 参数直接调用固定库中的 `python.engines.*` / `python.archives.*` CLI。连接内置脚本解析器时，使用 `from tools.gamel10n_host import parser`，再调用 `parser(request, 'Renpy')` 等固定格式接口；资源发现由 Python 独立实现。宿主及解析器命令由应用提供，JSON 输入输出统一使用 UTF-8。解析器按资源批次启动进程，不按文本条目调用。
+## TFT 预渲染字库
 
-`tools/vntextpatch-reference.json` 的 schema 2 锁定完整工具的文件哈希、`entryPoint` 和 `runtime`（`dotnet` 或 `native`）。托管工具同时包含 DLL、`.deps.json`、`.runtimeconfig.json` 及许可声明；启动命令由依赖解析层生成。组件宿主不加载解析器 DLL，也不推测工具路径。中间响应写入调用工作区的独立文件，完成后移除，不能覆盖适配器最终的 `responseFile`。
+`kirikiri-tft` 支持 Unicode TFT v1 的 BMP 字码和灰度 RLE。先将已解包的字库交给只读探针：
 
-已发布 schema 1 清单继续锁定原 DLL，只有原托管宿主能按该依赖执行。Rust 宿主不携带托管兼容进程或共享 .NET 运行时；旧包、清单与哈希保持原样，需要迁移逻辑、验证并发布新版本，不能直接把依赖指向新版原生工具。
+```text
+run_engine_python(script="src/tools/kirikiri_tft.py", stdin='{"operation":"probe","input":"work/original.tft","text":"原文かな、。简体译文！？ABC123","sampleLimit":2}')
+```
+
+返回格式、字符覆盖和少量原字形度量，不加载字体或写入文件。`index(data)` 与 `bitmap(data, glyph)` 可在各平台解析；`supplement(data, codepoints, renderer)` 仅追加缺字，保留全部原字形、度量和未知字节。所需字码应包含该字库使用的最终译文与保留原文，无缺字时返回原字节。
+
+Windows 上可用 `with GdiRenderer(font_file, face, size, weight=400, italic=False) as renderer` 提供新字形。`size` 为明确的正 em 像素高度；渲染器按需临时加载指定字体，检查实际名称与缺字并在退出时释放。调用者负责按原字形比较风格、可见尺寸、基线及字宽，为每份字库选择参数。
+
+组件不按字库文件名推断字号，不修改脚本或封包。适配器须确认实际字体绑定、文本解码和字库加载路径，再接入回包；静态补字通过不代表游戏中的显示已验证。其他 TFT 版本、非 BMP 字码或损坏数据会明确拒绝。
+
+## 固定解析器与校验上下文
+
+`run_engine_python(module=...)` 可调用固定库的 `python.engines.*`／`python.archives.*` CLI。原生解析器通过 `from tools.gamel10n_host import parser`，调用 `parser(request, 'Renpy')` 等格式入口，按资源批次启动，输入输出为 UTF-8 JSON。
+
+支持校验上下文的适配器在 `extract` 外层响应声明 `validationContextVersion: 1`，在 `validate` 调用 `validation_context(request)`，取得 `originalUnits`、`outputUnits`、`outputFiles` 和 `translations`。上下文仅在本次校验有效；返回 `None` 时执行完整提取。宿主核对版本、目录和资源选择，适配器仍负责非文本结构、编码与字体检查。
+
+`tools/vntextpatch-reference.json` schema 2 使用 `runtime: native`，固定 `GameL10n.VnTextPatch.exe` 与 `capstone.dll` 哈希。历史 schema 2 可省略入口并仅固定 EXE，保留环境时补记配套 DLL。版本缺失或损坏须恢复原文件，或显式更新后重新验收；schema 1 DLL 依赖须转换并重新发布。临时响应不能覆盖适配器最终 `responseFile`。
 
 ## CP932 映射
 
-`component('glyph_plan', request, texts=..., allowedSlots=..., preservedTexts=..., map=...)` 接受整个补丁最终使用的逻辑文本、已确认可用的码位、其他需保留的文本及可选已有映射，返回 `map`。最终文本包含译文和未翻译的原文；保留文本还应包含未提取的姓名、界面文字等。输入是逻辑文字，不是已经替换过的代理码位。辅助函数从 `tools.gamel10n_host` 导入。
+从 `tools.gamel10n_host` 导入 `component`：
 
-映射方向为“码位 → 真实 Unicode”，JSON 键是十进制字符串；已有 System4 FNL 模板使用反向映射，接入时需显式转换。`glyph_encode` 接受 `texts` 和 `map`，返回 base64 `values`；`glyph_decode` 接受 `values` 和 `map`，返回 `texts`。分配按字符及码位排序，不随文本读取顺序改变，已有映射保持固定。码位占用、映射冲突、容量不足、损坏的 UTF-16 或未计划字符都会报错；编码能完成但解码不一致的字符也必须纳入映射。按批次调用，避免为每个字启动子进程。
+| 调用 | 输入 | 输出 |
+| --- | --- | --- |
+| `glyph_plan` | `texts`、`allowedSlots`、`preservedTexts`、可选已有 `map` | `map` |
+| `glyph_encode` | `texts`、`map` | base64 `values` |
+| `glyph_decode` | `values`、`map` | `texts` |
 
-映射随输出资源或字体保存，用于重新提取产物；翻译记忆继续保存真实中文。接口处理完整文本单元，不用于分块流式编码。调用者仍需检查原 EXE 的字符遍历与字形查找、实际字体覆盖，以及试译后的显示和排版。
+例如 `component('glyph_plan', request, texts=..., allowedSlots=..., preservedTexts=..., map=...)`。规划使用整个补丁最终的逻辑文字，包含译文、未翻译文本及其他需保留的字符。
+
+映射方向为“码位 → Unicode”，JSON 键为十进制字符串；System4 FNL 的反向映射需显式转换。分配稳定并保留旧槽位，冲突、容量不足、未计划字符或编解码不一致时报错。映射随产物保存，翻译记忆保存真实中文。接口按完整文本批量调用。
 
 ## 字体与启动器
 
-Unicode 脚本读写成功后，仍需检查实际字体是否覆盖中文。原字体缺字时，引擎的测宽和回退绘制可能使用不同度量，出现个别字重叠；通过加空格、全局加字距或缩小全文不能解决缺字。应优先通过引擎已有设置，让测宽与绘制使用覆盖所需字符的字体，并检查系统设置、字体重置和读档是否恢复了原字体。保留用户存档及原字号、风格；原文构建仍须保持原字节。
+缺字会使测宽与回退绘制使用不同度量，导致重叠。应使用覆盖所需字符的字体，并核对设置、重置和读档后的实际选择，保留原字号和风格。
 
-`windows-font-metrics` 只依赖 Python 标准库和 Windows GDI。复制后用 `run_engine_python(script="work/windows_font_metrics.py", stdin=...)` 调用；JSON 例如：
+`windows-font-metrics` 通过 Windows GDI 检查字体：
 
 ```json
-{"fonts":[{"face":"Original Font","file":"work/unpacked/font.ttf","height":-24},{"face":"Microsoft YaHei","height":-24}],"text":"原文かな、。简体译文喂么过这试！？ABC123"}
+{"fonts":[{"face":"Original Font","file":"work/font.ttf","height":-24},{"face":"Microsoft YaHei","height":-24}],"text":"原文かな、。简体译文！？ABC123"}
 ```
 
-`fonts` 最多 4 项，`text` 最多 512 字符；字体 `file` 可省略以检查已安装字体，`height` 使用引擎实际有符号高度，还可指定 `width`、`weight`、`italic`、`charset` 和 `pitchAndFamily`。字体文件仅在诊断子进程内临时加载，不安装到系统。返回缺字计数及有界样例、实际字体名和字宽/字形度量；名字不同可能是本地化别名。缺字时测得的宽度不证明回退绘制正确；BMP 以外字符列为未检查，不计入覆盖通过。字形越出单字符边界本身也不等于排版错误。
+使用 `run_engine_python(script="work/windows_font_metrics.py", stdin=...)`，`fonts` 最多 4 项，首项为原字体，其余为候选；`text` 最多 512 字符，包含共同汉字、假名、标点、ASCII 及中文。`file` 可省略，`height` 使用引擎实际有符号高度；可选 `width`、`weight`、`italic`、`charset`、`pitchAndFamily`。
 
-该工具不运行游戏，不证明实际引擎选择了同一字体，也不覆盖预渲染字库或其他渲染后端。适配器需把已确认的字体修复写入确定性的构建流程，核对实际生效资源，并通过试译确认显示；普通补丁构建无需重复调用模型或字体诊断。
+返回实际名称、缺字、字宽、字形高度及 `textMetrics` 中的上升部、下降部、内部与外部留白。`ascent` 是字框顶部到基线的距离，`emHeight = height - internalLeading`；样例 `inkTop` / `inkBottom` 以基线为零、向下为正。正字号指定含内部留白的字框高度，负字号指定字符高度，因此相同数字不保证替换后视觉等大。
 
-QLIE 字体模板沿用对应适配器的完整名称及行高度、平均宽度规则；不能直接套用于任意字体引擎。System4 位图模板保留字体替换检测和非空字形检查。组件不包含字体文件，适配器需准备符合许可要求的字体和必要声明。
+`comparisons` 将每个候选与首项比较，`advanceRatio`、`inkWidthRatio`、`inkHeightRatio` 为共同覆盖字符逐字比率的中位数（候选 ÷ 原字体）；`emHeightRatio` 比较字符高度，`baselineDelta` / `cellHeightDelta` 为候选与原字体的像素差。缺字排除，空白字符或空轮廓不参与字形比率；无可比值时返回 `null`，应结合样本数判断。非 BMP 字符标为未检查。
 
-`component('qlie_font', request, input=..., output=..., family=..., map=...)` 生成字体；`component('render_glyphs', request, glyphs=[...])` 批量生成位图。每项字形包含 `character`、`width`、`height` 和 base64 原参考位图 `reference`，返回 base64 `values`。
+原字体覆盖中文时优先保留；必须替换时选择同类衬线或无衬线、字重和等宽属性的字体。明显的尺寸差异应通过候选选择或实际字体请求调整并复测，同时核对基线、行距和换行；比率不能直接当作通用放大倍率。字体仅在诊断进程临时加载，结果不能证明游戏实际选中该字体，最终外观通过少量试译确认。
 
-QLIE 启动组件自带已编译的 `QlieLauncher.exe`。生成补丁时将它复制为独立启动入口，并在 `build.launchExecutable` 声明路径；在启动器旁提供 `qlie-l10n/launch.xml` 和字体。XML 中的路径相对启动器目录，字体 `face` 必须与内部完整名称一致，写 XML 时需正确转义。组件不修改或重新生成原 EXE 的转区配置。
+GDI+ 游戏在请求顶层加 `"renderer":"gdiplus"`。每项结果的 `gdiplus` 对比 `fromDC`、`fromLogfontA/W`、`byName` 和显式 `privateCollection` 路径，保留原生状态码和创建结果。GDI 已选中字形而 GDI+ 创建失败时，先排查注册与创建路径；`NotTrueTypeFont` 本身不能证明文件不是 TrueType。私有集合成功只证明该调用方式可用，适配器还须让游戏使用同一路径。默认仍只测 GDI，不加载额外后端。
 
-启动器使用 Windows .NET Framework 4.x，目标为 x86。需要转区时使用玩家本机的 Locale Emulator；组件不安装该软件。字体仅在这条已确认的游戏启动链运行期间加载。其他引擎、字体枚举方式、子进程关系和转区工具需要另行验证。
+System4 位图使用 `component('render_glyphs', request, glyphs=[...])`，每项包含 `character`、`width`、`height` 和 base64 参考位图 `reference`，返回 base64 `values`。组件检查字体替换和非空字形，字体文件及许可由适配器准备。
+
+QLIE 参数与启动配置见[字体与启动组件](engines/qlie-filepack3-systemfont.md#字体组件接口)。
 
 ## 开发与打包
 
-Rust 工程当前通过 `tools/vntextpatch/GameL10n.VnTextPatch.exe` 直接提供 parser 操作，源码构建入口为 `scripts/build-vntextpatch.ps1`。字形、编码、模板及 QLIE 启动组件仍保留操作契约和参考源码，尚未接入新宿主；发行脚本不包含旧 `GameL10n.AdapterHost` 或托管兼容进程。游戏侧历史 .NET Framework 启动器与应用侧 .NET 运行时是独立依赖，迁移运行组件时分别验证。
-
-组件接入后仍须通过完整适配器验收。复制成功、编译通过或编码可逆，都不能代替游戏实际运行验证。
+工具构建见[开发文档](../development.md#工具准备)，发布文件选择见[产物约定](artifacts.md#正式适配器)。

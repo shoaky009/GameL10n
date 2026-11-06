@@ -38,6 +38,8 @@ internal static class VnTextPatchJson
 [JsonSerializable(typeof(double))]
 [JsonSerializable(typeof(global::GameL10n.VnTextPatch.Request))]
 [JsonSerializable(typeof(global::GameL10n.VnTextPatch.Response))]
+[JsonSerializable(typeof(global::VNTextPatch.Shared.Scripts.Yuris.YurisTextSource))]
+[JsonSerializable(typeof(global::VNTextPatch.Shared.Scripts.Yuris.YurisAttributeSource))]
 [JsonSerializable(typeof(int))]
 [JsonSerializable(typeof(int[]))]
 [JsonSerializable(typeof(long))]
@@ -46,4 +48,8 @@ internal static class VnTextPatchJson
 [JsonSerializable(typeof(object[]))]
 [JsonSerializable(typeof(string))]
 [JsonSerializable(typeof(string[]))]
+[JsonSerializable(typeof(global::GameL10n.Core.Development.UnitySchemaInspection.Field[]))]
+[JsonSerializable(typeof(global::GameL10n.Core.Development.UnitySchemaInspection.TextMethod[]))]
+[JsonSerializable(typeof(global::GameL10n.Core.Validation.ExecutableAnalysis))]
+[JsonSerializable(typeof(global::System.Collections.Generic.IReadOnlyDictionary<int, int>))]
 internal partial class VnTextPatchJsonContext : JsonSerializerContext;

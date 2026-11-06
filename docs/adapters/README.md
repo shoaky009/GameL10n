@@ -1,47 +1,44 @@
 # 引擎与资源模板
 
-> 完整产品的能力与协议参考；Rust 宿主的实际接入范围见[开发文档](../development.md)。
-
-适配能力按引擎或资源结构组织。下表说明格式级支持范围；同名引擎可能有不同封包、脚本、字体和运行时版本，实际使用仍需探测与验证。
-
-具体引擎和内置脚本解析器的说明集中在 `engines/`；通用的识别、智能适配、组件及产物文档保留在本级目录。
-
-| 引擎／模板 | 标识 | 支持范围与条件 |
-| --- | --- | --- |
-| [LiLiM SFA16 / AOS v2 / SCR](engines/sfa16-aos-v2.md) | `engine.sfa16.aos-v2` | AOS v2 中的剧情脚本；中文运行补丁仅用于已登记的 EXE 指纹 |
-| [System4 AIN v14 MSG1 + FNL](engines/system4-ain14-msg1-fnl.md) | `engine.system4-ain14-msg1-fnl` | MSG1 剧情消息、FNL 补字及匹配已登记代码的运行时修补 |
-| [QLIE FilePackVer3.0 + system_fix](engines/qlie-filepack3-systemfont.md) | `engine.qlie-filepack3-systemfont` | 匹配主封包、外置密钥、EXE 密钥资源及字体布局的版本 |
-| [VNTextPatch：22 个引擎系列／29 个脚本格式](engines/vntextpatch.md) | `engine.vntextpatch-*` | 已解包脚本的提取与回填；封包和中文运行条件见格式表 |
-| [Ren’Py RPYC2 及混合资源](engines/renpy-rpyc.md) | `template.loose-renpy-rpyc` / `template.rpa3-renpy-rpyc` / `template.renpy-mixed` | 编译脚本的惰性 AST 读写；支持松散脚本、RPA/ARC 3.0 及无路径冲突的源码组合，未知结构或加载顺序保留诊断 |
-| [Siglus / Scene.pck](engines/siglus.md) | `engine.siglus` | 指定场景布局、已确认显示调用及 FKDS 48/441 字库模板 |
-| [Unity SerializedFile 已确认文本布局](engines/unity-serialized-text.md) | `engine.unity-textasset-dialogue-json` | 已确认的对话 JSON、静态字段与部分动态说明模板，不是通用 Unity 文本解析器 |
-
-各适配器的结构检查不能证明游戏实际启动、中文显示、分支或存档兼容；安装试译补丁后仍需分别确认。
+适配器按引擎或资源结构组织。同名引擎可能使用不同封包、脚本和字体，实际兼容性以资源验收及游戏运行记录为准。
 
 ## 引擎库管理
 
-应用的“全局引擎库”按引擎或资源模板聚合展示内置能力、外置扩展和兼容记录，支持按引擎、模板或游戏名称搜索，以及来源、启停状态筛选。选择一个条目后可查看具体版本、兼容游戏和相关引擎经验。
+“全局引擎库”聚合内置能力、外置扩展和兼容记录，支持搜索、来源及启停筛选。选择条目可查看版本、兼容游戏和引擎经验。
 
-- 多选条目可以批量启用或停用。停用后不参与新项目的自动匹配，已有项目仍使用固定版本；引擎经验的启停单独管理。
-- 外置版本提供“打开所在文件夹”，直接定位该版本的扩展目录。
-- 兼容游戏按游戏项目去重，只保留最近使用的版本、简要说明和验证状态；识别、试译及生成补丁会更新同一条记录。
-- 外置版本可以删除，项目历史引用不会阻止删除；缺失或损坏的外置版本也可移除。正在识别、智能适配或使用此版本执行任务时，请先暂停或等待完成。内置能力随程序更新，不支持单独删除。
-- 删除版本会同时移除其扩展文件、兼容记录、全局激活引用和索引条目；只有历史记录或文件已经丢失的版本也可删除。游戏项目的原文、译文和汉化补丁保留。已保存文本仍可翻译、校对，已生成的补丁仍可安装；重新提取或生成新补丁需要重新识别或智能适配。游戏已经安装的汉化补丁不依赖扩展运行。
-- 资源回填通过与游戏运行验证分别展示；某个游戏版本通过验证不代表该引擎的所有游戏均兼容。
+- **启停**：支持多选；停用后不参与新项目匹配，已有项目仍使用固定版本。
+- **版本**：外置版本可打开所在文件夹或删除；内置能力随应用更新。
+- **兼容记录**：每个游戏保留一条最近使用记录，分别展示资源和运行验证状态。
+- **删除**：移除版本文件、兼容记录、激活引用和索引，缺失文件的记录也可删除；当前任务占用的版本须先停止使用。项目文本、译文和补丁保留，再次提取或构建前需重新识别。
+- **历史版本**：确认当前补丁“效果正常”后自动清理，其他项目仍在使用的版本保留；具体规则见[版本反馈与修复](automatic-adaptation.md#版本反馈与修复)。
 
-引擎库读取 `extensions/library-index.json` 中的展示摘要，并在内存中搜索筛选。发布、启停、删除和总结会同步更新索引，点击“刷新”重新读取索引。选择外置版本时才检查必要文件；文件丢失会保留条目并显示提示。实际使用时执行完整性校验；删除不扫描项目记录，只检查当前任务是否占用该版本。
-
-索引缺失或损坏时，从引擎注册元数据重建；重建不读取游戏资源、项目文本或扩展源码。索引用于展示与候选筛选，不替代运行时的适配器验证。
+列表读取 `extensions/library-index.json`，选择外置版本后才检查文件，实际执行前校验完整性。发布、启停、删除和总结同步更新索引；缺失或损坏时从注册元数据重建，不扫描游戏资源或扩展源码。
 
 ## 开发资料
 
-- 已知引擎使用 `engine.<引擎和格式>`。
-- 未知引擎使用具体资源结构命名，如 `template.json-dialogue-array-v1`。
-- 游戏标题、版本指纹、专用补丁参数和验证状态归入兼容记录，不创建以游戏名称命名的适配器。
-- 引擎名称相同不代表所有游戏版本兼容，实际使用仍需探测和验证资源。
+已知引擎使用 `engine.<引擎和格式>`，未知格式使用资源模板名称，如 `template.json-dialogue-array-v1`。游戏标题、专属参数与验证记录归入兼容记录。
 
-自动扩展的复用、发布及限制见[自动适配](automatic-adaptation.md)。
-正式适配器、汉化文件、分析脚本及其保留方式见[引擎分析产物与目录约定](artifacts.md)。
-可组合的字符映射、字体和启动实现见[编码与运行组件](components.md)。
-封包读写能力与支持的脚本组合见[封包组件](engine-components.md)和[组件组合模板](templates.md)。
-目录扫描、分层筛选和可选声明协议见[引擎识别声明](recognition.md)；智能适配的请求、缓存及恢复逻辑见[执行与恢复机制](adaptation-internals.md)。
+| 主题 | 文档 |
+| --- | --- |
+| 识别与复用 | [识别声明](recognition.md) |
+| 智能适配与验证 | [识别与智能适配](automatic-adaptation.md) |
+| 会话、工具和缓存 | [执行与恢复机制](adaptation-internals.md) |
+| 发布文件与工作目录 | [产物约定](artifacts.md) |
+| 编码、字体与启动 | [文本与运行组件](components.md) |
+| 封包与脚本组合 | [封包组件](engine-components.md)、[组合模板](templates.md) |
+
+## 引擎与格式能力表
+
+| 引擎／模板 | 标识 | 支持条件 |
+| --- | --- | --- |
+| [LiLiM SFA16 / AOS v2 / SCR](engines/sfa16-aos-v2.md) | `engine.sfa16.aos-v2` | AOS v2 剧情脚本，运行补丁须匹配已登记 EXE |
+| [System4 AIN v14 MSG1 + FNL](engines/system4-ain14-msg1-fnl.md) | `engine.system4-ain14-msg1-fnl` | MSG1 消息、FNL 补字及匹配运行时代码的修补 |
+| [QLIE FilePackVer3.0 + system_fix](engines/qlie-filepack3-systemfont.md) | `engine.qlie-filepack3-systemfont` | 匹配主封包、密钥及字体布局 |
+| [VNTextPatch：22 个引擎系列／29 个格式](engines/vntextpatch.md) | `engine.vntextpatch-*` | 已解包脚本，封包与中文运行条件见格式表 |
+| [YU-RIS](engines/yuris.md) | `engine.vntextpatch-yuris` | YSTB／YSCF、伴随命令表及可选 SJIS 隧道 |
+| [Ren’Py RPYC2 与混合资源](engines/renpy-rpyc.md) | `template.loose-renpy-rpyc` / `template.rpa3-renpy-rpyc` / `template.renpy-mixed` | 松散脚本、RPA/ARC 3.0 与无路径冲突的源码组合 |
+| [Siglus / Scene.pck](engines/siglus.md) | `engine.siglus` | 已确认场景和显示调用，FKDS 48/441 字库模板 |
+| [Unity SerializedFile](engines/unity-serialized-text.md) | `engine.unity-textasset-dialogue-json` | 已确认的对话 JSON、静态字段和动态说明模板 |
+
+[Artemis PFS 覆盖卷](engines/artemis-pfs.md)说明增量补丁的适用条件。
+[Valkyria DAT / SDT](engines/valkyria.md)说明参考解析、跳转验证及 GDI+ 字体创建的边界。

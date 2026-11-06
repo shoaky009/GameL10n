@@ -1,83 +1,80 @@
 # 开发与构建
 
-## 环境
+## 开发环境
 
-主工程使用 Rust 2024 edition，最低 Rust 1.92。Windows 构建需要 MSVC C++ 链接工具和 Windows SDK。Slint 固定为 1.18.1，使用 winit 后端和软件渲染，不引入 WebView 或 .NET 桌面运行时。
+- Rust 2024 edition，最低 Rust 1.92。
+- Slint 1.18.1。
+- Windows MSVC C++ 工具和 Windows SDK。
+- 构建固定 NativeAOT 工具需 .NET 10 SDK；Python 使用项目准备的便携版本。
+
+## 构建与打包
 
 ```powershell
 cargo check --workspace --locked
+cargo build --workspace --locked
 cargo test --workspace --locked
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo fmt --all -- --check
+./scripts/publish.ps1
 ```
 
-只构建无 UI 核心：
+| 配置 | 命令 | 输出 |
+| --- | --- | --- |
+| Release | `./scripts/publish.ps1` | `artifacts/GameL10n` |
+| Debug | `./scripts/publish.ps1 -Configuration Debug` | `artifacts/GameL10n-debug`，含诊断 CLI |
+
+打包前先完成工具准备。发行目录包含应用、Python、解析工具、适配组件和许可证，使用时保留完整目录。本地打包不生成 ZIP；重复打包会同步 `tools/` 与 `adapters/`，输出目录不要存放个人文件或应用数据。
+
+分发二进制时，按 GPLv3 提供对应源码与构建脚本，保留 `LICENSE`、`THIRD-PARTY-NOTICES.md` 及第三方声明。
+
+`docs/assets/logo.png` 用于 README；`crates/desktop/assets/icon.png` 是程序图标原图，替换时同步生成同目录的 `GameL10n.ico`。界面与图标资源嵌入应用。
+
+## 工具准备
+
+首次打包依次执行：
 
 ```powershell
-cargo build -p gamel10n-core --locked
-cargo tree -p gamel10n-core
+rustup target add i686-pc-windows-msvc
+./scripts/prepare-python.ps1
+./scripts/build-vntextpatch.ps1
+./target/runtime/python/python.exe -I -X utf8 ./scripts/build_qlie_launcher.py
+./scripts/build-fontbridge.ps1
 ```
 
-Core 依赖树不得出现 Slint。`cargo build` 默认构建 Core 和 CLI，不强制构建桌面模块。完整目录包使用 `scripts/publish.ps1`，输出 `artifacts/GameL10n`，不生成 ZIP。
+| 工具 | 位置与维护方式 |
+| --- | --- |
+| 便携 Python | `target/runtime/python`；准备脚本支持 `-ArchivePath` 使用固定版本本地归档 |
+| VNTextPatch NativeAOT | `target/runtime/vntextpatch`；由仓库内源码构建，附带源码参考包 |
+| 共享引擎工具库 | `third_party/engine-tools` 保存版本与固定归档，准备后位于 `target/runtime/engine-tools` |
+| 预编译运行组件 | `target/runtime/adapter-components`；[QLIE 启动器](adapters/engines/qlie-filepack3-systemfont.md#启动组件接入与构建)、[GDI+ 字体桥接](adapters/components/gdiplus-font-bridge.md) |
 
-## 工具
+`prepare-python.ps1` 和 `publish.ps1` 自动准备固定归档及宿主脚本；开发时可单独运行 `scripts/prepare-runtime.ps1` 刷新这些文件。`publish.ps1` 将已准备的运行依赖打包到发行目录的 `tools/`。版本固定与恢复规则见[固定工具依赖](adapters/adaptation-internals.md#固定工具依赖)。
 
-默认从可执行文件旁的 `tools/` 查找工具。源码运行时显式传入 `--tools-directory ./tools`。
+## GitHub 发布
 
-```text
-tools/
-  vntextpatch/GameL10n.VnTextPatch.exe
-  vntextpatch/VNTextPatch.LICENSE
-  vntextpatch/VNTextPatch.NOTICE.md
-  python/python.exe
-  python/python314.zip
-  python/…
-```
+[发布流程](../.github/workflows/release.yml)仅在推送 `vX.Y.Z` tag 时触发，例如 `v1.0.0`。
 
-便携 Python 使用 Windows x64 CPython 3.14.10 嵌入式发行包，放在 `tools/python/`，保留原始标准库、DLL 和许可证。`scripts/prepare-python.ps1` 下载或读取本地归档，核对固定 SHA-256 后准备工具。Python 与 AOT 二进制是本地工具产物，不提交 Git。
-
-VNTextPatch 源码位于 `third_party/VNTextPatch/`，JSON 工具入口位于 `tools/GameL10n.VnTextPatch/`。可通过 `scripts/build-vntextpatch.ps1` 重建 NativeAOT；只有该构建步骤需要 .NET 10 SDK、MSVC 和 Windows SDK，用户运行 Rust 桌面包不需要外置 .NET。29 个格式注册不代表全部格式或游戏版本都经过真实资源回归。
-
-## 可用功能
-
-- 读取 v1 项目索引、v2 项目元数据，保留额外字段；登记和搜索游戏项目。
-- Slint 项目列表、后台状态、底部滚动日志、提取结果分页检索和项目文件夹入口。
-- 显式选择 VNTextPatch 格式处理已解包脚本；保存原文快照并验证原文字节回填。
-- 已提交提取结果落盘并缓存，切换项目不自动重新提取。
-- 只读加载旧版分资源提取缓存，核对清单、资源哈希、文本身份和顺序；不要求旧引擎在 Rust 中重新执行。
-- CLI 回填指定译文，重新解析并验证输出，补丁写入项目目录。
-- Rust 通过 JSON CLI 执行 AOT 或明确指定的 Python 脚本；超时、取消、退出码和无效响应处理。
-
-尚未接入：模型 API 与翻译执行、旧版译文缓存和校对界面、完整智能适配会话、引擎库及包管理、字体和启动组件的 Rust 实现、补丁安装和原版恢复。复制保留的引擎、Provider 和智能适配文档描述完整产品契约，不能视为这些模块已经可用。
-
-## 无界面入口
+将 [CHANGELOG.md](../CHANGELOG.md) 的待发布内容整理为 `## [1.0.0] - YYYY-MM-DD`，填入实际日期，顶部保留空的 `## [Unreleased]`。提交后推送：
 
 ```powershell
-cargo run -p gamel10n-core -- --tools-directory ./tools --data-directory ./target/data add 'D:\Games\Example'
-cargo run -p gamel10n-core -- --data-directory ./target/data projects
-cargo run -p gamel10n-core -- --tools-directory ./tools --data-directory ./target/data extract '<项目ID>' Renpy
-cargo run -p gamel10n-core -- --data-directory ./target/data texts '<项目ID>' --query '原文' --offset 0
-cargo run -p gamel10n-core -- --tools-directory ./tools --data-directory ./target/data build '<项目ID>' ./translations.json
+git add CHANGELOG.md
+git commit -m "chore: release v1.0.0"
+git push origin main
+git tag v1.0.0
+git push origin v1.0.0
 ```
 
-`translations.json` 是文本 ID 到译文的 JSON 字典，未提供的文本保留原文。`build` 只生成补丁，不安装或修改游戏目录。普通 `.assets` 和封包游戏需要对应适配器，不能直接交给任意脚本解析器。
+Actions 使用内置令牌构建 Release，上传 `GameL10n-v1.0.0-win-x64.zip`，发布说明读取更新日志对应版本。版本记录缺失或为空时，在构建前报错。
 
-独立协议检查：
+## 资源静态验证
 
 ```powershell
-cargo run -p gamel10n-core -- formats
-cargo run -p gamel10n-core -- --tools-directory ./tools tool ./request.json
-cargo run -p gamel10n-core -- --tools-directory ./tools tool ./request.json --python-adapter ./adapter.py
+cargo run -p gamel10n-core -- tool ./request.json
+cargo run -p gamel10n-core -- --data-directory <数据目录> audit
 ```
 
-工具入口从 stdout 读取 JSON，请求不使用 `responseFile`。Python 引导会添加入口目录及其父目录到模块搜索路径，兼容并列 `src/` 和 `tools/` 的导入方式，不要求系统 Python 或 pip。
+静态验证检查资源和工具接口，游戏启动、显示和存档需单独实测。
 
-临时样本和调查脚本放在忽略的 `target/` 中。测试优先覆盖身份兼容、元数据保留、缓存恢复、进程协议和实际回填，不追求覆盖率数字。
+## 开发主题索引
 
-只读兼容诊断使用 `audit` 子命令。它检查索引中的项目、已提交提取数量和重复分页的一致性，输出首次加载与缓存读取耗时，不调用解析器或模型，不写回项目目录。
-
-```powershell
-cargo run -p gamel10n-core -- --data-directory '<已有数据根目录>' audit
-```
-
-`adapters/` 同时保存可复用 Python 代码和格式维护参考；其中的 C# 专用实现不编入 Rust 宿主。复制的参考源码或引擎说明不等于该引擎已经在新运行时中完成接入。
+[架构](architecture.md) · [桌面交互](desktop.md) · [模型接口](model-providers.md) · [数据存储](data-storage.md) · [适配器](adapters/README.md) · [扩展协议](adapters/protocol.md)

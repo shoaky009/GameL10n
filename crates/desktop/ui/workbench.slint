@@ -1,0 +1,163 @@
+import { Button, LineEdit, TextEdit, ComboBox, CheckBox, ScrollView, ListView } from "std-widgets.slint";
+import { App, Theme, Label, Caption, Heading, Link, ReportText } from "state.slint";
+
+component SelectableText inherits ReportText {
+    callback activated;
+    changed has-focus => { if self.has-focus { root.activated(); } }
+}
+
+component CopyLink inherits Link {
+    in property <string> label;
+    private property <bool> copied;
+    callback copy;
+    text: root.copied ? "已复制" : root.label;
+    font-size: 12px;
+    width: 56px;
+    clicked => { root.copy(); root.copied = true; reset.restart(); }
+    reset := Timer { interval: 1200ms; triggered => { root.copied = false; } }
+}
+
+export component Workbench inherits FocusScope {
+    property <bool> selection-enabled: !App.loading && !App.selection-busy;
+    property <bool> editor-ready: App.editor-id != "" && root.selection-enabled;
+    // Absolute positioning keeps this clipboard helper's zero size out of page layout constraints.
+    clipboard-buffer := TextInput { x: 0px; y: 0px; visible: false; width: 0px; height: 0px; read-only: true; }
+    function copy-text(value: string) {
+        clipboard-buffer.text = value;
+        clipboard-buffer.select-all();
+        clipboard-buffer.copy();
+        clipboard-buffer.text = "";
+    }
+    key-pressed(event) => {
+        if App.modal != "" { return reject; }
+        if event.modifiers.control && (event.text == "k" || event.text == "K") { search-input.focus(); return accept; }
+        if root.editor-ready && App.editor-editable && event.modifiers.control && (event.text == "s" || event.text == "S") { App.action("save-edit", ""); return accept; }
+        if root.editor-ready && App.editor-editable && event.modifiers.control && event.text == Key.Return { App.action("review-next", ""); return accept; }
+        if root.editor-ready && event.modifiers.alt && event.text == Key.UpArrow { App.action("editor-step", "-1"); return accept; }
+        if root.editor-ready && event.modifiers.alt && event.text == Key.DownArrow { App.action("editor-step", "1"); return accept; }
+        return reject;
+    }
+    VerticalLayout {
+    spacing: 8px;
+    HorizontalLayout {
+        search-input := LineEdit { placeholder-text: "搜索原文、译文、角色或位置"; text <=> App.text-query; edited => { App.action("texts", "0"); } horizontal-stretch: 1; }
+        ComboBox { model: App.resources; current-index <=> App.resource-filter; width: 170px; selected => { App.action("texts", "0"); } }
+        ComboBox { model: ["全部类型", "对白 / 旁白", "角色名", "选项", "菜单 / 界面", "物品 / 装备", "技能 / 天赋", "提示 / 说明"]; current-index <=> App.kind-filter; width: 124px; selected => { App.action("texts", "0"); } }
+        ComboBox { model: ["全部状态", "未翻译", "待校对", "已校对", "手工编辑", "格式问题", "翻译失败", "有候选"]; current-index <=> App.status-filter; width: 120px; selected => { App.action("texts", "0"); } }
+    }
+    HorizontalLayout { spacing: 16px;
+        HorizontalLayout { spacing: 8px;
+            Button { text: "选中本页"; enabled: root.selection-enabled && App.texts.length > 0; clicked => { App.action("select-page", ""); } }
+            Button { text: "全选匹配"; enabled: root.selection-enabled && App.text-total > 0; clicked => { App.action("select-matching", ""); } }
+            Button { text: "清空"; enabled: root.selection-enabled && App.selected-texts > 0; clicked => { App.action("select-clear", ""); } }
+            Button { text: "批量校对"; enabled: root.selection-enabled && App.selected-texts > 0 && App.editor-editable; clicked => { App.action("bulk-review", ""); } }
+        }
+        Rectangle { horizontal-stretch: 1; }
+        HorizontalLayout { spacing: 8px;
+            Button { text: "翻译所选"; enabled: root.selection-enabled && !App.busy && App.selected-texts > 0; clicked => { App.action("translate", "selected"); } }
+            Button { text: "重新翻译所选"; enabled: root.selection-enabled && !App.busy && App.selected-texts > 0; clicked => { App.action("retranslate-dialog", ""); } }
+            Button { text: "试译并生成补丁"; enabled: root.selection-enabled && !App.busy && App.selected-texts > 0; clicked => { App.action("translate", "trial"); } }
+        }
+    }
+    HorizontalLayout { spacing: 12px;
+        VerticalLayout { spacing: 12px;
+            HorizontalLayout { spacing: 16px;
+                Caption { text: App.selection-busy ? "正在更新选区…" : "已选 " + App.selected-texts + " 条"; vertical-alignment: center; wrap: no-wrap; }
+                CheckBox { text: "仅显示已选文本"; checked <=> App.only-selected; toggled => { App.action("texts", "0"); } }
+                Rectangle { horizontal-stretch: 1; }
+            }
+            ListView { vertical-stretch: 1; content-y <=> App.text-scroll-y;
+                for row in App.texts: Rectangle {
+                    height: 116px; background: row.id == App.editor-id ? Theme.tint : Theme.surface;
+                    HorizontalLayout { padding: 8px; spacing: 8px;
+                        CheckBox { checked: row.selected; enabled: root.selection-enabled; toggled => { App.action("toggle-text", row.id); } }
+                        Rectangle { horizontal-stretch: 1;
+                            VerticalLayout { spacing: 5px;
+                                HorizontalLayout { spacing: 8px; height: 20px;
+                                    Rectangle { horizontal-stretch: 1;
+                                        Caption { text: row.location; width: parent.width; height: parent.height; overflow: elide; wrap: no-wrap; }
+                                        TouchArea { enabled: !App.loading; mouse-cursor: pointer; clicked => { App.action("edit-text", row.id); } }
+                                    }
+                                    CopyLink { label: "复制原文"; enabled: row.source != ""; copy => { root.copy-text(row.source); } }
+                                    CopyLink { label: "复制译文"; enabled: row.translation != ""; copy => { root.copy-text(row.translation); } }
+                                }
+                                HorizontalLayout { spacing: 16px; height: 48px;
+                                    Rectangle { horizontal-stretch: 1; min-width: 0px; clip: true;
+                                        SelectableText {
+                                            text: row.source; width: parent.width; height: parent.height; enabled: !App.loading;
+                                            activated => { if row.id != App.editor-id { App.action("edit-text", row.id); } }
+                                        }
+                                    }
+                                    Rectangle { horizontal-stretch: 1; min-width: 0px; clip: true;
+                                        SelectableText {
+                                            text: row.translation; width: parent.width; height: parent.height; enabled: !App.loading;
+                                            activated => { if row.id != App.editor-id { App.action("edit-text", row.id); } }
+                                        }
+                                        if row.translation == "": Caption { text: "尚未翻译"; }
+                                    }
+                                }
+                                Rectangle { height: 18px;
+                                    Caption { text: row.metadata; width: parent.width; height: parent.height; overflow: elide; wrap: no-wrap; }
+                                    TouchArea { enabled: !App.loading; mouse-cursor: pointer; clicked => { App.action("edit-text", row.id); } }
+                                }
+                            }
+                        }
+                    }
+                    Rectangle { y: parent.height - 1px; height: 1px; background: Theme.line; }
+                }
+            }
+            if App.texts.length == 0: Caption {
+                text: App.loading ? "正在加载文本…"
+                    : !App.recognition-ready ? (App.recognition-running
+                        ? "正在识别与提取文本，完成后可在这里翻译与校对。"
+                        : "尚未提取文本，请先进行识别与适配。")
+                    : "没有符合条件的文本。";
+            }
+            HorizontalLayout { spacing: 16px;
+                HorizontalLayout { spacing: 8px;
+                    Button { text: "上一页"; width: 88px; enabled: App.offset > 0 && root.selection-enabled; clicked => { App.action("texts", "previous"); } }
+                    Button { text: "下一页"; width: 88px; enabled: App.offset + App.shown < App.text-total && root.selection-enabled; clicked => { App.action("texts", "next"); } }
+                }
+                Caption { text: "共 " + App.text-total + " 条 · " + (App.text-total == 0 ? 0 : App.offset + 1) + "–" + (App.offset + App.shown); vertical-alignment: center; wrap: no-wrap; }
+                Rectangle { horizontal-stretch: 1; }
+            }
+        }
+        Rectangle { width: 350px; background: Theme.background; border-color: Theme.line; border-width: 1px; border-radius: 5px;
+            VerticalLayout { padding: 14px; spacing: 10px;
+                HorizontalLayout { Heading { text: "文本校对"; } Button { text: "↑"; enabled: root.editor-ready; clicked => { App.action("editor-step", "-1"); } } Button { text: "↓"; enabled: root.editor-ready; clicked => { App.action("editor-step", "1"); } } }
+                ScrollView { vertical-stretch: 1; content-y <=> App.editor-scroll-y;
+                    VerticalLayout { spacing: 10px;
+                        Caption { text: App.editor-location == "" ? "选择一条文本开始校对" : App.editor-location; }
+                        HorizontalLayout {
+                            Label { text: "原文"; font-weight: 600; }
+                            Rectangle { horizontal-stretch: 1; }
+                            CopyLink { label: "复制原文"; enabled: root.editor-ready && App.editor-source != ""; copy => { root.copy-text(App.editor-source); } }
+                        }
+                        SelectableText { text: App.editor-source; }
+                        if App.editor-context != "": VerticalLayout {
+                            Caption { text: "相邻文本与上下文"; }
+                            SelectableText { text: App.editor-context; color: Theme.muted; font-size: 13px; }
+                        }
+                        HorizontalLayout {
+                            Label { text: "译文"; font-weight: 600; }
+                            Rectangle { horizontal-stretch: 1; }
+                            CopyLink { label: "复制译文"; enabled: root.editor-ready && App.editor-text != ""; copy => { root.copy-text(App.editor-text); } }
+                        }
+                        translation-editor := TextEdit { text <=> App.editor-text; height: 148px; enabled: root.editor-ready; read-only: !App.editor-editable; edited => { App.editor-dirty = true; App.action("edit-changed", ""); } }
+                        Caption { text: App.editor-status; }
+                        if App.editor-validation != "": ReportText { text: App.editor-validation; color: App.editor-has-issues ? Theme.error : Theme.secondary; }
+                        if App.editor-reviewed: Button { text: "标为待校对"; enabled: App.editor-editable; clicked => { App.action("unreview", ""); } }
+                        if App.editor-draft != "": VerticalLayout { Caption { text: "模型初稿"; } SelectableText { text: App.editor-draft; color: Theme.muted; font-size: 13px; } }
+                        Caption { text: "相关术语 · 点击插入"; }
+                        for term in App.terms: Button { text: term.source + " → " + term.target; enabled: App.editor-editable; clicked => { translation-editor.focus(); App.action("insert-term", term.target); } }
+                        if App.candidate != "": VerticalLayout { Label { text: "新候选"; } SelectableText { text: App.candidate; } HorizontalLayout { Button { text: "采用候选"; enabled: App.editor-editable; clicked => { App.action("accept-candidate", ""); } } Button { text: "放弃候选"; enabled: App.editor-editable; clicked => { App.action("discard-candidate", ""); } } } }
+                        Button { text: "撤销人工编辑"; enabled: root.editor-ready && App.editor-editable; clicked => { App.action("undo-edit", ""); } }
+                    }
+                }
+                HorizontalLayout { Button { text: "保存译文"; enabled: root.editor-ready && App.editor-editable; clicked => { App.action("save-edit", ""); } } Button { text: "重新翻译并对比"; enabled: root.editor-ready && !App.busy; clicked => { App.action("candidate", ""); } } }
+                Button { text: "确认校对，下一条"; primary: true; enabled: root.editor-ready && App.editor-editable; clicked => { App.action("review-next", ""); } }
+            }
+        }
+    }
+    }
+}

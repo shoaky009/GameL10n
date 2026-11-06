@@ -1,5 +1,9 @@
 # Third-party notices
 
+GameL10n's original code is licensed under GPL-3.0-only; see LICENSE.
+Third-party code, tools and reference materials retain their own licenses and
+copyright notices. The project license does not replace those terms.
+
 AOS/SCR format implementation references:
 
 - AosTools: https://github.com/Lasriel/AosTools
@@ -9,8 +13,9 @@ Applicable MIT notices follow. The Rust desktop application does not distribute 
 
 ## Slint and Rust dependencies
 
-The desktop layer uses Slint 1.18.1 under its upstream alternative license terms:
-GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0.
+The desktop layer uses Slint 1.18.1 under the GPL-3.0-only option of its upstream
+alternative license terms. Slint also offers LicenseRef-Slint-Royalty-free-2.0
+and LicenseRef-Slint-Software-3.0; those alternatives are not selected here.
 See https://slint.dev/license. Rust dependencies retain their respective licenses;
 the dependency versions are recorded in Cargo.lock.
 
@@ -20,7 +25,8 @@ The intelligent adaptation tools can query documentation and source links from
 https://github.com/GalTransl/GalTransl-GalGameReverse-Skill.
 The complete engine-tool integration uses a commit-pinned source archive containing Python
 implementations, catalog, engine guides, LICENSE and provenance notices in
-`tools/engine-tools`. This library is not yet included by the Rust packaging script. Previously installed versions may remain in the data
+`third_party/engine-tools`. The application package includes these pinned libraries under
+`tools/engine-tools`. Previously installed versions may remain in the data
 directory's shared `extensions/engine-tools` library. These materials retain
 their upstream licenses, including GPLv3 and file-specific third-party notices.
 Adapters referring to this library must meet the corresponding source and distribution

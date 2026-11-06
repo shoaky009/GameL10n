@@ -1,33 +1,34 @@
 # GameL10n
 
-<p align="center"><img src="logo.png" alt="GameL10n" width="280" /></p>
+<p align="center">
+  <img src="docs/assets/logo.png" alt="GameL10n logo" width="360" />
+</p>
 
-游戏文本本地化工具，使用 Rust 主宿主、Python 解析脚本和可替换的 Slint 桌面界面。翻译、引擎能力和项目管理分别独立；Core 不依赖任何 UI 框架。
+GameL10n 是面向游戏文本汉化的 Windows 桌面工具，提供从资源识别、文本提取到 AI 翻译、译文校对和汉化补丁生成的完整流程。
 
-当前可用：游戏项目登记与检索、旧版提取结果只读浏览、已解包脚本的 VNTextPatch 原生工具提取、原文字节回填检查、提取缓存、文本分页检索、通过 CLI 回填指定译文，以及 Python JSON CLI 调用。LLM 翻译、完整智能适配、校对编辑和补丁安装尚未接入。
+## 主要功能
+
+- **识别与智能适配**：复用已有引擎适配器，通过 AI 分析未知资源格式并开发新适配器。
+- **翻译与校对**：批量翻译、选段试译、译文编辑、术语管理、译文复用与断点续译。
+- **补丁制作**：生成、安装汉化补丁，并记录游戏内的验证结果。
+- **多游戏管理**：独立管理多个游戏项目，复用适配器和同类引擎经验。
+- **模型配置**：支持远程 API 和本地翻译模型，分析与翻译可分别配置。
 
 ## 快速开始
 
-需要 Rust 1.92 或更高版本，以及 Windows C++ 链接工具。工具目录包含 `tools/vntextpatch/GameL10n.VnTextPatch.exe` 和 `tools/python/python.exe`。VNTextPatch 使用 NativeAOT，不依赖外置 .NET 运行时；从源码重建该工具另需 .NET SDK 和 NativeAOT 构建工具。
-
-```powershell
-cargo run -p gamel10n-desktop -- --tools-directory ./tools
-```
-
-在左侧添加游戏目录，选择脚本格式并点击“提取脚本文本”。这里只处理已经解包的脚本；各格式的封包、编码和中文显示条件见[脚本格式说明](docs/adapters/engines/vntextpatch.md)。打开已有项目只读取保存结果，不自动重新提取。
-
-需要单独的数据目录时，加上 `--data-directory ./target/data`。无界面入口：
-
-```powershell
-cargo run -p gamel10n-core -- --help
-cargo run -p gamel10n-core -- formats
-```
+1. 从 [GitHub Releases](https://github.com/shoaky009/GameL10n/releases) 下载并解压，运行 `GameL10n.exe`，在“API 与任务默认值”中配置模型服务。
+2. 点击“添加游戏”选择安装目录，在“识别与适配”中提取文本。
+3. 在“翻译与校对”中选段试译或批量翻译，并编辑、校对译文。
+4. 生成补丁，在“补丁与验证”中安装并进入游戏确认效果。
 
 ## 文档
 
-- [文档索引](docs/README.md)
-- [架构与模块边界](docs/architecture.md)
-- [开发、构建与可用功能](docs/development.md)
-- [数据格式与兼容边界](docs/data-storage.md)
-- [引擎与脚本格式](docs/adapters/README.md)
-- [第三方许可证](THIRD-PARTY-NOTICES.md)
+- [支持的引擎与资源格式](docs/adapters/README.md)
+- [模型接口配置](docs/model-providers.md)
+- [更新日志](CHANGELOG.md)
+- [开发与构建](docs/development.md)
+- [全部文档](docs/README.md)
+
+## 许可
+
+项目采用 [GPL-3.0-only](LICENSE)。第三方组件许可见[第三方许可证](THIRD-PARTY-NOTICES.md)。

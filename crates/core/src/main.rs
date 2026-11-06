@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, path::PathBuf};
 use clap::{Parser, Subcommand};
 use gamel10n_core::{Application, ToolPaths, default_data_directory};
 use gamel10n_engines::{
-    CancellationToken,
+    CancellationToken, EngineService, PackageManifest,
     protocol::AdapterRequest,
     python::PythonAdapter,
     vntextpatch::{FORMATS, VnTextPatch},
@@ -45,6 +45,18 @@ enum Operation {
         #[arg(long, default_value_t = 0)]
         offset: usize,
     },
+    /// 只读查看当前翻译、校对状态和筛选摘要，不调用模型或写入项目。
+    Workbench {
+        project_id: String,
+        #[arg(long, default_value = "")]
+        query: String,
+        #[arg(long, default_value = "all")]
+        status: String,
+        #[arg(long, default_value_t = 0)]
+        offset: usize,
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+    },
     /// 列出原生脚本解析器键。
     Formats,
     /// 只读检查项目元数据及已有提取缓存，输出数量和加载耗时，不调用解析器或模型。
@@ -54,6 +66,9 @@ enum Operation {
         request: PathBuf,
         #[arg(long)]
         python_adapter: Option<PathBuf>,
+        /// 校验发布包及其固定依赖后执行。
+        #[arg(long, conflicts_with = "python_adapter")]
+        package: Option<PathBuf>,
     },
 }
 
@@ -69,7 +84,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let arguments = Arguments::parse();
     let tools = match arguments.tools_directory {
         Some(root) => ToolPaths::new(root),
-        None => ToolPaths::beside_executable()?,
+        None => ToolPaths::for_application()?,
     };
     if let Operation::Formats = arguments.command {
         println!("{}", FORMATS.join("\n"));
@@ -78,6 +93,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     if let Operation::Tool {
         request,
         python_adapter,
+        package,
     } = arguments.command
     {
         let request: AdapterRequest = read_json(&request)?;
@@ -88,7 +104,20 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             return Err("工具入口使用 stdout JSON，请省略 responseFile。".into());
         }
         let cancellation = CancellationToken::new();
-        let response = if let Some(entry) = python_adapter {
+        let response = if let Some(package) = package {
+            let (manifest, runtime) = PackageManifest::load_runtime(&package)?;
+            let handle = manifest.handle(&runtime)?;
+            EngineService::new(tools.asset_root(), tools.clone())
+                .with_shared_directory(
+                    arguments
+                        .data_directory
+                        .clone()
+                        .unwrap_or_else(default_data_directory)
+                        .join("extensions/engine-tools"),
+                )
+                .execute(&handle, &request, &cancellation)
+                .await?
+        } else if let Some(entry) = python_adapter {
             PythonAdapter::new(&tools, &entry)?
                 .execute(&request, &cancellation)
                 .await?
@@ -142,6 +171,27 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     &serde_json::json!({"total":page.total,"offset":page.offset,"units":page.units})
                 )?
             );
+        }
+        Operation::Workbench {
+            project_id,
+            query,
+            status,
+            offset,
+            limit,
+        } => {
+            let page = app
+                .workbench_page(
+                    &project_id,
+                    &gamel10n_core::workbench::WorkbenchFilter {
+                        query,
+                        status,
+                        ..Default::default()
+                    },
+                    offset,
+                    limit,
+                )
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&page)?);
         }
         Operation::Audit => {
             let mut results = Vec::new();

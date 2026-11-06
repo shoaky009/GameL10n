@@ -1,7 +1,13 @@
 //! Shared text contracts and file primitives, independent of engines and desktop UI.
 #![forbid(unsafe_code)]
 
+pub mod compatibility;
+pub mod edits;
+pub mod execution;
 pub mod files;
+pub mod provider;
+pub mod storage;
+pub mod text;
 
 use std::collections::HashSet;
 

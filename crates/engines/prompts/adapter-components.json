@@ -1,0 +1,221 @@
+[
+  {
+    "id": "windows-font-metrics",
+    "name": "Windows 字体覆盖与尺寸对比",
+    "scope": "仅用于分析：检查 GDI 字体缺字、实际名称、尺寸和基线；可选 GDI+ 创建路径对比，区分 GDI 注册与私有字体集合。临时加载工作副本 TTF/TTC/OTF，不安装字体、不运行游戏、不修改资源。",
+    "origin": "应用内置 Python ctypes / Windows GDI / GDI+；仅使用标准库。辅助脚本在 work/，不进入适配器发布包或游戏目录。",
+    "api": "copy_adapter_components 后，run_engine_python(script='work/windows_font_metrics.py', stdin=JSON)。fonts 为 1..4 项 {face,file?,height?,width?,weight?,italic?,charset?,pitchAndFamily?}，首项为原字体，后续为候选；height 默认 -24，必须使用引擎实际有符号高度和宽度、字重。file 为暂存字体。text 为 1..512 字符，包含有代表性的共同汉字/假名、标点、ASCII 和中文试译。返回 selectedFace、缺字、textMetrics（height/ascent/descent/internalLeading/externalLeading/emHeight）、实际字形高度及有限样例；inkTop/inkBottom 相对基线，向下为正。comparisons 按首项对比共同覆盖字符，返回 advanceRatio/inkWidthRatio/inkHeightRatio（逐字候选÷原字体的中位数）、emHeightRatio、baselineDelta/cellHeightDelta（像素）。缺字不参与对比，空白字符或空轮廓不参与字形比率；无可比样本为 null，应检查样本数。height>0 为含内部留白的字框高度，height<0 为字符高度；数值相同不等于视觉等大。非 BMP 字符列为未检查；异名可能是本地化别名，独立测量不证明原游戏实际选中该字体。 游戏使用 GDI+ 时，在请求顶层加 renderer:\"gdiplus\"；每项 gdiplus 报告 fromDC、fromLogfontA/W、byName、privateCollection 的原生 status/statusName 与 created。后者成功不代表游戏使用了该集合；前者失败时先修正实际创建路径，不按 NotTrueTypeFont 推断文件格式或反复换字体。默认 renderer=\"gdi\" 保持原探针行为。",
+    "example": "// Confirm the original face/style/weight and engine request; preserve it if Chinese coverage is sufficient.\n// Otherwise compare a few already available, license-compatible fonts of the same serif/sans, weight and mono/proportional style.\nrun_engine_python(script=\"work/windows_font_metrics.py\", stdin='{\"fonts\":[{\"face\":\"Original Font\",\"file\":\"work/unpacked/font.ttf\",\"height\":-24},{\"face\":\"Suitable Chinese Font\",\"file\":\"src/tools/candidate.ttf\",\"height\":-24}],\"text\":\"原文かな、。简体译文喂么过这试！？ABC123\"}')\n// If width or visible height differs substantially, try a closer candidate or adjust the confirmed font request and remeasure.\n// Ratios are evidence, not a universal multiplier: keep measurement/rendering consistent and check baseline, line spacing and wrapping.\n// Do not accept unchanged numeric size or a warning as size preservation; avoid exhaustive font search or pixel-perfect reverse engineering.\n// Do not insert spaces, alter translations, globally increase pitch, or apply QLIE-only font metrics to other engines.\n// Report the remaining in-game checks through a small trial; local metrics do not prove game rendering.",
+    "files": [
+      {
+        "name": "windows_font_metrics.py",
+        "path": "work/windows_font_metrics.py",
+        "binary": false
+      }
+    ],
+    "engineFamilies": [
+      "kaguya",
+      "kirikiri",
+      "valkyria"
+    ]
+  },
+  {
+    "id": "kaguya-tblstr",
+    "name": "KaGuYa TBLSTR 对齐文本表",
+    "scope": "ARC/ARI 配对、四字节对齐、XOR-FF 与严格 CP932 的 TBLSTR 变体；核对类型 0/2/3 与主记录索引。只确认表结构，不代表其他脚本、中文运行或整个引擎兼容。",
+    "origin": "根据已验证的 TBLSTR 解析与原字节回填实现整理；Python 标准库，不依赖游戏名称或固定资源路径。",
+    "api": "run_engine_python(script='src/tools/kaguya_tblstr.py', stdin=JSON)。JSON 为 {operation:'probe',input:'resources/table.arc',index:'resources/table.ari'}，可选 sampleLimit=0..2。返回结构、索引、编码、原字节回环与中文编码限制。适配器可直接复用 read_table/units/rebuild；未修改记录保留原字节，类型语义仍须当前样本确认。",
+    "example": "copy_adapter_components(ids=[\"kaguya-tblstr\"])\nrun_engine_python(script=\"src/tools/kaguya_tblstr.py\", stdin='{\"operation\":\"probe\",\"input\":\"resources/table.arc\",\"index\":\"resources/table.ari\"}')\n# In an adapter: from tools.kaguya_tblstr import read_table, units, rebuild\n# Chinese output needs an independently verified runtime route; inspect sjis-tunnel only when applicable.",
+    "files": [
+      {
+        "name": "kaguya_tblstr.py",
+        "path": "src/tools/kaguya_tblstr.py",
+        "binary": false
+      }
+    ],
+    "engineFamilies": [
+      "kaguya"
+    ]
+  },
+  {
+    "id": "xp3-adler",
+    "name": "XP3 Adler 派生过滤器检测",
+    "scope": "标准 XP3 索引、28 字节 segm 与已知 Adler 派生 XOR 变体。至少两个不同受保护成员的解压长度与明文 Adler 一致才确认过滤器；不推断 KS 标签、注音、覆盖顺序或游戏运行兼容。",
+    "origin": "根据已验证的 XP3 Adler 派生过滤流程整理；Python 标准库，只读索引与有界成员，不重包资源。",
+    "api": "run_engine_python(script='src/tools/xp3_adler.py', stdin=JSON)。JSON 为 {operation:'probe',input:'resources/scripts.xp3'}，可选 members（最多 6 个精确成员名）、sampleLimit=0..2。返回过滤器证据、未知索引块及保留要求。generate_key(adler) 与 apply_key_in_place(data,offset,count,key,member_offset=...) 可用于当前适配器；单独分段 buffer 必须传成员内位置。",
+    "example": "copy_adapter_components(ids=[\"xp3-adler\"])\nrun_engine_python(script=\"src/tools/xp3_adler.py\", stdin='{\"operation\":\"probe\",\"input\":\"resources/scripts.xp3\"}')\n# matched confirms the tested filter only. Preserve unknown index metadata before any rebuild.\n# Check custom script consumers separately; an archive filter cannot establish their semantics.",
+    "files": [
+      {
+        "name": "xp3_adler.py",
+        "path": "src/tools/xp3_adler.py",
+        "binary": false
+      }
+    ],
+    "engineFamilies": [
+      "kirikiri"
+    ]
+  },
+  {
+    "id": "sjis-tunnel",
+    "name": "VNTextProxy SJIS 隧道编码",
+    "scope": "VNTextProxy v0.0.41 的 3422 个扩展 BMP 字符映射；复用已有映射，严格编解码。引擎字符遍历、GDI 调用、字体、旁加载和转区须分别核对。不会修改 EXE、安装字体或下载运行文件。",
+    "origin": "VNTextProxy v0.0.41 兼容映射算法（arcusmaximus，MIT）；在 Python 中提供独立编解码与容量检查。",
+    "api": "from tools.sjis_tunnel import Tunnel。Tunnel(existing_mapping_bytes).encode/decode/serialize 保持已有码位。JSON CLI 为 {operation:'check',texts:[...] ,mappingInput?:'work/sjis_ext.bin'}，只在内存检查容量和往返，不输出或写入完整映射。另用 inspect_pe_imports 核对候选调用，windows-font-metrics 检查字体；静态导入命中不代表游戏能使用隧道尾字节。",
+    "example": "copy_adapter_components(ids=[\"sjis-tunnel\"])\nrun_engine_python(script=\"src/tools/sjis_tunnel.py\", stdin='{\"operation\":\"check\",\"texts\":[\"原文かな\",\"简体中文译文\"]}')\n# Collect ALL final translated and preserved text before serializing the map into patch output.\n# Use a hash-pinned VNTextProxy runtime with its license only after checking the actual character path.",
+    "files": [
+      {
+        "name": "sjis_tunnel.py",
+        "path": "src/tools/sjis_tunnel.py",
+        "binary": false
+      }
+    ],
+    "engineFamilies": [
+      "kaguya",
+      "valkyria"
+    ]
+  },
+  {
+    "id": "vntextproxy-runtime",
+    "name": "VNTextProxy 固定运行文件准备",
+    "scope": "官方 v0.0.41 的 Windows x86 PE32 代理 DLL 准备与许可复用；按已确认的 EXE 导入/加载链显式选择一个代理，不适用于 x64。只做静态准备，字符遍历、GDI/Direct2D、字体、旁加载和转区仍须当前游戏验证。 不支持 GDI+ 字体创建；GDI 私有加载成功不能作为 GDI+ 字体可用的依据。",
+    "origin": "arcusmaximus/VNTranslationTools v0.0.41 官方 ZIP（MIT，含 Microsoft Detours MIT）；Python 标准库验证整体与成员 SHA256，只提取白名单单个 DLL，不捆绑整个工具包。",
+    "api": "run_engine_python(script='src/tools/vntextproxy_runtime.py',stdin=JSON)。默认 {operation:'describe'} 返回固定下载 URL/哈希、8 个 DLL 成员名、映射和字体规则。{operation:'check',archive:'work/vntools.zip',proxy:'d3d9.dll'} 只读检查；prepare 再传 output:'src/runtime/vntextproxy'，仅写单个 DLL 与 licenses/VNTextProxy-LICENSE.txt，已有相同文件复用、不同文件拒绝，output 必须是当前工作目录内安全相对路径。官方 ZIP SHA256=37fc44f2c2fb73190b783df44bb58b60ce44e70131942f262ee3bf17dfa12439；先由 download_tool 下载 describe.release.url 并固定该哈希。无 INI 配置；sjis_ext.bin 在 EXE 旁，为 sjis-tunnel 组件生成的无 BOM 有序 UTF16LE 映射。字体可选，在 EXE 旁按 .ttf/.ttc/.otf 顺序首个匹配，文件名首个点前需匹配内部 face；不下载字体、不自动转区。",
+    "example": "copy_adapter_components(ids=[\"vntextproxy-runtime\"])\nrun_engine_python(script=\"src/tools/vntextproxy_runtime.py\",stdin='{\"operation\":\"describe\"}')\n# Download the fixed official ZIP with download_tool; inspect EXE imports before choosing a proxy.\nrun_engine_python(script=\"src/tools/vntextproxy_runtime.py\",stdin='{\"operation\":\"check\",\"archive\":\"work/vntools.zip\",\"proxy\":\"d3d9.dll\"}')\n# Only after the actual loading path is confirmed:\nrun_engine_python(script=\"src/tools/vntextproxy_runtime.py\",stdin='{\"operation\":\"prepare\",\"archive\":\"work/vntools.zip\",\"proxy\":\"d3d9.dll\",\"output\":\"src/runtime/vntextproxy\"}')\n# Register the returned files and preserve their paths/licenses when copying them beside the EXE.\n# runtimeTested=false: static success still requires current-game loading and rendering verification.",
+    "files": [
+      {
+        "name": "vntextproxy_runtime.py",
+        "path": "src/tools/vntextproxy_runtime.py",
+        "binary": false
+      },
+      {
+        "name": "VNTextProxy-LICENSE.txt",
+        "path": "src/tools/VNTextProxy-LICENSE.txt",
+        "binary": false
+      }
+    ],
+    "engineFamilies": [
+      "kaguya",
+      "yuris",
+      "valkyria"
+    ]
+  },
+  {
+    "id": "gdiplus-font-bridge",
+    "name": "GDI+ 私有字体创建桥接",
+    "scope": "Windows x86 PE32 普通导入的 GdipCreateFontFromDC/LogfontA/W，显式匹配字体；适用于 GDI 字体可用、GDI+ 原入口失败而 privateCollection 成功的路径。若同时普通导入 GdipGetFamily，自动配套重定向，以保留私有家族查询与释放的引用契约；系统字体透传。不支持动态/延迟导入、签名/CLR 程序、特殊字体宽度或旋转变换。不运行游戏或自动证明显示正常。",
+    "origin": "GameL10n.FontBridge 独立 MIT Rust 原生组件，预编译 Windows x86 DLL。Python 标准库重定向导入，保留原 IAT 地址、代码、重定位和 ASLR，不生成机器码。",
+    "api": "run_engine_python(script='src/tools/gdiplus_font_bridge.py',stdin=JSON)。inspect 接受 input 并返回 sha256/constructors；prepare 接受 input、expectedSha256、relativePath（保留原程序名）、functions（明确选择已确认构造入口）、fontFile、fontFace、可选 matchFace 和 mode（fallback 或 replace-matching）、outputDirectory。生成原名程序、DLL、UTF16LE INI、字体及组件许可，返回 files/哈希。fallback 仅在匹配字体且原入口状态14/16时替换；replace-matching 显式替换匹配字体；其他字体透传。字号从实际 GDI emHeight 转换，原有 GDI 注册/编码处理仍须保留。字体许可另行随补丁保存。适配器 build 可导入 prepare，并使用独立输出子目录后按返回清单复制到补丁。",
+    "example": "copy_adapter_components(ids=[\"gdiplus-font-bridge\"])\nrun_engine_python(script=\"src/tools/gdiplus_font_bridge.py\",stdin='{\"operation\":\"inspect\",\"input\":\"resources/Game.exe\"}')\n# First confirm the actual creation call, font face and windows-font-metrics renderer=gdiplus results.\n# Use the returned sha256; do not pass a guessed hash or every constructor by default.\nrun_engine_python(script=\"src/tools/gdiplus_font_bridge.py\",stdin='{\"operation\":\"prepare\",\"input\":\"resources/Game.exe\",\"expectedSha256\":\"<inspect sha256>\",\"relativePath\":\"Game.exe\",\"functions\":[\"GdipCreateFontFromDC\"],\"fontFile\":\"src/tools/candidate.ttf\",\"fontFace\":\"Candidate Family\",\"mode\":\"fallback\",\"outputDirectory\":\"work/font-bridge\"}')\n# Keep runtime files with the original-name EXE. No second launch entry is needed.\n# runtimeTested=false: private creation success is not game rendering, layout or save compatibility.",
+    "files": [
+      {"name":"gdiplus_font_bridge.py","path":"src/tools/gdiplus_font_bridge.py","binary":false},
+      {"name":"GameL10n.FontBridge.dll","path":"src/tools/GameL10n.FontBridge.dll","binary":true},
+      {"name":"GameL10n.FontBridge.LICENSE","path":"src/tools/GameL10n.FontBridge.LICENSE","binary":false}
+    ],
+    "engineFamilies": ["valkyria"]
+  },
+  {
+    "id": "kirikiri-scn-text",
+    "name": "Kirikiri PSB / KAGEX SCN 文本",
+    "scope": "已解密、无资源的 PSB v2/v3 SCN；显式选择 language_index，内部 speaker ID 默认仅作上下文。只提取正文、显示名、选项和场景标题，派生朗读/搜索缓存不送翻译。未知元组、控制语法或缓存规则会明确失败，不猜测回填。",
+    "origin": "连接固定 GalTransl python.engines.kirikiri_psb / kirikiri_scn 语义读写器；不复制或改写 PSB 编解码算法。",
+    "api": "use_engine_reference 固定共享依赖后，from kirikiri_scn_text import SceneText, tokens。SceneText(data, language_index=0, speaker_name=False).fields 为 (path,text,kind,node)；build({path:translation}) 返回 bytes 或无修改时 None，自动重算缓存/可见长度，复提核对修改与保留字段。语义路径用于稳定 ID。容器过滤、资源覆盖顺序、字体和游戏运行另行验证。",
+    "example": "// After copy_adapter_components(ids=[\"kirikiri-scn-text\"]), verify one staged plain SCN without writing a wrapper:\nrun_engine_python(script=\"src/tools/kirikiri_scn_text.py\", stdin='{\"operation\":\"verify\",\"input\":\"work/sample.scn\",\"speakerName\":false}')\n// In src/tools/adapter.py:\nfrom kirikiri_scn_text import SceneText\nscene = SceneText(plain_scn_bytes, language_index=0, speaker_name=False)\n# Existing fields such as scenes/0/texts/1/1/0/1 keep their IDs. Do not translate derived caches separately.\npatched = scene.build(translations_by_semantic_path)",
+    "files": [
+      {
+        "name": "kirikiri_scn_text.py",
+        "path": "src/tools/kirikiri_scn_text.py",
+        "binary": false
+      }
+    ],
+    "engineFamilies": [
+      "kirikiri"
+    ]
+  },
+  {
+    "id": "kirikiri-tft",
+    "name": "KiriKiri TFT 预渲染字库补字",
+    "scope": "Unicode TFT v1，16 位 BMP 字码与 0..64 灰度位图。保留原字形、度量及未知字节，仅追加缺字；解析和覆盖检查跨平台，生成新字形需要 Windows GDI。须独立确认游戏实际加载的字库、Unicode 文本路径及对应字号，不按文件名推断兼容。",
+    "origin": "根据 krkrz visual/PrerenderedFont.h、PrerenderedFont.cpp 的 TFT v1 格式实现；Python 标准库与 Windows GDI，无固定游戏路径、字体或在线依赖。",
+    "api": "run_engine_python(script='src/tools/kirikiri_tft.py', stdin=JSON)。只读 probe 接受 {operation:'probe',input:'work/original.tft',text:'原文和中文样本',sampleLimit:2}，返回格式、覆盖和至多两条字形度量；不加载字体、不写文件。适配器可导入 index/bitmap/supplement/GdiRenderer：supplement(data, codepoints, renderer) 返回 bytes，仅为缺字调用 renderer.glyph(code)，不改变已有记录和位图，无缺字返回原字节。GdiRenderer(font_file, face, size, weight=400, italic=False) 用 with 释放私有字体与 GDI 对象；size 是明确的正 em 像素高度，不从字库文件名或 GDI 正字号猜测。字体文件及其许可由适配器准备，补字结果不证明原游戏显示。",
+    "example": "copy_adapter_components(ids=[\"kirikiri-tft\"])\nrun_engine_python(script=\"src/tools/kirikiri_tft.py\", stdin='{\"operation\":\"probe\",\"input\":\"work/original.tft\",\"text\":\"原文かな、。简体译文！？ABC123\",\"sampleLimit\":2}')\n# In the adapter, after confirming the actual TFT consumer, style and pixel height:\nfrom tools.kirikiri_tft import GdiRenderer, supplement\n# Include final translations AND preserved text used by this font.\nwith GdiRenderer(font_file, face, pixel_height) as renderer:\n    patched = supplement(original_tft, required_bmp_codepoints, renderer)\n# Probe shared glyph metrics to select a matching font; preserve per-font sizing and routing.\n# Archive discovery/rebuilding and script font bindings remain the adapter's responsibility.",
+    "files": [
+      {
+        "name": "kirikiri_tft.py",
+        "path": "src/tools/kirikiri_tft.py",
+        "binary": false
+      }
+    ],
+    "engineFamilies": [
+      "kirikiri"
+    ]
+  },
+  {
+    "id": "cp932-glyph-map",
+    "name": "CP932 字形映射",
+    "scope": "确定性分配、保留原文码位、已有映射复用、严格编解码；不修改 EXE 或字体。调用者必须确认允许码位能被原引擎遍历、查字和显示。",
+    "origin": "基于现有 QLIE / System4 适配器的映射流程整理；增加全补丁保留文本及严格往返检查。",
+    "api": "from tools.gamel10n_host import component。glyph_plan 接受 texts、allowedSlots、preservedTexts、map，返回 map（码位→真实 Unicode，JSON 键为十进制字符串）；glyph_encode 接受 texts/map，返回 base64 values；glyph_decode 接受 values/map，返回 texts。一次处理完整文本单元，按批次调用预编译组件。",
+    "example": "from tools.gamel10n_host import component\n# Include ALL final logical text and reserve known UI/non-extracted literals.\n# allowedSlots needs runtime + glyph evidence; CP932 support alone is insufficient.\nmapping = component(\"glyph_plan\", request, texts=all_output_texts, allowedSlots=verified_slots,\n                    preservedTexts=other_preserved_text, map=existing_slot_to_unicode)[\"map\"]\nencoded = component(\"glyph_encode\", request, texts=output_texts, map=mapping)[\"values\"]\n# Persist mapping with output fonts/resources; FNL maps use the reverse direction: convert explicitly.",
+    "files": [
+      {
+        "name": "gamel10n_host.py",
+        "path": "src/tools/gamel10n_host.py",
+        "binary": false
+      }
+    ],
+    "engineFamilies": []
+  },
+  {
+    "id": "qlie-sfnt-font",
+    "name": "QLIE SFNT 字体模板",
+    "scope": "仅适用于已确认的 QLIE system 字体列表、MS Gothic/Mincho 字高与半角宽度策略。支持原模板使用的单字体 SFNT、cmap 4/12；不是 TTC/WOFF 通用字体工具。保留轮廓，调整映射、名称和该模板的度量。",
+    "origin": "tools/GameL10n.VnTextPatch/Components/QlieFont.cs；用于 QLIE system 字体布局，其他布局需另行验证。",
+    "api": "component('qlie_font', request, input=source_font, output=output_font, family=family, map=slot_to_unicode)。引擎配置完整名为 family + \" Regular\"，须与原转区路径的枚举结果一致。字体文件及其许可由适配器准备。",
+    "example": "from tools.gamel10n_host import component\ncomponent('qlie_font', request, input=source_font, output=output_font, family=family_name, map=slot_to_unicode)",
+    "files": [
+      {
+        "name": "gamel10n_host.py",
+        "path": "src/tools/gamel10n_host.py",
+        "binary": false
+      }
+    ],
+    "engineFamilies": []
+  },
+  {
+    "id": "system4-fnl-glyph",
+    "name": "System4 FNL 位图字形模板",
+    "scope": "Windows GDI / SimSun / BMP 字符；输出底朝上、每行按 4 字节对齐的单色位图，按原字形包围框缩放。适用于已确认的 FNL 位图布局，不提供 FNL 封包或运行时码位修补。",
+    "origin": "tools/GameL10n.VnTextPatch/Components/GlyphRasterizer.cs；检查字体替换及非空字形。",
+    "api": "component('render_glyphs', request, glyphs=[{character,width,height,reference}]) 返回 base64 values。reference 为原字形位图的 base64；一次批量生成多个字形。需要本机宋体，字体不随组件分发。",
+    "example": "from tools.gamel10n_host import component\nglyphs = component('render_glyphs', request, glyphs=[dict(character='译', width=cell_width, height=cell_height, reference=reference_base64)])['values']",
+    "files": [
+      {
+        "name": "gamel10n_host.py",
+        "path": "src/tools/gamel10n_host.py",
+        "binary": false
+      }
+    ],
+    "engineFamilies": []
+  },
+  {
+    "id": "qlie-japanese-font-launcher",
+    "name": "QLIE 日语转区与字体启动器",
+    "scope": "独立 Windows x64 NativeAOT EXE，无共享 CLR；读取 qlie-l10n/launch.xml，临时加载字体并保留日语 Locale Emulator 路径。检查 QLIE SHIFTJIS_CHARSET 完整字体名；等待 LEProc/游戏退出后卸载字体。仅适用 LEProc 等待实际游戏的已确认启动链。",
+    "origin": "tools/GameL10n.QlieLauncher/QlieLauncher.cs；直接提供同源码编译的启动器，不调用分析 API 编写或编译。",
+    "api": "将 tools/QlieLauncher.exe 复制到补丁的启动入口并声明 build.launchExecutable。launch.xml 的 executable、font.file 相对启动器目录；原 EXE 的 .le.config 保持原样。face 必须与字体内部 name ID 4 一致。Windows x64 NativeAOT，无需共享 .NET 运行时；需要转区时使用玩家本机 Locale Emulator。",
+    "example": "// Build output example: 启动汉化.exe (copied from tools/QlieLauncher.exe), qlie-l10n/launch.xml, generated fonts.\n// XML values must be escaped with an XML writer. Filenames below are placeholders, not discovery rules.\n<launch executable=\"game.exe\"><font file=\"qlie-l10n/Serif.ttf\" face=\"Patch Serif Regular\" /></launch>\n// Copy the original game/config resources as required by the protocol; test_adapter still gates publication.",
+    "files": [
+      {
+        "name": "QlieLauncher.cs",
+        "path": "src/tools/QlieLauncher.cs",
+        "binary": false
+      },
+      {
+        "name": "QlieLauncher.exe",
+        "path": "src/tools/QlieLauncher.exe",
+        "binary": true
+      }
+    ],
+    "engineFamilies": []
+  }
+]

@@ -1,15 +1,28 @@
 //! Application services shared by any UI or command-line host.
 #![forbid(unsafe_code)]
 
+pub mod adapter_feedback;
 mod application;
+pub mod catalog;
+pub mod cleanup;
+pub mod engine_tasks;
+pub mod game_directory;
 mod legacy;
+pub mod logs;
+pub mod patching;
+mod project_views;
 pub mod projects;
+pub mod relocation;
+pub mod settings;
+pub mod translation_tasks;
+pub mod workbench;
 
 use thiserror::Error;
 
 pub use application::{AppEvent, Application, StoredAnalysis, TaskState, TextPage};
 pub use gamel10n_engines::{CancellationToken, ToolPaths};
 pub use gamel10n_translation::TranslationUnit;
+pub use project_views::ProjectSnapshot;
 pub use projects::{GameProject, ProjectSummary, default_data_directory};
 
 pub fn native_formats() -> &'static [&'static str] {
@@ -24,6 +37,8 @@ pub enum CoreError {
     Engine(#[from] gamel10n_engines::EngineError),
     #[error(transparent)]
     Text(#[from] gamel10n_translation::TextError),
+    #[error(transparent)]
+    Storage(#[from] gamel10n_translation::storage::StorageError),
     #[error("文件操作失败：{0}")]
     Io(#[from] std::io::Error),
     #[error("后台操作失败：{0}")]

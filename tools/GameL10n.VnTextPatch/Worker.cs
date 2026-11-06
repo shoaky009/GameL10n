@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using VNTextPatch.Shared;
+using VNTextPatch.Shared.Scripts.Yuris;
 
 namespace GameL10n.VnTextPatch;
 
@@ -59,6 +60,7 @@ public static class Worker
         GlobalVariables.WriteUtf8 = false;
         GlobalVariables.jisStrings.Clear();
         Format format = Format.Get(request.Format);
+        YurisTextCodecs? codecs = YurisTextCodecs.Create(format.Key, request.YurisEncoding);
         string source = Path.GetFullPath(request.SourceDirectory);
         if (!Directory.Exists(source)) throw new DirectoryNotFoundException("找不到源脚本目录。");
         string[] files = (request.ResourceFiles ?? Directory.EnumerateFiles(source, "*", SearchOption.AllDirectories)
@@ -71,15 +73,15 @@ public static class Worker
         string[] scripts = files.Where(format.Matches).Where(p => !IsCompanionOnly(format, p)).ToArray();
         return request.Operation switch
         {
-            "probe" => Probe(format, source, files, scripts),
-            "extract" => new Response(Extraction: new Extraction(Extract(format, source, scripts), Warnings(format))),
-            "build" => Build(format, source, files, scripts, request),
-            "validate" => Validate(format, source, files, scripts, request),
+            "probe" => Probe(format, source, files, scripts, codecs),
+            "extract" => new Response(Extraction: new Extraction(Extract(format, source, scripts, request.IncludeYurisSources, codecs), Warnings(format))),
+            "build" => Build(format, source, files, scripts, request, codecs),
+            "validate" => Validate(format, source, files, scripts, request, codecs),
             _ => throw new InvalidDataException("不支持该脚本操作。")
         };
     }
 
-    private static Response Probe(Format format, string source, string[] files, string[] scripts)
+    private static Response Probe(Format format, string source, string[] files, string[] scripts, YurisTextCodecs? codecs)
     {
         var selected = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         bool foundText = false;
@@ -89,7 +91,7 @@ public static class Worker
             try
             {
                 if (!HasProbeEvidence(format, source, script)) continue;
-                var loaded = Load(format, source, script);
+                var loaded = Load(format, source, script, codecs: codecs);
                 if (format.Key == "TmrHiroAdvSystemText" && !loaded.Strings.Any(s => LooksLikeNarrative(s.Text))) continue;
                 string[] companions = Companions(format, files, script).ToArray();
                 if (format.Key == "Softpal" && companions.Length != 2) continue;
@@ -110,24 +112,25 @@ public static class Worker
         return new Response(Probe: new Probe(id, id, "1.0.1", $"VNTextPatch · {format.Key}", selected.Order(StringComparer.Ordinal).ToArray(), warnings));
     }
 
-    private static List<Unit> Extract(Format format, string source, string[] scripts)
+    private static List<Unit> Extract(Format format, string source, string[] scripts, bool includeYurisSources, YurisTextCodecs? codecs)
     {
         var units = new List<Unit>();
         foreach (string script in scripts)
         {
-            var loaded = Load(format, source, script);
+            var loaded = Load(format, source, script, includeYurisSources, codecs);
             for (int i = 0; i < loaded.Strings.Length; i++)
             {
                 ScriptString value = loaded.Strings[i];
                 if (!IsText(format, value)) continue;
                 units.Add(new Unit(UnitId(format, script, i), script, $"string:{i}", value.Text,
-                    $"{format.Key} · {script}", Kind: value.Type == ScriptStringType.CharacterName ? "name" : "dialogue"));
+                    $"{format.Key} · {script}", Kind: value.Type == ScriptStringType.CharacterName ? "name" : "dialogue",
+                    YurisSource: loaded.YurisSources?[i]));
             }
         }
         return units;
     }
 
-    private static Response Build(Format format, string source, string[] files, string[] scripts, Request request)
+    private static Response Build(Format format, string source, string[] files, string[] scripts, Request request, YurisTextCodecs? codecs)
     {
         string output = Output(source, request.OutputDirectory);
         Dictionary<string, string> translations;
@@ -143,12 +146,16 @@ public static class Worker
         {
             string destination = Resolve(output, file);
             Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+            if (File.Exists(destination))
+                File.SetAttributes(destination, File.GetAttributes(destination) & ~FileAttributes.ReadOnly);
             File.Copy(Resolve(source, file), destination, true);
+            // Source snapshots may be read-only. Only the independent output is editable.
+            File.SetAttributes(destination, File.GetAttributes(destination) & ~FileAttributes.ReadOnly);
         }
         var expectedByFile = new Dictionary<string, ScriptString[]>(StringComparer.OrdinalIgnoreCase);
         foreach (string script in scripts)
         {
-            var loaded = Load(format, source, script);
+            var loaded = Load(format, source, script, codecs: codecs);
             var expected = loaded.Strings.ToArray();
             bool changed = false;
             for (int i = 0; i < expected.Length; i++)
@@ -167,6 +174,10 @@ public static class Worker
             {
                 loaded.Parser.WritePatched(expected, ScriptLocation.FromFilePath(Resolve(output, script), format.Key));
             }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+            {
+                throw new ScriptException($"无法写入补丁脚本 {script}：{error.Message}", error, script);
+            }
             catch (Exception error)
             {
                 throw new ScriptException($"无法写回脚本 {script}。请使用智能适配检查该引擎的编码和脚本版本。", error, script);
@@ -176,14 +187,15 @@ public static class Worker
         // Verify every selected script, including resources sharing a companion text pool.
         foreach ((string script, ScriptString[] expected) in expectedByFile)
         {
-            ScriptString[] actual = Load(format, output, script).Strings;
+            ScriptString[] actual = Load(format, output, script, codecs: codecs, output: true).Strings;
             if (!EqualStrings(expected, actual))
-                throw new ScriptException($"脚本 {script} 写回后的文本或结构不一致，已拒绝该补丁。请使用智能适配检查脚本版本。" );
+                throw new ScriptException($"脚本 {script} 写回后的文本或结构不一致，已拒绝该补丁。{DescribeStringDifferences(expected, actual)}",
+                    resourcePath: script);
         }
         return new Response(Build: new Build(files, Warnings(format)));
     }
 
-    private static Response Validate(Format format, string source, string[] files, string[] scripts, Request request)
+    private static Response Validate(Format format, string source, string[] files, string[] scripts, Request request, YurisTextCodecs? codecs)
     {
         string output = Output(source, request.OutputDirectory);
         var issues = new List<Issue>();
@@ -196,10 +208,10 @@ public static class Worker
         {
             try
             {
-                ScriptString[] original = Load(format, source, script).Strings;
-                ScriptString[] patched = Load(format, output, script).Strings;
+                ScriptString[] original = Load(format, source, script, codecs: codecs).Strings;
+                ScriptString[] patched = Load(format, output, script, codecs: codecs, output: true).Strings;
                 if (original.Length != patched.Length || original.Where((s, i) => s.Type != patched[i].Type).Any())
-                    issues.Add(new Issue("script-structure", $"补丁改变了脚本文本结构：{script}"));
+                    issues.Add(new Issue("script-structure", $"补丁改变了脚本文本结构：{script}。{DescribeStringDifferences(original, patched, compareText: false)}"));
             }
             catch (Exception error)
             {
@@ -210,13 +222,19 @@ public static class Worker
         return new Response(Validation: new Validation(issues.Count == 0, issues));
     }
 
-    private static (IScript Parser, ScriptString[] Strings) Load(Format format, string root, string script)
+    private static (IScript Parser, ScriptString[] Strings, YurisTextSource[]? YurisSources) Load(
+        Format format, string root, string script, bool includeYurisSources = false, YurisTextCodecs? codecs = null, bool output = false)
     {
         try
         {
-            IScript parser = format.Create();
+            IScript parser = codecs is null ? format.Create() : new YurisScript(output ? codecs.Output : codecs.Source, codecs.Output);
             parser.Load(ScriptLocation.FromFilePath(Resolve(root, script), format.Key));
-            return (parser, parser.GetStrings().ToArray());
+            if (includeYurisSources && parser is YurisScript yuris)
+            {
+                YurisString[] strings = yuris.GetStringsWithSources().ToArray();
+                return (parser, strings.Select(str => str.String).ToArray(), strings.Select(str => str.Source).ToArray());
+            }
+            return (parser, parser.GetStrings().ToArray(), null);
         }
         catch (Exception error)
         {
@@ -232,6 +250,38 @@ public static class Worker
     }
     private static bool EqualStrings(ScriptString[] expected, ScriptString[] actual) => expected.Length == actual.Length &&
         expected.Where((s, i) => s.Type != actual[i].Type || s.Text != actual[i].Text).Any() == false;
+
+    private static string DescribeStringDifferences(ScriptString[] expected, ScriptString[] actual, bool compareText = true)
+    {
+        static string Sample(string value)
+        {
+            const int limit = 120;
+            int end = Math.Min(value.Length, limit);
+            if (end < value.Length && char.IsHighSurrogate(value[end - 1])) end--;
+            string sample = end < value.Length ? value[..end] + "…" : value;
+            return "\"" + sample.Replace("\\", "\\\\").Replace("\"", "\\\"")
+                .Replace("\r", "\\r").Replace("\n", "\\n").Replace("\t", "\\t") + "\"";
+        }
+
+        var differences = new List<string>();
+        for (int i = 0; i < Math.Max(expected.Length, actual.Length) && differences.Count < 2; i++)
+        {
+            if (i >= expected.Length)
+                differences.Add($"string:{i} difference=extra, expected=<missing>, actual={Sample(actual[i].Text)} ({actual[i].Type})");
+            else if (i >= actual.Length)
+                differences.Add($"string:{i} difference=missing, expected={Sample(expected[i].Text)} ({expected[i].Type}), actual=<missing>");
+            else
+            {
+                bool kind = expected[i].Type != actual[i].Type;
+                bool text = compareText && expected[i].Text != actual[i].Text;
+                if (!kind && !text) continue;
+                string category = kind && text ? "kind+text" : kind ? "kind" : "text";
+                differences.Add($"string:{i} difference={category}, expected={Sample(expected[i].Text)} ({expected[i].Type}), actual={Sample(actual[i].Text)} ({actual[i].Type})");
+            }
+        }
+        string count = expected.Length == actual.Length ? "" : $"count expected={expected.Length}, actual={actual.Length}; ";
+        return count + string.Join("; ", differences);
+    }
     private static string UnitId(Format format, string script, int index) => "vntp:" + Convert.ToHexStringLower(
         SHA256.HashData(Encoding.UTF8.GetBytes(format.Key + "\n" + script.ToLowerInvariant() + "\n" + index)));
     private static string[] Warnings(Format format) => format.Key switch

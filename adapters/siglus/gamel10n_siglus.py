@@ -62,10 +62,15 @@ def rules_file():
     return rules
 
 
-def load(root, selected, rules, disassemble=True, strict=True):
-    package = safe(root,selected['pck']).read_bytes()
+def input_path(root, relative, inputs):
+    original = safe(root, relative)
+    return Path(inputs.get(relative, original)) if inputs else original
+
+
+def load(root, selected, rules, disassemble=True, strict=True, inputs=None):
+    package = input_path(root,selected['pck'],inputs).read_bytes()
     header = package_header(package)
-    key = common.read_siglus_engine_exe_el(str(safe(root,selected['exe'])))
+    key = common.read_siglus_engine_exe_el(str(input_path(root,selected['exe'],inputs)))
     if header['scn_data_exe_angou_mod'] and len(key) != 16:
         raise ValueError('未能从当前 EXE 获取 Siglus 资源密钥，需要智能适配。')
     sources = read_sources(package)
@@ -82,10 +87,10 @@ def load(root, selected, rules, disassemble=True, strict=True):
             raise ValueError('文本类型规则无效。')
     config=''; offsets=[]
     try:
-        info, config = GEI.read_gameexe_dat(str(safe(root,selected['config'])), key)
+        info, config = GEI.read_gameexe_dat(str(input_path(root,selected['config'],inputs)), key)
         if not info['ini_ok'] or not re.search(r'^\s*#CONFIG\.FONT\.NAME\s*=',config,re.M|re.I):
             raise ValueError('Gameexe.dat 字体配置无法可靠解析。')
-        offsets = patch._find_charset_slot_offsets(safe(root,selected['exe']).read_bytes())
+        offsets = patch._find_charset_slot_offsets(input_path(root,selected['exe'],inputs).read_bytes())
         if not offsets: raise ValueError('当前 Siglus EXE 的字体筛选规则尚未适配。')
     except (ValueError, RuntimeError) as error: limitations.append(str(error))
     if strict and limitations: raise ValueError('；'.join(limitations))
@@ -268,9 +273,10 @@ def validate(root,out,selected,data,rules):
 
 
 def inspect(root,selected,rules,req):
+    inputs=req.get('inspectionInputs')
     source=req.get('source',''); query=req.get('query','')
     if source or query:
-        sources=read_sources(safe(root,selected['pck']).read_bytes())
+        sources=read_sources(input_path(root,selected['pck'],inputs).read_bytes())
         limit=min(12000,max(1,int(req.get('length',6000)))); start=max(0,int(req.get('offset',0)))
         matches=[]; remaining=limit
         for name,content in sources.items():
@@ -283,7 +289,7 @@ def inspect(root,selected,rules,req):
             remaining-=end-pos
             if remaining<=0 or len(matches)>=8: break
         return dict(matches=matches,sources=list(sources) if source and not matches else None)
-    data=load(root,selected,rules,strict=False)
+    data=load(root,selected,rules,strict=False,inputs=inputs)
     return dict(engine='Siglus',scenes=len(data['scenes']),units=len(data['units']),template='FKDS 48/441' if data['fkds'] else 'standard',
                 embeddedSources=list(data['sources']),calls=data['calls'].most_common(30),warnings=warnings(data),
                 limitations=data['limitations'],unresolvedDisplayCalls=data['unresolved'],

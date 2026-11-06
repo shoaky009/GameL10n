@@ -1,8 +1,6 @@
 /target/
 /artifacts/
-/.tools/
-/tools/python/
-/tools/vntextpatch/
+/.idea/
 **/bin/
 **/obj/
 **/__pycache__/

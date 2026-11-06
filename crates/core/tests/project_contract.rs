@@ -21,15 +21,60 @@ async fn opening_a_project_does_not_require_tools_or_start_recognition() {
 }
 
 #[tokio::test]
-async fn project_list_uses_index_even_when_the_project_directory_is_missing() {
+async fn project_list_sorts_saved_summaries_without_opening_project_directories() {
     let temporary = tempfile::tempdir().unwrap();
-    write_json(&temporary.path().join("games/index.json"), &json!({"schemaVersion":1,"projects":[{
-        "id":"1234567890abcdef12345678","gameDirectory":"C:\\Games\\Missing","name":"Saved project"
-    }]})).unwrap();
+    let projects = [
+        (
+            "000000000000000000000001",
+            "A",
+            Some("2026-11-06T10:00:00+08:00"),
+        ),
+        (
+            "000000000000000000000003",
+            "beta",
+            Some("2026-11-06T03:00:00Z"),
+        ),
+        (
+            "000000000000000000000004",
+            "alpha",
+            Some("2026-11-06T03:00:00Z"),
+        ),
+        (
+            "000000000000000000000002",
+            "Alpha",
+            Some("2026-11-06T03:00:00Z"),
+        ),
+        ("000000000000000000000005", "Without a date", None),
+    ]
+    .map(|(id, name, updated)| {
+        let mut project = json!({"id":id,"name":name,"gameDirectory":"C:\\Games\\Missing"});
+        if let Some(updated) = updated {
+            project["updatedAt"] = json!(updated);
+        }
+        project
+    });
+    write_json(
+        &temporary.path().join("games/index.json"),
+        &json!({"schemaVersion":1,"projects":projects}),
+    )
+    .unwrap();
     let app = Application::open(temporary.path().into(), &ToolPaths::new("missing"))
         .await
         .unwrap();
-    assert_eq!(app.list_projects("saved").await.len(), 1);
+    assert_eq!(
+        app.list_projects("  ")
+            .await
+            .into_iter()
+            .map(|project| project.id)
+            .collect::<Vec<_>>(),
+        [
+            "000000000000000000000002",
+            "000000000000000000000004",
+            "000000000000000000000003",
+            "000000000000000000000001",
+            "000000000000000000000005",
+        ]
+    );
 }
 
 #[test]
@@ -72,8 +117,53 @@ async fn reopening_a_removed_project_preserves_its_existing_settings() {
     let saved: GameProject =
         read_json(&data.join("games").join(&project.id).join("game.json")).unwrap();
     assert_eq!(saved.settings, project.settings);
-    assert_eq!(saved.extra, project.extra);
+    assert_eq!(saved.extra["customData"], project.extra["customData"]);
+    assert!(
+        saved
+            .extra
+            .get("updatedAt")
+            .is_some_and(|value| value.is_string())
+    );
     assert!(!saved.is_removed);
+}
+
+#[tokio::test]
+async fn settings_changes_update_project_order_but_opening_and_noop_saves_do_not() {
+    let temporary = tempfile::tempdir().unwrap();
+    let data = temporary.path().join("data");
+    let app = Application::open(data.clone(), &ToolPaths::new("missing"))
+        .await
+        .unwrap();
+    let mut ids = Vec::new();
+    for name in ["earlier", "later"] {
+        let game = temporary.path().join(name);
+        fs::create_dir(&game).unwrap();
+        ids.push(app.add_project(&game).await.unwrap().id);
+    }
+    let original = app.open_project(&ids[0]).await.unwrap();
+    app.save_project_settings(&ids[0], json!({})).await.unwrap();
+    assert_eq!(app.list_projects("").await[0].id, ids[1]);
+    assert_eq!(
+        app.open_project(&ids[0]).await.unwrap().extra["updatedAt"],
+        original.extra["updatedAt"]
+    );
+
+    app.save_project_settings(&ids[0], json!({"targetLanguage":"zh-CN"}))
+        .await
+        .unwrap();
+    let changed = app.open_project(&ids[0]).await.unwrap();
+    app.save_project_settings(&ids[0], json!({"targetLanguage":"zh-CN"}))
+        .await
+        .unwrap();
+    assert_eq!(
+        app.open_project(&ids[0]).await.unwrap().extra["updatedAt"],
+        changed.extra["updatedAt"]
+    );
+    drop(app);
+    let reopened = Application::open(data, &ToolPaths::new("missing"))
+        .await
+        .unwrap();
+    assert_eq!(reopened.list_projects("").await[0].id, ids[0]);
 }
 
 #[tokio::test]

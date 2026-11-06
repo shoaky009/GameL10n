@@ -9,10 +9,14 @@
     <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
     <AssemblyName>GameL10n.VnTextPatch</AssemblyName>
     <RootNamespace>GameL10n.VnTextPatch</RootNamespace>
+    <RuntimeFrameworkVersion>10.0.14</RuntimeFrameworkVersion>
+    <IlcFrameworkVersion>10.0.14</IlcFrameworkVersion>
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="../../third_party/VNTextPatch/**/*.cs" LinkBase="VNTextPatch" />
     <None Include="../../third_party/VNTextPatch/LICENSE" Link="VNTextPatch.LICENSE" CopyToOutputDirectory="PreserveNewest" />
     <None Include="../../third_party/VNTextPatch/NOTICE.md" Link="VNTextPatch.NOTICE.md" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../../third_party/Capstone/capstone.dll" Link="capstone.dll" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <None Include="../../third_party/Capstone/LICENSE.TXT" Link="Capstone.LICENSE.TXT" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

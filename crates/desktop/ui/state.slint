@@ -1,0 +1,247 @@
+import { Palette } from "std-widgets.slint";
+export struct ProjectRow { id: string, name: string, path: string, status: string, running: bool, selected: bool }
+export struct TextRow { id: string, location: string, source: string, translation: string, metadata: string, selected: bool }
+export struct NamedRow { id: string, name: string, detail: string, enabled: bool }
+export struct EngineRow { id: string, name: string, detail: string, enabled: bool, selected: bool }
+export struct TermRow { source: string, target: string }
+export struct TokenDisplay { text: string, exact: string }
+export struct CleanupRow { id: string, title: string, description: string, size: string, selected: bool }
+
+export global Theme {
+    out property <bool> dark: Palette.color-scheme == ColorScheme.dark;
+    out property <color> surface: dark ? #171c24 : #ffffff;
+    out property <color> background: dark ? #111720 : #f4f7fb;
+    out property <color> tint: dark ? #253c55 : #e6f0fc;
+    out property <color> accent: dark ? #94c5ff : #235b99;
+    out property <color> title: dark ? #f0f5fc : #172b43;
+    out property <color> ink: dark ? #cbd5e2 : #34465b;
+    out property <color> secondary: dark ? #b0bfd2 : #506278;
+    out property <color> muted: dark ? #96a6bc : #596b80;
+    out property <color> line: dark ? #354254 : #dbe4ef;
+    out property <color> error: dark ? #ffb1a7 : #ac3023;
+}
+
+export global App {
+    in-out property <[ProjectRow]> projects;
+    in-out property <length> project-scroll-y;
+    out property <length> project-row-height: 88px;
+    in-out property <[TextRow]> texts;
+    in-out property <[NamedRow]> apis;
+    in-out property <[NamedRow]> chain;
+    in-out property <[EngineRow]> engines;
+    in-out property <[NamedRow]> versions;
+    in-out property <[NamedRow]> games;
+    in-out property <[NamedRow]> knowledge;
+    in-out property <[NamedRow]> knowledge-origins;
+    in-out property <length> catalog-scroll-y;
+    in-out property <[TermRow]> terms;
+    in-out property <[string]> api-names;
+    in-out property <[string]> resources;
+    in-out property <string> data-directory;
+    in-out property <int> page;
+    in-out property <int> tab;
+    in-out property <string> project-id;
+    in-out property <string> project-name;
+    in-out property <string> project-path;
+    in-out property <string> project-query;
+    in-out property <bool> multi-projects;
+    in-out property <int> selected-projects;
+    in-out property <bool> ready;
+    in-out property <bool> loading;
+    in-out property <bool> busy;
+    in-out property <string> activity;
+    in-out property <string> status: "选择或添加游戏";
+    in-out property <string> counts;
+    in-out property <string> task-message;
+    in-out property <string> task-operation;
+    in-out property <TokenDisplay> task-usage;
+    in-out property <string> task-api-summary;
+    out property <string> task-api: task-api-for(task-operation, task-api-summary);
+    in-out property <string> error;
+    in-out property <float> progress;
+    in-out property <string> log-text;
+    in-out property <string> recognition;
+    in-out property <string> recognition-engine;
+    in-out property <string> recognition-adapter;
+    in-out property <bool> recognition-ready;
+    in-out property <bool> recognition-running;
+    in-out property <string> recognition-warnings;
+    in-out property <string> recognition-failure-title;
+    in-out property <string> recognition-failure-message;
+    in-out property <string> recognition-failure-next-action;
+    in-out property <string> recognition-diagnostics;
+    in-out property <string> warnings;
+    in-out property <string> adaptation-progress;
+    in-out property <bool> adaptation-running;
+    in-out property <string> adaptation-result-title;
+    in-out property <string> adaptation-summary;
+    in-out property <string> adaptation-next-action;
+    in-out property <string> adaptation-blocker;
+    in-out property <string> adaptation-pending-coverage;
+    in-out property <string> adaptation-runtime-checks;
+    in-out property <string> adaptation-validation;
+    in-out property <string> adaptation-notes;
+    in-out property <int> adaptation-objective: 0;
+    in-out property <bool> force-intelligent;
+    in-out property <TokenDisplay> adaptation-usage;
+    in-out property <string> review-summary;
+    in-out property <string> text-query;
+    in-out property <int> resource-filter;
+    in-out property <int> kind-filter;
+    in-out property <int> status-filter;
+    in-out property <bool> only-selected;
+    in-out property <int> selected-texts;
+    in-out property <bool> selection-busy;
+    in-out property <int> text-total;
+    in-out property <int> offset;
+    in-out property <int> shown;
+    in-out property <string> editor-id;
+    in-out property <string> editor-location;
+    in-out property <string> editor-source;
+    in-out property <string> editor-context;
+    in-out property <string> editor-text;
+    in-out property <string> editor-draft;
+    in-out property <string> editor-status;
+    in-out property <string> editor-validation;
+    in-out property <bool> editor-has-issues;
+    in-out property <bool> editor-reviewed;
+    in-out property <bool> editor-dirty;
+    in-out property <bool> editor-editable: true;
+    in-out property <length> text-scroll-y;
+    in-out property <length> editor-scroll-y;
+    in-out property <string> candidate;
+    in-out property <string> patch-summary;
+    in-out property <string> patch-path;
+    in-out property <string> patch-launch;
+    in-out property <string> runtime-check;
+    in-out property <int> patch-scope;
+    in-out property <string> runtime-note;
+    in-out property <[CleanupRow]> cleanup-items;
+    in-out property <bool> cleanup-loading;
+    in-out property <string> cleanup-patch;
+    in-out property <string> cleanup-project-id;
+    in-out property <bool> source-materials-cleared;
+    out property <bool> cleanup-selected: cleanup-items.length == 4 && (cleanup-items[0].selected || cleanup-items[1].selected || cleanup-items[2].selected || cleanup-items[3].selected);
+    in-out property <int> analysis-index: -1;
+    in-out property <int> chain-index: -1;
+    in-out property <int> candidate-api-index: -1;
+    in-out property <int> loaded-analysis-index: -1;
+    in-out property <string> budget: "1000000";
+    in-out property <string> loaded-budget: "1000000";
+    in-out property <int> loaded-turns: 60;
+    out property <TokenDisplay> budget-preview: format-token-budget(budget);
+    pure callback format-token-budget(string) -> TokenDisplay;
+    in-out property <int> turns: 60;
+    in-out property <string> language: "简体中文";
+    in-out property <string> style: "自然流畅，保留人物语气、情绪和原文含义。";
+    in-out property <string> terminology;
+    in-out property <int> batch-size: 24;
+    in-out property <int> concurrency: 2;
+    in-out property <string> api-id;
+    in-out property <string> api-name;
+    in-out property <string> api-endpoint;
+    in-out property <string> api-model;
+    in-out property <string> api-key;
+    in-out property <bool> api-remember-key: true;
+    in-out property <int> api-protocol;
+    in-out property <int> api-format;
+    in-out property <int> api-reasoning;
+    in-out property <string> catalog-query;
+    in-out property <int> catalog-sort;
+    in-out property <int> catalog-filter;
+    in-out property <int> catalog-enabled-filter;
+    in-out property <bool> catalog-multi;
+    in-out property <int> catalog-offset;
+    in-out property <int> catalog-total;
+    in-out property <string> engine-id;
+    in-out property <string> engine-name;
+    in-out property <string> engine-summary;
+    in-out property <bool> engine-enabled;
+    in-out property <int> engine-tab;
+    in-out property <string> version-id;
+    in-out property <string> version-detail;
+    in-out property <[string]> verification-project-names;
+    in-out property <[string]> verification-project-ids;
+    in-out property <int> verification-project-index;
+    in-out property <string> knowledge-id;
+    in-out property <string> knowledge-content;
+    in-out property <bool> knowledge-enabled;
+    in-out property <string> compatible-query;
+    in-out property <string> modal;
+    in-out property <string> modal-title;
+    in-out property <string> modal-message;
+    in-out property <string> instruction;
+    in-out property <bool> delete-files;
+    in-out property <string> new-directory;
+    in-out property <bool> migrate-data: true;
+    callback action(string, string);
+    pure callback concise-text(string) -> string;
+    pure callback task-api-for(string, string) -> string;
+}
+
+export component Label inherits Text { color: Theme.ink; font-size: 14px; line-height-factor: 1.2; wrap: word-wrap; }
+export component Caption inherits Text { color: Theme.muted; font-size: 13px; line-height-factor: 1.2; wrap: word-wrap; }
+export component Link inherits Rectangle {
+    in property <string> text;
+    in property <bool> enabled: true;
+    in property <length> font-size: 14px;
+    in property <bool> strong;
+    callback clicked;
+    min-width: 0px;
+    horizontal-stretch: 0;
+    vertical-stretch: 0;
+    forward-focus: keyboard;
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if root.enabled { root.clicked(); } }
+    border-radius: 2px;
+    border-width: keyboard.has-focus && root.enabled ? 1px : 0px;
+    border-color: Theme.accent;
+    VerticalLayout {
+        StyledText {
+            text: root.enabled && (hit-target.has-hover || keyboard.has-focus)
+                ? (root.strong ? @markdown("**<u>\{root.text}</u>**") : @markdown("<u>\{root.text}</u>"))
+                : (root.strong ? @markdown("**\{root.text}**") : @markdown("\{root.text}"));
+            default-color: root.enabled ? Theme.accent : Theme.muted;
+            default-font-size: root.font-size;
+            accessible-role: none;
+        }
+    }
+    hit-target := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { keyboard.focus(); root.clicked(); }
+    }
+    keyboard := FocusScope {
+        width: 0px;
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if event.text == Key.Return || event.text == Key.Space {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+}
+export component TokenCaption inherits Caption {
+    in property <TokenDisplay> value;
+    text: value.text;
+    if value.exact != "": Tooltip { text: @markdown("\{root.value.exact}"); }
+}
+export component Heading inherits Text { color: Theme.title; font-size: 20px; font-weight: 600; }
+export component SectionHeading inherits Text { color: Theme.title; font-size: 16px; font-weight: 600; wrap: word-wrap; }
+export component ReportText inherits TextInput {
+    read-only: true;
+    single-line: false;
+    wrap: word-wrap;
+    height: self.preferred-height;
+    color: Theme.ink;
+    font-size: 14px;
+    line-height-factor: 1.2;
+    selection-background-color: Theme.accent;
+    selection-foreground-color: Theme.surface;
+    vertical-alignment: top;
+}
+export component Divider inherits Rectangle { height: 1px; background: Theme.line; }

@@ -13,7 +13,7 @@ description: 调查 GameL10n 游戏项目的智能适配记录，评审 LLM 决�
 .\scripts\analyze-adaptation-log.ps1 -ProjectDirectory '<项目目录>'
 ```
 
-默认读取截止调用开始时的日志，输出紧凑 JSON：已记录的 Token、失败与缺失计数、最近六轮、最后源码修改和验收、耗时最多的工具及少量失败。它不会读取 session、源码或游戏资源，也不调用 API。
+默认读取截止调用开始时的日志，输出紧凑 JSON：已记录的 Token、失败与缺失计数、最近六次运行、最后源码修改和验收、耗时与输出最大的工具及少量失败。它不会读取 session、源码或游戏资源，也不调用 API。
 
 失败请求的用量可能记录在后续 `output-limit-recovery` 事件中，需与原请求关联后计入一次。`missingUsage` 表示未知，零值不应自行估算；总 Token 不是计费金额，缓存计费另需供应商数据。
 
@@ -26,19 +26,22 @@ description: 调查 GameL10n 游戏项目的智能适配记录，评审 LLM 决�
 ```powershell
 .\scripts\analyze-adaptation-log.ps1 -ProjectDirectory '<项目目录>' -RunId '<runId>' -Detail
 .\scripts\analyze-adaptation-log.ps1 -ProjectDirectory '<项目目录>' -Since '<ISO时间>' -Until '<ISO时间>'
+.\scripts\analyze-adaptation-log.ps1 -ProjectDirectory '<项目目录>' -FromTurn 30 -ToTurn 55
 ```
 
 记录调查截止时间。缺少 run-end 只说明没有观察到结束事件；不能据此断言任务还在运行。相同参数也可能在源码或输入改变后执行，判断重复应对照修改记录、结果和耗时。
 
-checkpoint 是否有效看相邻模型请求的 `visibleHistoryBytes` 和输入 Token；不能按持久化 Messages 数量判断。旧消息为恢复而保留，不代表每轮全部发送。用量按请求归属过滤，`hostRunTokens` 则是完整轮次总量；截取时间窗口后两者可能不同。
+`-Detail` 的 `modelTurns` 保留请求 Token、缓存与耗时；`checkpointHistory` 和 `historyCompactions` 对比压缩前后的实际请求。不能按持久化 Messages 数量判断上下文大小；旧消息为恢复而保留，不代表每轮全部发送。用量按请求归属过滤，`hostRunTokens` 则是完整运行总量；截取窗口后两者可能不同。按轮次分阶段时以实际工具和源码修改划界，重叠工作标为混合阶段；多次运行轮次可能重叠，必要时再限定 `-RunId`。
 
 ## 按调用取证
 
 1. 从摘要挑最后一次相关验收失败、异常耗时或重复失败，用 callId 定位对应的少量 JSONL 行。
-2. 日志只有元数据时，才解析一次 `adaptation/current/session.json`。优先取 `verificationDiagnostics`、`notes`、发布清单及相关调用，不输出整个对象。
-3. 工具输出按 `messages[].toolCallId` 精确查找；参数先查 `toolCalls`，为空时从 `providerData` 中只取 `type=function_call` 的 name、call_id、arguments。Chat Completions 格式则取其 tool_calls；不要转储 reasoning、加密内容或整个 providerData。
+2. 日志只有元数据时，才解析一次 `adaptation/current/session.json`。优先取 `verificationDiagnostics`、`notes`、发布清单及历史位置，不输出整个对象。当前格式的完整消息位于同目录的 `session-history.jsonl`，仅逐行读取 `historyStorage.bytes` 以内的已提交内容；旧格式仍从内嵌 `messages` 取证。
+3. 工具输出按调用 ID 精确查找，兼容 `toolCallId`、`tool_call_id` 和 `call_id`；参数先查 `toolCalls`，为空时从 `providerData` 中只取 `type=function_call` 的 name、call_id、arguments。Chat Completions 格式则取其 tool_calls；不要转储 reasoning、加密内容或整个 providerData。找到所需证据后停止读取历史，不把完整 JSONL 载入模型上下文。
 4. 沿实际报错的文件和行号读取源码片段。需要比较产物时，在本地计算数量、ID、实际译文和未修改项差异，只返回统计及必要的少量样例，通常最多两条。不要把数万条文本交给模型比较。
 5. 一次验证一个假设。超时先区分编译和运行，确认输入规模、最后输出及循环游标是否前进；仅延长超时不能证明定位正确。
+
+用户怀疑某项检查增加消耗时，分开计算本地探针、为解决真实问题而新增的实现、重复调查及验收。一个请求包含已有上下文，整阶段 Token 不能全部归因于检查，也不能当作可节省量；不同游戏之间无受控对照时，不宣称改动导致成本上涨。先查 `largestToolOutputs` 定位大输出，再看后续输入增长、预览与定向回读，不能把原始工具输出字节直接折算成模型 Token。
 
 调查默认只读，不干预正在运行的任务、启动游戏或触发付费 API；用户已授权的验证、修改或重跑按其范围执行。不为恢复上下文重跑已经有结果的实验。
 
@@ -47,6 +50,8 @@ checkpoint 是否有效看相邻模型请求的 `visibleHistoryBytes` 和输入 
 区分三层证据：资源可解析和往返、实际译文正确写入、原游戏运行显示。编码器与解码器共享同一个错误时也可能自洽；数量或 ID 相同不代表译文正确。原文直接复制通过不等于修改分支已被验证。
 
 检查现成解析器、组件和固定参考库是否真正试用。检索未命中应核对别名和词拆分；组件拒绝某个容器版本不能推导同引擎的脚本解析器不可用。二进制中未找到几种指令或常量，不足以排除某种能力。
+
+压缩后再次调查同一资料时，对照压缩事件、笔记更新时间、保留的证据入口和重复调用。区分必要恢复与确实重复的探索；压缩降低请求大小与丢失关键工作事实可以同时发生，不应仅凭重复读取就取消压缩。格式或运行能力已明确但缺少可复用实现时，优先评估组件化，避免只继续追加提示词。
 
 改进优先放在确定性检索、诊断字段、可复用工具或有条件的引擎指引中。只修当前缺口，不把单个游戏名称、地址、固定文本数量写成通用规则；无关引擎不增加提示词。
 

@@ -1,0 +1,71 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]*.[0-9]*.[0-9]*'
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read release notes
+        run: |
+          if ($env:GITHUB_REF_NAME -notmatch '^v\d+\.\d+\.\d+$') {
+              throw 'Release tags must use vMAJOR.MINOR.PATCH, for example v1.0.0.'
+          }
+          $version = [regex]::Escape($env:GITHUB_REF_NAME.Substring(1))
+          $changelog = Get-Content -LiteralPath CHANGELOG.md -Raw
+          $sections = [regex]::Matches($changelog, "(?ms)^## \[$version\][^\r\n]*\r?\n(?<notes>.*?)(?=^## |\z)")
+          if ($sections.Count -ne 1 -or [string]::IsNullOrWhiteSpace($sections[0].Groups['notes'].Value)) {
+              throw "CHANGELOG.md must contain one nonempty section for [$($env:GITHUB_REF_NAME.Substring(1))]."
+          }
+          [IO.File]::WriteAllText((Join-Path $env:RUNNER_TEMP 'release-notes.md'), $sections[0].Groups['notes'].Value.Trim())
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: i686-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Prepare bundled tools
+        run: |
+          ./scripts/prepare-python.ps1
+          ./scripts/build-vntextpatch.ps1
+          & ./target/runtime/python/python.exe -I -X utf8 ./scripts/build_vntextpatch.py --verify-only
+          if ($LASTEXITCODE -ne 0) { throw 'Native parser verification failed.' }
+          & ./target/runtime/python/python.exe -I -X utf8 ./scripts/build_qlie_launcher.py
+          if ($LASTEXITCODE -ne 0) { throw 'Launcher build failed.' }
+          ./scripts/build-fontbridge.ps1 -Test
+          & ./target/runtime/python/python.exe -I -X utf8 ./crates/engines/python/test_gdiplus_font_bridge.py
+          if ($LASTEXITCODE -ne 0) { throw 'Font bridge import verification failed.' }
+
+      - name: Build release package
+        run: |
+          ./scripts/publish.ps1
+          Compress-Archive -LiteralPath ./artifacts/GameL10n `
+              -DestinationPath "./artifacts/GameL10n-${env:GITHUB_REF_NAME}-win-x64.zip" -CompressionLevel Optimal
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: GameL10n ${{ github.ref_name }}
+          body_path: ${{ runner.temp }}/release-notes.md
+          files: artifacts/GameL10n-${{ github.ref_name }}-win-x64.zip
+          fail_on_unmatched_files: true

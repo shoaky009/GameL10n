@@ -1,0 +1,6 @@
+LIBRARY "GameL10n.FontBridge.dll"
+EXPORTS
+    GdipCreateFontFromDC=_BridgeCreateFontFromDC@8
+    GdipCreateFontFromLogfontA=_BridgeCreateFontFromLogfontA@12
+    GdipCreateFontFromLogfontW=_BridgeCreateFontFromLogfontW@12
+    GdipGetFamily=_BridgeGetFamily@8

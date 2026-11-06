@@ -1,0 +1,68 @@
+import { Button, LineEdit, ComboBox, CheckBox, ScrollView, ListView } from "std-widgets.slint";
+import { App, Theme, Label, Caption, Heading, Link } from "state.slint";
+export component EngineLibrary inherits VerticalLayout {
+    spacing: 12px; Heading { text: "全局引擎库"; font-size: 26px; }
+    HorizontalLayout {
+        LineEdit { text <=> App.catalog-query; placeholder-text: "搜索引擎、模板或兼容游戏"; edited => { App.action("catalog", "0"); } horizontal-stretch: 1; }
+        ComboBox { model: ["全部来源", "内置", "扩展", "仅历史记录"]; current-index <=> App.catalog-filter; selected => { App.action("catalog", "0"); } }
+        ComboBox { model: ["全部状态", "已启用", "已停用"]; current-index <=> App.catalog-enabled-filter; selected => { App.action("catalog", "0"); } }
+        ComboBox { model: ["名称", "最近更新", "兼容游戏数"]; current-index <=> App.catalog-sort; selected => { App.action("catalog", "0"); } }
+        Button { text: "刷新"; clicked => { App.action("catalog-refresh", ""); } }
+    }
+    HorizontalLayout { spacing: 16px;
+        VerticalLayout { width: 300px;
+            HorizontalLayout { Button { text: "多选"; checkable: true; checked <=> App.catalog-multi; } Button { text: "启用所选"; enabled: App.engine-id != ""; clicked => { App.action("engine-enable", "true"); } } Button { text: "停用所选"; enabled: App.engine-id != ""; clicked => { App.action("engine-enable", "false"); } } }
+            ListView { vertical-stretch: 1; content-y <=> App.catalog-scroll-y;
+                for engine in App.engines: Rectangle { height: 86px; background: engine.selected ? Theme.tint : Theme.surface;
+                    VerticalLayout { padding: 10px; Label { text: engine.name; font-weight: 600; overflow: elide; wrap: no-wrap; } Caption { text: engine.detail; overflow: elide; } }
+                    TouchArea { pointer-event(event) => { if event.kind == PointerEventKind.down && event.button == PointerEventButton.left { App.action(event.modifiers.shift ? "engine-range" : event.modifiers.control || App.catalog-multi ? "engine-toggle" : "engine", engine.id); } } }
+                }
+            }
+            HorizontalLayout { Button { text: "上一页"; enabled: App.catalog-offset > 0; clicked => { App.action("catalog", "previous"); } } Caption { text: "共 " + App.catalog-total + " 个"; } Button { text: "下一页"; enabled: App.catalog-offset + 100 < App.catalog-total; clicked => { App.action("catalog", "next"); } } }
+        }
+        VerticalLayout { spacing: 12px;
+            Heading { text: App.engine-name == "" ? "选择引擎或资源模板" : App.engine-name; }
+            HorizontalLayout {
+                Button { text: "概览"; clicked => { App.engine-tab = 0; } }
+                Button { text: "版本"; clicked => { App.engine-tab = 1; } }
+                Button { text: "兼容游戏"; clicked => { App.engine-tab = 2; } }
+                Button { text: "相关经验"; clicked => { App.engine-tab = 3; } }
+                Rectangle { horizontal-stretch: 1; }
+            }
+            if App.engine-tab == 0: ScrollView { VerticalLayout { alignment: start; Label { text: App.engine-summary; } } }
+            if App.engine-tab == 1: VerticalLayout {
+                ListView { for version in App.versions: Rectangle { height: 68px; background: App.version-id == version.id ? Theme.tint : Theme.surface;
+                    VerticalLayout { padding: 8px; Label { text: version.name; } Caption { text: version.detail; } }
+                    TouchArea { clicked => { App.action("version", version.id); } }
+                } }
+                Caption { text: App.version-detail; }
+                HorizontalLayout { Button { text: "打开所在文件夹"; enabled: App.version-id != ""; clicked => { App.action("open", "version"); } } Button { text: "验证发布包…"; enabled: App.version-id != ""; clicked => { App.action("verify-version", ""); } } Button { text: "删除版本…"; enabled: App.version-id != ""; clicked => { App.action("version-delete-dialog", ""); } } }
+            }
+            if App.engine-tab == 2: VerticalLayout {
+                LineEdit { text <=> App.compatible-query; placeholder-text: "筛选游戏名称或版本"; edited => { App.action("compatible-games", ""); } }
+                ListView { for game in App.games: Rectangle { height: max(78px, game-content.preferred-height);
+                    game-content := VerticalLayout { padding: 8px; spacing: 6px; alignment: start;
+                        Link { text: game.name; horizontal-stretch: 1; clicked => { App.action("project-reference", game.id); } }
+                        Caption { text: game.detail; }
+                    }
+                } }
+            }
+            if App.engine-tab == 3: VerticalLayout {
+                ListView { height: 170px; for knowledge in App.knowledge: Rectangle { height: 66px; background: App.knowledge-id == knowledge.id ? Theme.tint : Theme.surface; VerticalLayout { padding: 8px; Label { text: knowledge.name; } Caption { text: knowledge.detail; } } TouchArea { clicked => { App.action("knowledge", knowledge.id); } } } }
+                CheckBox { text: "用于后续智能识别与适配"; checked <=> App.knowledge-enabled; enabled: App.knowledge-id != ""; toggled => { App.action("knowledge-enable", ""); } }
+                ScrollView { horizontal-scrollbar-policy: always-off; content-width: self.visible-width;
+                    VerticalLayout { alignment: start; spacing: 12px;
+                        if App.knowledge-origins.length > 0: VerticalLayout { spacing: 8px;
+                            Label { text: "来源项目"; font-weight: 600; }
+                            for origin in App.knowledge-origins: Link {
+                                text: origin.name; horizontal-stretch: 1; enabled: origin.id != "";
+                                clicked => { App.action("project-reference", origin.id); }
+                            }
+                        }
+                        Label { text: App.knowledge-content; }
+                    }
+                }
+            }
+        }
+    }
+}

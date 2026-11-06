@@ -1,0 +1,75 @@
+import { Button, LineEdit, TextEdit, ComboBox, CheckBox, SpinBox, ScrollView, ProgressIndicator } from "std-widgets.slint";
+import { App, Theme, Label, Caption, TokenCaption, Heading, ReportText, Link } from "state.slint";
+export component DialogLayer inherits Rectangle {
+    background: #00000066;
+    TouchArea {}
+    Rectangle { width: min(parent.width - 100px, 660px); height: min(parent.height - 80px, modal-content.preferred-height + 40px); x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; background: Theme.surface; border-radius: 8px;
+        modal-content := VerticalLayout { padding: 20px; spacing: 12px;
+            if App.modal != "engine-review": Heading { text: App.modal == "api" ? "API 配置" : App.modal == "patch-texts" ? "本次补丁文本" : App.modal == "feedback" ? "任务需要处理" : App.modal-title; }
+            if App.modal == "engine-review": Link { text: "同类引擎经验"; font-size: 20px; strong: true; clicked => { App.modal = ""; App.action("open", "knowledge"); } }
+            if App.modal == "api": VerticalLayout { spacing: 10px;
+                Caption { text: "配置名称"; } LineEdit { text <=> App.api-name; }
+                Caption { text: "API 地址"; } LineEdit { text <=> App.api-endpoint; placeholder-text: "http://localhost:8080/v1"; }
+                HorizontalLayout { ComboBox { model: ["Chat Completions", "Responses"]; current-index <=> App.api-protocol; } LineEdit { text <=> App.api-model; placeholder-text: "模型名称"; horizontal-stretch: 1; } }
+                Caption { text: "API Key（本地服务可留空）"; } LineEdit { text <=> App.api-key; input-type: password; }
+                CheckBox { text: "记住 API Key（在本机加密保存）"; checked <=> App.api-remember-key; }
+                Caption { text: "分析思考等级（仅用于智能识别与适配）"; } ComboBox { model: ["接口默认", "low", "medium", "high", "xhigh"]; current-index <=> App.api-reasoning; }
+                Caption { text: "翻译输入格式"; } ComboBox { model: ["批量 JSON", "逐条纯文本（本地翻译模型）"]; current-index <=> App.api-format; }
+            }
+            if App.modal == "patch-texts": ScrollView { height: 360px; horizontal-scrollbar-policy: always-off; content-width: self.visible-width;
+                VerticalLayout { spacing: 12px; alignment: start;
+                    ReportText { text: App.modal-message; }
+                }
+            }
+            if App.modal == "engine-review": ScrollView { height: min(440px, root.height - 220px); horizontal-scrollbar-policy: always-off; content-width: self.visible-width;
+                VerticalLayout { padding-right: 16px; alignment: start; ReportText { text: App.review-summary; } }
+            }
+            if App.modal == "feedback": ScrollView { height: min(400px, root.height - 240px); horizontal-scrollbar-policy: always-off; content-width: self.visible-width;
+                VerticalLayout { padding-right: 16px; alignment: start; ReportText { text: App.error; } }
+            }
+            if App.modal != "api" && App.modal != "patch-texts" && App.modal != "engine-review" && App.modal != "feedback": Label { text: App.modal-message; }
+            if App.error != "" && App.modal != "engine-review" && App.modal != "feedback": ReportText { text: App.error; color: Theme.error; }
+            if App.modal == "adapt": ScrollView { height: min(440px, root.height - 300px);
+              VerticalLayout { spacing: 8px; padding-right: 12px; alignment: start;
+                Caption { text: "本次目标"; }
+                ComboBox { model: ["识别游戏", "修复现有问题", "补全遗漏文字"]; current-index <=> App.adaptation-objective; }
+                if App.adaptation-objective == 0: CheckBox { text: "强制智能识别（跳过常规匹配）"; checked <=> App.force-intelligent; }
+                Caption { text: App.adaptation-objective == 1 ? "使用智能适配修复编码、字体、启动或回填问题，保留已有文本与译文的匹配关系；完成相关检查后先生成补丁试用。" : App.adaptation-objective == 2 ? "使用智能适配调查并补齐对白、菜单、界面等遗漏文字。请在下方说明未汉化的位置或原文。" : App.force-intelligent ? "直接调用分析 API 检查游戏资源，复用已有源码和引擎经验；不会因常规解析器匹配成功而提前结束。" : "先进行常规适配；未找到可用适配器或提取不足 1,000 条文本时，自动继续智能检查。已有结果保留，缺少分析 API 配置时会提示错误。"; }
+                Caption { text: "补充目标或遗漏文字的位置（可留空）"; } TextEdit { text <=> App.instruction; height: 140px; }
+                Caption { text: "本次智能适配 Token 预算（1,000–20,000,000）"; }
+                HorizontalLayout { spacing: 10px;
+                    LineEdit { text <=> App.budget; input-type: number; horizontal-stretch: 1; }
+                    TokenCaption { value: App.budget-preview; min-width: 100px; vertical-alignment: center; }
+                }
+                Caption { text: "本次智能适配最多模型轮数"; }
+                SpinBox { value <=> App.turns; minimum: 1; maximum: 400; }
+                Caption { text: "达到 Token 或轮数上限时暂停并保存进度。未单独配置的项自动使用全局设置；修改后记为当前项目设置。"; }
+              }
+            }
+            if App.modal == "remove": CheckBox { text: "同时删除对应项目数据文件夹（不删除游戏）"; checked <=> App.delete-files; }
+            if App.modal == "cleanup": VerticalLayout { spacing: 12px;
+                if App.cleanup-loading: VerticalLayout { spacing: 8px;
+                    Caption { text: "正在统计各类文件的大小…"; }
+                    ProgressIndicator { indeterminate: true; height: 3px; }
+                }
+                if !App.cleanup-loading: ScrollView { height: min(320px, root.height - 440px); horizontal-scrollbar-policy: always-off; content-width: self.visible-width;
+                    VerticalLayout { spacing: 18px; padding-right: 12px; alignment: start;
+                        for item[index] in App.cleanup-items: VerticalLayout { spacing: 6px;
+                            HorizontalLayout { spacing: 12px;
+                                CheckBox { text: item.title; checked: item.selected; toggled => { App.cleanup-items[index].selected = self.checked; } }
+                                Rectangle { horizontal-stretch: 1; }
+                                Label { text: item.size; color: Theme.title; font-weight: 600; }
+                            }
+                            Caption { text: item.description; }
+                        }
+                    }
+                }
+                Caption { text: "删除后无法撤销；清理中断可重试。游戏目录内的文件与 .bak、全局引擎库和经验不在清理范围内。"; }
+            }
+            if App.modal == "patch": ComboBox { model: ["全部有效译文", "仅所选文本", "仅已校对译文"]; current-index <=> App.patch-scope; }
+            if App.modal == "verify-version": VerticalLayout { spacing: 8px; Caption { text: "用于验证的游戏项目"; } ComboBox { model: App.verification-project-names; current-index <=> App.verification-project-index; } }
+            if App.modal == "directory": VerticalLayout { spacing: 10px; HorizontalLayout { LineEdit { text <=> App.new-directory; horizontal-stretch: 1; } Button { text: "浏览…"; clicked => { App.action("browse-data", ""); } } } CheckBox { text: "迁移现有数据（保留原目录）"; checked <=> App.migrate-data; } }
+            HorizontalLayout { Rectangle { horizontal-stretch: 1; } Button { text: App.modal == "engine-review" || App.modal == "feedback" || App.modal == "patch-texts" ? "关闭" : "取消"; clicked => { if App.modal == "adapt" { App.action("adapt-cancel", ""); } App.modal = ""; App.api-key = ""; } } if App.modal == "resume-translation": Button { text: "改为全量翻译"; clicked => { App.modal = ""; App.action("translate", "force-all"); } } if App.modal != "patch-texts" && App.modal != "engine-review" && App.modal != "feedback": Button { text: App.modal == "resume-translation" ? "继续原选区" : App.modal == "cleanup" ? "清理所选文件" : "确认"; enabled: App.modal != "cleanup" || (!App.cleanup-loading && App.cleanup-selected); primary: true; clicked => { App.action("confirm", App.modal); } } }
+        }
+    }
+}

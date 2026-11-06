@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text;
 using System.Text.RegularExpressions;
 using VNTextPatch.Shared.Util;
 
@@ -40,6 +41,14 @@ namespace VNTextPatch.Shared.Scripts.Yuris
 
         private int _lineNumbersOffset;
         private int _lineNumbersSize;
+        private readonly Encoding _readEncoding;
+        private readonly Encoding _writeEncoding;
+
+        public YurisScenarioScript(Encoding? readEncoding = null, Encoding? writeEncoding = null)
+        {
+            _readEncoding = readEncoding ?? StringUtil.SjisEncoding;
+            _writeEncoding = writeEncoding ?? StringUtil.SjisTunnelEncoding;
+        }
 
         public string Extension => ".ybn";
 
@@ -88,17 +97,42 @@ namespace VNTextPatch.Shared.Scripts.Yuris
         {
             foreach (List<YurisAttribute> attrs in GetStringAttributeGroups())
             {
-                string str = string.Join("", attrs.Select(a => GetAttributeValue(a)));
-                Match dialogueMatch = Regex.Match(str, @"^(?<name>.+?)(?:[「『](?<text>.+)[』」]|(?<text>（.+）))$", RegexOptions.Singleline);
-                if (dialogueMatch.Success)
+                foreach (ScriptString str in SplitGroup(string.Join("", attrs.Select(a => GetAttributeValue(a)))))
+                    yield return str;
+            }
+        }
+
+        public IEnumerable<YurisString> GetStringsWithSources()
+        {
+            var sources = new Dictionary<int, YurisAttributeSource>();
+            int groupIndex = 0;
+            foreach (List<YurisAttribute> attrs in GetStringAttributeGroups(sources))
+            {
+                YurisAttributeSource[] groupSources = attrs.Select(a => sources[a.DescriptorOffset]).ToArray();
+                foreach (ScriptString str in SplitGroup(string.Join("", attrs.Select(a => GetAttributeValue(a)))))
                 {
-                    yield return new ScriptString(dialogueMatch.Groups["name"].Value, ScriptStringType.CharacterName);
-                    yield return new ScriptString(dialogueMatch.Groups["text"].Value, ScriptStringType.Message);
+                    string role = str.Type == ScriptStringType.CharacterName ? "name" : "dialogue";
+                    yield return new YurisString(str, new YurisTextSource(groupIndex, role, groupSources));
                 }
-                else
-                {
-                    yield return new ScriptString(str, ScriptStringType.Message);
-                }
+                groupIndex++;
+            }
+        }
+
+        private static Match MatchDialogue(string text) => Regex.Match(text,
+            @"^(?<name>.+?)(?:[「『](?<quoted>.+)[』」]|(?<thought>（.+）))$", RegexOptions.Singleline);
+
+        private static IEnumerable<ScriptString> SplitGroup(string text)
+        {
+            Match match = MatchDialogue(text);
+            if (match.Success)
+            {
+                yield return new ScriptString(match.Groups["name"].Value, ScriptStringType.CharacterName);
+                yield return new ScriptString(match.Groups["quoted"].Success
+                    ? match.Groups["quoted"].Value : match.Groups["thought"].Value, ScriptStringType.Message);
+            }
+            else
+            {
+                yield return new ScriptString(text, ScriptStringType.Message);
             }
         }
 
@@ -112,8 +146,10 @@ namespace VNTextPatch.Shared.Scripts.Yuris
                 BinaryPatcher patcher = new BinaryPatcher(inputStream, outputStream, a => _attributeValuesOffset + a, o => o - _attributeValuesOffset);
                 foreach (List<YurisAttribute> attrs in GetStringAttributeGroups())
                 {
-                    string? text = GetNextMessage(stringEnumerator);
-                    string? original = GetNextMessage(originalEnumerator);
+                    string originalGroup = string.Join("", attrs.Select(a => GetAttributeValue(a)));
+                    Match layout = MatchDialogue(originalGroup);
+                    string? text = GetNextMessage(stringEnumerator, originalGroup, layout);
+                    string? original = GetNextMessage(originalEnumerator, originalGroup, layout);
                     if (text == original)
                         continue; // Keep the original control bytes, expression quoting and group boundaries.
                     if (text == null)
@@ -162,7 +198,7 @@ namespace VNTextPatch.Shared.Scripts.Yuris
             }
         }
 
-        private static string? GetNextMessage(IEnumerator<ScriptString> stringEnumerator)
+        private static string? GetNextMessage(IEnumerator<ScriptString> stringEnumerator, string original, Match layout)
         {
             if (!stringEnumerator.MoveNext())
                 return null;
@@ -174,15 +210,18 @@ namespace VNTextPatch.Shared.Scripts.Yuris
                     throw new InvalidDataException("Not enough lines in translated script");
 
                 string text = MonospaceWordWrapper.Default.Wrap(stringEnumerator.Current.Text);
-                if (text.StartsWith("「") ||
-                    text.StartsWith("『") ||
-                    text.StartsWith("（"))
+                // A complete thought includes its parentheses in the public text. Once a
+                // translation adds a prefix/suffix, it needs an outer pair to remain a
+                // separate message when read again. Quoted messages always retain that pair.
+                if (layout.Groups["thought"].Success && text.StartsWith("（") && text.EndsWith("）"))
                 {
                     return name + text;
                 }
                 else
                 {
-                    return $"{name}「{text}」";
+                    char opening = layout.Groups["quoted"].Success ? original[layout.Groups["name"].Length] : '「';
+                    char closing = layout.Groups["quoted"].Success ? original[^1] : '」';
+                    return $"{name}{opening}{text}{closing}";
                 }
             }
             else
@@ -191,7 +230,8 @@ namespace VNTextPatch.Shared.Scripts.Yuris
             }
         }
 
-        private IEnumerable<List<YurisAttribute>> GetStringAttributeGroups()
+        private IEnumerable<List<YurisAttribute>> GetStringAttributeGroups(
+            Dictionary<int, YurisAttributeSource>? sources = null)
         {
             // Without descriptors there is no stored text or key to infer. Instructions may still be encrypted.
             if (_attributeDescriptorsSize == 0)
@@ -201,6 +241,7 @@ namespace VNTextPatch.Shared.Scripts.Yuris
             using IEnumerator<YurisAttribute> attrEnumerator = GetAttributes().GetEnumerator();
             List<YurisAttribute> commandAttrs = new List<YurisAttribute>();
             List<YurisAttribute> stringAttrs = new List<YurisAttribute>();
+            int commandIndex = 0;
             foreach (YurisCommand command in GetCommands())
             {
                 commandAttrs.Clear();
@@ -209,7 +250,15 @@ namespace VNTextPatch.Shared.Scripts.Yuris
                     if (!attrEnumerator.MoveNext())
                         throw new InvalidDataException();
 
-                    commandAttrs.Add(attrEnumerator.Current);
+                    YurisAttribute attr = attrEnumerator.Current;
+                    commandAttrs.Add(attr);
+                    if (sources is not null)
+                    {
+                        sources[attr.DescriptorOffset] = new YurisAttributeSource(commandIndex,
+                            _commandList!.GetCommandName(command.Id),
+                            (attr.DescriptorOffset - _attributeDescriptorsOffset) / 12, attr.Id,
+                            _commandList.GetAttributeName(command.Id, attr.Id), (int)attr.Type);
+                    }
                 }
 
                 IEnumerable<YurisAttribute> commandStringAttrs = GetStringAttributes(command, commandAttrs).Where(a => a.ValueLength > 0);
@@ -234,6 +283,7 @@ namespace VNTextPatch.Shared.Scripts.Yuris
                         }
                     }
                 }
+                commandIndex++;
             }
 
             if (stringAttrs.Count > 0)
@@ -256,7 +306,8 @@ namespace VNTextPatch.Shared.Scripts.Yuris
             }
             else if (command.Id == _gosubCommandId)
             {
-                string? subName = GetAttributeValue(attrs[0]);
+                // Subroutine identifiers remain in the original encoding; they are not translated text.
+                string? subName = GetAttributeValue(attrs[0], StringUtil.SjisEncoding);
                 if (subName == null ||
                     !subName.Equals("ES.CHAR.NAME", StringComparison.InvariantCultureIgnoreCase) &&
                     !subName.Equals("ES.SEL.SET", StringComparison.InvariantCultureIgnoreCase))
@@ -307,20 +358,21 @@ namespace VNTextPatch.Shared.Scripts.Yuris
             }
         }
 
-        private string? GetAttributeValue(in YurisAttribute attr)
+        private string? GetAttributeValue(in YurisAttribute attr, Encoding? encoding = null)
         {
+            encoding ??= _readEncoding;
             switch (attr.Type)
             {
                 case YurisAttributeType.Raw:
                 {
                     byte[] value = _data.AsSpan(attr.ValueOffset, attr.ValueLength).ToArray();
                     YurisControlCodesToStandard(value, 0, value.Length);
-                    return StringUtil.SjisEncoding.GetString(value);
+                    return encoding.GetString(value);
                 }
 
                 case YurisAttributeType.Expression:
                 {
-                    return EvaluatePushStringExpression(attr) ??
+                    return EvaluatePushStringExpression(attr, encoding) ??
                            EvaluateChrExpression(attr);
                 }
 
@@ -329,7 +381,7 @@ namespace VNTextPatch.Shared.Scripts.Yuris
             }
         }
 
-        private string? EvaluatePushStringExpression(in YurisAttribute attr)
+        private string? EvaluatePushStringExpression(in YurisAttribute attr, Encoding encoding)
         {
             // We expect expression bytecode of the form:
             // 4D           pushstring opcode
@@ -346,7 +398,7 @@ namespace VNTextPatch.Shared.Scripts.Yuris
             if (3 + argLength != attr.ValueLength)
                 return null;
 
-            string str = StringUtil.SjisEncoding.GetString(_data, attr.ValueOffset + 3, argLength);
+            string str = encoding.GetString(_data, attr.ValueOffset + 3, argLength);
             str = UnquoteString(str);
             str = Regex.Replace(str, @"(?<!\r)\n", "\r\n");
             return str;
@@ -407,13 +459,13 @@ namespace VNTextPatch.Shared.Scripts.Yuris
             return null;
         }
 
-        private static byte[] SerializeAttributeValue(in YurisAttribute attr, string value)
+        private byte[] SerializeAttributeValue(in YurisAttribute attr, string value)
         {
             switch (attr.Type)
             {
                 case YurisAttributeType.Raw:
                 {
-                    byte[] data = StringUtil.SjisTunnelEncoding.GetBytes(value);
+                    byte[] data = _writeEncoding.GetBytes(value);
                     StandardControlCodesToYuris(data, 0, data.Length);
                     return data;
                 }
@@ -423,12 +475,14 @@ namespace VNTextPatch.Shared.Scripts.Yuris
                     value = value.Replace("\r", "");
                     value = QuoteString(value);
 
-                    int numBytes = StringUtil.SjisTunnelEncoding.GetByteCount(value);
+                    int numBytes = _writeEncoding.GetByteCount(value);
+                    if (numBytes > ushort.MaxValue)
+                        throw new InvalidDataException("YU-RIS string expression exceeds its 16-bit byte length.");
                     byte[] data = new byte[3 + numBytes];
                     data[0] = 0x4D;
                     data[1] = (byte)numBytes;
                     data[2] = (byte)(numBytes >> 8);
-                    StringUtil.SjisTunnelEncoding.GetBytes(value, 0, value.Length, data, 3);
+                    _writeEncoding.GetBytes(value, 0, value.Length, data, 3);
                     return data;
                 }
 

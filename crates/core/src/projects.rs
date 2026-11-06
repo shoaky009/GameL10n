@@ -11,7 +11,7 @@ use tokio::sync::Mutex;
 
 use crate::CoreError;
 
-/// Full project metadata; unrecognized fields survive saves during migration.
+/// Full project metadata; unrecognized fields are retained when saving.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GameProject {
@@ -27,6 +27,15 @@ pub struct GameProject {
     pub extra: BTreeMap<String, Value>,
 }
 
+impl GameProject {
+    pub(crate) fn mark_updated(&mut self) {
+        self.extra.insert(
+            "updatedAt".into(),
+            Value::String(chrono::Utc::now().to_rfc3339()),
+        );
+    }
+}
+
 /// Lightweight project list data. Opening the list never opens extraction payloads.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -39,6 +48,13 @@ pub struct ProjectSummary {
 }
 
 impl ProjectSummary {
+    pub(crate) fn updated_at(&self) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+        self.extra
+            .get("updatedAt")
+            .and_then(Value::as_str)
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+    }
+
     pub fn extracted_unit_count(&self) -> Option<u64> {
         self.extra
             .get("analysis")
@@ -96,6 +112,12 @@ impl ProjectStore {
         &self.root
     }
 
+    pub async fn reload(&self) -> Result<(), CoreError> {
+        let root = self.root.clone();
+        *self.index.lock().await = tokio::task::spawn_blocking(move || load_index(&root)).await??;
+        Ok(())
+    }
+
     pub async fn ensure_writable(&self) -> Result<(), CoreError> {
         let mut lease = self.write_lease.lock().await;
         if lease.is_some() {
@@ -124,7 +146,11 @@ impl ProjectStore {
                 file.try_lock().map_err(|error| {
                     CoreError::InvalidData(format!("无法取得数据目录写入锁：{error}"))
                 })?;
-                Ok((file, load_index(&root)?))
+                let index = load_index(&root)?;
+                if root.join("games/index-pending.json").exists() {
+                    persist_index(&root, &index, &pending_index_ids(&root)?)?;
+                }
+                Ok((file, index))
             })
             .await??;
         // A read-only host may have observed an older index before the previous writer exited.
@@ -158,6 +184,86 @@ impl ProjectStore {
             .collect()
     }
 
+    pub async fn save(&self, project: &GameProject) -> Result<(), CoreError> {
+        validate_project(project, &project.id)?;
+        self.ensure_writable().await?;
+        let mut index = self.index.lock().await;
+        self.save_locked(project, &mut index).await
+    }
+
+    async fn save_locked(
+        &self,
+        project: &GameProject,
+        index: &mut ProjectIndex,
+    ) -> Result<(), CoreError> {
+        let mut next = index.clone();
+        next.projects.retain(|p| p.id != project.id);
+        if !project.is_removed {
+            next.projects.push(ProjectSummary::from(project));
+        }
+        let path = self.directory(&project.id)?.join("game.json");
+        let root = self.root.clone();
+        let saved = project.clone();
+        tokio::task::spawn_blocking(move || -> Result<(), CoreError> {
+            mark_index_pending(&root, &saved.id)?;
+            write_json(&path, &saved)?;
+            Ok(())
+        })
+        .await??;
+        // game.json is authoritative, including when the derived index cannot be replaced.
+        *index = next;
+        let root = self.root.clone();
+        let committed = index.clone();
+        let committed_ids = vec![project.id.clone()];
+        tokio::task::spawn_blocking(move || persist_index(&root, &committed, &committed_ids))
+            .await?
+    }
+
+    pub async fn remove(&self, id: &str, delete_data: bool) -> Result<(), CoreError> {
+        self.ensure_writable().await?;
+        let directory = self.directory(id)?;
+        if !delete_data && directory.is_dir() {
+            let mut project = self.get(id).await?;
+            project.is_removed = true;
+            return self.save(&project).await;
+        }
+        let project = if directory.is_dir() {
+            let project = self.get(id).await?;
+            if paths_overlap(&directory, &project.game_directory) {
+                return Err(CoreError::InvalidData(
+                    "项目目录与游戏目录重叠，不能删除；可仅移除记录。".into(),
+                ));
+            }
+            crate::application::resolve_relative(&self.root, &format!("games/{id}"))?;
+            Some(project)
+        } else {
+            None
+        };
+        {
+            let _index = self.index.lock().await;
+            let root = self.root.clone();
+            let pending_id = id.to_owned();
+            tokio::task::spawn_blocking(move || mark_index_pending(&root, &pending_id)).await??;
+        }
+        if let Some(saved) = project {
+            tokio::task::spawn_blocking(move || -> Result<(), CoreError> {
+                if let Err(error) = remove_project_directory(&directory) {
+                    write_json(&directory.join("game.json"), &saved)?;
+                    return Err(error.into());
+                }
+                Ok(())
+            })
+            .await??;
+        }
+        let mut index = self.index.lock().await;
+        index.projects.retain(|p| p.id != id);
+        let root = self.root.clone();
+        let committed = index.clone();
+        let committed_ids = vec![id.to_owned()];
+        tokio::task::spawn_blocking(move || persist_index(&root, &committed, &committed_ids))
+            .await?
+    }
+
     pub async fn get(&self, id: &str) -> Result<GameProject, CoreError> {
         let path = self.directory(id)?.join("game.json");
         if !path.is_file() {
@@ -173,10 +279,7 @@ impl ProjectStore {
     }
 
     pub async fn add(&self, directory: &Path) -> Result<GameProject, CoreError> {
-        let directory = std::path::absolute(directory)?;
-        if !directory.is_dir() {
-            return Err(CoreError::InvalidData("游戏目录不存在。".into()));
-        }
+        let directory = crate::game_directory::validate(directory)?;
         if paths_overlap(&directory, &self.root) {
             return Err(CoreError::InvalidData(
                 "游戏目录和应用数据目录不能互相包含。".into(),
@@ -213,27 +316,16 @@ impl ProjectStore {
             }
         };
         project.is_removed = false;
-        let summary = ProjectSummary::from(&project);
-        let mut next = index.clone();
-        next.projects.retain(|item| item.id != project.id);
-        next.projects.push(summary);
-        let index_path = self.root.join("games/index.json");
-        let saved = project.clone();
-        let committed_index = next.clone();
-        tokio::task::spawn_blocking(move || -> Result<(), CoreError> {
-            write_json(&game_path, &saved)?;
-            write_json(&index_path, &committed_index)?;
-            Ok(())
-        })
-        .await??;
-        *index = next;
+        project.mark_updated();
+        self.save_locked(&project, &mut index).await?;
         Ok(project)
     }
 }
 
 fn load_index(root: &Path) -> Result<ProjectIndex, CoreError> {
     let path = root.join("games/index.json");
-    if path.exists() {
+    let pending = pending_index_ids(root)?;
+    let mut index = if path.exists() {
         let index: ProjectIndex = read_json(&path)?;
         if index.schema_version != 1 {
             return Err(CoreError::InvalidData("不支持的项目列表版本。".into()));
@@ -241,32 +333,108 @@ fn load_index(root: &Path) -> Result<ProjectIndex, CoreError> {
         for project in &index.projects {
             validate_id(&project.id)?;
         }
-        return Ok(index);
-    }
-    let mut projects = Vec::new();
-    let games = root.join("games");
-    if games.is_dir() {
-        for entry in fs::read_dir(games)? {
-            let entry = entry?;
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if validate_id(&name).is_err() || !entry.file_type()?.is_dir() {
-                continue;
+        index
+    } else {
+        let mut projects = Vec::new();
+        let games = root.join("games");
+        if games.is_dir() {
+            for entry in fs::read_dir(games)? {
+                let entry = entry?;
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if validate_id(&name).is_err() || !entry.file_type()?.is_dir() {
+                    continue;
+                }
+                let path = entry.path().join("game.json");
+                if !path.exists() && pending.contains(&name) {
+                    continue;
+                }
+                let project: GameProject = read_json(&path)?;
+                validate_project(&project, &name)?;
+                if !project.is_removed {
+                    projects.push(ProjectSummary::from(&project));
+                }
             }
-            let project: GameProject = read_json(&entry.path().join("game.json"))?;
-            validate_project(&project, &name)?;
+        }
+        ProjectIndex {
+            schema_version: 1,
+            projects,
+            extra: BTreeMap::new(),
+        }
+    };
+    // A valid index needs only the few projects whose last commit was interrupted.
+    for id in pending {
+        index.projects.retain(|project| project.id != id);
+        let path = root.join("games").join(&id).join("game.json");
+        if path.exists() {
+            let project: GameProject = read_json(&path)?;
+            validate_project(&project, &id)?;
             if !project.is_removed {
-                projects.push(ProjectSummary::from(&project));
+                index.projects.push(ProjectSummary::from(&project));
             }
         }
     }
-    Ok(ProjectIndex {
-        schema_version: 1,
-        projects,
-        extra: BTreeMap::new(),
-    })
+    Ok(index)
 }
 
-fn paths_overlap(left: &Path, right: &Path) -> bool {
+fn pending_index_ids(root: &Path) -> Result<Vec<String>, CoreError> {
+    let path = root.join("games/index-pending.json");
+    let ids: Vec<String> = if path.exists() {
+        read_json(&path)?
+    } else {
+        Vec::new()
+    };
+    for id in &ids {
+        validate_id(id)?;
+    }
+    Ok(ids)
+}
+
+fn mark_index_pending(root: &Path, id: &str) -> Result<(), CoreError> {
+    let mut ids = pending_index_ids(root)?;
+    if !ids.iter().any(|pending| pending == id) {
+        ids.push(id.into());
+    }
+    write_json(&root.join("games/index-pending.json"), &ids)?;
+    Ok(())
+}
+
+fn persist_index(
+    root: &Path,
+    index: &ProjectIndex,
+    committed_ids: &[String],
+) -> Result<(), CoreError> {
+    write_json(&root.join("games/index.json"), index)?;
+    let mut pending = pending_index_ids(root)?;
+    pending.retain(|id| !committed_ids.contains(id));
+    if !pending.is_empty() {
+        write_json(&root.join("games/index-pending.json"), &pending)?;
+        return Ok(());
+    }
+    match fs::remove_file(root.join("games/index-pending.json")) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn remove_project_directory(directory: &Path) -> std::io::Result<()> {
+    // Keep the metadata available for retry/recovery until the material deletion succeeds.
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        if entry.file_name() == "game.json" {
+            continue;
+        }
+        if entry.file_type()?.is_dir() {
+            fs::remove_dir_all(entry.path())?;
+        } else {
+            fs::remove_file(entry.path())?;
+        }
+    }
+    fs::remove_file(directory.join("game.json"))?;
+    fs::remove_dir(directory)
+}
+
+pub(crate) fn paths_overlap(left: &Path, right: &Path) -> bool {
     if cfg!(windows) {
         let normalize = |path: &Path| {
             path.to_string_lossy()
@@ -357,4 +525,167 @@ pub fn default_data_directory() -> PathBuf {
         return PathBuf::from(path);
     }
     base
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn index_commit_does_not_clear_another_projects_pending_deletion() {
+        let root = tempfile::tempdir().unwrap();
+        let game = root.path().join("game");
+        fs::create_dir(&game).unwrap();
+        let data = root.path().join("data");
+        let store = ProjectStore::open(data.clone()).await.unwrap();
+        let mut project = store.add(&game).await.unwrap();
+        let deleting = "000000000000000000000001";
+        mark_index_pending(&data, deleting).unwrap();
+        project.name = "Updated".into();
+        store.save(&project).await.unwrap();
+        assert_eq!(pending_index_ids(&data).unwrap(), [deleting]);
+        drop(store);
+        let recovered = ProjectStore::open(data).await.unwrap();
+        assert_eq!(recovered.list("").await[0].name, "Updated");
+    }
+
+    #[tokio::test]
+    async fn failed_index_write_keeps_committed_metadata_and_recovers_only_pending_projects() {
+        let temporary = tempfile::tempdir().unwrap();
+        let data = temporary.path().join("data");
+        let game = temporary.path().join("game");
+        fs::create_dir(&game).unwrap();
+        let store = ProjectStore::open(data.clone()).await.unwrap();
+        let mut project = store.add(&game).await.unwrap();
+        let index_path = data.join("games/index.json");
+        let previous = fs::read(&index_path).unwrap();
+        fs::remove_file(&index_path).unwrap();
+        fs::create_dir(&index_path).unwrap();
+        project.name = "Committed name".into();
+        project.settings = json!({"translationProfileIds":["preserved"]});
+        project
+            .extra
+            .insert("customData".into(), json!({"value":42}));
+
+        assert!(store.save(&project).await.is_err());
+        assert_eq!(store.list("").await[0].name, "Committed name");
+        assert_eq!(
+            store.get(&project.id).await.unwrap().settings,
+            project.settings
+        );
+        assert!(data.join("games/index-pending.json").is_file());
+        fs::remove_dir(&index_path).unwrap();
+        fs::write(&index_path, previous).unwrap();
+        let unrelated = data.join("games/000000000000000000000001");
+        fs::create_dir(&unrelated).unwrap();
+        fs::write(unrelated.join("game.json"), "unrelated unreadable metadata").unwrap();
+        drop(store);
+
+        let reopened = ProjectStore::open(data.clone()).await.unwrap();
+        assert_eq!(reopened.list("").await[0].name, "Committed name");
+        assert_eq!(
+            reopened.get(&project.id).await.unwrap().extra["customData"],
+            json!({"value":42})
+        );
+        reopened.ensure_writable().await.unwrap();
+        let index: ProjectIndex = read_json(&index_path).unwrap();
+        assert_eq!(index.projects[0].id, project.id);
+        assert_eq!(index.projects[0].name, "Committed name");
+        assert!(!data.join("games/index-pending.json").exists());
+    }
+
+    #[tokio::test]
+    async fn a_committed_new_project_is_recovered_after_its_index_write_fails() {
+        let temporary = tempfile::tempdir().unwrap();
+        let data = temporary.path().join("data");
+        let first_game = temporary.path().join("first");
+        let second_game = temporary.path().join("second");
+        fs::create_dir(&first_game).unwrap();
+        fs::create_dir(&second_game).unwrap();
+        let store = ProjectStore::open(data.clone()).await.unwrap();
+        store.add(&first_game).await.unwrap();
+        let index_path = data.join("games/index.json");
+        let previous = fs::read(&index_path).unwrap();
+        fs::remove_file(&index_path).unwrap();
+        fs::create_dir(&index_path).unwrap();
+
+        assert!(store.add(&second_game).await.is_err());
+        let id = project_id(&second_game).unwrap();
+        assert_eq!(store.get(&id).await.unwrap().game_directory, second_game);
+        assert_eq!(store.list("").await.len(), 2);
+        fs::remove_dir(&index_path).unwrap();
+        fs::write(&index_path, previous).unwrap();
+        drop(store);
+
+        let reopened = ProjectStore::open(data).await.unwrap();
+        assert_eq!(reopened.list("").await.len(), 2);
+        assert_eq!(reopened.add(&second_game).await.unwrap().id, id);
+    }
+
+    #[tokio::test]
+    async fn removed_projects_stay_removed_when_the_index_write_fails() {
+        for delete_data in [false, true] {
+            let temporary = tempfile::tempdir().unwrap();
+            let data = temporary.path().join("data");
+            let game = temporary.path().join("game");
+            fs::create_dir(&game).unwrap();
+            fs::write(game.join("original.txt"), "original").unwrap();
+            let store = ProjectStore::open(data.clone()).await.unwrap();
+            let project = store.add(&game).await.unwrap();
+            let index_path = data.join("games/index.json");
+            let previous = fs::read(&index_path).unwrap();
+            fs::remove_file(&index_path).unwrap();
+            fs::create_dir(&index_path).unwrap();
+
+            assert!(store.remove(&project.id, delete_data).await.is_err());
+            assert!(store.list("").await.is_empty());
+            if delete_data {
+                assert!(!store.directory(&project.id).unwrap().exists());
+            } else {
+                assert!(store.get(&project.id).await.unwrap().is_removed);
+            }
+            assert_eq!(
+                fs::read_to_string(game.join("original.txt")).unwrap(),
+                "original"
+            );
+            fs::remove_dir(&index_path).unwrap();
+            fs::write(&index_path, previous).unwrap();
+            drop(store);
+
+            let reopened = ProjectStore::open(data.clone()).await.unwrap();
+            assert!(reopened.list("").await.is_empty());
+            reopened.ensure_writable().await.unwrap();
+            assert!(!data.join("games/index-pending.json").exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_marker_failure_prevents_an_unrecoverable_metadata_commit() {
+        let temporary = tempfile::tempdir().unwrap();
+        let data = temporary.path().join("data");
+        let game = temporary.path().join("game");
+        fs::create_dir(&game).unwrap();
+        let store = ProjectStore::open(data.clone()).await.unwrap();
+        let mut project = store.add(&game).await.unwrap();
+        let previous_name = project.name.clone();
+        fs::create_dir(data.join("games/index-pending.json")).unwrap();
+        project.name = "Must not commit".into();
+
+        assert!(store.save(&project).await.is_err());
+        assert_eq!(store.get(&project.id).await.unwrap().name, previous_name);
+        assert_eq!(store.list("").await[0].name, previous_name);
+    }
+
+    #[tokio::test]
+    async fn interrupted_first_project_creation_does_not_break_initial_index_recovery() {
+        let temporary = tempfile::tempdir().unwrap();
+        let id = "000000000000000000000001";
+        fs::create_dir_all(temporary.path().join("games").join(id)).unwrap();
+        write_json(&temporary.path().join("games/index-pending.json"), &[id]).unwrap();
+
+        let store = ProjectStore::open(temporary.path().into()).await.unwrap();
+        assert!(store.list("").await.is_empty());
+        store.ensure_writable().await.unwrap();
+        assert!(!temporary.path().join("games/index-pending.json").exists());
+    }
 }

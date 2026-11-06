@@ -17,6 +17,8 @@ def invoke(kind, request):
     if parser_command:
         paths["vnTextPatchCommand"] = parser_command
     payload = dict(request, protocolVersion=1, toolPaths=paths)
+    for key in ("validationContextFile", "buildMode", "outputFiles", "buildHints"):
+        payload.pop(key, None)
     process = subprocess.run([*command, kind], input=json.dumps(payload, ensure_ascii=False),
                              encoding="utf-8", stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
@@ -25,6 +27,7 @@ def invoke(kind, request):
         raise RuntimeError("组件未返回有效 JSON：" + process.stderr[-4000:]) from error
     if process.returncode != 0 or not response.get("success") or response.get("protocolVersion") != 1:
         raise RuntimeError(response.get("error") or process.stderr[-4000:] or "组件调用失败。")
+    response.pop("validationContextVersion", None)
     return response
 
 
@@ -41,6 +44,12 @@ def parser(request, format, **changes):
         raise RuntimeError("VNTextPatch 命令必须是可执行文件和参数组成的字符串数组。")
     # An inner tool must not overwrite the outer adapter's response file.
     payload.pop("responseFile", None)
+    # This context belongs to outer resource paths and IDs, not unpacked scripts.
+    for key in ("validationContextFile", "buildMode", "outputFiles", "buildHints"):
+        payload.pop(key, None)
+    # Container adapters translate their public IDs to the inner script's IDs.
+    if "translations" in changes:
+        payload.pop("translationsFile", None)
     result = subprocess.run(command, input=json.dumps(payload, ensure_ascii=False),
                             encoding="utf-8", stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             timeout=300, creationflags=0x08000000 if os.name == "nt" else 0)
@@ -50,7 +59,44 @@ def parser(request, format, **changes):
         raise RuntimeError("解析器未返回有效 JSON：" + result.stderr[-4000:]) from error
     if result.returncode != 0 or response.get("protocolVersion") != 1 or not response.get("success"):
         raise RuntimeError(response.get("error") or result.stderr[-4000:] or "脚本解析失败。")
+    response.pop("validationContextVersion", None)
     return response
+
+
+def validation_context(request):
+    """Reuse this verification's outer extraction results, or return None on older hosts.
+
+    This replaces duplicate text extraction only. Format-specific structure,
+    untouched fields, encoding, and runtime checks still belong to the adapter.
+    """
+    path = request.get("validationContextFile")
+    if path is None:
+        return None
+    if request.get("operation") != "validate":
+        raise ValueError("提取复用上下文仅适用于校验操作。")
+    with Path(path).open(encoding="utf-8-sig") as stream:
+        context = json.load(stream)
+    if not isinstance(context, dict) or context.get("schemaVersion") != 1:
+        raise ValueError("不支持的提取复用上下文版本。")
+    for key in ("sourceDirectory", "outputDirectory"):
+        if (not isinstance(context.get(key), str) or not isinstance(request.get(key), str)
+                or Path(context[key]).resolve() != Path(request[key]).resolve()):
+            raise ValueError("提取复用上下文与当前资源目录不一致。")
+    if context.get("resourceFiles") != request.get("resourceFiles"):
+        raise ValueError("提取复用上下文与当前资源选择不一致。")
+    for key in ("originalUnits", "outputUnits", "outputFiles"):
+        if not isinstance(context.get(key), list):
+            raise ValueError("提取复用上下文缺少完整提取结果或产物列表。")
+    if request.get("buildMode") == "overlay" and context["outputFiles"] != request.get("outputFiles"):
+        raise ValueError("提取复用上下文与当前覆盖包清单不一致。")
+    if request.get("translationsFile"):
+        with Path(request["translationsFile"]).open(encoding="utf-8-sig") as stream:
+            translations = json.load(stream)
+    else:
+        translations = request.get("translations") or {}
+    if not isinstance(translations, dict) or any(not isinstance(text, str) for text in translations.values()):
+        raise ValueError("译文必须为 ID 到文本的映射。")
+    return dict(context, translations=translations)
 
 
 def component(operation, request=None, **parameters):

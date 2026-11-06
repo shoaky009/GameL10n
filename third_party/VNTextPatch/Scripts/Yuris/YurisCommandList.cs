@@ -9,6 +9,7 @@ namespace VNTextPatch.Shared.Scripts.Yuris
     {
         private readonly Dictionary<string, byte> _commandIds = new Dictionary<string, byte>();
         private readonly List<Dictionary<string, byte>> _attributeIds = new List<Dictionary<string, byte>>();
+        private readonly List<List<string>> _attributeNames = new List<List<string>>();
 
         public YurisCommandList(string filePath)
         {
@@ -45,6 +46,12 @@ namespace VNTextPatch.Shared.Scripts.Yuris
             return _attributeIds[commandId][attributeName];
         }
 
+        public string? GetAttributeName(byte commandId, short attributeId)
+        {
+            List<string> names = _attributeNames[commandId];
+            return attributeId >= 0 && attributeId < names.Count ? names[attributeId] : null;
+        }
+
         private void ReadCommand(byte commandId, BinaryReader reader)
         {
             string commandName = reader.ReadZeroTerminatedSjisString();
@@ -52,14 +59,17 @@ namespace VNTextPatch.Shared.Scripts.Yuris
 
             byte numAttributes = reader.ReadByte();
             Dictionary<string, byte> attributeIds = new Dictionary<string, byte>();
+            List<string> attributeNames = new List<string>();
             for (byte attrId = 0; attrId < numAttributes; attrId++)
             {
                 string attrName = reader.ReadZeroTerminatedSjisString();
                 attributeIds.TryAdd(attrName, attrId);
+                attributeNames.Add(attrName);
 
                 reader.Skip(2);
             }
             _attributeIds.Add(attributeIds);
+            _attributeNames.Add(attributeNames);
         }
     }
 }

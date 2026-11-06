@@ -1,0 +1,173 @@
+{
+  "2915811a559386ed": {
+    "version": "2915811a559386ed",
+    "unicode": false,
+    "fontRevision": 1,
+    "fontFingerprintPrefix": "",
+    "probe": {
+      "engineId": "qlie-filepack3",
+      "adapterId": "qlie-filepack3-systemfont",
+      "adapterVersion": "1.0.0",
+      "description": "QLIE FilePackVer3.0 主脚本封包／system_fix 字体布局（完整资源阶段严格校验）",
+      "warnings": [
+        "仅识别主脚本 data0.pack；不改动图像和语音封包。"
+      ]
+    },
+    "buildWarnings": [
+      "安装后请双击 启动汉化.exe；启动器会加载汉化字体并沿用原游戏的日语运行配置。游戏内显示尚待确认。"
+    ],
+    "instructions": "安装补丁后双击游戏目录中的 启动汉化.exe。启动器临时加载汉化字体，并通过本机 Locale Emulator 运行原游戏 EXE，沿用原 EXE 的日语配置；已使用系统日语环境且没有单独转区配置时可直接运行。未找到 Locale Emulator 时会请您选择 LEProc.exe。请保留原游戏的 .exe.le.config；无需对启动器本身设置转区。原 EXE、视频和其他未翻译资源保留。字体仅在游戏运行期间加载，不永久安装。实际游戏内显示仍需试译确认。"
+  },
+  "6cd70ca295b40fb4": {
+    "version": "6cd70ca295b40fb4",
+    "unicode": false,
+    "fontRevision": 1,
+    "fontFingerprintPrefix": "",
+    "probe": {
+      "engineId": "qlie-filepack3",
+      "adapterId": "qlie-filepack3-systemfont",
+      "adapterVersion": "1.0.0",
+      "description": "QLIE FilePackVer3.0 主脚本封包／system_fix 字体布局（完整资源阶段严格校验）",
+      "warnings": [
+        "仅识别主脚本 data0.pack；不改动图像和语音封包。"
+      ]
+    },
+    "buildWarnings": [
+      "请将输出合并到游戏副本，并使用 qlie-l10n/启动汉化.cmd；勿直接运行原EXE。游戏启动及实际渲染尚未验证。"
+    ],
+    "instructions": "将导出的所有文件按原路径合并到游戏副本，保留未导出的图像、语音等原资源。请通过本目录的 启动汉化.cmd 启动；窗口需保持打开，游戏退出后自动卸载临时会话字体，不永久安装。不要直接启动原EXE，否则新增汉字可能显示错误。原EXE未修改。已验证编码及独立GDI字体路径，尚未验证游戏启动或实际渲染。字体槽5及外字字库保持原样。"
+  },
+  "753a80f5d6027b9f": {
+    "version": "753a80f5d6027b9f",
+    "unicode": false,
+    "fontRevision": 2,
+    "fontFingerprintPrefix": "qlie-font-v2\n",
+    "probe": {
+      "engineId": "qlie-filepack3",
+      "adapterId": "qlie-filepack3-systemfont",
+      "adapterVersion": "1.0.0",
+      "description": "QLIE FilePackVer3.0 主脚本封包／system_fix 字体布局（完整资源阶段严格校验）",
+      "warnings": [
+        "仅识别主脚本 data0.pack；不改动图像和语音封包。"
+      ]
+    },
+    "buildWarnings": [
+      "安装后请双击 启动汉化.exe；启动器会加载汉化字体并沿用原游戏的日语运行配置。游戏内显示尚待确认。"
+    ],
+    "instructions": "安装补丁后双击游戏目录中的 启动汉化.exe。启动器临时加载汉化字体，并通过本机 Locale Emulator 运行原游戏 EXE，沿用原 EXE 的日语配置；已使用系统日语环境且没有单独转区配置时可直接运行。未找到 Locale Emulator 时会请您选择 LEProc.exe。请保留原游戏的 .exe.le.config；无需对启动器本身设置转区。原 EXE、视频和其他未翻译资源保留。字体仅在游戏运行期间加载，不永久安装。实际游戏内显示仍需试译确认。"
+  },
+  "85286fdfac3b0898": {
+    "version": "85286fdfac3b0898",
+    "unicode": false,
+    "fontRevision": 3,
+    "fontFingerprintPrefix": "qlie-font-v3\n",
+    "probe": {
+      "engineId": "qlie-filepack3",
+      "adapterId": "qlie-filepack3-systemfont",
+      "adapterVersion": "1.0.0",
+      "description": "QLIE FilePackVer3.0 主脚本封包／system_fix 字体布局（完整资源阶段严格校验）",
+      "warnings": [
+        "仅识别主脚本 data0.pack；不改动图像和语音封包。"
+      ]
+    },
+    "buildWarnings": [
+      "安装后请双击 启动汉化.exe；启动器会加载汉化字体并沿用原游戏的日语运行配置。游戏内显示尚待确认。"
+    ],
+    "instructions": "安装补丁后双击游戏目录中的 启动汉化.exe。启动器临时加载汉化字体，并通过本机 Locale Emulator 运行原游戏 EXE，沿用原 EXE 的日语配置；已使用系统日语环境且没有单独转区配置时可直接运行。未找到 Locale Emulator 时会请您选择 LEProc.exe。请保留原游戏的 .exe.le.config；无需对启动器本身设置转区。原 EXE、视频和其他未翻译资源保留。字体仅在游戏运行期间加载，不永久安装。实际游戏内显示仍需试译确认。"
+  },
+  "8b3b903685e13fca": {
+    "version": "8b3b903685e13fca",
+    "unicode": false,
+    "fontRevision": 1,
+    "fontFingerprintPrefix": "",
+    "probe": {
+      "engineId": "qlie-filepack3",
+      "adapterId": "qlie-filepack3-systemfont",
+      "adapterVersion": "1.0.0",
+      "description": "QLIE FilePackVer3.0 主脚本封包／system_fix 字体布局（完整资源阶段严格校验）",
+      "warnings": [
+        "仅识别主脚本 data0.pack；不改动图像和语音封包。"
+      ]
+    },
+    "buildWarnings": [
+      "安装后请双击 启动汉化.exe；启动器会加载汉化字体并沿用原游戏的日语运行配置。游戏内显示尚待确认。"
+    ],
+    "instructions": "安装补丁后双击游戏目录中的 启动汉化.exe。启动器临时加载汉化字体，并通过本机 Locale Emulator 运行原游戏 EXE，沿用原 EXE 的日语配置；已使用系统日语环境且没有单独转区配置时可直接运行。未找到 Locale Emulator 时会请您选择 LEProc.exe。请保留原游戏的 .exe.le.config；无需对启动器本身设置转区。原 EXE、视频和其他未翻译资源保留。字体仅在游戏运行期间加载，不永久安装。实际游戏内显示仍需试译确认。"
+  },
+  "9301a0e9c7f1aa88": {
+    "version": "9301a0e9c7f1aa88",
+    "unicode": false,
+    "fontRevision": 3,
+    "fontFingerprintPrefix": "qlie-font-v3\n",
+    "probe": {
+      "engineId": "qlie-filepack3",
+      "adapterId": "qlie-filepack3-systemfont",
+      "adapterVersion": "1.0.0",
+      "description": "QLIE FilePackVer3.0 主脚本封包／system_fix 字体布局（完整资源阶段严格校验）",
+      "warnings": [
+        "仅识别主脚本 data0.pack；不改动图像和语音封包。"
+      ]
+    },
+    "buildWarnings": [
+      "安装后请双击 启动汉化.exe；启动器会加载汉化字体并沿用原游戏的日语运行配置。游戏内显示尚待确认。"
+    ],
+    "instructions": "安装补丁后双击游戏目录中的 启动汉化.exe。启动器临时加载汉化字体，并通过本机 Locale Emulator 运行原游戏 EXE，沿用原 EXE 的日语配置；已使用系统日语环境且没有单独转区配置时可直接运行。未找到 Locale Emulator 时会请您选择 LEProc.exe。请保留原游戏的 .exe.le.config；无需对启动器本身设置转区。原 EXE、视频和其他未翻译资源保留。字体仅在游戏运行期间加载，不永久安装。实际游戏内显示仍需试译确认。"
+  },
+  "9a44e166fa6aff9d": {
+    "version": "9a44e166fa6aff9d",
+    "unicode": false,
+    "fontRevision": 3,
+    "fontFingerprintPrefix": "qlie-font-v3\n",
+    "probe": {
+      "engineId": "qlie-filepack3",
+      "adapterId": "qlie-filepack3-systemfont",
+      "adapterVersion": "2.1.0",
+      "description": "QLIE FilePackVer3.0 多封包补丁覆盖／系统字体布局",
+      "warnings": [
+        "探测仅使用有限文件头；完整阶段校验启动程序结构及全部封包索引。无关封包保留原字节，游戏启动和显示尚未验证。"
+      ]
+    },
+    "buildWarnings": [
+      "请从 启动汉化.exe 启动，保留原程序及转区配置；游戏内显示尚未验证。"
+    ],
+    "instructions": "请将补丁覆盖到完整游戏目录，并从根目录的“启动汉化.exe”启动。\r\n保留原 EXE、BIN、资源目录及原 Locale Emulator 配置。非日语系统区域需要已配置日语运行环境的 Locale Emulator；首次可选择 LEProc.exe。\r\n启动器仅为当前 Windows 会话加载衍生字体，不安装系统字体、不修改注册表。转区启动器可能提前退出，因此成功启动后字体保留至注销／重启。\r\n脚本仍使用 CP932，新增字符通过随补丁生成的私用区字形映射显示。请勿删除 map.json，否则无法正确重新提取译文。最多支持 1880 个新增字符（已有外字占用会减少容量）。\r\n本适配包已做资源回填与独立编码／字形检查；未进行游戏启动、转区路线及游戏内显示验证。\r\n"
+  },
+  "f8bfcd9f964da90c": {
+    "version": "f8bfcd9f964da90c",
+    "unicode": false,
+    "fontRevision": 3,
+    "fontFingerprintPrefix": "qlie-font-v3\n",
+    "probe": {
+      "engineId": "qlie-filepack3",
+      "adapterId": "qlie-filepack3-systemfont",
+      "adapterVersion": "1.0.0",
+      "description": "QLIE FilePackVer3.0 主脚本封包／system_fix 字体布局（完整资源阶段严格校验）",
+      "warnings": [
+        "仅识别主脚本 data0.pack；不改动图像和语音封包。"
+      ]
+    },
+    "buildWarnings": [
+      "安装后请双击 启动汉化.exe；启动器会加载汉化字体并沿用原游戏的日语运行配置。游戏内显示尚待确认。"
+    ],
+    "instructions": "安装补丁后双击游戏目录中的 启动汉化.exe。启动器临时加载汉化字体，并通过本机 Locale Emulator 运行原游戏 EXE，沿用原 EXE 的日语配置；已使用系统日语环境且没有单独转区配置时可直接运行。未找到 Locale Emulator 时会请您选择 LEProc.exe。请保留原游戏的 .exe.le.config；无需对启动器本身设置转区。原 EXE、视频和其他未翻译资源保留。字体仅在游戏运行期间加载，不永久安装。实际游戏内显示仍需试译确认。"
+  },
+  "bbf864bb786d5c86": {
+    "version": "bbf864bb786d5c86",
+    "unicode": true,
+    "fontRevision": 3,
+    "fontFingerprintPrefix": "qlie-font-v3\n",
+    "probe": {
+      "engineId": "qlie-filepack31",
+      "adapterId": "qlie-filepack31-unicode",
+      "adapterVersion": "0.2.0",
+      "description": "QLIE FilePackVer3.1／HashVer1.4／Unicode ImoScripter",
+      "warnings": [
+        "QLIE Unicode 布局候选；完整阶段验证 RESKEY、3.1 版本、全部尾索引及原生宽字符剧情加载路径。未知或 ANSI 运行时会被拒绝。无文本封包仅检查索引并保持原样；可能占用较多工作空间。游戏启动、转区路径与实际显示尚未验证。"
+      ]
+    },
+    "buildWarnings": [
+      "请从“启动汉化.exe”启动；保留原程序及日语转区配置。资源回填验证不代表游戏启动或显示已验证。"
+    ],
+    "instructions": "请将补丁完整安装至原游戏目录，并使用根目录的“启动汉化.exe”。\r\n启动器临时注册两种汉化字体，并沿用原 EXE 的日语 Locale Emulator 配置和工作目录；不会修改系统区域或原 EXE。首次运行可能需要选择已安装的 LEProc.exe。\r\n字体注册在当前登录会话内保留，以兼容转区启动器提前退出；注销后自动失效。\r\n脚本采用引擎原生支持的 UTF-16LE BOM，无私用区替换。明朝与黑体风格分别保留，base 字体继承关系不变。\r\n已经过封包、译文回填与独立字体探针检查；游戏启动、转区下的字体枚举和实际画面尚未验证。\r\n"
+  }
+}

@@ -1,0 +1,1870 @@
+{
+  "groups": [
+    {
+      "name": "reuse",
+      "description": "Local engine knowledge, bundled parsers, reusable text/font components and adapter templates",
+      "tools": [
+        "inspect_engine_knowledge",
+        "copy_engine_knowledge_tools",
+        "inspect_existing_text",
+        "inspect_builtin_adapter",
+        "inspect_adapter_source",
+        "try_builtin_adapter",
+        "copy_adapter",
+        "inspect_engine_component",
+        "run_engine_component",
+        "compose_adapter_template",
+        "inspect_adapter_component",
+        "copy_adapter_components"
+      ]
+    },
+    {
+      "name": "development",
+      "description": "Adapter protocol, source edits, local probes, verification and publication",
+      "tools": [
+        "adapter_protocol",
+        "write_file",
+        "replace_text",
+        "remove_file",
+        "run_tool",
+        "run_engine_python",
+        "test_adapter",
+        "update_release_files",
+        "finish"
+      ]
+    },
+    {
+      "name": "research",
+      "description": "Shared engine guides, Python adapter bridge, repository search, web pages and extra downloads",
+      "tools": [
+        "search_engine_references",
+        "inspect_engine_reference",
+        "use_engine_reference",
+        "search_repositories",
+        "fetch_url",
+        "download_tool"
+      ]
+    },
+    {
+      "name": "native",
+      "description": "Launch/file diagnostics and PE imports/disassembly",
+      "tools": [
+        "inspect_game_launch",
+        "find_game_file",
+        "inspect_pe_imports",
+        "inspect_pe_code"
+      ]
+    },
+    {
+      "name": "unity",
+      "description": "Unity managed/IL2CPP types, fields, literals and native reference candidates",
+      "tools": [
+        "inspect_unity_schema"
+      ]
+    },
+    {
+      "name": "siglus",
+      "description": "Siglus scene commands, display rules and bundled parser sources",
+      "tools": [
+        "inspect_siglus_game"
+      ]
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "load_tool_groups",
+        "description": "Select tool schemas for the next request. mode=add (default) loads more groups; mode=replace keeps only the supplied groups, or basic tools with groups=[]. Load the relevant groups; all is available for broad inspection. Checkpoint/resume/model changes trim unused schemas, and any group can be reloaded. Local only; does not run tools or download anything. Call alone.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "groups": {
+              "type": "array",
+              "minItems": 0,
+              "maxItems": 7,
+              "items": {
+                "type": "string",
+                "enum": [
+                  "reuse",
+                  "development",
+                  "research",
+                  "native",
+                  "unity",
+                  "siglus",
+                  "all"
+                ]
+              }
+            },
+            "mode": {
+              "type": "string",
+              "enum": [
+                "add",
+                "replace"
+              ],
+              "default": "add"
+            }
+          },
+          "required": [
+            "groups"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "report_progress",
+        "description": "Brief Chinese progress for the user when evidence or direction changes. exploring: unresolved issue and next probe; breakthrough: observed evidence and what it enables; implementing: established route; correction: retract an earlier claim. <=400 characters, no private reasoning, percentages or ETA. Accompany normal tools in the same response; no extra model turn. This report never validates or publishes an adapter.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "exploring",
+                "breakthrough",
+                "implementing",
+                "correction"
+              ]
+            },
+            "message": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 400
+            }
+          },
+          "required": [
+            "kind",
+            "message"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "inspect_engine_knowledge",
+        "description": "Search shared engine/format experience from previous projects. With id, read full conditional guidance, helpers and reuseOptions with exact component/parser/published-adapter calls. Prefer their ready JSON probes over writing another wrapper. Without id, query searches engine names/aliases; empty query lists this game's candidates (exact first, related variants next). Lists contain short previews; pass nextOffset as offset to page. With id and sourceOffset=0, read only a page of source evidence; use nextSourceOffset for more. Verify format, script semantics and runtime conditions independently; a family match is only a lead.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "sourceOffset": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100000
+            },
+            "offset": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100000
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "copy_engine_knowledge_tools",
+        "description": "Copy one shared source helper into work/ without overwriting edits. Requires id and tool name from inspect_engine_knowledge. Inspect applicability and dependencies, then use run_engine_python on current samples. Does not execute, validate or publish an adapter. Call alone.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "tool": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "tool"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "list_files",
+        "description": "List files with sizes. game uses host-bound original inputs; installed reads the current installation for diagnostics; workspace reads working files. Pagination, no file contents.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "root": {
+              "type": "string",
+              "enum": [
+                "game",
+                "installed",
+                "workspace"
+              ]
+            },
+            "path": {
+              "type": "string"
+            },
+            "offset": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
+            }
+          },
+          "required": [
+            "root"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "read_file",
+        "description": "Read a bounded file slice. root=game uses original production inputs; installed reads currently installed bytes for diagnostics. encoding: hex, utf8, cp932, cp936. Source/JSON and workspace work/*.txt/.log/.csv reports default to utf8; unknown game resources default to hex. Use search_text byteOffsets for targeted reads instead of rereading whole files. Returns the encoding used.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "root": {
+              "type": "string",
+              "enum": [
+                "game",
+                "installed",
+                "workspace"
+              ]
+            },
+            "path": {
+              "type": "string"
+            },
+            "offset": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "length": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 32768
+            },
+            "encoding": {
+              "type": "string",
+              "enum": [
+                "hex",
+                "utf8",
+                "cp932",
+                "cp936"
+              ]
+            }
+          },
+          "required": [
+            "root",
+            "path"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "read_tool_result",
+        "description": "Read a character slice of an earlier tool result omitted from replay. Uses the existing session, no rerun or external request. Optional query locates relevant text. Original results remain available across automatic compaction, checkpoint and restart.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "toolCallId": {
+              "type": "string"
+            },
+            "offset": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "length": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 16384
+            },
+            "query": {
+              "type": "string",
+              "maxLength": 256
+            }
+          },
+          "required": [
+            "toolCallId"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "read_session_history",
+        "description": "Retrieve an archived message's text and exact tool arguments without rerunning tools. messageIndex is the original zero-based session position; default 0. Optional query finds the next matching message from that position. offset/length page through its text. Returns nextMessageIndex for further searching. Provider encrypted reasoning is excluded.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "messageIndex": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "offset": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "length": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 16384
+            },
+            "query": {
+              "type": "string",
+              "maxLength": 256
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "inspect_existing_text",
+        "description": "Read the existing extraction baseline without re-extracting resources. Returns a bounded page with original IDs, locators and cache fields. Use resourcePath to inspect relevant existing support before a repair; preserve these fields so committed translations remain reusable.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "resourcePath": {
+              "type": "string"
+            },
+            "offset": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 20
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "search_text",
+        "description": "Search a file byte range or a directory of text/source files. Returns at most 20 excerpts with byte offsets. File offset is bytes; directory offset is a file cursor, with fileByteOffset for resuming inside that file. Pass returned nextOffset and nextFileByteOffset until more=false. Directory scans are bounded to 64 text files and 4 MiB per call; binary archives are excluded. Source defaults to utf8; unknown game files to cp932.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "root": {
+              "type": "string",
+              "enum": [
+                "game",
+                "installed",
+                "workspace"
+              ]
+            },
+            "path": {
+              "type": "string"
+            },
+            "query": {
+              "type": "string"
+            },
+            "encoding": {
+              "type": "string"
+            },
+            "offset": {
+              "type": "integer"
+            },
+            "fileByteOffset": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "root",
+            "path",
+            "query"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "inspect_game_launch",
+        "description": "Refresh read-only launch evidence: native system ACP, per-EXE Locale Emulator profiles, bounded startup scripts and recent error-log excerpts. Does not run anything. Missing profiles do not prove locale independence; partial means incomplete inspection.",
+        "parameters": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "inspect_pe_imports",
+        "description": "Read real PE imports and candidate x86/x64 indirect call/jump sites, with IAT RVAs and bounded hex context. query filters comma-separated names/DLLs. Pages default to 20, capped at 40; use nextOffset. Byte patterns are not decoded control flow or runtime proof. Read-only.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "root": {
+              "type": "string",
+              "enum": [
+                "game",
+                "installed",
+                "workspace"
+              ]
+            },
+            "path": {
+              "type": "string"
+            },
+            "query": {
+              "type": "string",
+              "maxLength": 500
+            },
+            "offset": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 8192
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 40
+            }
+          },
+          "required": [
+            "root",
+            "path"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "inspect_pe_code",
+        "description": "Disassemble 1-8 known code ranges in an x86/x64 PE using bundled Capstone. No scripts, Python setup or downloads. addressKind defaults to va (preferred image VA), also rva or file. Addresses are hex strings such as 0x429fb0 or decimal strings; each length is bytes, total <=16384. Returns a compact VA/bytes/instruction listing, per-range RVA/file mapping and nextAddress (VA); direct branch targets are in operands. Decoding starts exactly where requested; start alignment/reachability still need evidence. Read-only, never executes the game. Prefer this over writing one disassembly script per address.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "root": {
+              "type": "string",
+              "enum": [
+                "game",
+                "installed",
+                "workspace"
+              ]
+            },
+            "path": {
+              "type": "string"
+            },
+            "addressKind": {
+              "type": "string",
+              "enum": [
+                "va",
+                "rva",
+                "file"
+              ]
+            },
+            "ranges": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 8,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "address": {
+                    "type": "string"
+                  },
+                  "length": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 4096
+                  }
+                },
+                "required": [
+                  "address",
+                  "length"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "instructionLimit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
+            }
+          },
+          "required": [
+            "root",
+            "path",
+            "ranges"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "inspect_unity_schema",
+        "description": "Read-only Unity investigation. types (default): query comma-separated type names in IL2CPP v31 or managed/dummy .NET assemblies; returns fields, bases and text-method clues. literals: search visible text in the metadata literal table. references: supply matching x64 GameAssembly via assemblyPath, then queryKind=literal finds candidate consumers; queryKind=method pages through literals referenced by a display function/type and shows their other consumers. References are bounded byte-pattern candidates, not proof of display-only use or complete call graphs. No game execution, scripts, downloads or files. Use inspect_pe_code to verify code uses; don't infer serialized offsets from native layout or declarations.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "root": {
+              "type": "string",
+              "enum": [
+                "game",
+                "installed",
+                "workspace"
+              ]
+            },
+            "path": {
+              "type": "string"
+            },
+            "mode": {
+              "type": "string",
+              "enum": [
+                "types",
+                "literals",
+                "references"
+              ]
+            },
+            "assemblyPath": {
+              "type": "string",
+              "description": "references only: matching Windows x64 GameAssembly path, relative to the same root; path must be its IL2CPP v31 metadata."
+            },
+            "queryKind": {
+              "type": "string",
+              "enum": [
+                "literal",
+                "method"
+              ],
+              "description": "references only; default literal. method matches a consumer function/type name to inspect the whole display group."
+            },
+            "query": {
+              "type": "string",
+              "maxLength": 256
+            },
+            "offset": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 8
+            }
+          },
+          "required": [
+            "root",
+            "path"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "find_game_file",
+        "description": "Locate an exact reported relative path or filename in the game, returning same-name matches and whether the scan was partial. Use before concluding that a file/movie error means missing resources. Does not read or modify file contents.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "list_adapters",
+        "description": "List reusable published adapters and built-in script parsers, with saved engine candidates. Optional query filters names/formats. refreshCandidates rescans bounded local evidence; use after game resources change, not on every continuation.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string"
+            },
+            "refreshCandidates": {
+              "type": "boolean"
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "inspect_builtin_adapter",
+        "description": "Inspect one bundled parser's capabilities, limitations, source index and reuse instructions. Supply path from its index to read a bounded source slice; offset/length count characters. Does not copy files or call a model.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "format": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            },
+            "offset": {
+              "type": "integer"
+            },
+            "length": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "format"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "inspect_siglus_game",
+        "description": "Use bundled SiglusSceneScriptUtility on this game: returns scene/text counts, actual command argument references, template and embedded source index. source/query reads bounded embedded source without unpacking files. No model calls, translation, installation or game writes. Reuse copy_adapter engine.siglus for new display rules instead of writing another parser. Call alone.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "source": {
+              "type": "string"
+            },
+            "query": {
+              "type": "string"
+            },
+            "offset": {
+              "type": "integer"
+            },
+            "length": {
+              "type": "integer"
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "inspect_adapter_component",
+        "description": "Inspect one reusable text/encoding/font/launcher component from list_adapters.components: API, example, exact applicability and files. Optional path reads a bounded source slice (character offsets). Components are not complete adapters or proof of game compatibility.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            },
+            "offset": {
+              "type": "integer"
+            },
+            "length": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "copy_adapter_components",
+        "description": "Copy 1-4 selected helpers/components without overwriting differing files. Analysis-only tools such as windows-font-metrics go to work/ and are not released. Runtime helpers go to src/tools; the QLIE launcher includes a standalone EXE. No C# compilation, font files or framework installation. Confirm applicability before use; test_adapter still required for adapter changes. Call alone.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "ids": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "ids"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "try_builtin_adapter",
+        "description": "Try a built-in parser on 1-12 explicit files under workspace resources/ or work/. Total input at most 64 MiB. Returns count, bounded samples, concrete parse diagnostics and optionally host-checked original-byte roundtrip (default true). Include required companions. Does not translate, test rendering, publish or activate. Stage original samples first; unpack archives locally into work/.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "format": {
+              "type": "string"
+            },
+            "directory": {
+              "type": "string"
+            },
+            "files": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "checkRoundtrip": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "format",
+            "directory",
+            "files"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "adapter_protocol",
+        "description": "Get the exact runtime adapter protocol. No model request or external operation.",
+        "parameters": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "inspect_adapter_source",
+        "description": "Inspect a published adapter by exact id/version without copying or executing it. Omit path to list registered file names/sizes (query filters names, offset/length page entries; default 40, max 100). With path, read a UTF-8 source slice (offset/length in UTF-16 characters, default 4096, max 16384; query locates a literal excerpt, files <=1 MiB). Only accessed files are hash-checked. Reuse compatible modules independently; a failed filter does not reject the container/script/font implementation. Use copy_adapter(files=[paths]) for selected reference files even when src already contains code.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "id": { "type": "string" },
+            "version": { "type": "string" },
+            "path": { "type": "string" },
+            "query": { "type": "string", "maxLength": 256 },
+            "offset": { "type": "integer", "minimum": 0 },
+            "length": { "type": "integer", "minimum": 1, "maximum": 16384 }
+          },
+          "required": ["id", "version"],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "copy_adapter",
+        "description": "Without files, reuse a complete adapter in src (published copies require empty src); built-in IDs register their pinned parser and Python bridge. With files from inspect_adapter_source, copy 1-32 registered published files, <=32 MiB total, into work/adapter-references/id/version without changing src, identity, dependencies or release selection. This reference mode works with existing code and checks only selected files. Existing differing files are never overwritten. Preserve imports, pinned dependencies and licenses when integrating modules into src. Legacy C# is reference only; new logic uses Python. All implementations still require test_adapter before finish. Call alone.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "version": {
+              "type": "string"
+          },
+          "files": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 32,
+            "items": { "type": "string" },
+            "description": "Selected registered paths from a published adapter, copied as references only. Omit to reuse the whole adapter."
+            }
+          },
+          "required": [
+            "id",
+            "version"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "search_engine_references",
+        "description": "Look up an engine, alias or format in the GalTransl index: returns scoped docs, module paths and public functions, NOT verified adapters. Uses the shared local library when prepared, otherwise online metadata. No game data is sent. Use inspect_engine_reference for local guides and run_engine_python to call existing algorithms instead of rewriting them.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "inspect_engine_reference",
+        "description": "Read one engine guide or a bounded source slice from the shared GalTransl Python toolkit. Uses the fixed source bundled with the app or already installed locally; no automatic download. Returns public function names, module paths and reuse instructions. engine is an exact ID from search_engine_references. Optional query/offset/length locate a relevant section. retryDownload retries local preparation after missing tool files are restored. Call alone.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "engine": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            },
+            "query": {
+              "type": "string"
+            },
+            "offset": {
+              "type": "integer"
+            },
+            "length": {
+              "type": "integer"
+            },
+            "retryDownload": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "engine"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "run_engine_python",
+        "description": "Run one script OR pinned library module. For a new/updated work/*.py probe, supply script + content to write and run in ONE call; a failed write prevents execution. Omit content to rerun an existing script or call a module CLI directly. Bundled portable Python, UTF-8 IO, no downloads/pip/pycache. Use staged samples and concise counts/differences/samples. Long output is previewed; read_tool_result retrieves the retained original. Can follow edits in one ordered batch.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "script": {
+              "type": "string",
+              "description": "work/*.py or existing src/tools/*.py. Omit with module."
+            },
+            "content": {
+              "type": "string",
+              "description": "Optional UTF-8 probe source; requires script under work/. Saved before execution; omit to reuse the file."
+            },
+            "module": {
+              "type": "string",
+              "description": "Exact pinned module, e.g. python.engines.kirikiri_hxv4_text; mutually exclusive with script/content."
+            },
+            "arguments": {
+              "type": "array",
+              "maxItems": 128,
+              "items": {
+                "type": "string"
+              }
+            },
+            "workingDirectory": {
+              "type": "string"
+            },
+            "stdin": {
+              "type": "string"
+            },
+            "timeoutSeconds": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 600,
+              "default": 120
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "inspect_engine_component",
+        "description": "List fixed callable archive components or inspect one id. Returns supported formats, read/write operations, budgets and dependency contract. No downloads or source reading. Prefer run_engine_component over writing a Python wrapper for a supported format.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "run_engine_component",
+        "description": "Directly inspect/extract/rebuild a staged archive using a fixed component, without writing code. Input under resources/ or work/; output is a NEW work/ directory. Returns bounded entries plus full manifest.json. Optional members/extensions select extraction. RPA inspect reads only the index; extract reads selected payloads (unread SHA256=null). verifyContents=true hashes all members. Rebuild replacements map exact archive names to work/ files; untouched members are verified. Uses pinned local shared Python/library, no pip/download. XP3 requires independently confirmed filter=none. Call alone.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "inspect",
+                "extract",
+                "rebuild"
+              ]
+            },
+            "archive": {
+              "type": "string"
+            },
+            "output": {
+              "type": "string"
+            },
+            "filter": {
+              "type": "string",
+              "enum": [
+                "none"
+              ]
+            },
+            "members": {
+              "type": "array",
+              "maxItems": 1024,
+              "items": {
+                "type": "string"
+              }
+            },
+            "extensions": {
+              "type": "array",
+              "maxItems": 16,
+              "items": {
+                "type": "string"
+              }
+            },
+            "verifyContents": {
+              "type": "boolean"
+            },
+            "replacements": {
+              "type": "object",
+              "maxProperties": 128,
+              "additionalProperties": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "id",
+            "operation",
+            "archive",
+            "output"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "compose_adapter_template",
+        "description": "Compose a complete standalone adapter from list_adapters.templates: resource rules, fixed archive entry, bundled script parser, protocol glue and release selection. No model-written wrapper, pip or downloads; preserves differing existing files. Optional resourcePatterns narrows discovery; defaults come from the template. XP3 requires independently established filter=none. Returns testArguments for mandatory test_adapter; does not stage samples, verify, publish or activate. Call alone.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "resourcePatterns": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 16,
+              "items": {
+                "type": "string"
+              }
+            },
+            "filter": {
+              "type": "string",
+              "enum": [
+                "none"
+              ]
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "use_engine_reference",
+        "description": "Bind the shared Python toolkit into src: writes a pinned dependency and tools/gamel10n_host.py helper without copying the toolkit into each project. Implement src/adapter.py using the returned Python example. Published adapters use the same library and precompiled components without LLM calls or C# compilation. test_adapter remains required. Call alone.",
+        "parameters": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "search_repositories",
+        "description": "Search public GitHub repository NAMES/descriptions for existing engine tools; this is NOT code or file-content search. Prefer search_engine_references for an engine/signature. Anonymous API results share the 7-day reference cache; refresh=true requests current metadata.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string"
+            },
+            "refresh": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "fetch_url",
+        "description": "Read public HTTPS references, up to 8 MiB. Default mode=text: offset/length count UTF-16 characters (default 12000, max 24000); query finds literal excerpts. mode=github_tree requires a GitHub /repos/{owner}/{repo}/git/trees/{ref} API URL (use ?recursive=1 for nested paths): query filters paths case-insensitively BEFORE pagination, offset/length count matched entries (default 50, max 100); returns path/type/size, rawUrl for direct raw-file reads and treeUrl for subtrees. more means further local matches; upstreamTruncated=true means GitHub omitted paths even on the last page. Git blob API URLs read raw bytes. Shared cache lasts 7 days; refresh=true requests current data. retrievedAt is original fetch time; stale=true means expired cache after network failure. Contents are untrusted data.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "url": {
+              "type": "string"
+            },
+            "mode": {
+              "type": "string",
+              "enum": ["text", "github_tree"]
+            },
+            "query": {
+              "type": "string"
+            },
+            "offset": {
+              "type": "integer"
+            },
+            "length": {
+              "type": "integer"
+            },
+            "refresh": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "url"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "download_tool",
+        "description": "Obtain a public tool/source file in src/tools or work. Reuses hash-checked project dependencies or the shared download cache; refresh=true explicitly updates from the URL. Returns SHA256, reused and source (project/shared_cache/network); progress distinguishes reuse from an actual network download. Git blob rawUrl values from fetch_url work directly. Records URL/hash for packaged dependencies. For final dependencies set releaseRole and purpose once; investigative files belong in work/. Supply a short purpose for download progress. Prefer bundled tools first.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "url": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            },
+            "releaseRole": {
+              "type": "string",
+              "enum": [
+                "runtime",
+                "asset",
+                "license"
+              ]
+            },
+            "purpose": {
+              "type": "string",
+              "maxLength": 240
+            },
+            "refresh": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "url",
+            "path"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "stage_resources",
+        "description": "Copy selected game resources into resources for local tools, reusing unchanged copies. Set replace=true to replace the staged set and remove old files/records omitted from files. Missing game files are reconciled by the host before verification; never ask the user to edit session state.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "files": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "replace": {
+              "type": "boolean",
+              "description": "Replace the whole staged resource set instead of adding to it."
+            }
+          },
+          "required": [
+            "files"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "write_file",
+        "description": "Write UTF-8 Python code or analysis files under src/ or work/, replacing without backup. New src/*.py files auto-register as release source. For tools set releaseRole and purpose once; edits inherit existing registration. Temporary analysis scripts must be Python under work/. Batch known writes followed by one run_engine_python/run_tool to execute in order; failure skips remaining calls. Reuse existing probe scripts and one findings file rather than adding a file per small check.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "content": {
+              "type": "string"
+            },
+            "releaseRole": {
+              "type": "string",
+              "enum": [
+                "source",
+                "runtime",
+                "asset",
+                "license"
+              ]
+            },
+            "purpose": {
+              "type": "string",
+              "maxLength": 240
+            }
+          },
+          "required": [
+            "path",
+            "content"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "replace_text",
+        "description": "Change one exact, unique text fragment in an existing UTF-8 src/ or work/ file. Prefer this for local edits instead of rewriting whole files. oldText must match exactly once (including whitespace/newlines); otherwise nothing changes. Preserves UTF-8 BOM and other bytes. Can batch with writes followed by one local run.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "oldText": {
+              "type": "string"
+            },
+            "newText": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "path",
+            "oldText",
+            "newText"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "remove_file",
+        "description": "Remove one obsolete file under src/ or work/. Cannot delete directories or originals.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "run_tool",
+        "description": "Run an existing workspace executable; legacy dotnet/powershell commands must be ported to Python. For analysis scripts use run_engine_python; do not compile C# probes. Pass arguments as an array. Use resources copies; never edit original game. Output bounded.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "executable": {
+              "type": "string"
+            },
+            "arguments": {
+              "type": "array",
+              "maxItems": 128,
+              "items": {
+                "type": "string"
+              }
+            },
+            "workingDirectory": {
+              "type": "string"
+            },
+            "stdin": {
+              "type": "string"
+            },
+            "timeoutSeconds": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 600,
+              "default": 120
+            }
+          },
+          "required": [
+            "executable",
+            "arguments"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "test_adapter",
+        "description": "Check Python syntax, package and verify the saved release selection with entry src/adapter.py. The pinned shared Python dependency is prepared automatically. Early in development, trialFiles selects 1-12 staged COMPLETE files, including required companions, for an isolated roundtrip/Chinese-edit trial. It keeps resourcePatterns unchanged, checks only selected coverage/repair records, returns stage=trial and CANNOT publish. Do not truncate containers; omit trialFiles for mandatory full verification. trialFiles and discoveryOnly are mutually exclusive. Identical inputs reuse the last completed result (reused=true), including deterministic failures; change relevant implementation or evidence before retesting. Omit releaseFiles to reuse it; supplying releaseFiles replaces the selection. New src Python files and copied dependencies auto-register. Use update_release_files only for dependency changes or exclusions. Paths are FINAL PACKAGE paths: src/adapter.py maps to workspace src/adapter.py; tools/parser.py maps to workspace src/tools/parser.py. No globs or automatic directory inclusion. Exclude probes, samples, logs, unused tools and old implementations. Test this exact release before finish. Full verification checks discovery against real game/staged samples and independently verifies extraction/roundtrip; repair also checks the existing baseline. discoveryOnly=true cannot publish. Optional recognition declares proven required file/signature facts and nonblocking hints; omit to retain it. It is independent of resourcePatterns. Do not invent game-specific filenames or research extra facts solely to fill it.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "engine",
+                "template"
+              ]
+            },
+            "key": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "resourcePatterns": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "releaseFiles": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 512,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": "string",
+                    "maxLength": 512
+                  },
+                  "role": {
+                    "type": "string",
+                    "enum": [
+                      "source",
+                      "runtime",
+                      "asset",
+                      "license"
+                    ]
+                  },
+                  "purpose": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 240
+                  }
+                },
+                "required": [
+                  "path",
+                  "role",
+                  "purpose"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "trialFiles": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 12,
+              "items": {
+                "type": "string",
+                "maxLength": 512
+              }
+            },
+            "discoveryOnly": {
+              "type": "boolean"
+            },
+            "recognition": {
+              "type": "object",
+              "properties": {
+                "schemaVersion": {
+                  "type": "integer",
+                  "enum": [
+                    1
+                  ]
+                },
+                "required": {
+                  "type": "array",
+                  "maxItems": 32,
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "patterns": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 16,
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "minimumSize": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "maximumSize": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "signatures": {
+                        "type": "array",
+                        "maxItems": 8,
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "offset": {
+                              "type": "integer",
+                              "minimum": 0
+                            },
+                            "hex": {
+                              "type": "string",
+                              "minLength": 2,
+                              "maxLength": 128
+                            },
+                            "origin": {
+                              "type": "string",
+                              "enum": [
+                                "start",
+                                "end"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "offset",
+                            "hex"
+                          ],
+                          "additionalProperties": false
+                        }
+                      }
+                    },
+                    "required": [
+                      "patterns"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "hints": {
+                  "type": "array",
+                  "maxItems": 32,
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "patterns": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 16,
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "minimumSize": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "maximumSize": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "signatures": {
+                        "type": "array",
+                        "maxItems": 8,
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "offset": {
+                              "type": "integer",
+                              "minimum": 0
+                            },
+                            "hex": {
+                              "type": "string",
+                              "minLength": 2,
+                              "maxLength": 128
+                            },
+                            "origin": {
+                              "type": "string",
+                              "enum": [
+                                "start",
+                                "end"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "offset",
+                            "hex"
+                          ],
+                          "additionalProperties": false
+                        }
+                      }
+                    },
+                    "required": [
+                      "patterns"
+                    ],
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "required": [
+                "schemaVersion",
+                "required",
+                "hints"
+              ],
+              "additionalProperties": false
+            },
+            "coverageSamples": {
+              "type": "array",
+              "maxItems": 64,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "resourcePath": {
+                    "type": "string"
+                  },
+                  "locator": {
+                    "type": "string"
+                  },
+                  "sourceText": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "resourcePath",
+                  "locator",
+                  "sourceText"
+                ],
+                "additionalProperties": false
+              },
+              "description": "Merge independent original-text anchors by resourcePath/locator; host checks extraction. Omission retains previous samples."
+            },
+            "coverageSampleCorrections": {
+              "type": "array",
+              "maxItems": 4,
+              "description": "Correct an independently proven mislabelled anchor, never to conceal a reader defect. Supply the exact original sample, a real independently located replacement, reason and evidence (resource/byte offsets or reference). No blanket deletion. All other anchors remain; full test_adapter must pass again. Omission retains samples.",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "original": {
+                    "type": "object",
+                    "properties": {
+                      "resourcePath": {
+                        "type": "string"
+                      },
+                      "locator": {
+                        "type": "string"
+                      },
+                      "sourceText": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "resourcePath",
+                      "locator",
+                      "sourceText"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "replacement": {
+                    "type": "object",
+                    "properties": {
+                      "resourcePath": {
+                        "type": "string"
+                      },
+                      "locator": {
+                        "type": "string"
+                      },
+                      "sourceText": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "resourcePath",
+                      "locator",
+                      "sourceText"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "reason": {
+                    "type": "string",
+                    "maxLength": 600
+                  },
+                  "evidence": {
+                    "type": "string",
+                    "maxLength": 2000
+                  }
+                },
+                "required": [
+                  "original",
+                  "replacement",
+                  "reason",
+                  "evidence"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "pendingCoverage": {
+              "type": "array",
+              "maxItems": 24,
+              "items": {
+                "type": "string"
+              },
+              "description": "Replace concrete known missing extraction. Omission retains prior tasks. Do not treat untested runtime behavior as missing coverage or guess/delete legacy items; classify explicitly from evidence."
+            },
+            "runtimeChecks": {
+              "type": "array",
+              "maxItems": 24,
+              "items": {
+                "type": "string"
+              },
+              "description": "Replace pending startup/rendering checks, separate from known missing text. Omission retains prior checks. Untested runtime checks alone do not block publication after full resource validation."
+            }
+          },
+          "required": [
+            "kind",
+            "key",
+            "name",
+            "resourcePatterns"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "update_release_files",
+        "description": "Inspect or incrementally update the saved release selection. files upserts exact PACKAGE paths with source/runtime/asset/license roles and purposes; remove excludes paths without deleting files. No arguments lists selection and unregistered files. Use only for changed dependencies or exclusions; test_adapter reuses this state across failures/restarts/checkpoints. Game originals belong to resources, modified game files to patch output, never release assets.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "files": {
+              "type": "array",
+              "maxItems": 512,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  },
+                  "role": {
+                    "type": "string",
+                    "enum": [
+                      "source",
+                      "runtime",
+                      "asset",
+                      "license"
+                    ]
+                  },
+                  "purpose": {
+                    "type": "string",
+                    "maxLength": 240
+                  }
+                },
+                "required": [
+                  "path",
+                  "role",
+                  "purpose"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "remove": {
+              "type": "array",
+              "maxItems": 512,
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "finish",
+        "description": "Publish and activate the last successfully tested package. Checks source/dependency/resource contents still match verification. Reading files and updating work/ reports do not require retesting.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "summary": {
+              "type": "string"
+            },
+            "allowPartial": {
+              "type": "boolean",
+              "description": "Explicitly publish usable partial support with known missing coverage, disclosed in summary. Repair may retain unrelated coverage omissions without expanding scope."
+            }
+          },
+          "required": [
+            "summary"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "report_blocker",
+        "description": "Stop for specific user input or an investigated obstacle. unsupported additionally requires canContinueLocally and evidence (concrete attempted approaches, results and evidence locations). canContinueLocally MUST be true if any actionable local investigation, implementation or validation remains; this returns continue, not stop. CP932 rejecting Chinese, unfinished runtime analysis, missing parser/tools or failed searches alone are unfinished work. Do not ask users to program the adapter. Call alone, concise Chinese.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "needs_input",
+                "unsupported"
+              ]
+            },
+            "summary": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "nextAction": {
+              "type": "string"
+            },
+            "canContinueLocally": {
+              "type": "boolean"
+            },
+            "evidence": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "summary",
+            "reason",
+            "nextAction"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "checkpoint",
+        "description": "Compact when requested or a major phase ends, not after each probe. Prefer <=3000 characters: preserve exact field order/stride/API facts needed by the current implementation, evidence locations, failed hypotheses, coverage/omissions and next action. Do not copy source/disassembly. Recent small tool exchanges and the previously read adapter protocol survive. Call alone.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "summary": {
+              "type": "string"
+            },
+            "coverageSamples": {
+              "type": "array",
+              "maxItems": 64,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "resourcePath": {
+                    "type": "string"
+                  },
+                  "locator": {
+                    "type": "string"
+                  },
+                  "sourceText": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "resourcePath",
+                  "locator",
+                  "sourceText"
+                ],
+                "additionalProperties": false
+              },
+              "description": "Merge independent original-text anchors by resourcePath/locator; host checks extraction. Omission retains previous samples."
+            },
+            "coverageSampleCorrections": {
+              "type": "array",
+              "maxItems": 4,
+              "description": "Correct an independently proven mislabelled anchor, never to conceal a reader defect. Supply the exact original sample, a real independently located replacement, reason and evidence (resource/byte offsets or reference). No blanket deletion. All other anchors remain; full test_adapter must pass again. Omission retains samples.",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "original": {
+                    "type": "object",
+                    "properties": {
+                      "resourcePath": {
+                        "type": "string"
+                      },
+                      "locator": {
+                        "type": "string"
+                      },
+                      "sourceText": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "resourcePath",
+                      "locator",
+                      "sourceText"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "replacement": {
+                    "type": "object",
+                    "properties": {
+                      "resourcePath": {
+                        "type": "string"
+                      },
+                      "locator": {
+                        "type": "string"
+                      },
+                      "sourceText": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "resourcePath",
+                      "locator",
+                      "sourceText"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "reason": {
+                    "type": "string",
+                    "maxLength": 600
+                  },
+                  "evidence": {
+                    "type": "string",
+                    "maxLength": 2000
+                  }
+                },
+                "required": [
+                  "original",
+                  "replacement",
+                  "reason",
+                  "evidence"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "pendingCoverage": {
+              "type": "array",
+              "maxItems": 24,
+              "items": {
+                "type": "string"
+              },
+              "description": "Replace concrete known missing extraction. Omission retains prior tasks. Do not treat untested runtime behavior as missing coverage or guess/delete legacy items; classify explicitly from evidence."
+            },
+            "runtimeChecks": {
+              "type": "array",
+              "maxItems": 24,
+              "items": {
+                "type": "string"
+              },
+              "description": "Replace pending startup/rendering checks, separate from known missing text. Omission retains prior checks. Untested runtime checks alone do not block publication after full resource validation."
+            }
+          },
+          "required": [
+            "summary"
+          ],
+          "additionalProperties": false
+        }
+      }
+    }
+  ]
+}
