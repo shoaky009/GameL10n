@@ -1,0 +1,11 @@
+/target/
+/artifacts/
+/.tools/
+/tools/python/
+/tools/vntextpatch/
+**/bin/
+**/obj/
+**/__pycache__/
+*.pyc
+*.pdb
+.DS_Store

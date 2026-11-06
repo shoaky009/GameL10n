@@ -1,0 +1,10 @@
+* text=auto eol=lf
+*.rs text eol=lf
+*.slint text eol=lf
+*.py text eol=lf
+*.toml text eol=lf
+*.md text eol=lf
+*.ps1 text eol=lf
+*.png binary
+*.dll binary
+*.whl binary

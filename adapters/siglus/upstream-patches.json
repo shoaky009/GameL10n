@@ -1,0 +1,13 @@
+{
+  "siglus_ssu/__init__.py": [
+    ["import os\nimport sys", "import os\nimport sys\n__path__.append(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'native', 'siglus_ssu'))"]
+  ],
+  "siglus_ssu/const.py": [
+    ["with open(__file__, \"rb\") as _source_file:\n    CONST_SHA512 = file_digest(_source_file, \"sha512\").hexdigest()", "from io import BytesIO as _BytesIO\nfrom pkgutil import get_data as _get_data\nCONST_SHA512 = file_digest(_BytesIO(_get_data(__package__, 'const.py')), 'sha512').hexdigest()"]
+  ],
+  "siglus_ssu/disam.py": [
+    ["    def _pop_arg_value(arg_info):", "    def _pop_arg_ref(arg_info):\n        form = arg_info['form']\n        if form == fm_list:\n            return expr_state.pop_arg_list(arg_info['sub'], _pop_arg_ref)\n        if form in expr_state.scalar_forms:\n            item = _pop_stack_top() if stack else {}\n            return item.get('val') if form == fm_str and item.get('form') == fm_str else None\n        _consume_element()\n        return None\n\n    def _pop_arg_value(arg_info):"],
+    ["                arg_values = _peek_arg_list(arg_forms, _pop_arg_value)", "                arg_values = _peek_arg_list(arg_forms, _pop_arg_value)\n                arg_refs = _peek_arg_list(arg_forms, _pop_arg_ref)"],
+    ["                    \"_arg_values\": list(arg_values or []),", "                    \"_arg_values\": list(arg_values or []),\n                    \"_arg_string_ids\": list(arg_refs or []),"]
+  ]
+}

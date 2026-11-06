@@ -1,0 +1,103 @@
+{
+  "targetLanguage": "简体中文",
+  "corrections": [
+    {
+      "id": "Tiny Rogues_Data/resources.assets::52220::field:activeDescription",
+      "sourceText": "Gain (+x0%) Stats from Dexterity and",
+      "context": "Stats.SimpleStat / Doppelganger Form - Bard (Effect 1) / activeDescription",
+      "previousTranslation": "从敏捷和",
+      "translation": "获得(+x0%)的属性加成，来源为敏捷和"
+    },
+    {
+      "id": "Tiny Rogues_Data/resources.assets::52220::field:informativeDescription",
+      "sourceText": "Gain (+x0%) Stats from Dexterity and",
+      "context": "Stats.SimpleStat / Doppelganger Form - Bard (Effect 1) / informativeDescription",
+      "previousTranslation": "从敏捷和",
+      "translation": "获得(+x0%)的属性加成，来源为敏捷和"
+    },
+    {
+      "id": "Tiny Rogues_Data/resources.assets::52221::field:activeDescription",
+      "sourceText": " Intelligence.",
+      "context": "Stats.SimpleStat / Doppelganger Form - Bard (Effect 2) / activeDescription",
+      "previousTranslation": "智力获得的属性提高。",
+      "translation": " 智力。"
+    },
+    {
+      "id": "Tiny Rogues_Data/resources.assets::52221::field:informativeDescription",
+      "sourceText": " Intelligence.",
+      "context": "Stats.SimpleStat / Doppelganger Form - Bard (Effect 2) / informativeDescription",
+      "previousTranslation": "智力获得的属性提高。",
+      "translation": " 智力。"
+    },
+    {
+      "id": "Tiny Rogues_Data/resources.assets::52239::field:activeDescription",
+      "sourceText": "You gain (x0) Luck<sprite name=\"Luck\"> at Level [[1]],",
+      "context": "Stats.Dynamic_Stats.DynamicStat / Hero Ability (Effect 1) / activeDescription",
+      "previousTranslation": "你在等级[[1]]、",
+      "translation": "获得(x0)幸运<sprite name=\"Luck\">的等级为[[1]]、"
+    },
+    {
+      "id": "Tiny Rogues_Data/resources.assets::52239::field:informativeDescription",
+      "sourceText": "You gain (x0) Luck<sprite name=\"Luck\"> at Level [[1]],",
+      "context": "Stats.Dynamic_Stats.DynamicStat / Hero Ability (Effect 1) / informativeDescription",
+      "previousTranslation": "你在等级[[1]]、",
+      "translation": "获得(x0)幸运<sprite name=\"Luck\">的等级为[[1]]、"
+    },
+    {
+      "id": "Tiny Rogues_Data/resources.assets::52240::field:activeDescription",
+      "sourceText": " [[3]] and",
+      "context": "Stats.Dynamic_Stats.DynamicStat / Hero Ability (Effect 2) / activeDescription",
+      "previousTranslation": "[[3]]和",
+      "translation": " [[3]]和"
+    },
+    {
+      "id": "Tiny Rogues_Data/resources.assets::52240::field:informativeDescription",
+      "sourceText": " [[3]] and",
+      "context": "Stats.Dynamic_Stats.DynamicStat / Hero Ability (Effect 2) / informativeDescription",
+      "previousTranslation": "[[3]]和",
+      "translation": " [[3]]和"
+    },
+    {
+      "id": "Tiny Rogues_Data/resources.assets::52241::field:activeDescription",
+      "sourceText": " [[5]].",
+      "context": "Stats.Dynamic_Stats.DynamicStat / Hero Ability (Effect 3) / activeDescription",
+      "previousTranslation": "[[5]]时获得幸运。",
+      "translation": " [[5]]。"
+    },
+    {
+      "id": "Tiny Rogues_Data/resources.assets::52241::field:informativeDescription",
+      "sourceText": " [[5]].",
+      "context": "Stats.Dynamic_Stats.DynamicStat / Hero Ability (Effect 3) / informativeDescription",
+      "previousTranslation": "[[5]]时获得幸运。",
+      "translation": " [[5]]。"
+    },
+    {
+      "id": "Tiny Rogues_Data/resources.assets::52245::field:activeDescription",
+      "sourceText": "Gain (+x0%) Stats from //Charms and ",
+      "context": "Stats.SimpleStat / Mystic Ability (Effect 1) / activeDescription",
+      "previousTranslation": "从//护符和",
+      "translation": "获得(+x0%)的属性加成，来源为//护符和 "
+    },
+    {
+      "id": "Tiny Rogues_Data/resources.assets::52245::field:informativeDescription",
+      "sourceText": "Gain (+x0%) Stats from //Charms and ",
+      "context": "Stats.SimpleStat / Mystic Ability (Effect 1) / informativeDescription",
+      "previousTranslation": "从//护符和",
+      "translation": "获得(+x0%)的属性加成，来源为//护符和 "
+    },
+    {
+      "id": "Tiny Rogues_Data/resources.assets::52246::field:activeDescription",
+      "sourceText": "Weapon Enchantments.",
+      "context": "Stats.SimpleStat / Mystic Ability (Effect 2) / activeDescription",
+      "previousTranslation": "武器附魔获得的属性提高。",
+      "translation": "武器附魔。"
+    },
+    {
+      "id": "Tiny Rogues_Data/resources.assets::52246::field:informativeDescription",
+      "sourceText": "Weapon Enchantments.",
+      "context": "Stats.SimpleStat / Mystic Ability (Effect 2) / informativeDescription",
+      "previousTranslation": "武器附魔获得的属性提高。",
+      "translation": "武器附魔。"
+    }
+  ]
+}
