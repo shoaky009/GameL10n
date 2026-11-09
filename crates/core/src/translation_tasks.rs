@@ -108,6 +108,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn queued_translation_can_cancel_before_loading_sources_and_resume_later() {
+        let (root, app, id, mut options) = trial_fixture().await;
+        options.build_patch_after = false;
+        let extraction = app
+            .project_directory(&id)
+            .unwrap()
+            .join("extraction/native.json");
+        let original = std::fs::read(&extraction).unwrap();
+        drop(app);
+        let app = Application::open(
+            root.path().join("data"),
+            &crate::ToolPaths::new(root.path().join("tools")),
+        )
+        .await
+        .unwrap();
+        app.save_concurrency(1).await.unwrap();
+        let token = CancellationToken::new();
+        let permit = app.translation_permit(&token).await.unwrap();
+        // Loading while queued would fail before cancellation reaches the waiting task.
+        std::fs::write(&extraction, b"invalid extraction JSON").unwrap();
+        let mut events = app.subscribe();
+        let run = app.translate_project(&id, options);
+        tokio::pin!(run);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                tokio::select! {
+                    event = events.recv() => {
+                        if let crate::AppEvent::TaskChanged(state) = event.unwrap()
+                            && state.running
+                        {
+                            break;
+                        }
+                    }
+                    result = &mut run => panic!("queued task loaded sources: {result:?}"),
+                }
+            }
+        })
+        .await
+        .unwrap();
+        app.cancel(&id).await;
+        let result = tokio::time::timeout(Duration::from_secs(5), run)
+            .await
+            .unwrap();
+        assert!(matches!(
+            result,
+            Err(CoreError::Engine(gamel10n_engines::EngineError::Cancelled))
+        ));
+        assert!(!app.task_state(&id).await.unwrap().running);
+        assert!(!app.translation_scope(&id).await.unwrap().unwrap().completed);
+
+        std::fs::write(&extraction, original).unwrap();
+        drop(permit);
+        let resumed = app.resume_translation(&id).await.unwrap();
+        assert_eq!((resumed.completed, resumed.cache_hits), (1, 1));
+        assert_eq!(resumed.translations["line-1"], "你好");
+    }
+
+    #[tokio::test]
     async fn trial_build_failure_keeps_scope_resumable_without_retranslating() {
         let (_root, app, id, options) = trial_fixture().await;
         let mut events = app.subscribe();
@@ -332,10 +390,6 @@ impl Application {
                 .and_then(Value::as_u64)
                 .unwrap_or(24) as usize;
         }
-        let analysis = self
-            .cached_analysis(id)
-            .await?
-            .ok_or_else(|| CoreError::InvalidData("请先识别并提取游戏文本。".into()))?;
         let providers = self.translation_providers(id).await?;
         let policy = crate::workbench::validated_policy(&project.settings)?;
         let directory = self.store.directory(id)?;
@@ -369,6 +423,10 @@ impl Application {
             // Release translation concurrency capacity before building, but keep the project task.
             let result = {
                 let _permit = self.translation_permit(&cancellation).await?;
+                let analysis = self
+                    .cached_analysis(id)
+                    .await?
+                    .ok_or_else(|| CoreError::InvalidData("请先识别并提取游戏文本。".into()))?;
                 let engine = TranslationEngine::new(
                     directory,
                     Some(self.data_directory().join("memory").join(id)),

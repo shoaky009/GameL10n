@@ -260,7 +260,7 @@ impl ResourceChanges {
 
 /// Reconciles selected copies with host-bound inputs, preserving source and work files.
 pub(super) fn reconcile(
-    request: &AdaptationRequest,
+    request: &AdaptationRequest<'_>,
     workspace: &Path,
     state: &mut Session,
     cancellation: &CancellationToken,
@@ -343,7 +343,7 @@ pub(super) fn reconcile(
 
 /// Stages selected whole files; replacement also removes every unselected copy.
 pub(super) fn stage(
-    request: &AdaptationRequest,
+    request: &AdaptationRequest<'_>,
     workspace: &Path,
     state: &mut Session,
     files: &[String],
@@ -471,7 +471,7 @@ pub(super) fn stage(
 mod tests {
     use super::*;
 
-    fn fixture(root: &Path) -> (AdaptationRequest, PathBuf, Session) {
+    fn fixture(root: &Path) -> (AdaptationRequest<'static>, PathBuf, Session) {
         let game = root.join("game");
         let workspace = root.join("project/adaptation/current");
         for directory in [
@@ -497,7 +497,7 @@ mod tests {
             builtin_probes: vec![],
             discovery_inventory: None,
             limits: AdaptationLimits::default(),
-            baseline_units: vec![],
+            baseline_units: &[],
         };
         let mut state = Session {
             verified_package: Some(json!({"id":"fixture"})),

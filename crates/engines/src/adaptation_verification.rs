@@ -156,7 +156,7 @@ fn report_verification_progress(
 }
 
 fn evidence(
-    request: &AdaptationRequest,
+    request: &AdaptationRequest<'_>,
     state: &Session,
     trial: Option<&[String]>,
 ) -> (Value, Vec<TranslationUnit>) {
@@ -321,7 +321,7 @@ fn candidate_inventory(inventory: &Inventory, patterns: &[String]) -> BTreeMap<S
 )]
 async fn discover_inputs(
     service: &EngineService,
-    request: &AdaptationRequest,
+    request: &AdaptationRequest<'_>,
     workspace: &Path,
     state: &Session,
     package: &PackageManifest,
@@ -449,7 +449,7 @@ async fn discover_inputs(
 }
 
 fn fingerprint(
-    request: &AdaptationRequest,
+    request: &AdaptationRequest<'_>,
     workspace: &Path,
     state: &Session,
     discovery_only: bool,
@@ -547,7 +547,7 @@ fn accept(
     package: Value,
     implementation: &str,
     verification: VerificationResult,
-    request: &AdaptationRequest,
+    request: &AdaptationRequest<'_>,
 ) {
     state.verified_package = Some(package);
     state.verified_fingerprint = Some(implementation.into());
@@ -568,7 +568,7 @@ fn accept(
 )]
 async fn inspect_inputs(
     service: &EngineService,
-    request: &AdaptationRequest,
+    request: &AdaptationRequest<'_>,
     workspace: &Path,
     state: &Session,
     package: &PackageManifest,
@@ -609,7 +609,7 @@ async fn inspect_inputs(
 
 pub(super) async fn test_adapter(
     service: &EngineService,
-    request: &AdaptationRequest,
+    request: &AdaptationRequest<'_>,
     workspace: &Path,
     state: &mut Session,
     args: &Value,
@@ -1082,7 +1082,7 @@ pub(super) async fn test_adapter(
 mod tests {
     use super::*;
 
-    fn fixture(root: &Path) -> (EngineService, AdaptationRequest, PathBuf, Session) {
+    fn fixture(root: &Path) -> (EngineService, AdaptationRequest<'static>, PathBuf, Session) {
         let assets = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         let service = EngineService::new(&assets, crate::ToolPaths::development())
             .with_shared_directory(root.join("shared"));
@@ -1123,7 +1123,7 @@ mod tests {
             builtin_probes: vec![],
             discovery_inventory: None,
             limits: AdaptationLimits::default(),
-            baseline_units: vec![],
+            baseline_units: &[],
         };
         (service, request, workspace, state)
     }
@@ -1185,7 +1185,7 @@ mod tests {
         request.inputs.excluded.insert("runtime.json".into());
         request.objective = "Repair".into();
         request.improve_existing = true;
-        request.baseline_units = ["原文", "second"]
+        let baseline_units: Vec<_> = ["原文", "second"]
             .into_iter()
             .enumerate()
             .map(|(index, text)| TranslationUnit {
@@ -1199,6 +1199,10 @@ mod tests {
                 protected_tokens: None,
             })
             .collect();
+        let request = AdaptationRequest {
+            baseline_units: &baseline_units,
+            ..request
+        };
         for directory in [&request.game_directory, &workspace.join("resources")] {
             fs::write(
                 directory.join("text.json"),
@@ -1381,7 +1385,14 @@ mod tests {
         assert!(error.to_string().contains(path));
     }
 
-    fn archive_fixture(root: &Path) -> (AdaptationRequest, PathBuf, Session, DiscoveryInputs) {
+    fn archive_fixture(
+        root: &Path,
+    ) -> (
+        AdaptationRequest<'static>,
+        PathBuf,
+        Session,
+        DiscoveryInputs,
+    ) {
         let (_, request, workspace, mut state) = fixture(root);
         let archive = request.game_directory.join("archive.bin");
         fs::File::create(&archive)

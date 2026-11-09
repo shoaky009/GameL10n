@@ -54,7 +54,7 @@ fn extension(path: &str) -> String {
 }
 
 fn fresh(
-    request: &AdaptationRequest,
+    request: &AdaptationRequest<'_>,
     workspace: &Path,
     state: &Session,
 ) -> Result<bool, EngineError> {
@@ -314,7 +314,7 @@ pub(super) async fn trial_response(
 
 pub(super) async fn run(
     service: &EngineService,
-    request: &AdaptationRequest,
+    request: &AdaptationRequest<'_>,
     workspace: &Path,
     state: &mut Session,
     path: &Path,
@@ -348,7 +348,7 @@ pub(super) async fn run(
 
 pub(super) async fn run_trials(
     service: &EngineService,
-    request: &AdaptationRequest,
+    request: &AdaptationRequest<'_>,
     workspace: &Path,
     state: &mut Session,
     path: &Path,
@@ -534,7 +534,7 @@ fn supported(
 
 pub(super) async fn run_template(
     service: &EngineService,
-    request: &AdaptationRequest,
+    request: &AdaptationRequest<'_>,
     workspace: &Path,
     state: &mut Session,
     path: &Path,
@@ -659,7 +659,7 @@ mod tests {
         root: &Path,
         format: &str,
         resource: &str,
-    ) -> (EngineService, AdaptationRequest, PathBuf, Session) {
+    ) -> (EngineService, AdaptationRequest<'static>, PathBuf, Session) {
         let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let workspace = root.join("adaptation/current");
         fs::create_dir_all(workspace.join("work")).unwrap();
@@ -676,7 +676,7 @@ mod tests {
             improve_existing: false,
             require_model_analysis: false,
             limits: AdaptationLimits::default(),
-            baseline_units: vec![],
+            baseline_units: &[],
             reuse_failures: vec![],
             builtin_probes: vec![],
             discovery_inventory: None,

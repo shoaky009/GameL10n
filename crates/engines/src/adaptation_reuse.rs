@@ -16,7 +16,7 @@ const MAX_SOURCE_BYTES: usize = 1024 * 1024;
 const MAX_COPY_BYTES: usize = 32 * 1024 * 1024;
 
 fn find<'a>(
-    request: &'a AdaptationRequest,
+    request: &'a AdaptationRequest<'_>,
     args: &Value,
 ) -> Result<(PackageManifest, &'a Path), EngineError> {
     let id = text(args, "id")?;
@@ -62,7 +62,7 @@ fn read_registered(
     Ok(content)
 }
 
-pub(super) fn inspect(request: &AdaptationRequest, args: &Value) -> Result<Value, EngineError> {
+pub(super) fn inspect(request: &AdaptationRequest<'_>, args: &Value) -> Result<Value, EngineError> {
     let (manifest, directory) = find(request, args)?;
     if let Some(path) = args.get("path") {
         let relative = path
@@ -115,7 +115,7 @@ pub(super) fn inspect(request: &AdaptationRequest, args: &Value) -> Result<Value
 }
 
 pub(super) fn copy_selected(
-    request: &AdaptationRequest,
+    request: &AdaptationRequest<'_>,
     workspace: &Path,
     args: &Value,
     cancellation: &CancellationToken,

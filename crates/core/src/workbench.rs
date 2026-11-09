@@ -126,7 +126,7 @@ impl Workbench {
         policy: TranslationPolicy,
         analysis_key: usize,
     ) -> Result<Self, CoreError> {
-        let memory = TranslationMemory::load(directory.join("memory"), Some(&legacy_memory))
+        let mut memory = TranslationMemory::load(directory.join("memory"), Some(&legacy_memory))
             .map_err(storage_error)?;
         let edits =
             gamel10n_translation::edits::EditStore::open(&directory).map_err(storage_error)?;
@@ -137,9 +137,11 @@ impl Workbench {
         let mut rows = HashMap::with_capacity(units.len());
         let mut resources = std::collections::BTreeSet::new();
         let mut kinds = std::collections::BTreeSet::new();
+        let mut ordered: Vec<_> = units.iter().enumerate().collect();
+        ordered.sort_by_cached_key(|(_, unit)| memory_key(unit, &policy));
         edits
             .read(|edits| -> Result<(), CoreError> {
-                for (index, unit) in units.iter().enumerate() {
+                for (index, unit) in ordered {
                     let model = memory
                         .find(unit, &policy)
                         .map_err(storage_error)?

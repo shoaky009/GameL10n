@@ -147,27 +147,26 @@ struct MemoryShard {
 
 pub struct TranslationMemory {
     directory: PathBuf,
+    legacy_directory: Option<PathBuf>,
+    legacy_keys: BTreeMap<String, Vec<String>>,
+    cached_prefix: String,
     entries: BTreeMap<String, MemoryEntry>,
-    legacy_imported: bool,
 }
 impl TranslationMemory {
-    /// Read-only until a translation is committed. Legacy individual records are imported in memory.
+    /// Opens read-only history, loading at most one shard at a time until a batch is committed.
     pub fn load(directory: PathBuf, legacy_directory: Option<&Path>) -> Result<Self, StorageError> {
-        let mut result = Self {
-            directory,
-            entries: BTreeMap::new(),
-            legacy_imported: false,
-        };
-        let marker: Option<Value> =
-            read_recoverable(&result.directory.join(".legacy-import.json"))?;
+        let marker: Option<Value> = read_recoverable(&directory.join(".legacy-import.json"))?;
         if marker.as_ref().is_some_and(|value| {
             value.get("schemaVersion") != Some(&json!(1))
                 || value.get("entryCount").and_then(Value::as_u64).is_none()
         }) {
             return Err(StorageError::Invalid("旧版缓存导入记录无效".into()));
         }
-        if let Some(legacy) = legacy_directory.filter(|path| path.is_dir() && marker.is_none()) {
-            result.legacy_imported = true;
+        let legacy_directory = legacy_directory
+            .filter(|path| path.is_dir() && marker.is_none())
+            .map(Path::to_path_buf);
+        let mut legacy_keys = BTreeMap::<String, Vec<String>>::new();
+        if let Some(legacy) = &legacy_directory {
             for entry in fs::read_dir(legacy)? {
                 let path = entry?.path();
                 let Some(key) = path
@@ -177,71 +176,96 @@ impl TranslationMemory {
                 else {
                     continue;
                 };
-                if path.extension().is_none_or(|extension| extension != "json") {
-                    continue;
+                if path
+                    .extension()
+                    .is_some_and(|extension| extension == "json")
+                {
+                    legacy_keys
+                        .entry(key[..2].into())
+                        .or_default()
+                        .push(key.into());
                 }
-                let value: MemoryEntry = read_json(&path)?;
-                if value.key.as_deref() != Some(key) {
+            }
+        }
+        Ok(Self {
+            directory,
+            legacy_directory,
+            legacy_keys,
+            cached_prefix: String::new(),
+            entries: BTreeMap::new(),
+        })
+    }
+
+    fn read_shard(&self, prefix: &str) -> Result<BTreeMap<String, MemoryEntry>, StorageError> {
+        let mut entries = BTreeMap::new();
+        if let Some(legacy) = &self.legacy_directory
+            && let Some(keys) = self.legacy_keys.get(prefix)
+        {
+            for key in keys {
+                let mut entry: MemoryEntry = read_json(&legacy.join(format!("{key}.json")))?;
+                if entry.key.as_ref() != Some(key) {
                     return Err(StorageError::Invalid("旧版缓存键不一致".into()));
                 }
-                result.entries.insert(key.into(), value);
+                entry.key = None;
+                entries.insert(key.clone(), entry);
             }
         }
-        if result.directory.is_dir() {
-            let mut prefixes = BTreeSet::new();
-            for entry in fs::read_dir(&result.directory)? {
-                let name = entry?.file_name().to_string_lossy().into_owned();
-                if (name.len() == 7 && name.ends_with(".json")
-                    || name.len() == 11 && name.ends_with(".json.bak"))
-                    && name[..2]
-                        .bytes()
-                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        if let Some(shard) =
+            read_recoverable::<MemoryShard>(&self.directory.join(format!("{prefix}.json")))?
+        {
+            if !matches!(shard.schema_version, 1 | 2) {
+                return Err(StorageError::Invalid("不支持的缓存分片版本".into()));
+            }
+            for (key, mut entry) in shard.entries {
+                if !valid_key(&key)
+                    || !key.starts_with(prefix)
+                    || entry.key.as_ref().is_some_and(|stored| stored != &key)
+                    || (shard.schema_version == 1 && entry.key.is_none())
                 {
-                    prefixes.insert(name[..2].to_owned());
+                    return Err(StorageError::Invalid("缓存分片键不一致".into()));
                 }
-            }
-            for prefix in prefixes {
-                let shard = read_recoverable::<MemoryShard>(
-                    &result.directory.join(format!("{prefix}.json")),
-                )?
-                .ok_or_else(|| StorageError::Invalid("缓存分片丢失".into()))?;
-                if !matches!(shard.schema_version, 1 | 2) {
-                    return Err(StorageError::Invalid("不支持的缓存分片版本".into()));
-                }
-                for (key, mut entry) in shard.entries {
-                    if !valid_key(&key)
-                        || !key.starts_with(&prefix)
-                        || entry.key.as_ref().is_some_and(|stored| stored != &key)
-                        || (shard.schema_version == 1 && entry.key.is_none())
-                    {
-                        return Err(StorageError::Invalid("缓存分片键不一致".into()));
-                    }
-                    entry.key = None;
-                    result.entries.insert(key, entry);
-                }
+                entry.key = None;
+                entries.insert(key, entry);
             }
         }
-        Ok(result)
+        Ok(entries)
     }
+
+    fn shard(&mut self, prefix: &str) -> Result<&BTreeMap<String, MemoryEntry>, StorageError> {
+        if self.cached_prefix != prefix {
+            self.entries = self.read_shard(prefix)?;
+            self.cached_prefix = prefix.into();
+        }
+        Ok(&self.entries)
+    }
+
+    /// Drops loaded text before a long API wait; subsequent lookups reopen the required shard.
+    pub fn clear_cache(&mut self) {
+        self.entries.clear();
+        self.cached_prefix.clear();
+    }
+
     pub fn find(
-        &self,
+        &mut self,
         unit: &TranslationUnit,
         policy: &TranslationPolicy,
     ) -> Result<Option<&str>, StorageError> {
-        let key = memory_key(unit, policy);
+        let mut key = memory_key(unit, policy);
         let emphasis = emphasis_groups(&unit.source_text);
-        let entry = self.entries.get(&key).or_else(|| {
-            (!emphasis.is_empty())
-                .then(|| self.entries.get(&key_with_emphasis(unit, policy, false)))
-                .flatten()
-        });
-        let Some(entry) = entry else {
+        let primary = self.shard(&key[..2])?.contains_key(&key);
+        if !primary {
+            if emphasis.is_empty() {
+                return Ok(None);
+            }
+            key = key_with_emphasis(unit, policy, false);
+        }
+        let Some(entry) = self.shard(&key[..2])?.get(&key) else {
             return Ok(None);
         };
         if entry.source_text != unit.source_text || entry.context != unit.context {
             return Err(StorageError::Invalid("缓存原文与上下文不一致".into()));
         }
-        if !self.entries.contains_key(&key)
+        if !primary
             && emphasis
                 .iter()
                 .any(|group| entry.translation.contains(group))
@@ -250,50 +274,56 @@ impl TranslationMemory {
         }
         Ok(Some(&entry.translation))
     }
+
     pub fn store_batch(&mut self, entries: Vec<(String, MemoryEntry)>) -> Result<(), StorageError> {
-        let mut prefixes = BTreeSet::new();
-        if self.legacy_imported {
-            prefixes.extend(self.entries.keys().map(|key| key[..2].to_owned()));
-        }
-        for (key, _) in &entries {
-            if !valid_key(key) {
+        let mut pending = BTreeMap::<String, BTreeMap<String, MemoryEntry>>::new();
+        for (key, mut entry) in entries {
+            if !valid_key(&key) {
                 return Err(StorageError::Invalid("缓存键无效".into()));
             }
-            prefixes.insert(key[..2].to_owned());
+            entry.key = None;
+            pending
+                .entry(key[..2].into())
+                .or_default()
+                .insert(key, entry);
         }
-        let pending: BTreeMap<_, _> = entries
-            .into_iter()
-            .map(|(key, mut entry)| {
-                entry.key = None;
-                (key, entry)
-            })
-            .collect();
+        let importing = self.legacy_directory.is_some();
+        let mut prefixes: BTreeSet<_> = pending.keys().cloned().collect();
+        if importing {
+            prefixes.extend(self.legacy_keys.keys().cloned());
+            if self.directory.is_dir() {
+                for entry in fs::read_dir(&self.directory)? {
+                    let name = entry?.file_name().to_string_lossy().into_owned();
+                    if (name.len() == 7 && name.ends_with(".json")
+                        || name.len() == 11 && name.ends_with(".json.bak"))
+                        && name.as_bytes()[..2]
+                            .iter()
+                            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+                    {
+                        prefixes.insert(name[..2].to_owned());
+                    }
+                }
+            }
+        }
+        self.clear_cache();
+        let mut entry_count = 0;
         for prefix in prefixes {
-            let mut values: BTreeMap<_, _> = self
-                .entries
-                .range(prefix.clone()..)
-                .take_while(|(key, _)| key.starts_with(&prefix))
-                .map(|(key, value)| (key.clone(), value.clone()))
-                .collect();
-            values.extend(
-                pending
-                    .range(prefix.clone()..)
-                    .take_while(|(key, _)| key.starts_with(&prefix))
-                    .map(|(key, value)| (key.clone(), value.clone())),
-            );
+            let mut values = self.read_shard(&prefix)?;
+            values.extend(pending.remove(&prefix).unwrap_or_default());
             let shard = MemoryShard {
                 schema_version: 2,
                 entries: values,
             };
             write_json(&self.directory.join(format!("{prefix}.json")), &shard)?;
-            self.entries.extend(shard.entries);
+            entry_count += shard.entries.len();
         }
-        if self.legacy_imported {
+        if importing {
             write_json(
                 &self.directory.join(".legacy-import.json"),
-                &json!({"schemaVersion":1,"entryCount":self.entries.len()}),
+                &json!({"schemaVersion":1,"entryCount":entry_count}),
             )?;
-            self.legacy_imported = false;
+            self.legacy_directory = None;
+            self.legacy_keys.clear();
         }
         Ok(())
     }
@@ -465,6 +495,119 @@ mod tests {
             "e8fcbdd30f06267f147df4305bb2e15db671a429d9b977ff5fa8b1677887ffe8"
         );
     }
+
+    fn memory_entry(unit: &TranslationUnit, translation: &str) -> MemoryEntry {
+        MemoryEntry {
+            key: None,
+            source_text: unit.source_text.clone(),
+            context: unit.context.clone(),
+            translation: translation.into(),
+            provider: "fixture".into(),
+            created_at: now(),
+        }
+    }
+
+    #[test]
+    fn batch_commit_preserves_unloaded_records_and_recovers_backup_shards() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("memory");
+        let policy = TranslationPolicy::default();
+        let first = unit("hello", "scene");
+        let key = memory_key(&first, &policy);
+        let other_key = format!("{}{}", &key[..2], "0".repeat(62));
+        let path = directory.join(format!("{}.json", &key[..2]));
+        let backup = path.with_extension("json.bak");
+        write_json(
+            &backup,
+            &MemoryShard {
+                schema_version: 2,
+                entries: BTreeMap::from([
+                    (key.clone(), memory_entry(&first, "旧译文")),
+                    (
+                        other_key.clone(),
+                        memory_entry(&unit("other", "scene"), "其他译文"),
+                    ),
+                ]),
+            },
+        )
+        .unwrap();
+        let mut memory = TranslationMemory::load(directory, None).unwrap();
+        memory
+            .store_batch(vec![(key.clone(), memory_entry(&first, "新译文"))])
+            .unwrap();
+        let saved: MemoryShard = read_json(&path).unwrap();
+        assert_eq!(saved.entries[&other_key].translation, "其他译文");
+        assert_eq!(memory.find(&first, &policy).unwrap(), Some("新译文"));
+
+        // A writer must merge the latest file even if this reader has already cached the prefix.
+        let mut changed = saved;
+        changed.entries.get_mut(&other_key).unwrap().translation = "外部更新".into();
+        write_json(&path, &changed).unwrap();
+        memory
+            .store_batch(vec![(key, memory_entry(&first, "再次更新"))])
+            .unwrap();
+        let saved: MemoryShard = read_json(&path).unwrap();
+        assert_eq!(saved.entries[&other_key].translation, "外部更新");
+    }
+
+    #[test]
+    fn lazy_legacy_import_keeps_modern_values_and_migrates_unread_records() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("memory");
+        let legacy = root.path().join("legacy");
+        let policy = TranslationPolicy::default();
+        let units = [unit("hello", "scene"), unit("bye", "scene")];
+        let keys: Vec<_> = units.iter().map(|unit| memory_key(unit, &policy)).collect();
+        for (unit, key) in units.iter().zip(&keys) {
+            let mut entry = memory_entry(unit, "旧版译文");
+            entry.key = Some(key.clone());
+            write_json(&legacy.join(format!("{key}.json")), &entry).unwrap();
+        }
+        let mut modern = TranslationMemory::load(directory.clone(), None).unwrap();
+        modern
+            .store_batch(vec![(keys[0].clone(), memory_entry(&units[0], "新版译文"))])
+            .unwrap();
+        let mut memory = TranslationMemory::load(directory.clone(), Some(&legacy)).unwrap();
+        assert_eq!(memory.find(&units[0], &policy).unwrap(), Some("新版译文"));
+        assert!(!directory.join(".legacy-import.json").exists());
+        memory.store_batch(vec![]).unwrap();
+        fs::remove_dir_all(&legacy).unwrap();
+        let mut reopened = TranslationMemory::load(directory.clone(), Some(&legacy)).unwrap();
+        assert_eq!(reopened.find(&units[1], &policy).unwrap(), Some("旧版译文"));
+        let marker: Value = read_json(&directory.join(".legacy-import.json")).unwrap();
+        assert_eq!(marker["entryCount"], 2);
+    }
+
+    #[test]
+    fn lazy_lookup_preserves_emphasis_fallback_and_reports_requested_corruption() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("memory");
+        let policy = TranslationPolicy::default();
+        let unit = unit("[[LOUD]] hello", "scene");
+        let old_key = key_with_emphasis(&unit, &policy, false);
+        let new_key = memory_key(&unit, &policy);
+        let mut memory = TranslationMemory::load(directory.clone(), None).unwrap();
+        memory
+            .store_batch(vec![(old_key.clone(), memory_entry(&unit, "大声：你好"))])
+            .unwrap();
+        assert_eq!(memory.find(&unit, &policy).unwrap(), Some("大声：你好"));
+        memory
+            .store_batch(vec![(old_key, memory_entry(&unit, "[[LOUD]]你好"))])
+            .unwrap();
+        assert_eq!(memory.find(&unit, &policy).unwrap(), None);
+        memory
+            .store_batch(vec![(new_key.clone(), memory_entry(&unit, "新规则译文"))])
+            .unwrap();
+        assert_eq!(memory.find(&unit, &policy).unwrap(), Some("新规则译文"));
+        fs::write(
+            directory.join(format!("{}.json", &new_key[..2])),
+            b"invalid JSON",
+        )
+        .unwrap();
+        let mut reopened = TranslationMemory::load(directory, None).unwrap();
+        assert!(reopened.find(&unit, &policy).is_err());
+    }
+
     #[test]
     fn reads_v1_v2_shards_and_legacy_edits_without_changing_identity() {
         let directory = tempfile::tempdir().unwrap();
@@ -493,7 +636,7 @@ mod tests {
             },
         )
         .unwrap();
-        let memory = TranslationMemory::load(directory.path().join("memory"), None).unwrap();
+        let mut memory = TranslationMemory::load(directory.path().join("memory"), None).unwrap();
         assert_eq!(memory.find(&unit, &policy).unwrap(), Some("你好"));
         let mut edits = TranslationEdits::default();
         edits.entries.insert(

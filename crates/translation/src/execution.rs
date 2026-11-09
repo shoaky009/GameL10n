@@ -16,8 +16,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
-    fs::{self, OpenOptions},
-    io::Write,
+    fs::{self, File, OpenOptions},
+    io::{BufReader, BufWriter, Seek, Write},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -181,6 +181,66 @@ struct CommitOptions {
     candidate_only: bool,
     retranslation_id: Option<String>,
 }
+
+// Keep result snapshots on disk so API waits retain IDs, not every completed translation.
+// These snapshots also preserve results if a user edits or deletes a correction during the run.
+struct CompletedTranslations {
+    ids: HashSet<String>,
+    writer: BufWriter<File>,
+}
+impl CompletedTranslations {
+    fn new(directory: &Path) -> Result<Self, ExecutionError> {
+        fs::create_dir_all(directory)?;
+        Ok(Self {
+            ids: HashSet::new(),
+            writer: BufWriter::new(tempfile::tempfile_in(directory)?),
+        })
+    }
+
+    fn insert(&mut self, id: &str, text: &str) -> Result<(), ExecutionError> {
+        serde_json::to_writer(&mut self.writer, &(id, text)).map_err(Self::json_error)?;
+        self.writer.write_all(b"\n")?;
+        self.ids.insert(id.into());
+        Ok(())
+    }
+
+    fn extend(&mut self, translations: &BTreeMap<String, String>) -> Result<(), ExecutionError> {
+        for (id, text) in translations {
+            self.insert(id, text)?;
+        }
+        Ok(())
+    }
+
+    fn contains_key(&self, id: &str) -> bool {
+        self.ids.contains(id)
+    }
+
+    fn len(&self) -> usize {
+        self.ids.len()
+    }
+
+    fn into_translations(mut self) -> Result<BTreeMap<String, String>, ExecutionError> {
+        drop(self.ids);
+        self.writer.rewind()?;
+        let file = self
+            .writer
+            .into_inner()
+            .map_err(|error| error.into_error())?;
+        serde_json::Deserializer::from_reader(BufReader::new(file))
+            .into_iter::<(String, String)>()
+            .map(|entry| entry.map_err(Self::json_error))
+            .collect()
+    }
+
+    fn json_error(source: serde_json::Error) -> ExecutionError {
+        crate::files::FileError::Json {
+            path: "临时翻译结果".into(),
+            source,
+        }
+        .into()
+    }
+}
+
 impl TranslationEngine {
     pub fn new(directory: PathBuf, legacy_memory: Option<PathBuf>) -> Self {
         Self {
@@ -248,7 +308,7 @@ impl TranslationEngine {
             ExecutionJournal::default()
         };
         let mut issues = load_issues(&self.directory);
-        let mut completed = BTreeMap::new();
+        let mut completed = CompletedTranslations::new(&self.directory)?;
         let mut failed = BTreeSet::new();
         let mut cache_hits = 0;
         let mut usage = TokenUsage::default();
@@ -328,15 +388,22 @@ impl TranslationEngine {
                     .iter()
                     .map(|unit| unit.id.as_str())
                     .collect();
+                let keys: HashSet<_> = receipt
+                    .request
+                    .units
+                    .iter()
+                    .map(|unit| unit.memory_key.as_str())
+                    .collect();
                 let recovery_units: Vec<_> = all_units
                     .iter()
                     .filter(|unit| {
                         // Receipts store representatives; recover identical texts in the selection too.
-                        !options.candidate_only && options.retranslation_id.is_none()
+                        (!options.candidate_only && options.retranslation_id.is_none()
                             || requested.contains(unit.id.as_str())
                             || selected
                                 .as_ref()
-                                .is_none_or(|ids| ids.contains(unit.id.as_str()))
+                                .is_none_or(|ids| ids.contains(unit.id.as_str())))
+                            && keys.contains(memory_key(unit, policy).as_str())
                     })
                     .collect();
                 let committed = self
@@ -355,11 +422,14 @@ impl TranslationEngine {
                     .await?;
                 memory = committed.memory;
                 issues = committed.issues;
-                completed.extend(committed.completed.into_iter().filter(|(id, _)| {
-                    selected
+                for (id, text) in committed.completed {
+                    if selected
                         .as_ref()
                         .is_none_or(|ids| ids.contains(id.as_str()))
-                }));
+                    {
+                        completed.insert(&id, &text)?;
+                    }
+                }
                 let compatible: HashSet<_> = recovery_units
                     .iter()
                     .map(|unit| memory_key(unit, policy))
@@ -390,12 +460,13 @@ impl TranslationEngine {
         let edit_store = tokio::task::spawn_blocking(move || EditStore::open(&directory))
             .await
             .map_err(|error| ExecutionError::Invalid(error.to_string()))??;
-        edit_store.read(|edits| -> Result<(), ExecutionError> {
+        let mut history_units = edit_store.read(|edits| -> Result<Vec<_>, ExecutionError> {
+            let mut history_units = Vec::new();
             for unit in &units {
                 cancelled(cancellation)?;
                 if options.candidate_only {
                     if let Some(candidate) = edits.candidate(unit, &policy.target_language) {
-                        completed.insert(unit.id.clone(), candidate.text.clone());
+                        completed.insert(&unit.id, &candidate.text)?;
                         cache_hits += 1;
                     }
                     continue;
@@ -406,18 +477,27 @@ impl TranslationEngine {
                 {
                     continue;
                 }
-                let text = edit
-                    .map(|edit| edit.text.as_str())
-                    .or(memory.find(unit, policy)?);
-                if let Some(text) = text
-                    && (edit.is_some() || text::validate(unit, text).is_empty())
-                {
-                    completed.insert(unit.id.clone(), text.into());
+                if let Some(edit) = edit {
+                    completed.insert(&unit.id, &edit.text)?;
                     cache_hits += 1;
+                } else {
+                    history_units.push(*unit);
                 }
             }
-            Ok(())
+            Ok(history_units)
         })??;
+        // Visit each prefix together so a bounded cache does not reread it for every source row.
+        history_units.sort_by_cached_key(|unit| memory_key(unit, policy));
+        for unit in history_units {
+            cancelled(cancellation)?;
+            if let Some(text) = memory.find(unit, policy)?
+                && text::validate(unit, text).is_empty()
+            {
+                completed.insert(&unit.id, text)?;
+                cache_hits += 1;
+            }
+        }
+        memory.clear_cache();
         issues.retain(|issue| {
             issue
                 .unit_id
@@ -439,6 +519,7 @@ impl TranslationEngine {
             });
             groups[index].push(unit);
         }
+        drop(by_key);
         let uncertain: HashSet<_> = journal
             .pending
             .values()
@@ -480,6 +561,7 @@ impl TranslationEngine {
                 }
             }
         }
+        drop(uncertain);
         emit(
             "查询缓存",
             format!("已加载 {cache_hits} 条历史译文。"),
@@ -490,16 +572,18 @@ impl TranslationEngine {
             None,
         );
         let batch_size = providers[0].maximum_batch_size().min(options.batch_size);
-        let mut batches = groups.chunks(batch_size);
+        let mut batches = groups.into_iter();
         let mut fallback_batches = VecDeque::new();
-        'batches: while let Some((start_provider, batch)) = fallback_batches
-            .pop_front()
-            .or_else(|| batches.next().map(|batch| (0, batch.to_vec())))
+        'batches: while let Some((start_provider, batch)) =
+            fallback_batches.pop_front().or_else(|| {
+                let batch: Vec<_> = batches.by_ref().take(batch_size).collect();
+                (!batch.is_empty()).then_some((0, batch))
+            })
         {
             cancelled(cancellation)?;
             // Protect manual corrections saved during an ordinary background translation.
             let mut current = Vec::<Vec<&TranslationUnit>>::new();
-            edit_store.read(|edits| {
+            edit_store.read(|edits| -> Result<(), ExecutionError> {
                 for group in &batch {
                     let mut remaining = Vec::new();
                     for unit in group {
@@ -507,7 +591,7 @@ impl TranslationEngine {
                             && !options.candidate_only
                             && let Some(edit) = edits.find(unit, &policy.target_language)
                         {
-                            completed.insert(unit.id.clone(), edit.text.clone());
+                            completed.insert(&unit.id, &edit.text)?;
                             cache_hits += 1;
                             continue;
                         }
@@ -517,7 +601,8 @@ impl TranslationEngine {
                         current.push(remaining);
                     }
                 }
-            })?;
+                Ok(())
+            })??;
             if current.is_empty() {
                 continue;
             }
@@ -743,7 +828,7 @@ impl TranslationEngine {
                     cache_hits,
                     failed.len(),
                     &usage,
-                    Some((&batch_units, &completed, &issues)),
+                    Some((&batch_units, &BTreeMap::new(), &issues)),
                 );
                 if !continue_on_error {
                     return Err(error);
@@ -760,13 +845,13 @@ impl TranslationEngine {
                     &response,
                     CommitState {
                         memory,
-                        completed,
+                        completed: BTreeMap::new(),
                         issues,
                     },
                 )
                 .await?;
             memory = committed.memory;
-            completed = committed.completed;
+            completed.extend(&committed.completed)?;
             issues = committed.issues;
             for group in &current {
                 if completed.contains_key(&group[0].id) {
@@ -794,7 +879,7 @@ impl TranslationEngine {
                 cache_hits,
                 failed.len(),
                 &usage,
-                Some((&batch_units, &completed, &issues)),
+                Some((&batch_units, &committed.completed, &issues)),
             );
             if !continue_on_error && batch_units.iter().any(|unit| failed.contains(&unit.id)) {
                 return Err(ExecutionError::Invalid(
@@ -805,19 +890,22 @@ impl TranslationEngine {
         // Existing edits remain usable after a failed retranslation, but do not fulfil that request.
         if !options.candidate_only && options.retranslation_id.is_none() && !failed.is_empty() {
             let mut resolved = Vec::new();
-            edit_store.read(|edits| {
+            let mut updates = BTreeMap::new();
+            edit_store.read(|edits| -> Result<(), ExecutionError> {
                 for unit in &units {
                     if failed.contains(&unit.id)
                         && let Some(edit) = edits.find(unit, &policy.target_language)
                         && text::validate(unit, &edit.text).is_empty()
                     {
-                        completed.insert(unit.id.clone(), edit.text.clone());
+                        completed.insert(&unit.id, &edit.text)?;
+                        updates.insert(unit.id.clone(), edit.text.clone());
                         failed.remove(&unit.id);
                         issues.retain(|issue| issue.unit_id.as_deref() != Some(&unit.id));
                         resolved.push(*unit);
                     }
                 }
-            })?;
+                Ok(())
+            })??;
             if !resolved.is_empty() {
                 write_json(&self.directory.join("translation-errors.json"), &issues)?;
                 emit(
@@ -827,7 +915,7 @@ impl TranslationEngine {
                     cache_hits,
                     failed.len(),
                     &usage,
-                    Some((&resolved, &completed, &issues)),
+                    Some((&resolved, &updates, &issues)),
                 );
             }
         }
@@ -838,7 +926,7 @@ impl TranslationEngine {
             completed: completed.len(),
             total: units.len(),
             failed: failed.len(),
-            translations: completed,
+            translations: completed.into_translations()?,
             cache_hits,
             usage,
         };
@@ -1195,6 +1283,98 @@ mod tests {
             analysis_reasoning_effort: Some("high".into()),
         })
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn final_results_keep_completed_snapshots_when_edits_change_between_batches() {
+        let directory = tempfile::tempdir().unwrap();
+        let units = [
+            unit("history", "hello"),
+            unit("edit", "goodbye"),
+            unit("new", "thanks"),
+        ];
+        let policy = TranslationPolicy::default();
+        let history = |text: &str| {
+            (
+                memory_key(&units[0], &policy),
+                MemoryEntry {
+                    key: None,
+                    source_text: units[0].source_text.clone(),
+                    context: units[0].context.clone(),
+                    translation: text.into(),
+                    provider: "fixture".into(),
+                    created_at: now(),
+                },
+            )
+        };
+        let mut memory = TranslationMemory::load(directory.path().join("memory"), None).unwrap();
+        memory.store_batch(vec![history("历史译文")]).unwrap();
+        let store = EditStore::open(directory.path()).unwrap();
+        store
+            .update::<_, StorageError>(|_| {
+                Ok((
+                    (),
+                    EditChanges {
+                        entries: BTreeMap::from([(
+                            "edit".into(),
+                            Some(TranslationEdit::new(
+                                &units[1],
+                                &policy.target_language,
+                                "手工译文".into(),
+                                true,
+                            )),
+                        )]),
+                        ..Default::default()
+                    },
+                ))
+            })
+            .unwrap();
+        let server = mock_once(
+            200,
+            json!({"choices":[{"finish_reason":"stop","message":{"content":"{\"0\":\"谢谢\"}"}}]}),
+        );
+        let mut changed = false;
+        let result = TranslationEngine::new(directory.path().into(), None)
+            .run(
+                &units,
+                &[local_provider(server.0)],
+                &policy,
+                &TranslationOptions::default(),
+                &CancellationToken::new(),
+                |progress| {
+                    if progress.stage == "查询缓存" && progress.completed == 2 && !changed {
+                        changed = true;
+                        store
+                            .update::<_, StorageError>(|_| {
+                                Ok((
+                                    (),
+                                    EditChanges {
+                                        entries: BTreeMap::from([("edit".into(), None)]),
+                                        ..Default::default()
+                                    },
+                                ))
+                            })
+                            .unwrap();
+                        memory.store_batch(vec![history("运行中更新")]).unwrap();
+                    }
+                },
+            )
+            .await
+            .unwrap();
+        server.2.join().unwrap();
+        assert!(changed);
+        assert_eq!(
+            (result.completed, result.cache_hits, result.failed),
+            (3, 2, 0)
+        );
+        assert_eq!(
+            result.translations,
+            BTreeMap::from([
+                ("history".into(), "历史译文".into()),
+                ("edit".into(), "手工译文".into()),
+                ("new".into(), "谢谢".into()),
+            ])
+        );
     }
 
     #[tokio::test]
@@ -2015,7 +2195,7 @@ mod tests {
             usage: TokenUsage::default(),
             provider_request_id: None,
         };
-        let committed = TranslationEngine::new(directory.path().into(), None)
+        let mut committed = TranslationEngine::new(directory.path().into(), None)
             .commit_response(
                 &[&units[0]],
                 &policy,

@@ -260,7 +260,7 @@ mod tests {
             builtin_probes: vec![],
             discovery_inventory: None,
             limits: AdaptationLimits::default(),
-            baseline_units: vec![],
+            baseline_units: &[],
         };
         let error = service
             .adapt(&request, &provider, &CancellationToken::new(), None)

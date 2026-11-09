@@ -77,7 +77,7 @@ impl AdaptationLimits {
 }
 
 #[derive(Clone, Debug)]
-pub struct AdaptationRequest {
+pub struct AdaptationRequest<'a> {
     pub game_id: String,
     pub game_directory: PathBuf,
     pub inputs: AdaptationInputs,
@@ -95,7 +95,7 @@ pub struct AdaptationRequest {
     /// Inventory from a completed regular discovery pass in this task. Avoids probing twice.
     pub discovery_inventory: Option<Inventory>,
     pub limits: AdaptationLimits,
-    pub baseline_units: Vec<TranslationUnit>,
+    pub baseline_units: &'a [TranslationUnit],
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -395,7 +395,7 @@ pub(crate) fn tokens(usage: &TokenUsage) -> u64 {
 impl EngineService {
     pub async fn adapt(
         &self,
-        request: &AdaptationRequest,
+        request: &AdaptationRequest<'_>,
         provider: &OpenAiProvider,
         cancellation: &CancellationToken,
         progress: ProgressCallback<'_>,
@@ -721,7 +721,7 @@ impl EngineService {
     )]
     async fn adaptation_tool(
         &self,
-        request: &AdaptationRequest,
+        request: &AdaptationRequest<'_>,
         workspace: &Path,
         state: &mut Session,
         name: &str,
@@ -1677,7 +1677,7 @@ impl EngineService {
 
     fn knowledge_reuse_options(
         &self,
-        request: &AdaptationRequest,
+        request: &AdaptationRequest<'_>,
         entry: &Value,
     ) -> Result<Value, EngineError> {
         let family = &entry["family"];
@@ -1767,7 +1767,7 @@ impl EngineService {
 
     fn adapter_list(
         &self,
-        request: &AdaptationRequest,
+        request: &AdaptationRequest<'_>,
         state: &mut Session,
         args: &Value,
         cancellation: &CancellationToken,
@@ -2051,7 +2051,7 @@ impl EngineService {
 
     async fn copy_adapter(
         &self,
-        request: &AdaptationRequest,
+        request: &AdaptationRequest<'_>,
         workspace: &Path,
         state: &mut Session,
         args: &Value,
@@ -2431,7 +2431,7 @@ impl EngineService {
 
     async fn test_adapter(
         &self,
-        request: &AdaptationRequest,
+        request: &AdaptationRequest<'_>,
         workspace: &Path,
         state: &mut Session,
         args: &Value,
@@ -2452,7 +2452,7 @@ impl EngineService {
 
     async fn finish_adapter(
         &self,
-        request: &AdaptationRequest,
+        request: &AdaptationRequest<'_>,
         workspace: &Path,
         state: &mut Session,
         args: &Value,
@@ -2683,7 +2683,7 @@ fn copy_knowledge_sources(
     Ok(copied)
 }
 fn knowledge_candidates(
-    _request: &AdaptationRequest,
+    _request: &AdaptationRequest<'_>,
     state: &Session,
 ) -> Result<Vec<String>, EngineError> {
     Ok(crate::adaptation_context::knowledge_candidates(state))
@@ -2849,7 +2849,7 @@ async fn save_session(path: &Path, state: &mut Session) -> Result<(), EngineErro
 pub(crate) fn file_error(error: impl std::fmt::Display) -> EngineError {
     EngineError::Protocol(error.to_string())
 }
-fn trace(request: &AdaptationRequest, mut entry: Value) -> Result<(), EngineError> {
+fn trace(request: &AdaptationRequest<'_>, mut entry: Value) -> Result<(), EngineError> {
     let directory = request.project_directory.join("logs");
     fs::create_dir_all(&directory)?;
     let mut file = OpenOptions::new()
@@ -2923,7 +2923,7 @@ fn strings(args: &Value, key: &str) -> Result<Vec<String>, EngineError> {
     Ok(values)
 }
 fn tool_root(
-    request: &AdaptationRequest,
+    request: &AdaptationRequest<'_>,
     workspace: &Path,
     args: &Value,
 ) -> Result<PathBuf, EngineError> {
@@ -2940,7 +2940,7 @@ fn tool_root(
     }
 }
 fn tool_file(
-    request: &AdaptationRequest,
+    request: &AdaptationRequest<'_>,
     workspace: &Path,
     args: &Value,
     relative: &str,
@@ -3155,7 +3155,7 @@ fn workspace_fingerprint(workspace: &Path, state: &Session) -> Result<String, En
         &json!({"hostRevision":1,"files":files,"selection":state.release_files,"patterns":state.resource_patterns,"recognition":state.recognition,"family":state.family}),
     )?))
 }
-fn verification_context(request: &AdaptationRequest) -> String {
+fn verification_context(request: &AdaptationRequest<'_>) -> String {
     hash_text(&json!({"objective":request.objective,"baseline":request.baseline_units}).to_string())
 }
 fn safe_call_id(id: &str) -> String {
@@ -4946,7 +4946,7 @@ mod tests {
         );
     }
 
-    fn fixture(root: &Path) -> (EngineService, AdaptationRequest, PathBuf, Session) {
+    fn fixture(root: &Path) -> (EngineService, AdaptationRequest<'static>, PathBuf, Session) {
         let assets = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         let service = EngineService::new(&assets, ToolPaths::development())
             .with_shared_directory(root.join("shared"));
@@ -4991,7 +4991,7 @@ mod tests {
             builtin_probes: vec![],
             discovery_inventory: None,
             limits: AdaptationLimits::default(),
-            baseline_units: vec![],
+            baseline_units: &[],
         };
         (service, request, workspace, session)
     }
@@ -5175,7 +5175,7 @@ mod tests {
             return;
         }
         request.objective = "Repair".into();
-        request.baseline_units = vec![
+        let baseline_units = [
             TranslationUnit {
                 id: "0".into(),
                 resource_path: "text.json".into(),
@@ -5197,6 +5197,10 @@ mod tests {
                 protected_tokens: None,
             },
         ];
+        let request = AdaptationRequest {
+            baseline_units: &baseline_units,
+            ..request
+        };
         let args = json!({"kind":"engine","key":"fixture","name":"Fixture","resourcePatterns":["*.json"],"trialFiles":["text.json"]});
         let cancellation = CancellationToken::new();
         state.total_turns = 5;
@@ -5206,7 +5210,12 @@ mod tests {
             .expect("trial");
         assert_eq!(passed["passed"], true);
         assert_eq!(state.extra["highestVerificationMilestone"], 1);
-        request.baseline_units[0].context = "changed baseline".into();
+        let mut changed_baseline = baseline_units.clone();
+        changed_baseline[0].context = "changed baseline".into();
+        let request = AdaptationRequest {
+            baseline_units: &changed_baseline,
+            ..request
+        };
         state.total_turns = 9;
         let failed = service
             .test_adapter(&request, &workspace, &mut state, &args, &cancellation, None)
@@ -5326,8 +5335,7 @@ mod tests {
                 .to_string()
                 .contains("目标或已有文本基线")
         );
-        changed_request = request.clone();
-        changed_request.baseline_units.push(TranslationUnit {
+        let changed_baseline = [TranslationUnit {
             id: "existing".into(),
             resource_path: "text.json".into(),
             locator: "0".into(),
@@ -5336,7 +5344,11 @@ mod tests {
             speaker: None,
             kind: "dialogue".into(),
             protected_tokens: None,
-        });
+        }];
+        let changed_request = AdaptationRequest {
+            baseline_units: &changed_baseline,
+            ..request.clone()
+        };
         assert!(
             service
                 .finish_adapter(

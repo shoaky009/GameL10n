@@ -957,7 +957,7 @@ impl Application {
             limits,
             baseline_units: baseline
                 .as_ref()
-                .map(|value| value.extraction().units.clone())
+                .map(|value| value.extraction().units.as_slice())
                 .unwrap_or_default(),
         };
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<EngineProgress>();

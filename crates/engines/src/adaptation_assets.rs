@@ -116,7 +116,7 @@ fn page_source(
 
 pub(crate) async fn inspect_builtin(
     service: &EngineService,
-    request: &AdaptationRequest,
+    request: &AdaptationRequest<'_>,
     state: &Session,
     args: &Value,
     cancellation: &CancellationToken,

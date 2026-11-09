@@ -1033,7 +1033,7 @@ pub(crate) struct KnowledgeContext {
 }
 
 pub(crate) fn knowledge_context(
-    request: &AdaptationRequest,
+    request: &AdaptationRequest<'_>,
     state: &Session,
     progress: ProgressCallback<'_>,
 ) -> Result<KnowledgeContext, EngineError> {

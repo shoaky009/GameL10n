@@ -35,7 +35,7 @@ fn append_failure(state: &mut Session, call: &ToolCall, reason: &str) {
     state.messages.push(json!({"role":"tool","tool_call_id":call.id,"content":json!({"success":false,"error":reason}).to_string()}));
 }
 
-pub(super) fn recover(state: &mut Session, request: &AdaptationRequest, identity: &str) {
+pub(super) fn recover(state: &mut Session, request: &AdaptationRequest<'_>, identity: &str) {
     if let Some(interrupted) = state.running_tool_id.take() {
         let dependent = state.extra.get("pendingCallsAreSequential") == Some(&json!(true))
             || sequential(&state.pending_calls);
@@ -506,7 +506,7 @@ fn record_tool(state: &mut Session, call: &ToolCall, args: &Value, value: &Value
 )]
 pub(super) async fn run(
     service: &EngineService,
-    request: &AdaptationRequest,
+    request: &AdaptationRequest<'_>,
     provider: &OpenAiProvider,
     workspace: &Path,
     path: &Path,
@@ -1022,7 +1022,7 @@ mod tests {
     use gamel10n_translation::provider::{ApiProtocol, ProviderSettings, TranslationFormat};
     use std::io::{Read, Write};
 
-    fn fixture(root: &Path) -> (EngineService, AdaptationRequest, PathBuf, Session) {
+    fn fixture(root: &Path) -> (EngineService, AdaptationRequest<'static>, PathBuf, Session) {
         let workspace = root.join("adaptation/current");
         fs::create_dir_all(workspace.join("work")).unwrap();
         fs::create_dir_all(root.join("game")).unwrap();
@@ -1041,7 +1041,7 @@ mod tests {
             builtin_probes: vec![],
             discovery_inventory: None,
             limits: AdaptationLimits::default(),
-            baseline_units: vec![],
+            baseline_units: &[],
         };
         let state = Session {
             game_id: "g".into(),
@@ -1491,7 +1491,7 @@ mod tests {
             builtin_probes: vec![],
             discovery_inventory: None,
             limits: AdaptationLimits::default(),
-            baseline_units: vec![],
+            baseline_units: &[],
         };
         let mut state = Session {
             objective: "Develop".into(),
