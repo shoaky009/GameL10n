@@ -1,6 +1,8 @@
 # Third-party notices
 
-GameL10n's original code is licensed under GPL-3.0-only; see LICENSE.
+GameL10n's main application is licensed under GPL-3.0-only; see LICENSE.
+Independently licensed components retain their own terms, including the MIT-licensed
+FontBridge component in `tools/GameL10n.FontBridge`.
 Third-party code, tools and reference materials retain their own licenses and
 copyright notices. The project license does not replace those terms.
 

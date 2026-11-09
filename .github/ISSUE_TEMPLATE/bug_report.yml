@@ -1,0 +1,49 @@
+name: 问题反馈
+description: 反馈 GameL10n 使用中遇到的问题。
+title: "[Bug] "
+body:
+  - type: textarea
+    id: background
+    attributes:
+      label: 问题背景
+      description: 简要说明遇到的问题，以及当时正在进行的操作。
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: 运行环境
+      description: 提供 GameL10n 版本或提交号、Windows 版本，以及相关的适配器或模型配置。
+      placeholder: |
+        GameL10n 版本：
+        Windows 版本：
+        适配器 / 模型（如适用）：
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: 复现步骤
+      description: 列出触发问题的具体步骤，并说明是每次发生还是偶发。
+      placeholder: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: 预期与实际表现
+      description: 说明期望的结果与实际发生的情况；如有报错，请提供完整的错误信息。
+      placeholder: |
+        预期表现：
+
+        实际表现：
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 日志或截图
+      description: 按需提供相关日志片段或截图，请删除 API 密钥、个人信息及未获授权分享的游戏内容。

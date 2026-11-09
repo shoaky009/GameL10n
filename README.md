@@ -6,6 +6,10 @@
 
 GameL10n 是面向游戏文本汉化的 Windows 桌面工具，提供从资源识别、文本提取到 AI 翻译、译文校对和汉化补丁生成的完整流程。
 
+本项目为独立开发的**非官方工具**，不代表任何游戏开发商、发行商、引擎作者或平台，也未获得这些主体的认可或背书。游戏、引擎和平台名称仅用于说明兼容性，相关权利归各自权利人所有。
+
+请仅在取得必要授权或适用法律允许的范围内处理游戏资源。购买游戏或取得本工具的开源许可，不等于获得游戏内容的翻译、修改或传播授权。使用前请阅读[免责声明与使用边界](DISCLAIMER.md)；版权问题请通过[版权投诉入口](https://github.com/shoaky009/GameL10n/issues/new?template=copyright.yml)联系维护者。
+
 ## 主要功能
 
 - **识别与智能适配**：复用已有引擎适配器，通过 AI 分析未知资源格式并开发新适配器。
@@ -27,8 +31,10 @@ GameL10n 是面向游戏文本汉化的 Windows 桌面工具，提供从资源�
 - [模型接口配置](docs/model-providers.md)
 - [更新日志](CHANGELOG.md)
 - [开发与构建](docs/development.md)
+- [免责声明与版权投诉](DISCLAIMER.md)
+- [仓库内容检查记录](docs/repository-content-review.md)
 - [全部文档](docs/README.md)
 
 ## 许可
 
-项目采用 [GPL-3.0-only](LICENSE)。第三方组件许可见[第三方许可证](THIRD-PARTY-NOTICES.md)。
+主程序采用 [GPL-3.0-only](LICENSE)。该许可允许在遵守其条款的前提下使用、修改和分发软件，包括商业用途；分发时须履行适用的源码提供及许可保留义务。独立组件和第三方材料保留各自许可，见[许可声明](THIRD-PARTY-NOTICES.md)。软件许可不授予任何第三方游戏内容或商标的权利。

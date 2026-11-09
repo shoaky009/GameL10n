@@ -25,7 +25,7 @@ cargo fmt --all -- --check
 
 打包前先完成工具准备。发行目录包含应用、Python、解析工具、适配组件和许可证，使用时保留完整目录。本地打包不生成 ZIP；重复打包会同步 `tools/` 与 `adapters/`，输出目录不要存放个人文件或应用数据。
 
-分发二进制时，按 GPLv3 提供对应源码与构建脚本，保留 `LICENSE`、`THIRD-PARTY-NOTICES.md` 及第三方声明。
+分发二进制时，按 GPLv3 提供对应源码与构建脚本，保留 `LICENSE`、`THIRD-PARTY-NOTICES.md`、`DISCLAIMER.md` 及第三方声明。打包脚本将这三个根目录文件一并复制到发行目录。[免责声明](../DISCLAIMER.md)说明非官方属性、游戏内容的授权边界与版权投诉方式，不替代第三方授权。
 
 `docs/assets/logo.png` 用于 README；`crates/desktop/assets/icon.png` 是程序图标原图，替换时同步生成同目录的 `GameL10n.ico`。界面与图标资源嵌入应用。
 

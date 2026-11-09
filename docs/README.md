@@ -6,6 +6,8 @@
 | --- | --- |
 | 模块与依赖 | [架构与模块边界](architecture.md) |
 | 环境、构建与发布 | [开发与构建](development.md) |
+| 使用边界与版权联系 | [免责声明与版权投诉](../DISCLAIMER.md) |
+| 仓库材料与检查范围 | [仓库内容检查记录](repository-content-review.md) |
 
 ## 功能与流程
 

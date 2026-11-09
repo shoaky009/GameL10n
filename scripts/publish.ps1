@@ -93,7 +93,7 @@ foreach ($file in $runtimeFiles) {
     [IO.File]::Copy($file.FullName, $destination, $true)
     $null = $expectedFiles.Add($destination)
 }
-foreach ($notice in @('LICENSE', 'THIRD-PARTY-NOTICES.md')) {
+foreach ($notice in @('LICENSE', 'THIRD-PARTY-NOTICES.md', 'DISCLAIMER.md')) {
     [IO.File]::Copy((Join-Path $repo $notice), (Join-Path $OutputDirectory $notice), $true)
 }
 if ($Configuration -eq 'Release' -and (Test-Path -LiteralPath $cliOutput)) {

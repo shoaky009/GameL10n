@@ -1,0 +1,40 @@
+name: Copyright concern
+description: Report a copyright concern about repository content, history, or release assets.
+title: "[Copyright] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This issue and its attachments are public. Maintainers will reply in this issue.
+        Do not post identification documents, home addresses, signatures, trade secrets, or complete game resources.
+        If supporting evidence is confidential, describe it briefly so maintainers can coordinate a follow-up.
+        See [DISCLAIMER.md](https://github.com/shoaky009/GameL10n/blob/main/DISCLAIMER.md) for the project's position and contact process.
+        This form does not replace GitHub's copyright reporting process or any legally required notice procedure.
+  - type: textarea
+    id: affected-content
+    attributes:
+      label: Affected content
+      description: Link to the file, commit, historical version, or release asset. Include relevant line numbers or paths inside archives.
+    validations:
+      required: true
+  - type: textarea
+    id: rights-and-authority
+    attributes:
+      label: Rights and authority
+      description: Identify the work and rights involved, and explain your role as the rights holder or authorized representative. Do not post sensitive documents.
+    validations:
+      required: true
+  - type: textarea
+    id: concern-and-request
+    attributes:
+      label: Concern and requested action
+      description: Explain the alleged infringement and the action requested, such as removal, a license correction, or attribution.
+    validations:
+      required: true
+  - type: checkboxes
+    id: confirmation
+    attributes:
+      label: Confirmation
+      options:
+        - label: I am the rights holder or an authorized representative, and the information above is true and accurate to the best of my knowledge.
+          required: true
