@@ -173,9 +173,11 @@ def read_index(stream):
         flags, raw, stored, units = struct.unpack_from("<IQQH", info)
         if flags not in (0, 0x80000000):
             raise ValueError("unsupported XP3 info flags")
-        if not 0 < units <= 4096 or len(info) != 22 + 2 * units:
+        name_end = 22 + 2 * units
+        if (not 0 < units <= 4096 or len(info) < name_end
+                or info[name_end:] not in (b"", b"\0\0")):
             raise ValueError("unsupported XP3 info/name layout")
-        name = info[22:].decode("utf-16-le", errors="strict")
+        name = info[22:name_end].decode("utf-16-le", errors="strict")
         if "\0" in name or name in names:
             raise ValueError("NUL or duplicate XP3 member name")
         names.add(name)

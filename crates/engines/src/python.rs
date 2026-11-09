@@ -55,12 +55,21 @@ impl PythonAdapter {
                 .extra
                 .insert("translationsFile".into(), serde_json::json!(path));
         }
-        self.process
+        let response = self
+            .process
             .clone()
             .with_response_file(response_file)
             .execute::<_, AdapterResponse>(&request, cancellation)
-            .await?
-            .checked()
+            .await?;
+        response.checked().map_err(|error| match error {
+            EngineError::Rejected(message) if request.operation == "extract" => {
+                EngineError::Incompatible {
+                    stage: "extraction",
+                    message,
+                }
+            }
+            error => error,
+        })
     }
 }
 

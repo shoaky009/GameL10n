@@ -1,10 +1,10 @@
 """Sparse XP3 probes request bounded missing index/member ranges."""
+from contextlib import nullcontext
 from pathlib import Path
-import struct
-import zlib
 
 from kirikiri_text import Script
 from xp3_adler import MAGIC, read_index, read_member
+from xp3_container import read_member as read_archive_member
 
 
 class Missing(Exception):
@@ -41,6 +41,46 @@ class View:
             output += part
             self.position += len(part)
         return bytes(output)
+
+
+def rot_probe(request):
+    files = request.get('probeFiles')
+    if not files:
+        files = [dict(path=path, length=(Path(request['sourceDirectory']) / path).stat().st_size)
+                 for path in request.get('resourceFiles', [])]
+    reads, selected, warnings = [], [], []
+    for file in files:
+        if not file['path'].lower().endswith('.xp3'):
+            continue
+        try:
+            source = (nullcontext(View(request, file)) if request.get('probeFiles')
+                      else (Path(request['sourceDirectory']) / file['path']).open('rb'))
+            with source as view:
+                index = read_index(view)
+                candidates = [entry for entry in index.entries
+                              if entry.name.lower().endswith(('.ks', '.ma'))
+                              and 0 < entry.raw_size <= 524288 and entry.packed_size <= 524288]
+                if not candidates:
+                    continue
+                entry = min(candidates, key=lambda item: item.packed_size)
+                Script(read_archive_member(view, entry, 'rot', max_size=524288))
+            selected.append(file['path'].replace('\\', '/'))
+        except Missing as missing:
+            reads.append(dict(path=file['path'], offset=missing.offset, length=missing.count))
+        except Exception as error:
+            warnings.append(file['path'] + '：' + str(error))
+    if reads:
+        return dict(probeReads=reads)
+    if not selected:
+        if warnings:
+            raise ValueError('XP3 索引或脚本与当前过滤器不兼容：' + '；'.join(warnings[:3]))
+        return dict(probe=None)
+    return dict(probe=dict(engineId='kirikiri-xp3-text', adapterId='kirikiri-xp3-text', adapterVersion='1.0.0',
+                           description='KiriKiri Z XP3: KS(KAG)/ma 文本提取，中文回写为重建的同路径 XP3 归档',
+                           requiredFiles=selected, originalExecutable=None, warnings=warnings + [
+                               '覆盖范围：.ks 剧情/选项与 testo/*.ma 菜单提示文本；.tjs 脚本内 UI/系统消息、图片与视频内嵌文字未提取。',
+                               '中文回写为重建同路径 XP3（未改动成员保留原始压缩数据），无需额外 patch 归档。',
+                               '未验证运行时：中文脚本（UTF-8）解码、字体字形覆盖与 ACP=936 环境下的窗口/界面文字。']))
 
 
 def adler_probe(request):

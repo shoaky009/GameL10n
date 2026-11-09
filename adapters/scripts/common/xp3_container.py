@@ -3,7 +3,7 @@ import shutil
 import struct
 import zlib
 
-from xp3_adler import MAGIC, _chunks, apply_key_in_place, generate_key, read_index
+from xp3_adler import MAGIC, _chunks, _inflate, _read_at, apply_key_in_place, generate_key, read_index
 
 ROT = bytes(((value << (value.bit_count() & 7)) | (value >> (8 - (value.bit_count() & 7)))) & 255 for value in range(256))
 INV = bytes(ROT.index(value) for value in range(256))
@@ -11,6 +11,36 @@ INV = bytes(ROT.index(value) for value in range(256))
 
 def chunk(tag, data):
     return tag + struct.pack('<Q', len(data)) + data
+
+
+def read_member(stream, entry, variant, *, max_size=64 << 20):
+    """Read a checked member from a full archive or a sparse probe view."""
+    if max(entry.raw_size, entry.packed_size) > max_size:
+        raise ValueError('XP3 成员过大: ' + entry.name)
+    stream.seek(0, 2)
+    size = stream.tell()
+    result = bytearray()
+    for segment in entry.segments:
+        stored = _read_at(stream, size, segment.offset, segment.packed_size)
+        if segment.flag:
+            try:
+                data = _inflate(stored, segment.raw_size, max_size)
+            except zlib.error:
+                if variant != 'v2':
+                    raise
+                data = stored
+        else:
+            data = stored
+        if len(data) != segment.raw_size:
+            raise ValueError('XP3 成员段长度不符。')
+        result.extend(data)
+    if variant == 'rot':
+        result = result.translate(ROT)
+    elif variant == 'adler' and entry.protected:
+        apply_key_in_place(result, 0, len(result), generate_key(entry.adler32))
+    if len(result) != entry.raw_size or zlib.adler32(result) & 0xffffffff != entry.adler32:
+        raise ValueError('XP3 成员长度或校验失败: ' + entry.name)
+    return bytes(result)
 
 
 class Archive:
@@ -37,34 +67,8 @@ class Archive:
                 self.raw_index = stream.read(size)
 
     def read(self, entry):
-        if entry.raw_size > 64 << 20:
-            raise ValueError('XP3 成员过大: ' + entry.name)
-        result = bytearray()
         with self.path.open('rb') as stream:
-            for segment in entry.segments:
-                stream.seek(segment.offset)
-                stored = stream.read(segment.packed_size)
-                if len(stored) != segment.packed_size:
-                    raise ValueError('XP3 成员段截断。')
-                if segment.flag:
-                    try:
-                        data = zlib.decompress(stored)
-                    except zlib.error:
-                        if self.variant != 'v2':
-                            raise
-                        data = stored
-                else:
-                    data = stored
-                if len(data) != segment.raw_size:
-                    raise ValueError('XP3 成员段长度不符。')
-                result.extend(data)
-        if self.variant == 'rot':
-            result = result.translate(ROT)
-        elif self.variant == 'adler' and entry.protected:
-            apply_key_in_place(result, 0, len(result), generate_key(entry.adler32))
-        if len(result) != entry.raw_size or entry.adler32 and zlib.adler32(result) & 0xffffffff != entry.adler32:
-            raise ValueError('XP3 成员长度或校验失败: ' + entry.name)
-        return bytes(result)
+            return read_member(stream, entry, self.variant)
 
     def build(self, destination, replacements):
         destination.parent.mkdir(parents=True, exist_ok=True)

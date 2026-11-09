@@ -561,12 +561,12 @@ impl EngineService {
         } else {
             None
         };
-        let mut response = match adapter {
+        let response = match adapter {
             AdapterHandle::Native { format } => {
                 request.format = Some(format.clone());
                 VnTextPatch::new(&self.tools)
                     .execute(&request, cancellation)
-                    .await?
+                    .await
             }
             AdapterHandle::Python {
                 entry,
@@ -588,7 +588,7 @@ impl EngineService {
                 );
                 PythonAdapter::new(&self.tools, entry)?
                     .execute(&request, cancellation)
-                    .await?
+                    .await
             }
             AdapterHandle::BuiltinSiglus => {
                 let prepared = self.siglus(cancellation).await?;
@@ -603,14 +603,20 @@ impl EngineService {
                 );
                 PythonAdapter::new(&self.tools, &entry)?
                     .execute(&request, cancellation)
-                    .await?
+                    .await
             }
             AdapterHandle::BuiltinSfa16 => {
                 PythonAdapter::new(&self.tools, &self.sfa16_entry()?)?
                     .execute(&request, cancellation)
-                    .await?
+                    .await
             }
         };
+        if response
+            .as_ref()
+            .is_err_and(|error| !matches!(error, EngineError::Incompatible { .. }))
+        {
+            return response;
+        }
         if let Some(expected) = source_hashes
             && hashes(
                 &request.source_directory,
@@ -628,6 +634,7 @@ impl EngineService {
                 "适配器在读取或校验期间修改了补丁输出。".into(),
             ));
         }
+        let mut response = response?;
         // A script may report its implementation version; project pins use the immutable package version.
         if let (
             AdapterHandle::Python {
@@ -2781,6 +2788,41 @@ with open(r['responseFile'],'w',encoding='utf-8') as output: json.dump(out,outpu
             fs::read(root.path().join("scripts.dat")).expect("original"),
             vec![0; 131072]
         );
+    }
+
+    #[tokio::test]
+    async fn rejected_extraction_cannot_hide_changed_source_bytes() {
+        let Some(service) = service() else {
+            return;
+        };
+        let root = tempfile::tempdir().expect("fixture");
+        let source = root.path().join("source");
+        fs::create_dir(&source).expect("source");
+        fs::write(source.join("scripts.dat"), b"original").expect("resource");
+        let entry = root.path().join("adapter.py");
+        fs::write(
+            &entry,
+            r#"import json,sys
+from pathlib import Path
+r=json.load(sys.stdin)
+(Path(r['sourceDirectory'])/'scripts.dat').write_bytes(b'changed')
+Path(r['responseFile']).write_text(json.dumps(dict(protocolVersion=1,success=False,error='unsupported layout')),encoding='utf8')
+"#,
+        )
+        .expect("adapter");
+        let adapter = AdapterHandle::Python {
+            entry,
+            package_directory: None,
+            id: "engine.fixture".into(),
+            version: "1".into(),
+        };
+        let mut request = AdapterRequest::new("extract", &source);
+        request.resource_files = Some(vec!["scripts.dat".into()]);
+        let error = service
+            .execute(&adapter, &request, &CancellationToken::new())
+            .await
+            .expect_err("source mutation is fatal even when extraction is rejected");
+        assert!(matches!(error, EngineError::Rejected(message) if message.contains("只读源资源")));
     }
 
     #[tokio::test]

@@ -85,20 +85,13 @@ def apply(text, replacements):
 
 
 def execute(request, variant):
-    if variant == 'adler' and request.get('operation') == 'probe':
-        from xp3_probe import adler_probe
-        return adler_probe(request)
     operation = request.get('operation', 'probe')
+    if operation == 'probe':
+        from xp3_probe import adler_probe, rot_probe
+        return adler_probe(request) if variant == 'adler' else rot_probe(request)
     if operation == 'validate':
         return dict(validation=dict(passed=True, issues=[], runtimeStatus='not-tested'))
-    selected = archives(request, operation == 'probe')
-    if operation == 'probe':
-        return dict(probe=dict(engineId='kirikiri-xp3-text', adapterId='kirikiri-xp3-text', adapterVersion='1.0.0',
-                              description='KiriKiri Z XP3: KS(KAG)/ma 文本提取，中文回写为重建的同路径 XP3 归档',
-                              requiredFiles=selected, originalExecutable=None, warnings=[
-                                  '覆盖范围：.ks 剧情/选项与 testo/*.ma 菜单提示文本；.tjs 脚本内 UI/系统消息、图片与视频内嵌文字未提取。',
-                                  '中文回写为重建同路径 data.xp3（未改动成员保留原始压缩数据），无需额外 patch 归档。',
-                                  '未验证运行时：中文脚本（UTF-8）解码、字体字形覆盖与 ACP=936 环境下的窗口/界面文字。']))
+    selected = archives(request)
     seen, ids = set(), set()
     units, warnings, loaded = [], [], []
     trans = translations(request) if operation == 'build' else {}

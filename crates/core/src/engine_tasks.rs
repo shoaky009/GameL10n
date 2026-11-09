@@ -2306,6 +2306,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn regular_recognition_tries_next_candidate_after_extraction_is_rejected() {
+        let tools = crate::ToolPaths::development();
+        if !tools.python().is_file() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let game = root.path().join("game");
+        fs::create_dir(&game).unwrap();
+        let original = serde_json::to_vec(&vec!["line"; SMALL_EXTRACTION_THRESHOLD]).unwrap();
+        fs::write(game.join("text.json"), &original).unwrap();
+        let app = Application::open(root.path().join("data"), &tools)
+            .await
+            .unwrap();
+        let project = app.add_project(&game).await.unwrap();
+        let fixture = include_str!("../../engines/tests/fixtures/json_adapter.py");
+        let rejected = fixture.replace(
+            "elif r['operation'] == 'extract':",
+            "elif r['operation'] == 'extract':\n    out.update(success=False, error='unsupported XP3 info/name layout')",
+        );
+        register_json_adapter(&app, "fixture-a-invalid", &rejected);
+        register_json_adapter(&app, "fixture-z-valid", fixture);
+        assert!(matches!(
+            app.recognize(&project.id).await.unwrap(),
+            RecognitionResult::Extracted(SMALL_EXTRACTION_THRESHOLD)
+        ));
+        let saved = app.store.get(&project.id).await.unwrap();
+        assert_eq!(
+            saved.extra["analysis"]["adapterId"],
+            "engine.fixture-z-valid"
+        );
+        let failure = &saved.extra["discovery"]["reuseFailures"][0];
+        assert_eq!(failure["id"], "engine.fixture-a-invalid");
+        assert_eq!(failure["failedStage"], "extraction");
+        assert_eq!(failure["evidence"][0], "unsupported XP3 info/name layout");
+        assert_eq!(fs::read(game.join("text.json")).unwrap(), original);
+    }
+
+    #[tokio::test]
+    async fn rejected_extraction_without_other_candidates_enters_smart_adaptation() {
+        let tools = crate::ToolPaths::development();
+        if !tools.python().is_file() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let game = root.path().join("game");
+        fs::create_dir(&game).unwrap();
+        let original = br#"["one","two"]"#;
+        fs::write(game.join("text.json"), original).unwrap();
+        let app = Application::open(root.path().join("data"), &tools)
+            .await
+            .unwrap();
+        let project = app.add_project(&game).await.unwrap();
+        let rejected = include_str!("../../engines/tests/fixtures/json_adapter.py").replace(
+            "elif r['operation'] == 'extract':",
+            "elif r['operation'] == 'extract':\n    out.update(success=False, error='unsupported XP3 info/name layout')",
+        );
+        register_json_adapter(&app, "fixture", &rejected);
+        let error = app.recognize(&project.id).await.unwrap_err();
+        assert!(error.to_string().contains("API"), "{error}");
+        assert_eq!(
+            app.task_state(&project.id).await.unwrap().operation,
+            "adapt"
+        );
+        let saved = app.store.get(&project.id).await.unwrap();
+        assert_eq!(
+            saved.extra["discovery"]["reuseFailures"][0]["failedStage"],
+            "extraction"
+        );
+        assert_eq!(fs::read(game.join("text.json")).unwrap(), original);
+    }
+
+    #[tokio::test]
     async fn small_extraction_enters_smart_check_and_retains_text_when_api_is_missing() {
         let tools = crate::ToolPaths::development();
         if !tools.python().is_file() {

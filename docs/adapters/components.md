@@ -37,6 +37,8 @@ run_engine_python(script="src/tools/sjis_tunnel.py", stdin='{"operation":"check"
 
 XP3 检测只确认已验证的派生过滤器。未知索引块返回 `rebuildRequiresPreservation=true`，重建须保留；分段解码使用 `apply_key_in_place(..., member_offset=...)` 指定成员内相位。
 
+文件名按索引声明的 UTF-16 长度读取，允许字段后附一个 UTF-16 NUL 终止符；其他尾部、名称内的 NUL、重复名称及成员与分段长度不一致仍拒绝。已有 XP3 旋转过滤器适配器须通过索引解析、脚本成员解码与校验后才匹配，只有封包签名不足以确认兼容。
+
 SJIS 检查在内存中规划全部译文与保留原文，构建通过 `Tunnel.serialize()` 保存映射。编码容量与往返检查不包含运行时字符遍历和字体验证。
 
 ## VNTextProxy 运行文件准备
