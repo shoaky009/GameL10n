@@ -4,6 +4,11 @@
 
 ## [Unreleased]
 
+### 改进
+
+- QLIE 字体与转区启动器改为 Rust 实现，保留原有补丁入口和 XML 配置。
+- Pull Request 自动运行 Windows 构建检查及 Rust、Python 和原生组件回归测试。
+
 ## [0.1.0] - 2026-11-09
 
 ### 新增

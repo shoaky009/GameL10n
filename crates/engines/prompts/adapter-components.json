@@ -200,14 +200,14 @@
   {
     "id": "qlie-japanese-font-launcher",
     "name": "QLIE 日语转区与字体启动器",
-    "scope": "独立 Windows x64 NativeAOT EXE，无共享 CLR；读取 qlie-l10n/launch.xml，临时加载字体并保留日语 Locale Emulator 路径。检查 QLIE SHIFTJIS_CHARSET 完整字体名；等待 LEProc/游戏退出后卸载字体。仅适用 LEProc 等待实际游戏的已确认启动链。",
-    "origin": "tools/GameL10n.QlieLauncher/QlieLauncher.cs；直接提供同源码编译的启动器，不调用分析 API 编写或编译。",
-    "api": "将 tools/QlieLauncher.exe 复制到补丁的启动入口并声明 build.launchExecutable。launch.xml 的 executable、font.file 相对启动器目录；原 EXE 的 .le.config 保持原样。face 必须与字体内部 name ID 4 一致。Windows x64 NativeAOT，无需共享 .NET 运行时；需要转区时使用玩家本机 Locale Emulator。",
+    "scope": "独立 Windows x64 Rust EXE，无共享运行时；读取 qlie-l10n/launch.xml，临时加载字体并保留日语 Locale Emulator 路径。检查 QLIE SHIFTJIS_CHARSET 完整字体名；等待 LEProc/游戏退出后卸载字体。仅适用 LEProc 等待实际游戏的已确认启动链。",
+    "origin": "tools/GameL10n.QlieLauncher/src/；直接提供同源码编译的启动器，不调用分析 API 编写或编译。",
+    "api": "将 tools/QlieLauncher.exe 复制到补丁的启动入口并声明 build.launchExecutable。launch.xml 的 executable、font.file 相对启动器目录；原 EXE 的 .le.config 保持原样。face 必须与字体内部 name ID 4 一致。Windows x64 Rust，无需额外安装运行时；需要转区时使用玩家本机 Locale Emulator。",
     "example": "// Build output example: 启动汉化.exe (copied from tools/QlieLauncher.exe), qlie-l10n/launch.xml, generated fonts.\n// XML values must be escaped with an XML writer. Filenames below are placeholders, not discovery rules.\n<launch executable=\"game.exe\"><font file=\"qlie-l10n/Serif.ttf\" face=\"Patch Serif Regular\" /></launch>\n// Copy the original game/config resources as required by the protocol; test_adapter still gates publication.",
     "files": [
       {
-        "name": "QlieLauncher.cs",
-        "path": "src/tools/QlieLauncher.cs",
+        "name": "QlieLauncher.Cargo.toml",
+        "path": "src/tools/launcher-source/Cargo.toml",
         "binary": false
       },
       {

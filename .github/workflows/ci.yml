@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  check:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: i686-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            tools/GameL10n.QlieLauncher -> ../../target/qlie-launcher/cargo
+            tools/GameL10n.FontBridge -> ../../target/fontbridge/cargo
+
+      - name: Check Rust formatting
+        run: |
+          cargo fmt --all -- --check
+          if ($LASTEXITCODE -ne 0) { throw 'Workspace formatting failed.' }
+          cargo fmt --manifest-path tools/GameL10n.QlieLauncher/Cargo.toml -- --check
+          if ($LASTEXITCODE -ne 0) { throw 'Launcher formatting failed.' }
+          cargo fmt --manifest-path tools/GameL10n.FontBridge/Cargo.toml -- --check
+          if ($LASTEXITCODE -ne 0) { throw 'Font bridge formatting failed.' }
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Prepare and verify native tools
+        run: |
+          ./scripts/prepare-python.ps1
+          ./scripts/build-vntextpatch.ps1
+          & ./target/runtime/python/python.exe -I -X utf8 ./scripts/build_vntextpatch.py --verify-only
+          if ($LASTEXITCODE -ne 0) { throw 'Native parser verification failed.' }
+          & ./target/runtime/python/python.exe -I -X utf8 ./scripts/build_qlie_launcher.py
+          if ($LASTEXITCODE -ne 0) { throw 'Launcher build failed.' }
+          ./scripts/build-fontbridge.ps1 -Test
+
+      - name: Check Rust code
+        run: |
+          cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+          if ($LASTEXITCODE -ne 0) { throw 'Workspace Clippy failed.' }
+          cargo clippy --manifest-path tools/GameL10n.QlieLauncher/Cargo.toml --target-dir target/qlie-launcher/cargo --all-targets --all-features --locked -- -D warnings
+          if ($LASTEXITCODE -ne 0) { throw 'Launcher Clippy failed.' }
+
+      - name: Test Rust workspace
+        run: cargo test --workspace --locked
+
+      - name: Test QLIE launcher
+        run: cargo test --manifest-path tools/GameL10n.QlieLauncher/Cargo.toml --target-dir target/qlie-launcher/cargo --locked
+
+      - name: Test Python components
+        run: ./target/runtime/python/python.exe -I -X utf8 -m unittest discover -s crates/engines/python -p 'test_*.py'
+
+      - name: Test NativeAOT parser regressions
+        run: ./target/runtime/python/python.exe -I -X utf8 tools/GameL10n.VnTextPatch/tests/test_yuris.py --executable target/runtime/vntextpatch/GameL10n.VnTextPatch.exe
+
+      - name: Test prepared desktop workflow
+        run: cargo test -p gamel10n-core --test desktop_workflow --locked -- --ignored

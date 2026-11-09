@@ -50,7 +50,7 @@ Core 管理任务，同一项目的资源修改任务串行，不同项目可并
 
 Rust 管理模型会话、工具调度、预算、状态与验收。Python 执行分析脚本和正式适配器，入口为 `src/adapter.py`，通过 UTF-8 JSON CLI v1 通信。固定 VNTextPatch 解析能力由 NativeAOT EXE 提供。
 
-自研原生工具与运行组件使用 Rust，平台 API 的 FFI 和必要的 `unsafe` 限定在 `tools/` 下的独立组件，通过明确的 ABI 或进程协议接入。现有 C# NativeAOT 工具保留，不向业务模块扩展。
+自研原生工具与运行组件使用 Rust，平台 API 的 FFI 和必要的 `unsafe` 限定在 `tools/` 下的独立组件，通过明确的 ABI 或进程协议接入。QLIE 启动器是读取独立 XML 配置的 Rust EXE；VNTextPatch 的现有 C# NativeAOT 工具及第三方解析器继续保留，不向业务模块扩展。
 
 子进程使用明确的程序和参数，提供超时、取消及输出限制。开发与验收使用资源副本，发布前检查语法、原文回填、中文与部分翻译；运行时核对版本和文件完整性。子进程不构成操作系统沙箱。
 

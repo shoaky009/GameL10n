@@ -135,8 +135,8 @@ fn source(name: &str) -> Result<&'static [u8], EngineError> {
         "gamel10n_host.py" => Ok(include_bytes!(
             "../../../adapters/components/gamel10n_host.py"
         )),
-        "QlieLauncher.cs" => Ok(include_bytes!(
-            "../../../tools/GameL10n.QlieLauncher/QlieLauncher.cs"
+        "QlieLauncher.Cargo.toml" => Ok(include_bytes!(
+            "../../../tools/GameL10n.QlieLauncher/Cargo.toml"
         )),
         _ => Err(EngineError::Rejected(format!("内置组件源码缺失：{name}"))),
     }
@@ -237,25 +237,34 @@ pub(super) fn copy(
             files.push((file.path.clone(), content));
         }
         if component.id == "qlie-japanese-font-launcher" {
-            // Keep the NativeAOT launcher's complete source provenance in its package.
+            // Retain the launcher's complete Rust project beside the pinned binary.
             for (name, content) in [
-                ("QlieLauncher.cs", source("QlieLauncher.cs")?),
+                ("LICENSE", include_bytes!("../../../LICENSE").as_slice()),
                 (
-                    "NativeDialogs.cs",
-                    include_bytes!("../../../tools/GameL10n.QlieLauncher/NativeDialogs.cs")
+                    "Cargo.lock",
+                    include_bytes!("../../../tools/GameL10n.QlieLauncher/Cargo.lock").as_slice(),
+                ),
+                (
+                    "src/main.rs",
+                    include_bytes!("../../../tools/GameL10n.QlieLauncher/src/main.rs").as_slice(),
+                ),
+                (
+                    "src/config.rs",
+                    include_bytes!("../../../tools/GameL10n.QlieLauncher/src/config.rs").as_slice(),
+                ),
+                (
+                    "src/font.rs",
+                    include_bytes!("../../../tools/GameL10n.QlieLauncher/src/font.rs").as_slice(),
+                ),
+                (
+                    "src/windows.rs",
+                    include_bytes!("../../../tools/GameL10n.QlieLauncher/src/windows.rs")
                         .as_slice(),
                 ),
                 (
-                    "LauncherSelfTests.cs",
-                    include_bytes!("../../../tools/GameL10n.QlieLauncher/LauncherSelfTests.cs")
+                    "src/self_test.rs",
+                    include_bytes!("../../../tools/GameL10n.QlieLauncher/src/self_test.rs")
                         .as_slice(),
-                ),
-                (
-                    "GameL10n.QlieLauncher.csproj",
-                    include_bytes!(
-                        "../../../tools/GameL10n.QlieLauncher/GameL10n.QlieLauncher.csproj"
-                    )
-                    .as_slice(),
                 ),
             ] {
                 files.push((
@@ -593,7 +602,7 @@ mod tests {
             description["scope"]
                 .as_str()
                 .expect("scope")
-                .contains("x64 NativeAOT")
+                .contains("x64 Rust")
         );
         let workspace = root.path().join("workspace");
         fs::create_dir_all(&workspace).expect("workspace");
@@ -625,10 +634,14 @@ mod tests {
         )
         .expect("copy");
         assert_eq!(result["components"][0]["files"][1]["available"], true);
-        assert!(workspace.join("src/tools/QlieLauncher.cs").is_file());
         assert!(
             workspace
-                .join("src/tools/launcher-source/NativeDialogs.cs")
+                .join("src/tools/launcher-source/Cargo.toml")
+                .is_file()
+        );
+        assert!(
+            workspace
+                .join("src/tools/launcher-source/src/windows.rs")
                 .is_file()
         );
         assert!(
@@ -643,13 +656,13 @@ mod tests {
                 .iter()
                 .filter(|file| file.role == "license")
                 .count(),
-            4
+            8
         );
         assert!(
             !state
                 .release_files
                 .iter()
-                .any(|file| file.path == "tools/QlieLauncher.cs")
+                .any(|file| file.path.ends_with(".cs"))
         );
     }
 }

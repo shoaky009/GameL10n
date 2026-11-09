@@ -5,7 +5,7 @@
 - Rust 2024 edition，最低 Rust 1.92。
 - Slint 1.18.1。
 - Windows MSVC C++ 工具和 Windows SDK。
-- 构建固定 NativeAOT 工具需 .NET 10 SDK；Python 使用项目准备的便携版本。
+- 构建 VNTextPatch NativeAOT 工具需 .NET 10 SDK；QLIE 启动器和字体桥接使用 Rust，Python 使用项目准备的便携版本。
 
 ## 构建与打包
 
@@ -17,6 +17,14 @@ cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo fmt --all -- --check
 ./scripts/publish.ps1
 ```
+
+独立 Rust 工具使用各自的 Cargo 清单运行检查，例如：
+
+```powershell
+cargo test --manifest-path tools/GameL10n.QlieLauncher/Cargo.toml --locked
+```
+
+[PR 检查](../.github/workflows/ci.yml)在 Windows 上执行格式、静态检查和回归测试；tag 发布由独立发布流程处理。
 
 | 配置 | 命令 | 输出 |
 | --- | --- | --- |

@@ -4941,10 +4941,8 @@ mod tests {
         assert!(development.contains(&"run_tool".into()));
         assert!(!development.contains(&"inspect_pe_code".into()));
         assert_eq!(
-            filter_tools(&tools, &[json!("all")])
-                .expect("all tools")
-                .len(),
-            43
+            filter_tools(&tools, &[json!("all")]).expect("all tools"),
+            tools
         );
     }
 

@@ -19,7 +19,7 @@ The desktop layer uses Slint 1.18.1 under the GPL-3.0-only option of its upstrea
 alternative license terms. Slint also offers LicenseRef-Slint-Royalty-free-2.0
 and LicenseRef-Slint-Software-3.0; those alternatives are not selected here.
 See https://slint.dev/license. Rust dependencies retain their respective licenses;
-the dependency versions are recorded in Cargo.lock.
+the dependency versions are recorded in Cargo.lock and each standalone tool's Cargo.lock.
 
 ## Engine research toolkit
 
