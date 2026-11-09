@@ -2,6 +2,8 @@
 
 适配器按引擎或资源结构组织。同名引擎可能使用不同封包、脚本和字体，实际兼容性以资源验收及游戏运行记录为准。
 
+能力按三个层面维护：通用流程负责识别、错误分类、资源验收和已有文本身份；引擎家族复用封包、脚本与编码组件；具体引擎配置负责已确认的过滤参数、资源布局和显示入口。游戏样本用于确认适用条件，游戏名称不作为格式兼容证据。
+
 ## 引擎库管理
 
 “全局引擎库”聚合内置能力、外置扩展和兼容记录，支持搜索、来源及启停筛选。选择条目可查看版本、兼容游戏和引擎经验。
@@ -38,6 +40,7 @@
 | [YU-RIS](engines/yuris.md) | `engine.vntextpatch-yuris` | YSTB／YSCF、伴随命令表及可选 SJIS 隧道 |
 | [Ren’Py RPYC2 与混合资源](engines/renpy-rpyc.md) | `template.loose-renpy-rpyc` / `template.rpa3-renpy-rpyc` / `template.renpy-mixed` | 松散脚本、RPA/ARC 3.0 与无路径冲突的源码组合 |
 | [Siglus / Scene.pck](engines/siglus.md) | `engine.siglus` | 已确认场景和显示调用，FKDS 48/441 字库模板 |
+| [KiriKiri / SMIL / SmileCrypt](engines/kirikiri-smil-smile.md) | `engine.kirikiri-smil-smile` | 名称映射、已确认过滤器配置、PSB SCN 与静态脚本显示槽 |
 | [Unity SerializedFile](engines/unity-serialized-text.md) | `engine.unity-textasset-dialogue-json` | 已确认的对话 JSON、静态字段和动态说明模板 |
 
 [Artemis PFS 覆盖卷](engines/artemis-pfs.md)说明增量补丁的适用条件。

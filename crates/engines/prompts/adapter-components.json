@@ -56,6 +56,19 @@
     ]
   },
   {
+    "id": "xp3-smil",
+    "name": "XP3 SMIL 文件名映射与 SmileCrypt",
+    "scope": "File/smil 索引、原始别名及受支持的保护声明布局；SmileCrypt 参数显式提供。成员解密须校验明文 Adler32；回填保留前缀、别名、时间字段及未修改成员压缩字节，并同步映射中的校验标识。不确认脚本语义或游戏运行。",
+    "origin": "SMIL 与 SmileCrypt 依据 GARbro 的 MIT 许可实现；模块内保留完整许可。复用已有有界 XP3 索引与解压原语。",
+    "api": "copy_adapter_components(ids=['xp3-smil']) 后使用 tools.xp3_smil。read_index(stream) 返回 entries/chunks；每项 name 为显示名称，alias 是唯一成员身份，二者不能混用。SmileFilter(key_xor,first_xor,zero_xor) 显式构造参数；decode_member 返回 (plaintext,filterApplied)，read_member 返回校验后的明文。rebuild(source,destination,index,{exact_alias:bytes},filter) 按别名回填；空替换保持原字节。",
+    "example": "copy_adapter_components(ids=[\"xp3-smil\"])\n# Supply parameters established for the engine variant and verify multiple actual members.\n# Use entry.alias for replacement keys; restored display names can include a startup decoy.\n# Parse decrypted scripts with their corresponding KS, TJS or SCN reader before accepting support.",
+    "files": [
+      {"name": "xp3_adler.py", "path": "src/tools/xp3_adler.py", "binary": false},
+      {"name": "xp3_smil.py", "path": "src/tools/xp3_smil.py", "binary": false}
+    ],
+    "engineFamilies": ["kirikiri"]
+  },
+  {
     "id": "sjis-tunnel",
     "name": "VNTextProxy SJIS 隧道编码",
     "scope": "VNTextProxy v0.0.41 的 3422 个扩展 BMP 字符映射；复用已有映射，严格编解码。引擎字符遍历、GDI 调用、字体、旁加载和转区须分别核对。不会修改 EXE、安装字体或下载运行文件。",

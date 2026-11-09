@@ -24,23 +24,31 @@ class SceneText:
 
     fields contains (semantic_path, original_text, kind, PSB_node). Body/name
     locators follow the original tree, so omitting derived caches never shifts
-    visible IDs. Unknown layouts, controls or cache rules fail explicitly.
+    visible IDs. Strict mode rejects unknown layouts, controls or cache rules;
+    explicit partial mode reports and preserves unsupported message fields.
     """
-    def __init__(self, data, language_index=0, *, speaker_name=False):
+    def __init__(self, data, language_index=0, *, speaker_name=False, allow_partial=False):
         self.p = Psb(data)
         self.language_index = language_index
         self.speaker_name = speaker_name
-        self.records = scn.records(self.p, language_index, speaker_name=speaker_name)
+        self.allow_partial = allow_partial
+        self.skipped_fields = {}
+        if allow_partial:
+            self.records, self.strict_issue = scn.writable_records(self.p, language_index, speaker_name=speaker_name)
+        else:
+            self.records = scn.records(self.p, language_index, speaker_name=speaker_name)
+            self.strict_issue = None
         self.fields = []
         self.routes = {}
         self.derived_paths = set()
         scenes = scn.fields(self.p, self.p.root, ())['scenes']
         by_scene = {}
         for record in self.records:
-            try:
-                scn.controls(record['row']['message'])
-            except ValueError as error:
-                raise ValueError(f"SCN scene={record['scene']}, text={record['index']}: {error}") from error
+            if not allow_partial:
+                try:
+                    scn.controls(record['row']['message'])
+                except ValueError as error:
+                    raise ValueError(f"SCN scene={record['scene']}, text={record['index']}: {error}") from error
             by_scene.setdefault(record['scene'], []).append(record)
             for path in record['caches']:
                 self.derived_paths.add(self.locate(path)[1])
@@ -51,7 +59,11 @@ class SceneText:
             for record in by_scene.get(index, []):
                 if record['name'] is not None:
                     self.add(record['name'], 'name')
-                self.add(record['message'], 'choice' if record['kind'] == 'choice' else 'dialogue')
+                if allow_partial and (record.get('non_writable') or record.get('opaque')):
+                    self.skipped_fields[self.locate(record['message'])[1]] = (
+                        record.get('non_writable') or 'SCN derived fields do not match the supported layout')
+                else:
+                    self.add(record['message'], 'choice' if record['kind'] == 'choice' else 'dialogue')
 
     def locate(self, route):
         node = self.p.root
@@ -90,26 +102,33 @@ class SceneText:
         changed = {self.routes[path]: text for path, text in translations.items() if text != original[path]}
         if not changed:
             return None
-        rows = [dict(record['row']) for record in self.records]
+        selected, rows = [], []
         allowed = set(changed)
         semantic_paths = set()
-        for record, row in zip(self.records, rows):
+        for record in self.records:
             semantic_paths.add(record['message'])
+            if record['name'] is not None:
+                semantic_paths.add(record['name'])
+            if record['message'] not in changed and record['name'] not in changed:
+                continue
+            row = dict(record['row'])
+            selected.append(record)
+            rows.append(row)
             if record['message'] in changed:
                 row['message'] = changed[record['message']].replace('\\n', '\n')
                 allowed.update(record['caches'])
                 if 'length' in record:
                     allowed.add(record['length'])
             if record['name'] is not None:
-                semantic_paths.add(record['name'])
                 if record['name'] in changed:
                     row['name'] = changed[record['name']]
-        rebuilt, _ = scn.patch(self.p, self.records, rows)
+        rebuilt, _ = scn.patch(self.p, selected, rows)
         # Scene titles are not part of the upstream message/choice table.
         titles = {path: text for path, text in changed.items() if path not in semantic_paths}
         if titles:
             rebuilt = Psb(rebuilt).patch(titles)
-        after = SceneText(rebuilt, self.language_index, speaker_name=self.speaker_name)
+        after = SceneText(rebuilt, self.language_index, speaker_name=self.speaker_name,
+                          allow_partial=self.allow_partial)
         expected = original | translations
         if {path: text for path, text, _, _ in after.fields} != expected:
             raise ValueError('SCN re-extraction changed a translated or untouched field')

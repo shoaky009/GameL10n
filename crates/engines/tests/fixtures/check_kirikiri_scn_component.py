@@ -1,91 +1,14 @@
 """Synthetic PSB reference aliasing, SCN derived-field and language checks."""
 import importlib.util
-import struct
 import sys
-import zlib
 
-from python.engines.kirikiri_psb import Psb, array
 
 spec = importlib.util.spec_from_file_location('component', sys.argv[1])
 component = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(component)
 
 
-def psb(tree):
-    keys = {}
-    strings = {}
-
-    def collect(value):
-        if isinstance(value, dict):
-            for key, child in value.items():
-                keys.setdefault(key, len(keys))
-                collect(child)
-        elif isinstance(value, list):
-            for child in value:
-                collect(child)
-        elif isinstance(value, str):
-            strings.setdefault(value, len(strings))
-    collect(tree)
-    trie = {}
-    for key, index in keys.items():
-        node = trie
-        for char in key.encode('utf-8'):
-            node = node.setdefault(char, {})
-        node[0] = index
-    a, b, used = [0], [0xffffffff], {0}
-    pending = [(0, trie)]
-    while pending:
-        index, children = pending.pop()
-        base = 1
-        while any(base + char in used for char in children):
-            base += 1
-        size = base + max(children) + 1
-        a.extend([0] * max(0, size - len(a)))
-        b.extend([0xffffffff] * max(0, size - len(b)))
-        a[index] = base
-        for char, child in children.items():
-            at = base + char
-            used.add(at)
-            b[at] = index
-            if char == 0:
-                a[at] = child
-            else:
-                pending.append((at, child))
-
-    def encode(value):
-        if value is None:
-            return b'\x01'
-        if isinstance(value, int):
-            return b'\x04' if value == 0 else b'\x06' + value.to_bytes(2, 'little', signed=True)
-        if isinstance(value, str):
-            return b'\x16' + strings[value].to_bytes(2, 'little')
-        values = value.values() if isinstance(value, dict) else value
-        pieces = [encode(child) for child in values]
-        offsets = []
-        at = 0
-        for piece in pieces:
-            offsets.append(at)
-            at += len(piece)
-        if isinstance(value, dict):
-            return b'\x21' + array([keys[key] for key in value]) + array(offsets) + b''.join(pieces)
-        return b'\x20' + array(offsets) + b''.join(pieces)
-
-    names = array(a) + array(b)
-    body = encode(tree)
-    offsets, pool = [], bytearray()
-    for text in strings:
-        offsets.append(len(pool))
-        pool.extend(text.encode('utf-8') + b'\0')
-    index = array(offsets)
-    root_at = 44 + len(names)
-    strings_at = root_at + len(body)
-    pool_at = strings_at + len(index)
-    co = pool_at + len(pool)
-    cl = co + len(array([]))
-    cd = cl + len(array([]))
-    header = bytearray(b'PSB\0\x03\0\0\0' + struct.pack('<9I', 44, 44, strings_at, pool_at, co, cl, cd, root_at, 0))
-    struct.pack_into('<I', header, 40, zlib.adler32(header[8:40]) & 0xffffffff)
-    return bytes(header) + names + body + index + pool + array([]) + array([])
+from kirikiri_scn_fixture import psb
 
 
 message = r'Hello\n%f123;world.'
@@ -138,4 +61,28 @@ french_path = 'scenes/0/texts/0/1/1/1'
 result = french.build({french_path: '你好'})
 assert component.SceneText(result, language_index=0).records[0]['row']['message'] == message.replace('\\n', '\n')
 assert component.SceneText(result, language_index=1).records[0]['row']['message'] == '你好'
+
+# Partial mode isolates unknown controls and inconsistent caches to their message.
+for bad_message, bad_cache in [('Unmatched]', 'Unmatched]'), ('Original', 'different-cache')]:
+    tree = dict(scenes=[dict(title='Opening', texts=[
+        ['internal-id', [['Alice', bad_message, len(bad_cache), bad_cache, bad_cache]], None, None, None],
+        ['internal-id', [[None, 'Good', 4, 'Good', 'Good']], None, None, None]])])
+    raw = psb(tree)
+    rejects(lambda: component.SceneText(raw))
+    partial = component.SceneText(raw, allow_partial=True)
+    assert len(partial.skipped_fields) == 1
+    path = 'scenes/0/texts/1/1/0/1'
+    first = partial.records[0]
+    expected_original = component.scn.fingerprint(partial.p, {partial.records[1]['message'],
+        *partial.records[1]['caches'], partial.records[1]['length']})
+    rebuilt = component.SceneText(partial.build({path: '中文'}), allow_partial=True)
+    assert len(rebuilt.skipped_fields) == 1
+    assert component.scn.fingerprint(rebuilt.p, {rebuilt.records[1]['message'],
+        *rebuilt.records[1]['caches'], rebuilt.records[1]['length']}) == expected_original
+    assert rebuilt.p.text(rebuilt.locate(first['message'])[0]) == bad_message
+    assert rebuilt.p.text(rebuilt.locate(first['message'][:-1] + (3,))[0]) == bad_cache
+    named = component.SceneText(partial.build({'scenes/0/texts/0/1/0/0': '爱丽丝'}), allow_partial=True)
+    assert named.p.text(named.locate(first['message'])[0]) == bad_message
+    assert named.p.text(named.locate(first['message'][:-1] + (3,))[0]) == bad_cache
+    rejects(lambda: partial.build({'scenes/0/texts/0/1/0/1': 'uncertain body'}))
 print('scn-component-ok')

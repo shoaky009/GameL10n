@@ -150,6 +150,9 @@ pub struct AdapterResponse {
     pub success: bool,
     #[serde(default)]
     pub error: Option<String>,
+    /// Only an explicit resource incompatibility may select another adapter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_kind: Option<String>,
     #[serde(default)]
     pub probe: Option<ProbeResult>,
     #[serde(default)]

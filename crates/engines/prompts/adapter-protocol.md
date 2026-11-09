@@ -46,6 +46,9 @@ supports large extractions). An inline stdout JSON response is also supported fo
 Each CLI operation is cancellable. Probe has a 45-second total budget; other operations have a ten-minute timeout. stdout/stderr diagnostics are limited to 8 MiB for new
 packages; extraction responses written to responseFile have no fixed byte limit. Do not print extraction data to stdout.
 Response: {protocolVersion:1,success:true,error:null,probe|extraction|build|validation:...}; failures use success:false,error.
+An extraction may additionally return errorKind:"incompatible" only when its resource format/filter is unsupported.
+The host then records the evidence and tries other adapters. Missing dependencies, I/O errors, implementation errors
+and unknown failures must omit this classification and stop the operation; do not label every caught exception incompatible.
 Probe: {engineId,adapterId,adapterVersion,description,requiredFiles:[relativePath],warnings:[],originalExecutable:null,buildHints:{}}.
 Optional buildHints stores small per-game build choices derived from candidate names, e.g. an unused overlay volume path.
 The host persists and forwards it to extract/build/validate, including verification. Compute it in bounded probe from the candidate

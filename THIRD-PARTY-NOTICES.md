@@ -11,6 +11,11 @@ AOS/SCR format implementation references:
 - AosTools: https://github.com/Lasriel/AosTools
 - GARbro: https://github.com/morkt/GARbro
 
+The SMIL XP3 filename mapping and parameterized SmileCrypt implementation in
+`adapters/components/xp3_smil.py` also follows GARbro's MIT-licensed
+`ArcFormats/KiriKiri/ArcXP3.cs` and `CryptAlgorithms.cs`. The complete MIT notice
+is retained in that Python module and the embedded built-in adapter sources.
+
 Applicable MIT notices follow. The Rust desktop application does not distribute Windows App SDK or a shared .NET runtime. The fixed VNTextPatch tool retains its source notices and the applicable NativeAOT/.NET component licenses.
 
 ## Slint and Rust dependencies

@@ -253,6 +253,7 @@ pub(crate) async fn inspect_builtin(
 
 fn kirikiri_guidance() -> Value {
     json!({"parserReuse":crate::adaptation_context::KIRIKIRI_SUMMARY,
+        "smilProfile":"File/smil 索引先用 xp3-smil 恢复名称并保留原始别名；同名启动成员可能含保护用伪条目。SMIL 不代表某个固定过滤器，须对多个实际成员验证参数及明文校验，再区分 TJS2100、TJS 源码、KS 和 PSB SCN。内置 SMIL/SmileCrypt 配置只接受其有界样本验证通过的变体。",
         "archiveSupport":"XP3 容器、脚本语义、中文编码和字体是不同能力。现有适配器失败时先检查可复制的源码；容器组件拒绝过滤标记或超出预算，不代表 KS 解析器不可复用。TJS 源码与 TJS2100 编译脚本分别处理。",
         "patchArchives":"若现有初始化脚本或已验证的同类运行时资料已明确 patch 卷或裸文件覆盖及搜索优先级，优先复用已有 writer 与加载路径输出修改脚本、配置和必要字体。已掌握过滤器时沿用，不能为做小包改成无过滤器或另加 DLL；仅已确认无过滤器时可用 python.archives.xp3.build。规则或现成能力不明时保留 replace，不为体积另开研究、下载、Hook 开发或额外验收。",
         "minimalTrial":"先选一个短 KS 和含姓名/选项的代表样本：原文往返、少量中文及保留符号（如 ♪、・）、局部修改后复提。比较实际译文、ID、位置和所有未修改项；封包重建另核对修改与未修改条目的清单及内容。小样通过后再完整 test_adapter。",

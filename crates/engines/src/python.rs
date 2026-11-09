@@ -61,13 +61,13 @@ impl PythonAdapter {
             .with_response_file(response_file)
             .execute::<_, AdapterResponse>(&request, cancellation)
             .await?;
+        let incompatible = request.operation == "extract"
+            && response.error_kind.as_deref() == Some("incompatible");
         response.checked().map_err(|error| match error {
-            EngineError::Rejected(message) if request.operation == "extract" => {
-                EngineError::Incompatible {
-                    stage: "extraction",
-                    message,
-                }
-            }
+            EngineError::Rejected(message) if incompatible => EngineError::Incompatible {
+                stage: "extraction",
+                message,
+            },
             error => error,
         })
     }
@@ -77,6 +77,48 @@ impl PythonAdapter {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[tokio::test]
+    async fn only_explicit_extraction_incompatibility_allows_another_adapter() {
+        let paths = ToolPaths::development();
+        if !paths.python().is_file() {
+            return;
+        }
+        let directory = tempfile::tempdir().expect("fixture");
+        let entry = directory.path().join("adapter.py");
+        for (operation, kind, recoverable) in [
+            ("extract", "incompatible", true),
+            ("extract", "", false),
+            ("extract", "io", false),
+            ("build", "incompatible", false),
+        ] {
+            std::fs::write(
+                &entry,
+                format!(
+                    r#"import json,sys
+r=json.load(sys.stdin)
+print(json.dumps(dict(protocolVersion=1,success=False,error='resource error',errorKind='{kind}')))
+"#
+                ),
+            )
+            .expect("fixture");
+            let result = PythonAdapter::new(&paths, &entry)
+                .expect("adapter")
+                .execute(
+                    &AdapterRequest::new(operation, directory.path()),
+                    &CancellationToken::new(),
+                )
+                .await
+                .expect_err("failed operation");
+            assert_eq!(
+                matches!(result, EngineError::Incompatible { .. }),
+                recoverable
+            );
+            if !recoverable {
+                assert!(matches!(result, EngineError::Rejected(_)));
+            }
+        }
+    }
 
     #[tokio::test]
     async fn adapters_receive_translations_file_and_return_file_responses() {

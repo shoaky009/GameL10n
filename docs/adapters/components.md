@@ -7,6 +7,7 @@
 | `windows-font-metrics` | 缺字、字体尺寸及 GDI+ 字体创建路径对比 | Windows，仅分析时使用 |
 | `kaguya-tblstr` | ARC/ARI 检测、解析和变长重建 | XOR-FF、四字节最小对齐、类型 0/2/3 |
 | `xp3-adler` | 索引、成员与 Adler 派生过滤器检查 | 至少两个受保护成员通过；不提供回包器 |
+| `xp3-smil` | SMIL 名称映射、参数化 SmileCrypt 与保留式重建 | 明确参数并校验明文；替换按原始成员别名 |
 | `sjis-tunnel` | VNTextProxy 映射、容量与往返检查 | v0.0.41，最多 3422 个扩展 BMP 字符 |
 | `vntextproxy-runtime` | 固定代理 DLL 检查和准备 | Windows x86，确认代理加载链 |
 | `gdiplus-font-bridge` | 固定 GDI+ 私有字体创建与导入重定向 | x86 普通导入、明确字体匹配与实际创建路径 |
@@ -39,6 +40,8 @@ XP3 检测只确认已验证的派生过滤器。未知索引块返回 `rebuildR
 
 文件名按索引声明的 UTF-16 长度读取，允许字段后附一个 UTF-16 NUL 终止符；其他尾部、名称内的 NUL、重复名称及成员与分段长度不一致仍拒绝。已有 XP3 旋转过滤器适配器须通过索引解析、脚本成员解码与校验后才匹配，只有封包签名不足以确认兼容。
 
+SMIL 映射中的可读名称与封包原始别名分别保留；二者不能当成同一个身份，同名启动成员可能含保护用伪条目。`xp3-smil` 支持按原始别名替换，保留受支持的保护声明前缀及未修改成员数据，更新成员和名称映射中的校验标识。未知保护布局或模糊映射仍拒绝，不通过统一跳过异常条目完成重建。
+
 SJIS 检查在内存中规划全部译文与保留原文，构建通过 `Tunnel.serialize()` 保存映射。编码容量与往返检查不包含运行时字符遍历和字体验证。
 
 ## VNTextProxy 运行文件准备
@@ -52,6 +55,8 @@ GDI+ 私有集合成功而原字体创建失败时，先检查[字体桥接组�
 `kirikiri-scn-text` 使用共享库 `kirikiri_psb`／`kirikiri_scn`。`SceneText` 按原树路径定位，内部 speaker ID 只作上下文。修改选中正文及其朗读、搜索和长度缓存，保留其余字段；未知布局报错。
 
 `src/tools/kirikiri_scn_text.py` 的 `{"operation":"verify","input":"work/sample.scn"}` 检查原字节往返与一条中文修改。正式适配器用 `use_engine_reference` 固定依赖；外层过滤器、加载优先级和字体单独验证。
+
+默认采用严格 SCN 布局。显式选择 `SceneText(..., allow_partial=True)` 时，按共享库已确认的类型定位其他可写字段；无法确认控制符、可见长度或派生数据的正文字段列入 `skipped_fields` 并保留原文，不阻止同文件中独立字段的回填。构建只重写实际修改的记录及其已确认派生值。
 
 ## TFT 预渲染字库
 

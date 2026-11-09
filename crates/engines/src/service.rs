@@ -183,6 +183,7 @@ pub struct EngineService {
     pub shared_directory: PathBuf,
     pub(crate) disabled_families: BTreeSet<String>,
     excluded_adapters: BTreeSet<(String, String)>,
+    preferred_adapter: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -200,6 +201,7 @@ impl EngineService {
             shared_directory,
             disabled_families: BTreeSet::new(),
             excluded_adapters: BTreeSet::new(),
+            preferred_adapter: None,
         }
     }
 
@@ -210,6 +212,12 @@ impl EngineService {
 
     pub fn with_disabled_families(mut self, families: impl IntoIterator<Item = String>) -> Self {
         self.disabled_families = families.into_iter().collect();
+        self
+    }
+
+    /// Keeps an existing project's adapter ahead of newly available built-in profiles.
+    pub fn with_preferred_adapter(mut self, adapter_id: Option<String>) -> Self {
+        self.preferred_adapter = adapter_id;
         self
     }
 
@@ -351,6 +359,44 @@ impl EngineService {
             fs::write(&entry, source)?;
         }
         Ok(entry)
+    }
+
+    pub(crate) fn kirikiri_smil_entry(&self) -> Result<PathBuf, EngineError> {
+        let root = self.shared_directory.join("builtins/kirikiri-smil-v1");
+        fs::create_dir_all(&root)?;
+        let files: &[(&str, &[u8])] = &[
+            (
+                "adapter.py",
+                include_bytes!("../../../adapters/kirikiri/smil_adapter.py"),
+            ),
+            (
+                "xp3_adler.py",
+                include_bytes!("../../../adapters/components/xp3_adler.py"),
+            ),
+            (
+                "xp3_smil.py",
+                include_bytes!("../../../adapters/components/xp3_smil.py"),
+            ),
+            (
+                "kirikiri_scn_text.py",
+                include_bytes!("../../../adapters/components/kirikiri_scn_text.py"),
+            ),
+            (
+                "kirikiri_text.py",
+                include_bytes!("../../../adapters/scripts/common/kirikiri_text.py"),
+            ),
+            (
+                "gamel10n_host.py",
+                include_bytes!("../../../adapters/components/gamel10n_host.py"),
+            ),
+        ];
+        for (name, source) in files {
+            let path = root.join(name);
+            if fs::read(&path).ok().as_deref() != Some(*source) {
+                fs::write(path, source)?;
+            }
+        }
+        Ok(root.join("adapter.py"))
     }
 
     pub(crate) fn current_reference(&self) -> Result<Value, EngineError> {
@@ -536,19 +582,22 @@ impl EngineService {
                 }
             }
         }
-        let source_hashes =
-            if matches!(adapter, AdapterHandle::Python { .. }) && request.operation != "probe" {
-                request
-                    .resource_files
-                    .as_ref()
-                    .map(|files| match expected_source_hashes {
-                        Some(expected) => selected_hashes(expected, files),
-                        None => hashes(&request.source_directory, files),
-                    })
-                    .transpose()?
-            } else {
-                None
-            };
+        let source_hashes = if matches!(
+            adapter,
+            AdapterHandle::Python { .. } | AdapterHandle::BuiltinKirikiriSmil
+        ) && request.operation != "probe"
+        {
+            request
+                .resource_files
+                .as_ref()
+                .map(|files| match expected_source_hashes {
+                    Some(expected) => selected_hashes(expected, files),
+                    None => hashes(&request.source_directory, files),
+                })
+                .transpose()?
+        } else {
+            None
+        };
         let patch_hashes = if matches!(request.operation.as_str(), "validate" | "extract") {
             request
                 .output_directory
@@ -607,6 +656,20 @@ impl EngineService {
             }
             AdapterHandle::BuiltinSfa16 => {
                 PythonAdapter::new(&self.tools, &self.sfa16_entry()?)?
+                    .execute(&request, cancellation)
+                    .await
+            }
+            AdapterHandle::BuiltinKirikiriSmil => {
+                let entry = self.kirikiri_smil_entry()?;
+                let reference: Value = serde_json::from_str(include_str!(
+                    "../../../third_party/engine-tools/current.json"
+                ))?;
+                let library = self.reference_library(&reference)?;
+                request.extra.insert(
+                    "toolPaths".into(),
+                    json!({"engineLibrary":library,"python":self.tools.python()}),
+                );
+                PythonAdapter::new(&self.tools, &entry)?
                     .execute(&request, cancellation)
                     .await
             }
@@ -683,7 +746,10 @@ impl EngineService {
         }
         if let Some(extraction) = &mut response.extraction {
             validate_raw_units(&extraction.units, &request.source_directory)?;
-            if matches!(adapter, AdapterHandle::Python { .. }) {
+            if matches!(
+                adapter,
+                AdapterHandle::Python { .. } | AdapterHandle::BuiltinKirikiriSmil
+            ) {
                 let allowed: BTreeSet<_> = if let Some(resources) = &request.resource_files {
                     resources
                         .iter()
@@ -888,6 +954,72 @@ impl EngineService {
         let mut diagnostics = Vec::new();
         let mut reuse_failures = Vec::new();
         let mut builtin_probes = Vec::new();
+        let has_xp3 = inventory
+            .files
+            .iter()
+            .any(|file| file.path.to_lowercase().ends_with(".xp3"));
+        let probe_smil = has_xp3
+            && self
+                .preferred_adapter
+                .as_deref()
+                .is_none_or(|id| id == "engine.kirikiri-smil-smile");
+        let mut probe_elapsed = Duration::ZERO;
+        if probe_smil
+            && !self
+                .disabled_families
+                .contains("engine.kirikiri-smil-smile")
+            && !self
+                .excluded_adapters
+                .contains(&("engine.kirikiri-smil-smile".into(), "1".into()))
+        {
+            let adapter = AdapterHandle::BuiltinKirikiriSmil;
+            let resources = inventory
+                .files
+                .iter()
+                .filter(|file| file.path.to_lowercase().ends_with(".xp3"))
+                .map(|file| file.path.clone())
+                .collect::<Vec<_>>();
+            Self::report(
+                progress,
+                "检查内置解析器",
+                "正在检查 KiriKiri SMIL 映射、过滤器及脚本样本。",
+            );
+            let started = Instant::now();
+            let probe = self
+                .probe_bounded(&adapter, source, &resources, cancellation)
+                .await?;
+            probe_elapsed += started.elapsed();
+            if let Some(probe) = probe {
+                let usable = if verification == DiscoveryVerification::ProbeOnly {
+                    true
+                } else {
+                    let mut request = AdapterRequest::new("extract", source);
+                    request.resource_files = Some(probe.required_files.clone());
+                    match self.execute(&adapter, &request, cancellation).await {
+                        Ok(response) => response
+                            .extraction
+                            .is_some_and(|result| !result.units.is_empty()),
+                        Err(EngineError::Incompatible { message, .. }) => {
+                            diagnostics
+                                .push(format!("内置解析器 {} 提取不兼容：{message}", adapter.id()));
+                            false
+                        }
+                        Err(error) => return Err(error),
+                    }
+                };
+                if usable {
+                    return Ok(DiscoveryResult {
+                        adapter: Some(adapter),
+                        probe: Some(probe),
+                        diagnostics,
+                        file_count: inventory.files.len(),
+                        complete: inventory.complete,
+                        reuse_failures,
+                        builtin_probes,
+                    });
+                }
+            }
+        }
         for directory in packages {
             match PackageManifest::load_runtime(directory) {
                 Ok((manifest, directory)) => {
@@ -923,7 +1055,6 @@ impl EngineService {
             }
         }
         candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.0));
-        let mut probe_elapsed = Duration::ZERO;
         for (recognition_evidence, directory, manifest, resources) in candidates {
             if cancellation.is_cancelled() {
                 return Err(EngineError::Cancelled);
@@ -1650,8 +1781,10 @@ impl EngineService {
             let response = self
                 .execute_with_hashes(adapter, &request, Some(&before), None, cancellation)
                 .await?;
-            let accepts_validation_context = matches!(adapter, AdapterHandle::Python { .. })
-                && response.validation_context_version == Some(1);
+            let accepts_validation_context = matches!(
+                adapter,
+                AdapterHandle::Python { .. } | AdapterHandle::BuiltinKirikiriSmil
+            ) && response.validation_context_version == Some(1);
             let extracted = response
                 .extraction
                 .ok_or_else(|| EngineError::Protocol("缺少提取结果。".into()))?;
@@ -1953,8 +2086,10 @@ impl EngineService {
                             .join("；"),
                     ));
                 }
-                if !matches!(adapter, AdapterHandle::Python { .. })
-                    && hashes(&source_directory, resources)? != before
+                if !matches!(
+                    adapter,
+                    AdapterHandle::Python { .. } | AdapterHandle::BuiltinKirikiriSmil
+                ) && hashes(&source_directory, resources)? != before
                 {
                     return Err(EngineError::Rejected("适配器修改了只读资源副本。".into()));
                 }
@@ -2806,7 +2941,7 @@ with open(r['responseFile'],'w',encoding='utf-8') as output: json.dump(out,outpu
 from pathlib import Path
 r=json.load(sys.stdin)
 (Path(r['sourceDirectory'])/'scripts.dat').write_bytes(b'changed')
-Path(r['responseFile']).write_text(json.dumps(dict(protocolVersion=1,success=False,error='unsupported layout')),encoding='utf8')
+Path(r['responseFile']).write_text(json.dumps(dict(protocolVersion=1,success=False,errorKind='incompatible',error='unsupported layout')),encoding='utf8')
 "#,
         )
         .expect("adapter");

@@ -28,6 +28,7 @@ pub enum AdapterHandle {
     },
     BuiltinSiglus,
     BuiltinSfa16,
+    BuiltinKirikiriSmil,
 }
 
 impl AdapterHandle {
@@ -37,6 +38,7 @@ impl AdapterHandle {
             Self::Python { id, .. } => id,
             Self::BuiltinSiglus => "engine.siglus",
             Self::BuiltinSfa16 => "engine.sfa16.aos-v2",
+            Self::BuiltinKirikiriSmil => "engine.kirikiri-smil-smile",
         }
     }
 }

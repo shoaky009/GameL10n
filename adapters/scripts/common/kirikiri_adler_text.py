@@ -1,7 +1,7 @@
 """Adler variant display attributes, ruby groups, static labels and tables."""
 import re
 
-from kirikiri_text import Span, escape, scan_ks, scan_ma, scan_tjs, unescape
+from kirikiri_text import Span, escape, scan_ks, scan_ma, scan_static_tjs, unescape
 
 NAME_COMMANDS = {'nm', 'set_title', 'speaker', 'Talk', 'talk', 'cn', 'name', '名前'}
 MESSAGE_COMMANDS = {'sel01', 'sel02', 'sel03', 'sel04', 'AddSelect', 'ruby'}
@@ -51,10 +51,6 @@ def attributes(row):
             start = command.start('attrs') + attr.start('value')
             keep_key = name == 'nm' and attr['key'] == 't' and not any(item['key'] == 'rt' for item in attrs)
             yield start + skip, len(value) - skip * 2, 'name' if name in NAME_COMMANDS else 'choice', quoted, start + len(value) if keep_key else -1, ' rt=' + value if keep_key else ''
-
-
-def visible_tjs(text, start):
-    return re.search(r'\b(?:caption|hint|title)\s*[:=]\s*$', text[max(0, start - 150):start - 1]) is not None
 
 
 def embedded(text):
@@ -185,10 +181,12 @@ def tables(name, text):
 
 def scan(name, text):
     extension = name.lower().rsplit('.', 1)[-1]
-    spans = tables(name, text) if extension == 'csv' else scan_tjs(text) if extension == 'tjs' else display_ks(text) if extension == 'ks' else scan_ma(text)
+    if extension == 'tjs':
+        return scan_static_tjs(text)
+    spans = tables(name, text) if extension == 'csv' else display_ks(text) if extension == 'ks' else scan_ma(text)
     counts = {}
     for span in sorted(spans, key=lambda item: item.start):
         count = counts.get(span.line, 0)
         span.suffix = ':' + str(count) if count else ''
         counts[span.line] = count + 1
-    return [span for span in spans if visible_tjs(text, span.start)] if extension == 'tjs' else spans
+    return spans

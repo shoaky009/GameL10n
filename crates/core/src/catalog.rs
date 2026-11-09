@@ -1573,6 +1573,15 @@ fn add_builtins(index: &mut LibraryIndex) {
         },
         "2.0.4",
     );
+    insert_builtin(
+        index,
+        AdapterFamily {
+            kind: "engine".into(),
+            key: "kirikiri-smil-smile".into(),
+            name: "KiriKiri / SMIL / SmileCrypt / PSB SCN".into(),
+        },
+        "1",
+    );
 }
 
 fn insert_builtin(index: &mut LibraryIndex, family: AdapterFamily, version: &str) {

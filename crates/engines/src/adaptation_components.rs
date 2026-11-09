@@ -111,6 +111,7 @@ fn source(name: &str) -> Result<&'static [u8], EngineError> {
             "../../../adapters/components/kaguya_tblstr.py"
         )),
         "xp3_adler.py" => Ok(include_bytes!("../../../adapters/components/xp3_adler.py")),
+        "xp3_smil.py" => Ok(include_bytes!("../../../adapters/components/xp3_smil.py")),
         "sjis_tunnel.py" => Ok(include_bytes!(
             "../../../adapters/components/sjis_tunnel.py"
         )),
@@ -364,7 +365,7 @@ mod tests {
         let root = tempfile::tempdir().expect("fixture");
         let service = service(root.path());
         let components = list("").expect("catalog");
-        assert_eq!(components.len(), 12);
+        assert_eq!(components.len(), 13);
         assert!(components.iter().all(|component| {
             component.as_object().expect("metadata").len() == 4
                 && component["version"] == VERSION
@@ -418,6 +419,7 @@ mod tests {
             [
                 "windows-font-metrics",
                 "xp3-adler",
+                "xp3-smil",
                 "kirikiri-scn-text",
                 "kirikiri-tft",
             ]

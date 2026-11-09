@@ -113,12 +113,8 @@ def _chunks(data):
         offset += size
 
 
-def read_index(stream):
-    """Read and validate metadata without reading member contents.
-
-    Returned names are archive identifiers, not safe filesystem output paths.
-    Unknown chunks must be preserved by any future writer, not discarded.
-    """
+def read_index_data(stream):
+    """Return bounded index bytes and the archive/header/index boundaries."""
     stream.seek(0, 2)
     size = stream.tell()
     read = lambda offset, count: _read_at(stream, size, offset, count)
@@ -146,6 +142,15 @@ def read_index(stream):
     packed = read(index_at + prefix, packed_size)
     data = _inflate(packed, raw_size, MAX_INDEX) if flag else packed
     index_end = index_at + prefix + packed_size
+    return data, size, header_end, index_at, index_end
+
+
+def read_index(stream):
+    """Read checked metadata; returned names are not safe filesystem paths.
+
+    Unknown chunks must be preserved by any future writer, not discarded.
+    """
+    data, size, header_end, index_at, index_end = read_index_data(stream)
     entries, unknown, names, segment_count, unknown_count = [], [], set(), 0, 0
     for tag, body in _chunks(data):
         if tag != b"File":

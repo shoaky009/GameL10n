@@ -175,6 +175,18 @@ def scan_tjs(text):
     return result
 
 
+def scan_static_tjs(text):
+    """Select caption/hint/title literals, retaining source-line slot identities."""
+    counts, result = {}, []
+    for span in scan_tjs(text):
+        count = counts.get(span.line, 0)
+        span.suffix = ':' + str(count) if count else ''
+        counts[span.line] = count + 1
+        if re.search(r'\b(?:caption|hint|title)\s*[:=]\s*$', text[max(0, span.start - 150):span.start - 1]):
+            result.append(span)
+    return result
+
+
 class Script:
     def __init__(self, data):
         self.raw = data

@@ -425,6 +425,7 @@ impl Application {
         let game = crate::game_directory::validate(&project.game_directory)?;
         let game_id = id.to_owned();
         let pin = catalog_adapter(&project).map(|adapter| (adapter.adapter_id, adapter.version));
+        let preferred_adapter = pin.as_ref().map(|(id, _)| id.clone());
         let (packages, inventory, disabled) =
             tokio::task::spawn_blocking(move || -> Result<_, CoreError> {
                 let catalog = EngineCatalog::open(&root)?;
@@ -466,6 +467,7 @@ impl Application {
             let service = self
                 .engine_service()
                 .with_disabled_families(disabled.clone())
+                .with_preferred_adapter(preferred_adapter.clone())
                 .with_excluded_adapters(excluded.clone());
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<EngineProgress>();
             let report = move |progress| {
@@ -1176,6 +1178,8 @@ impl Application {
             AdapterHandle::BuiltinSiglus
         } else if probe.adapter_id == "engine.sfa16.aos-v2" {
             AdapterHandle::BuiltinSfa16
+        } else if probe.adapter_id == "engine.kirikiri-smil-smile" {
+            AdapterHandle::BuiltinKirikiriSmil
         } else {
             return Err(CoreError::InvalidData(format!(
                 "适配器 {} {} 不存在或无法执行；已保存译文可继续校对和翻译。",
@@ -2323,7 +2327,7 @@ mod tests {
         let fixture = include_str!("../../engines/tests/fixtures/json_adapter.py");
         let rejected = fixture.replace(
             "elif r['operation'] == 'extract':",
-            "elif r['operation'] == 'extract':\n    out.update(success=False, error='unsupported XP3 info/name layout')",
+            "elif r['operation'] == 'extract':\n    out.update(success=False, errorKind='incompatible', error='unsupported XP3 info/name layout')",
         );
         register_json_adapter(&app, "fixture-a-invalid", &rejected);
         register_json_adapter(&app, "fixture-z-valid", fixture);
@@ -2360,7 +2364,7 @@ mod tests {
         let project = app.add_project(&game).await.unwrap();
         let rejected = include_str!("../../engines/tests/fixtures/json_adapter.py").replace(
             "elif r['operation'] == 'extract':",
-            "elif r['operation'] == 'extract':\n    out.update(success=False, error='unsupported XP3 info/name layout')",
+            "elif r['operation'] == 'extract':\n    out.update(success=False, errorKind='incompatible', error='unsupported XP3 info/name layout')",
         );
         register_json_adapter(&app, "fixture", &rejected);
         let error = app.recognize(&project.id).await.unwrap_err();
@@ -2375,6 +2379,42 @@ mod tests {
             "extraction"
         );
         assert_eq!(fs::read(game.join("text.json")).unwrap(), original);
+    }
+
+    #[tokio::test]
+    async fn unclassified_extraction_failure_stops_without_model_fallback() {
+        let tools = crate::ToolPaths::development();
+        if !tools.python().is_file() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let game = root.path().join("game");
+        fs::create_dir(&game).unwrap();
+        fs::write(game.join("text.json"), br#"["one","two"]"#).unwrap();
+        let app = Application::open(root.path().join("data"), &tools)
+            .await
+            .unwrap();
+        let project = app.add_project(&game).await.unwrap();
+        let broken = include_str!("../../engines/tests/fixtures/json_adapter.py").replace(
+            "elif r['operation'] == 'extract':",
+            "elif r['operation'] == 'extract':\n    out.update(success=False, error='dependency unavailable')",
+        );
+        register_json_adapter(&app, "fixture", &broken);
+        let error = app.recognize(&project.id).await.unwrap_err();
+        assert!(
+            error.to_string().contains("dependency unavailable"),
+            "{error}"
+        );
+        assert_eq!(
+            app.task_state(&project.id).await.unwrap().operation,
+            "recognize"
+        );
+        assert!(
+            !app.project_directory(&project.id)
+                .unwrap()
+                .join("adaptation")
+                .exists()
+        );
     }
 
     #[tokio::test]
