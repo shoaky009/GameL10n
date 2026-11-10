@@ -30,6 +30,7 @@ extensions/packages/<引擎或模板 ID>/<版本>/
   tools/                       运行依赖、素材与许可
   package.json                 身份、版本、规则、文件用途与哈希
   verification.json            宿主验收记录
+  capability-profile.json      可选的机器可读能力契约与复验配方
 ```
 
 发布输入保存在 `session.json.releaseFiles`，发布后写入 `package.json.releaseFiles`。仅选中文件参与打包和验收，路径须为包内具体文件，不接受通配符、重复或越界。
@@ -41,7 +42,7 @@ extensions/packages/<引擎或模板 ID>/<版本>/
 | `asset` | 补丁所需启动器、字体或数据 | `tools/Launcher.exe` |
 | `license` | 许可、来源及必要源码声明 | `tools/LICENSE.txt` |
 
-宿主可登记已写入的正式源码和已知组件依赖；外部脚本产物及间接依赖须显式选择。`package.json`、`verification.json` 由宿主生成，不属于输入清单。清单、源码、依赖或资源变化后重新验收。
+宿主可登记已写入的正式源码和已知组件依赖；外部脚本产物及间接依赖须显式选择。`package.json`、`verification.json` 与可选 `capability-profile.json` 由宿主生成，不属于输入清单。能力资料绑定清单及宿主验收版本，用于复用代码和生成验证步骤，不能替代当前游戏验收；旧包没有此文件仍可使用。清单、源码、依赖或资源变化后重新验收。
 
 发布版本固定，不能原地删改文件；精简或修复须重新选择文件、验收并发布。Python 入口由固定共享解释器执行，兼容字段 `assemblySha256` 保存入口哈希。
 

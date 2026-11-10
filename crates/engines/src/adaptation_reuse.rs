@@ -109,6 +109,7 @@ pub(super) fn inspect(request: &AdaptationRequest<'_>, args: &Value) -> Result<V
     Ok(json!({
         "id":manifest.id,"version":manifest.version,"manifestVersion":manifest.manifest_version,
         "family":manifest.family,"files":page,"fileCount":files.len(),
+        "capabilityProfile":super::capability::describe(directory, &manifest),
         "nextOffset":next,"more":next<files.len(),"referenceOnly":true,
         "usage":"先按文件名定位所需模块，再用 path 和 query/offset/length 读取片段。文件索引不校验全包，仅核验实际读取或复制的文件。copy_adapter(files=[发布路径]) 将所选文件复制到 work/adapter-references/，不覆盖当前源码、不登记依赖或授予兼容资格；按模块核对输入、导入、共享依赖和许可后接入 src，再经 test_adapter 验收。"
     }))

@@ -80,6 +80,7 @@ pub(super) fn recover(state: &mut Session, request: &AdaptationRequest<'_>, iden
         !request.objective.is_empty() && !request.objective.eq_ignore_ascii_case(&state.objective);
     let changed_instruction = request.user_instruction.trim() != state.user_instruction;
     if changed_objective || changed_instruction {
+        state.workflow.needs_verification = false;
         decision::reset_problem(state);
         for call in std::mem::take(&mut state.pending_calls) {
             append_failure(
@@ -1356,6 +1357,98 @@ mod tests {
         assert_eq!(
             fs::read_to_string(request.game_directory.join("text.json")).unwrap(),
             "[\"原文\",\"second\"]"
+        );
+        let AdapterHandle::Python {
+            package_directory: Some(published),
+            ..
+        } = result.2.unwrap()
+        else {
+            panic!("published Python adapter")
+        };
+        let manifest = PackageManifest::load(&published).unwrap();
+        let profile = fs::read(published.join("capability-profile.json")).unwrap();
+        assert_eq!(
+            capability::describe(&published, &manifest)["status"],
+            "available"
+        );
+
+        // A second resource set reuses executable code and the recipe, then independently verifies it.
+        let mut second = request.clone();
+        second.game_id = "second".into();
+        second.game_directory = root.path().join("second-game");
+        second.project_directory = root.path().join("second-project");
+        second.package_directories = vec![published.clone()];
+        fs::create_dir_all(&second.game_directory).unwrap();
+        fs::write(
+            second.game_directory.join("text.json"),
+            "[\"另一个输入\",\"third\",\"fourth\"]",
+        )
+        .unwrap();
+        let workspace = second.project_directory.join("adaptation/current");
+        fs::create_dir_all(workspace.join("resources")).unwrap();
+        fs::create_dir_all(workspace.join("work")).unwrap();
+        fs::copy(
+            second.game_directory.join("text.json"),
+            workspace.join("resources/text.json"),
+        )
+        .unwrap();
+        let mut state = Session {
+            game_id: second.game_id.clone(),
+            game_directory: second.game_directory.clone(),
+            objective: "Develop".into(),
+            ..Session::default()
+        };
+        state.extra.insert(
+            "resourceHashes".into(),
+            json!({"text.json":hash_file(&second.game_directory.join("text.json")).unwrap()}),
+        );
+        let (provider, server) = model(vec![
+            tool_response(
+                "reuse",
+                "copy_adapter",
+                json!({"id":manifest.id,"version":manifest.version}),
+            ),
+            tool_response(
+                "finish",
+                "finish",
+                json!({"summary":"Second fixture independently verified"}),
+            ),
+        ]);
+        let events = std::sync::Mutex::new(Vec::new());
+        let reused = run(
+            &service,
+            &second,
+            &provider,
+            &workspace,
+            &workspace.join("session.json"),
+            &mut state,
+            "reuse".into(),
+            &CancellationToken::new(),
+            None,
+            &|event| {
+                events.lock().unwrap().push(event);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(server.join().unwrap().len(), 2);
+        assert_eq!(reused.0, AdaptationStatus::Activated);
+        assert_eq!(state.verification.as_ref().unwrap().units, 3);
+        assert_ne!(
+            state.verification.as_ref().unwrap().resource_hashes["text.json"],
+            hash_file(&request.game_directory.join("text.json")).unwrap()
+        );
+        assert!(
+            events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|event| event["operation"] == "host-step-end" && event["passed"] == true)
+        );
+        assert_eq!(
+            fs::read(published.join("capability-profile.json")).unwrap(),
+            profile
         );
     }
 

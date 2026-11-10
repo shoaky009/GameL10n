@@ -357,6 +357,7 @@ fn snapshot(state: &Session, workspace: &Path, disabled: &BTreeSet<String>) -> V
         "notes":short(&state.notes,8000),"workNotes":work_notes,"lastModelSummary":short(&state.summary,1600),"nextAction":state.next_action,
         "modelProgress":state.progress_note,
         "repairTickets":super::repair::packet(state),
+        "capabilityGaps":super::capability::gaps(state, workspace),
         "hostState":{
             "recognition":bounded(&json!(state.recognition),2048),"family":bounded(&state.family,2048),
             "verification":verification_summary(state,"verificationCache"),

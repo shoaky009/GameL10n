@@ -31,7 +31,10 @@ pub(super) fn observe(
     result: &Value,
 ) {
     let success = history::successful(result);
-    if name == "compose_adapter_template" && success && result["testArguments"].is_object() {
+    if matches!(name, "compose_adapter_template" | "copy_adapter")
+        && success
+        && result["testArguments"].is_object()
+    {
         state.workflow.verification_args = Some(result["testArguments"].clone());
         state.workflow.needs_verification = true;
     } else if name == "test_adapter" && state.family["key"].is_string() {

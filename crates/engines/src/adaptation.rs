@@ -20,6 +20,8 @@ use serde_json::{Value, json};
 
 #[path = "adaptation_automatic.rs"]
 mod automatic;
+#[path = "adaptation_capability.rs"]
+mod capability;
 #[path = "adaptation_components.rs"]
 mod components;
 #[path = "adaptation_decision.rs"]
@@ -2154,6 +2156,7 @@ impl EngineService {
                 continue;
             };
             if manifest.id == id && manifest.version == version {
+                let test_arguments = capability::arguments(directory, &manifest);
                 let source = workspace.join("src");
                 if source.exists() && (!source.is_dir() || fs::read_dir(&source)?.next().is_some())
                 {
@@ -2204,7 +2207,7 @@ impl EngineService {
                     state.family = manifest.family;
                 }
                 return Ok(
-                    json!({"success":true,"legacyReferenceOnly":manifest.manifest_version!=4,"nextAction":if manifest.manifest_version==4{"保留既有文本身份与回填方案，修改后重新验收。"}else{"旧 C# 源码保存在 work/legacy，仅供移植参考；实现 src/adapter.py 后完整验收。"}}),
+                    json!({"success":true,"legacyReferenceOnly":manifest.manifest_version!=4,"testArguments":test_arguments,"currentGameAccepted":false,"nextAction":if test_arguments.is_some(){"已复用代码、固定依赖和验收配方；宿主将对已暂存的当前资源验收，失败后只处理能力缺口。来源游戏的验证不授予当前游戏资格。"}else if manifest.manifest_version==4{"保留既有文本身份与回填方案，修改后重新验收。"}else{"旧 C# 源码保存在 work/legacy，仅供移植参考；实现 src/adapter.py 后完整验收。"}}),
                 );
             }
         }
@@ -2674,6 +2677,7 @@ impl EngineService {
         )?;
         if let Some(verification) = &state.verification {
             write_json(&destination.join("verification.json"), verification).map_err(file_error)?;
+            capability::publish(&destination, &manifest, verification)?;
         }
         PackageManifest::load(&destination)?.handle(&destination)?;
         let runtime_checks = coverage_list(state, "runtimeChecks");

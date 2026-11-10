@@ -24,7 +24,7 @@
 | --- | --- |
 | 识别与复用 | [识别声明](recognition.md) |
 | 智能适配与验证 | [识别与智能适配](automatic-adaptation.md) |
-| 会话、决策、工具和缓存 | [执行与恢复机制](adaptation-internals.md) |
+| 会话、修复任务、能力配方与执行调度 | [执行与恢复机制](adaptation-internals.md) |
 | 发布文件与工作目录 | [产物约定](artifacts.md) |
 | 编码、字体与启动 | [文本与运行组件](components.md) |
 | 封包与脚本组合 | [封包组件](engine-components.md)、[组合模板](templates.md) |

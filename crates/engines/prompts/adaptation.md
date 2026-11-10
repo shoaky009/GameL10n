@@ -47,6 +47,9 @@ The host continues known verification after template composition or edits with s
 discovery/trial to full verification. Read the host result before planning another test; publication still uses finish.
 For font coverage, use inspect_font_coverage once for the complete local translation corpus and known font candidates.
 Cmap coverage does not validate resource binding, fallback, shaping, atlases or in-game rendering; retain those checks separately.
+Use host capabilityGaps and repair tickets to select the unresolved contract. Published package profiles provide a reusable
+verification recipe bound to executable code and resource conditions; copy_adapter may let the host verify it immediately.
+Profile availability and another game's success never prove the current game's compatibility.
 Requests contain current host state, relevant evidence and a few complete recent exchanges. Earlier calls, layouts and output remain available
 through read_tool_result/read_session_history. Read precise missing evidence rather than restarting an investigation.
 Prioritize the current game's real text paths and reported omissions. Expand coverage using actual format/runtime evidence;

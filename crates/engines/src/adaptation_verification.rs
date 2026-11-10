@@ -2,7 +2,7 @@
 use super::*;
 use crate::protocol::ProbeResult;
 
-const VERIFIER_REVISION: u32 = 10;
+pub(super) const VERIFIER_REVISION: u32 = 10;
 
 fn verified_public_dependency(
     service: &EngineService,
