@@ -204,14 +204,20 @@ Token 旁的“第 X 轮”统计 API 请求，包含失败与重试，不包含
 | 输入、输出与 `cachedTokens` | 服务商用量，缓存属于输入，缺失与零值区分 |
 | `cacheHitRate`、`missingCacheUsage` | 有缓存计数请求的缓存／输入总量，以及计数缺失请求数 |
 | 上下文与工具定义大小 | 实际请求、保留历史和裁剪规模 |
+| `contextComponents`、`toolDefinitionFingerprint` | 决策快照、旧证据、补入协议、近期交互及回读预览大小，工具定义集合是否改变 |
+| `verificationConfigured` | 本次请求前是否已有可自动复用的验收参数 |
 | `decisionHistoryStart`、`decisionEvidenceCount`、`problemId` | 当前请求选取的历史起点、证据数量与问题 |
 | 调用 ID、参数指纹、路径、范围与诊断 | 定位工具执行和重复工作 |
+| `resultFingerprint`、脚本与报告哈希 | 区分同参不同结果、相同输出及实验代码变化 |
+| 进程退出码、报告错误与报告计数 | 区分脚本运行失败、报告契约失败和部分样本不匹配 |
 | `verification-phase`、`fingerprintStats` | 验收阶段、修改条数、哈希与探测的读取规模 |
 | `automatic-template` | 模板阶段、输入／脚本／实际读取量及脚本和媒体包数量 |
 
 成功请求正文和源码写入内容不复制到诊断日志，API 异常写入 `api-*.json`。日志 URL 移除凭据和查询参数。缓存命中只记本次耗时，不累计历史耗时。
 
-`scripts/analyze-adaptation-log.ps1 -ProjectDirectory <项目目录>` 输出 Token、耗时、大输出及验收摘要；`-RunId`、`-Since`、`-Until`、`-FromTurn`、`-ToTurn` 限定范围，`-Detail` 展开请求、重复参数和上下文压缩前后对比。重复调用须结合输入变化判断，工具原始输出大小不等于模型实际输入，缺少结束记录不能仅由日志反推任务状态。
+`contextComponents` 记录可见内容的 UTF-8 大小，沿用上下文预算的计量方式，不是供应商 Token 分项。`decisionMessageBytes` 与 `recentHistoryBytes` 组成可见历史；快照、证据及补入协议是决策消息的组成部分，回读大小则是近期交互的子集，不能重复相加。回读同时记录保留原文与实际发送预览的大小；旧日志缺失这些字段时保持未知。
+
+`scripts/analyze-adaptation-log.ps1 -ProjectDirectory <项目目录>` 输出 Token、耗时、大输出及验收摘要；`-RunId`、`-Since`、`-Until`、`-FromTurn`、`-ToTurn` 限定范围，`-Detail` 展开请求分项、相同输出、拒绝的批次及上下文压缩前后对比。工具总数和耗时包含已结束的宿主自动步骤，`modelToolCalls` 与 `hostSteps` 分别计数，验收记录以 `caller` 标明来源。重复参数或相同输出只表示候选重复工作，仍须结合输入变化与用途判断；缺少结束记录不能仅由日志反推任务状态。
 
 ## 维护入口
 

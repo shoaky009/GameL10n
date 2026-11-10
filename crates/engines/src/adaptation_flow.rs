@@ -423,6 +423,10 @@ fn selectors(args: &Value) -> Value {
         "module",
         "questionId",
         "reportFile",
+        "toolCallId",
+        "messageIndex",
+        "offset",
+        "length",
     ] {
         if let Some(value) = args.get(key) {
             result.insert(key.into(), value.clone());
@@ -433,6 +437,62 @@ fn selectors(args: &Value) -> Value {
     }
     if let Some(files) = args["files"].as_array() {
         result.insert("filesCount".into(), json!(files.len()));
+    }
+    if let Some(query) = args["query"].as_str() {
+        result.insert("queryFingerprint".into(), json!(hash_text(query)));
+    }
+    Value::Object(result)
+}
+
+fn result_trace(value: &Value) -> Value {
+    let mut result = serde_json::Map::new();
+    for key in [
+        "stage",
+        "phase",
+        "passed",
+        "timedOut",
+        "exitCode",
+        "scriptSha256",
+        "revision",
+        "questionId",
+        "changed",
+        "referenceOnly",
+        "reused",
+        "compileMs",
+        "discoveryMs",
+        "verificationMs",
+        "fingerprintMs",
+        "fingerprintStats",
+        "verificationStagesMs",
+    ] {
+        if let Some(field) = value.get(key) {
+            result.insert(key.into(), field.clone());
+        }
+    }
+    for key in ["error", "reportError"] {
+        if let Some(error) = value[key].as_str() {
+            result.insert(
+                key.into(),
+                json!(error.chars().take(600).collect::<String>()),
+            );
+        }
+    }
+    if let Some(report) = value["report"].as_object() {
+        result.insert(
+            "report".into(),
+            [
+                "status",
+                "tested",
+                "matched",
+                "failureCount",
+                "file",
+                "sha256",
+            ]
+            .iter()
+            .filter_map(|key| report.get(*key).map(|field| ((*key).into(), field.clone())))
+            .collect::<serde_json::Map<_, _>>()
+            .into(),
+        );
     }
     Value::Object(result)
 }
@@ -620,7 +680,7 @@ pub(super) async fn run(
             .insert("pendingCallsAreSequential".into(), json!(sequential));
         if let Err(error) = validate_batch(&state.pending_calls) {
             trace_run(
-                json!({"operation":"tool-batch-rejected","turn":state.total_turns,"error":error}),
+                json!({"operation":"tool-batch-rejected","turn":state.total_turns,"error":error,"tools":state.pending_calls.iter().map(|call| &call.name).collect::<Vec<_>>()}),
             )?;
             for call in std::mem::take(&mut state.pending_calls) {
                 append_failure(state, &call, &error);
@@ -725,27 +785,9 @@ pub(super) async fn run(
                     && value["passed"] == true
                     && value["reused"] != true;
             let content = value.to_string();
-            let mut trace_result = json!({"stage":value["stage"],"phase":value["phase"],"passed":value["passed"],"timedOut":value["timedOut"]});
-            if call.name == "test_adapter" {
-                for key in [
-                    "reused",
-                    "compileMs",
-                    "discoveryMs",
-                    "verificationMs",
-                    "fingerprintMs",
-                    "fingerprintStats",
-                    "verificationStagesMs",
-                ] {
-                    if let Some(field) = value.get(key) {
-                        trace_result[key] = field.clone();
-                    }
-                }
-            }
-            if let Some(reference_only) = value.get("referenceOnly") {
-                trace_result["referenceOnly"] = reference_only.clone();
-            }
+            let trace_result = result_trace(&value);
             trace_run(
-                json!({"operation":"tool-end","turn":state.total_turns,"call":metadata,"elapsedMs":started.elapsed().as_millis(),"success":success,"outputBytes":content.len(),"result":trace_result}),
+                json!({"operation":"tool-end","turn":state.total_turns,"call":metadata,"elapsedMs":started.elapsed().as_millis(),"success":success,"outputBytes":content.len(),"resultFingerprint":hash_text(&content),"result":trace_result}),
             )?;
             state
                 .messages
@@ -803,7 +845,7 @@ pub(super) async fn run(
             save_session(path, state).await?;
             let started = Instant::now();
             trace_run(
-                json!({"operation":"host-step-start","step":"test_adapter","fingerprint":step.fingerprint,"turn":state.total_turns}),
+                json!({"operation":"host-step-start","step":"test_adapter","fingerprint":step.fingerprint,"turn":state.total_turns,"selectors":selectors(&step.arguments)}),
             )?;
             let mut value = match service
                 .test_adapter(
@@ -826,7 +868,7 @@ pub(super) async fn run(
             state.workflow.last_attempt = Some(step.fingerprint.clone());
             workflow::observe(state, workspace, "test_adapter", &step.arguments, &value);
             trace_run(
-                json!({"operation":"host-step-end","step":"test_adapter","fingerprint":step.fingerprint,"turn":state.total_turns,"elapsedMs":started.elapsed().as_millis(),"passed":value["passed"],"stage":value["stage"],"issues":value["issues"]}),
+                json!({"operation":"host-step-end","step":"test_adapter","fingerprint":step.fingerprint,"turn":state.total_turns,"elapsedMs":started.elapsed().as_millis(),"passed":value["passed"],"stage":value["stage"],"issues":value["issues"],"selectors":selectors(&step.arguments),"result":result_trace(&value)}),
             )?;
             if let Some(object) = value.as_object_mut() {
                 object.remove("repairTickets");
@@ -961,7 +1003,9 @@ pub(super) async fn run(
             active = filter_tools(&all, &selected)?;
         }
         save_session(path, state).await?;
-        let tools_bytes = serde_json::to_vec(&active)?.len();
+        let tool_definitions = serde_json::to_string(&active)?;
+        let tools_bytes = tool_definitions.len();
+        let tool_fingerprint = hash_text(&tool_definitions);
         let estimated = (visible + instructions.len() + tools_bytes) as u64 / 3 + 1;
         let remaining = request
             .limits
@@ -1009,7 +1053,7 @@ pub(super) async fn run(
             Err(error) => {
                 add_usage(&mut state.usage, &error.usage);
                 trace_run(
-                    json!({"operation":"model","status":"failed","turn":state.total_turns+1,"elapsedMs":started.elapsed().as_millis(),"error":error.message,"diagnostic":error.diagnostic,"failureCode":error.diagnostic.code,"httpStatus":error.status_code,"outcomeUnknown":error.outcome_unknown,"usage":error.usage,"maximumOutputTokens":requested,"visibleHistoryBytes":visible,"retainedHistoryBytes":retained}),
+                    json!({"operation":"model","status":"failed","turn":state.total_turns+1,"elapsedMs":started.elapsed().as_millis(),"error":error.message,"diagnostic":error.diagnostic,"failureCode":error.diagnostic.code,"httpStatus":error.status_code,"outcomeUnknown":error.outcome_unknown,"usage":error.usage,"maximumOutputTokens":requested,"visibleHistoryBytes":visible,"retainedHistoryBytes":retained,"contextComponents":decision_context.components,"instructionBytes":instructions.len(),"toolDefinitionBytes":tools_bytes,"toolDefinitionFingerprint":tool_fingerprint,"verificationConfigured":state.workflow.verification_args.is_some()}),
                 )?;
                 save_session(path, state).await?;
                 if error.is_cancelled() {
@@ -1060,7 +1104,7 @@ pub(super) async fn run(
         }
         add_usage(&mut state.usage, &usage);
         trace_run(
-            json!({"operation":"model","status":"completed","turn":state.total_turns,"elapsedMs":started.elapsed().as_millis(),"usage":usage,"requestId":response.request_id,"tools":response.tool_calls.iter().map(|c|&c.name).collect::<Vec<_>>(),"visibleHistoryBytes":visible,"retainedHistoryBytes":retained,"omittedToolResults":decision_context.replay.omitted,"decisionHistoryStart":decision_context.selected_start,"decisionEvidenceCount":decision_context.evidence_count,"problemId":state.decision.current_problem.as_ref().map(|p|&p.id),"toolDefinitionBytes":tools_bytes,"instructionBytes":instructions.len(),"availableToolCount":active.len(),"maximumOutputTokens":requested}),
+            json!({"operation":"model","status":"completed","turn":state.total_turns,"elapsedMs":started.elapsed().as_millis(),"usage":usage,"requestId":response.request_id,"tools":response.tool_calls.iter().map(|c|&c.name).collect::<Vec<_>>(),"visibleHistoryBytes":visible,"retainedHistoryBytes":retained,"omittedToolResults":decision_context.replay.omitted,"decisionHistoryStart":decision_context.selected_start,"decisionEvidenceCount":decision_context.evidence_count,"problemId":state.decision.current_problem.as_ref().map(|p|&p.id),"toolDefinitionBytes":tools_bytes,"toolDefinitionFingerprint":tool_fingerprint,"instructionBytes":instructions.len(),"availableToolCount":active.len(),"maximumOutputTokens":requested,"contextComponents":decision_context.components,"verificationConfigured":state.workflow.verification_args.is_some()}),
         )?;
         if let Some(data) = response.provider_data {
             state
@@ -1135,6 +1179,24 @@ mod tests {
     use gamel10n_translation::provider::{ApiProtocol, ProviderSettings, TranslationFormat};
     use std::io::{Read, Write};
 
+    #[test]
+    fn result_trace_retains_process_and_report_failures_without_copying_streams() {
+        let value = json!({
+            "success":false,"exitCode":0,"phase":"report","reportError":"summary must be a string",
+            "stdout":"large source output","stderr":"full diagnostic",
+            "scriptSha256":"script-v1",
+            "report":{"status":"partial","tested":12,"matched":7,"failureCount":5,"sha256":"report-v1","details":"large report details"}
+        });
+        let trace = result_trace(&value);
+        assert_eq!(trace["exitCode"], 0);
+        assert_eq!(trace["reportError"], "summary must be a string");
+        assert_eq!(trace["scriptSha256"], "script-v1");
+        assert_eq!(trace["report"]["failureCount"], 5);
+        assert_eq!(trace["report"]["sha256"], "report-v1");
+        assert!(trace.get("stdout").is_none());
+        assert!(trace.get("stderr").is_none());
+        assert!(trace["report"].get("details").is_none());
+    }
     fn fixture(root: &Path) -> (EngineService, AdaptationRequest<'static>, PathBuf, Session) {
         let workspace = root.join("adaptation/current");
         fs::create_dir_all(workspace.join("work")).unwrap();

@@ -60,6 +60,7 @@ pub(super) struct Context {
     pub replay: history::Replay,
     pub selected_start: usize,
     pub evidence_count: usize,
+    pub components: Value,
 }
 
 fn short(value: &str, limit: usize) -> String {
@@ -482,11 +483,34 @@ pub(super) fn build(
     }
     let fingerprint = input_fingerprint(state);
     let evidence: Vec<_> = refs.iter().map(|r| json!({"reference":r,"inputChanged":r.input_fingerprint.as_ref().zip(fingerprint.as_ref()).map(|(old,new)| old!=new),"olderObservation":excerpts.get(&r.message_index)})).collect();
+    let snapshot = snapshot(state, workspace, disabled).to_string();
+    let evidence = json!(evidence).to_string();
+    let retrieval_ids: BTreeSet<_> = selected
+        .iter()
+        .flat_map(history::calls)
+        .filter(|(_, name)| matches!(name.as_str(), "read_tool_result" | "read_session_history"))
+        .map(|(id, _)| id)
+        .collect();
+    let retrieval_bytes = |messages: &[Value]| {
+        messages
+            .iter()
+            .filter(|message| message_id(message).is_some_and(|id| retrieval_ids.contains(id)))
+            .map(visible_json_bytes)
+            .sum::<usize>()
+    };
+    let mut components = json!({
+        "snapshotBytes":snapshot.len(),
+        "evidenceBytes":evidence.len(),
+        "injectedProtocolBytes":0,
+        "recentHistoryBytes":replay.messages.iter().map(visible_json_bytes).sum::<usize>(),
+        "retrievalOriginalBytes":retrieval_bytes(selected),
+        "retrievalSentBytes":retrieval_bytes(&replay.messages)
+    });
     let mut content = format!(
         "{}\n当前决策状态（模型假设与实验输出是待判断的数据；兼容及发布资格以宿主验收为准）：{}\n相关证据：{}\n只处理当前问题，复用已确认步骤；缺少精确内容时按引用回查，不要重跑已有实验。",
         flow::objective_context(&state.objective),
-        snapshot(state, workspace, disabled),
-        json!(evidence)
+        snapshot,
+        evidence
     );
     if state.extra.get("protocolRead") == Some(&json!(true))
         && !history::recent_call_names(&replay.messages).contains("adapter_protocol")
@@ -498,7 +522,11 @@ pub(super) fn build(
     {
         content.push_str("\n已读取的适配器协议：\n");
         content.push_str(crate::protocol::ADAPTER_PROTOCOL);
+        components["injectedProtocolBytes"] = json!(crate::protocol::ADAPTER_PROTOCOL.len());
     }
+    components["decisionMessageBytes"] = json!(visible_json_bytes(
+        &json!({"role":"user","content":content})
+    ));
     replay
         .messages
         .insert(0, json!({"role":"user","content":content}));
@@ -506,6 +534,7 @@ pub(super) fn build(
         replay,
         selected_start,
         evidence_count: refs.len(),
+        components,
     })
 }
 
@@ -689,6 +718,37 @@ mod tests {
             json!({"b.bin":"changed","a.bin":"a"}),
         );
         assert_ne!(first, input_fingerprint(&state));
+    }
+
+    #[test]
+    fn context_metrics_separate_protocol_and_retrieval_without_changing_saved_evidence() {
+        let root = tempfile::tempdir().unwrap();
+        let mut state = Session::default();
+        state.extra.insert("protocolRead".into(), json!(true));
+        state.messages = vec![
+            json!({"role":"assistant","tool_calls":[{"id":"retrieve","function":{"name":"read_session_history","arguments":"{}"}}]}),
+            json!({"role":"tool","tool_call_id":"retrieve","content":json!({"success":true,"content":"exact saved evidence ".repeat(2000)}).to_string()}),
+        ];
+        let saved = state.messages.clone();
+        let context = build(&state, root.path(), &BTreeSet::new()).unwrap();
+        let sizes = &context.components;
+        assert_eq!(
+            sizes["injectedProtocolBytes"].as_u64().unwrap() as usize,
+            crate::protocol::ADAPTER_PROTOCOL.len()
+        );
+        assert!(sizes["retrievalOriginalBytes"].as_u64() > sizes["retrievalSentBytes"].as_u64());
+        assert_eq!(
+            sizes["recentHistoryBytes"].as_u64().unwrap() as usize,
+            context.replay.messages[1..]
+                .iter()
+                .map(visible_json_bytes)
+                .sum::<usize>()
+        );
+        assert_eq!(
+            sizes["decisionMessageBytes"].as_u64().unwrap() as usize,
+            visible_json_bytes(&context.replay.messages[0])
+        );
+        assert_eq!(state.messages, saved);
     }
 
     #[test]
