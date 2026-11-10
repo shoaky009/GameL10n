@@ -953,7 +953,14 @@ pub(super) async fn run(
             .iter()
             .map(visible_json_bytes)
             .sum::<usize>();
-        let checkpoint_bytes = retained.saturating_sub(decision_context.replay.process_bytes_saved);
+        // The retained history includes exchanges outside the decision window, so its
+        // compaction thresholds must discount process previews over that same history.
+        let process_bytes_saved = if retained > 256 * 1024 {
+            history::for_request(&state.messages[state.history_start..]).process_bytes_saved
+        } else {
+            decision_context.replay.process_bytes_saved
+        };
+        let checkpoint_bytes = retained.saturating_sub(process_bytes_saved);
         let milestone =
             verification_phase && (visible > 64 * 1024 || checkpoint_bytes > 256 * 1024);
         if checkpoint_requested
@@ -1818,6 +1825,124 @@ mod tests {
         assert_eq!(
             requests[2]["tools"].as_array().unwrap().len(),
             tool_definitions().unwrap().len()
+        );
+    }
+
+    #[tokio::test]
+    async fn large_process_output_outside_decision_window_does_not_repeat_checkpoint_requests() {
+        let root = tempfile::tempdir().unwrap();
+        let (service, request, workspace, mut state) = fixture(root.path());
+        let output = format!(
+            "{}retained-process-tail",
+            "original process output ".repeat(45000)
+        );
+        state.messages = vec![
+            json!({"role":"assistant","tool_calls":[{"id":"process","type":"function","function":{"name":"run_engine_python","arguments":"{}"}}]}),
+            json!({"role":"tool","tool_call_id":"process","content":json!({"success":true,"exitCode":0,"stdout":output,"stderr":""}).to_string()}),
+        ];
+        for index in 0..3 {
+            let id = format!("read-{index}");
+            state.messages.push(json!({"role":"assistant","tool_calls":[{"id":id,"type":"function","function":{"name":"read_file","arguments":"{}"}}]}));
+            state.messages.push(json!({"role":"tool","tool_call_id":id,"content":"{\"success\":true,\"content\":\"confirmed evidence\"}"}));
+        }
+        state
+            .messages
+            .push(json!({"role":"user","content":CHECKPOINT_REQUEST}));
+        let arguments =
+            json!({"summary":"Process completed; implement src/adapter.py."}).to_string();
+        state.messages.push(json!({"role":"assistant","tool_calls":[{"id":"checkpoint","type":"function","function":{"name":"checkpoint","arguments":arguments}}]}));
+        state.pending_calls.push(ToolCall {
+            id: "checkpoint".into(),
+            name: "checkpoint".into(),
+            arguments,
+        });
+        let edit = json!({"id":"fixture","choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","tool_calls":[{"id":"next-edit","type":"function","function":{"name":"write_file","arguments":json!({"path":"src/adapter.py","content":"def main(): pass\n"}).to_string()}}]}}],"usage":{"prompt_tokens":100,"completion_tokens":20}});
+        let (provider, server) = model(vec![
+            edit,
+            summary_response("stop"),
+            summary_response("stop"),
+        ]);
+        let events = std::sync::Mutex::new(Vec::new());
+        run(
+            &service,
+            &request,
+            &provider,
+            &workspace,
+            &workspace.join("session.json"),
+            &mut state,
+            "continue with the saved next action".into(),
+            &CancellationToken::new(),
+            None,
+            &|entry| {
+                events.lock().unwrap().push(entry);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        let requests = server.join().unwrap();
+        assert!(requests.iter().all(|request| {
+            !request["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|message| {
+                    message["role"] == "user"
+                        && message["content"]
+                            .as_str()
+                            .is_some_and(|content| content.starts_with(CHECKPOINT_REQUEST))
+                })
+        }));
+        assert!(
+            !events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["operation"] == "checkpoint-request")
+        );
+        let mut restored = load_session(&workspace.join("session.json")).unwrap();
+        assert!(session_store::base(&restored) > 0);
+        let original = read_tool_result(
+            &workspace,
+            &restored,
+            &json!({"toolCallId":"process","query":"retained-process-tail","length":512}),
+        )
+        .unwrap();
+        assert!(
+            original["content"]
+                .as_str()
+                .unwrap()
+                .contains("retained-process-tail")
+        );
+        assert_eq!(
+            fs::read_to_string(workspace.join("src/adapter.py")).unwrap(),
+            "def main(): pass\n"
+        );
+        let (provider, server) = model(vec![summary_response("stop"), summary_response("stop")]);
+        run(
+            &service,
+            &request,
+            &provider,
+            &workspace,
+            &workspace.join("session.json"),
+            &mut restored,
+            "continue".into(),
+            &CancellationToken::new(),
+            None,
+            &|entry| {
+                events.lock().unwrap().push(entry);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(server.join().unwrap().len(), 2);
+        assert!(
+            !events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["operation"] == "checkpoint-request")
         );
     }
 
