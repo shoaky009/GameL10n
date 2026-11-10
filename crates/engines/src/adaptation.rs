@@ -28,6 +28,8 @@ mod decision;
 mod failure;
 #[path = "adaptation_flow.rs"]
 mod flow;
+#[path = "adaptation_font.rs"]
+mod font;
 #[path = "adaptation_history.rs"]
 mod history;
 #[path = "adaptation_reuse.rs"]
@@ -40,6 +42,8 @@ mod resources;
 mod session_store;
 #[path = "adaptation_verification.rs"]
 mod verification;
+#[path = "adaptation_workflow.rs"]
+mod workflow;
 
 pub use failure::{AdaptationFailure, AdaptationFailureCategory};
 pub use resources::AdaptationInputs;
@@ -186,6 +190,7 @@ pub(crate) struct Session {
     pub progress_note: Value,
     pub decision: decision::DecisionState,
     pub repairs: Vec<repair::Ticket>,
+    pub workflow: workflow::Workflow,
     pub verified_package: Option<Value>,
     pub verified_fingerprint: Option<String>,
     pub verification: Option<VerificationResult>,
@@ -1251,6 +1256,7 @@ impl EngineService {
                 self.helper(&params, cancellation).await
             }
             "inspect_engine_component" => describe_engine_components(args),
+            "inspect_font_coverage" => font::run(workspace, args, cancellation),
             "run_engine_component" => {
                 self.run_component(workspace, state, args, cancellation)
                     .await

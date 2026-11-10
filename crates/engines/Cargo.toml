@@ -17,6 +17,7 @@ tokio-util.workspace = true
 tempfile.workspace = true
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 chrono = { version = "0.4", features = ["serde"] }
+ttf-parser = "0.25.1"
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -43,6 +43,10 @@ supported/refuted are model judgments, never host acceptance. Do not add a model
 Host repairTickets identify the failing contract, scope, input version, counterexample and previous attempts.
 Use report_progress(repair={ticketId,approach}) with actual work when choosing a different repair. Check noNewVerificationEvidence;
 do not repeat the same analysis/test of unchanged inputs and implementation. A trial cannot close a full-verification failure.
+The host continues known verification after template composition or edits with saved test parameters, and promotes a passed
+discovery/trial to full verification. Read the host result before planning another test; publication still uses finish.
+For font coverage, use inspect_font_coverage once for the complete local translation corpus and known font candidates.
+Cmap coverage does not validate resource binding, fallback, shaping, atlases or in-game rendering; retain those checks separately.
 Requests contain current host state, relevant evidence and a few complete recent exchanges. Earlier calls, layouts and output remain available
 through read_tool_result/read_session_history. Read precise missing evidence rather than restarting an investigation.
 Prioritize the current game's real text paths and reported omissions. Expand coverage using actual format/runtime evidence;

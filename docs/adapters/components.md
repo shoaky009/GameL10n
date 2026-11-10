@@ -5,6 +5,7 @@
 | 组件 ID | 能力 | 适用条件 |
 | --- | --- | --- |
 | `windows-font-metrics` | 缺字、字体尺寸及 GDI+ 字体创建路径对比 | Windows，仅分析时使用 |
+| `inspect_font_coverage` 宿主工具 | 全部译文字符与 SFNT/TTC cmap 的批量比对 | 跨平台，仅检查覆盖，完整报告在工作区 |
 | `kaguya-tblstr` | ARC/ARI 检测、解析和变长重建 | XOR-FF、四字节最小对齐、类型 0/2/3 |
 | `xp3-adler` | 索引、成员与 Adler 派生过滤器检查 | 至少两个受保护成员通过；不提供回包器 |
 | `xp3-smil` | SMIL 名称映射、参数化 SmileCrypt 与保留式重建 | 明确参数并校验明文；替换按原始成员别名 |

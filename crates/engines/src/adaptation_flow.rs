@@ -42,6 +42,7 @@ fn append_failure(state: &mut Session, call: &ToolCall, reason: &str) {
 }
 
 pub(super) fn recover(state: &mut Session, request: &AdaptationRequest<'_>, identity: &str) {
+    workflow::recover(state);
     if let Some(interrupted) = state.running_tool_id.take() {
         for ticket in &mut state.repairs {
             if ticket.status == repair::Status::Verifying {
@@ -534,6 +535,7 @@ pub(super) async fn run(
     trace_run: &impl Fn(Value) -> Result<(), EngineError>,
 ) -> Result<(AdaptationStatus, String, Option<AdapterHandle>), EngineError> {
     state.extra.remove("blocker");
+    state.workflow.last_decision = None;
     state.next_action.clear();
     decision::bootstrap(state);
     let initial_usage = tokens(&state.usage);
@@ -706,6 +708,13 @@ pub(super) async fn run(
                 repair::patched(state);
             }
             record_tool(state, &call, args.as_ref().unwrap_or(&Value::Null), &value);
+            workflow::observe(
+                state,
+                workspace,
+                &call.name,
+                args.as_ref().unwrap_or(&Value::Null),
+                &value,
+            );
             decision::record(state, &call, args.as_ref().unwrap_or(&Value::Null));
             verification_phase |= record_verification_phase(state, &call, &value);
             advanced |= number(state, "highestVerificationMilestone") > previous_milestone
@@ -785,6 +794,46 @@ pub(super) async fn run(
                 return Ok((status, state.summary.clone(), None));
             }
         }
+        for _ in 0..2 {
+            let Some(step) = workflow::next(state, workspace)? else {
+                break;
+            };
+            state.workflow.running = Some(step.fingerprint.clone());
+            save_session(path, state).await?;
+            let started = Instant::now();
+            trace_run(
+                json!({"operation":"host-step-start","step":"test_adapter","fingerprint":step.fingerprint,"turn":state.total_turns}),
+            )?;
+            let mut value = match service
+                .test_adapter(
+                    request,
+                    workspace,
+                    state,
+                    &step.arguments,
+                    cancellation,
+                    progress,
+                )
+                .await
+            {
+                Ok(value) => value,
+                Err(EngineError::Cancelled) => return Err(EngineError::Cancelled),
+                Err(error) => {
+                    json!({"passed":false,"success":false,"error":error.to_string(),"repairTickets":repair::packet(state)})
+                }
+            };
+            state.workflow.running = None;
+            state.workflow.last_attempt = Some(step.fingerprint.clone());
+            workflow::observe(state, workspace, "test_adapter", &step.arguments, &value);
+            trace_run(
+                json!({"operation":"host-step-end","step":"test_adapter","fingerprint":step.fingerprint,"turn":state.total_turns,"elapsedMs":started.elapsed().as_millis(),"passed":value["passed"],"stage":value["stage"],"issues":value["issues"]}),
+            )?;
+            if let Some(object) = value.as_object_mut() {
+                object.remove("repairTickets");
+            }
+            state.messages.push(json!({"role":"user","content":format!("宿主已按现有参数自动执行 test_adapter，原始验收标准未变。结果：{}",value)}));
+            verification_phase = true;
+            save_session(path, state).await?;
+        }
         if let Some(reason) = state.extra.get("contextBoundary").cloned() {
             compact_history(state, workspace, false, &service.disabled_families)?;
             state.extra.remove("contextBoundary");
@@ -837,6 +886,18 @@ pub(super) async fn run(
             trace_run(
                 json!({"operation":"implementation-review","turn":state.total_turns,"lastImplementationTurn":number(state,"lastImplementationTurn"),"lastVerificationProgressTurn":number(state,"lastVerificationProgressTurn"),"highestVerificationMilestone":number(state,"highestVerificationMilestone")}),
             )?;
+        }
+        let decision_key = workflow::decision_key(state, workspace).ok().flatten();
+        if decision_key.is_some() && decision_key == state.workflow.last_decision {
+            trace_run(
+                json!({"operation":"decision-deferred","reason":"no-new-repair-evidence","turn":state.total_turns,"fingerprint":decision_key}),
+            )?;
+            state.next_action = "相同修复任务没有新增证据或实现变化，已暂停重复分析。可补充新线索或点击继续，显式重试一次。".into();
+            return Ok((
+                AdaptationStatus::Incomplete,
+                state.next_action.clone(),
+                None,
+            ));
         }
         let mut decision_context = decision::build(state, workspace, &service.disabled_families)?;
         let retained = state.messages[state.history_start..]
@@ -935,6 +996,7 @@ pub(super) async fn run(
         }
         let started = Instant::now();
         turns += 1;
+        state.workflow.last_decision = decision_key;
         repair::analyzing(state);
         let requests_before = provider.request_count();
         let response = provider
@@ -1184,6 +1246,144 @@ mod tests {
 
     fn summary_response(reason: &str) -> Value {
         json!({"id":"fixture","choices":[{"finish_reason":reason,"message":{"role":"assistant","content":"仍在探索：正在核对资源结构。"}}],"usage":{"prompt_tokens":100,"completion_tokens":20,"prompt_tokens_details":{"cached_tokens":50}}})
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn host_promotes_trial_to_full_before_the_next_model_request() {
+        let root = tempfile::tempdir().unwrap();
+        let (_, mut request, workspace, mut state) = fixture(root.path());
+        let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let tools = crate::ToolPaths::new(root.path().join("tools"));
+        fs::create_dir_all(tools.python().parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink("/usr/bin/python3", tools.python()).unwrap();
+        write_json(
+            &tools.root.join("python/runtime.json"),
+            &json!({"archiveSha256":"fixture"}),
+        )
+        .unwrap();
+        fs::create_dir_all(tools.vntextpatch().parent().unwrap()).unwrap();
+        // These pinned bytes are never executed: the fixture uses only its Python JSON adapter.
+        fs::write(tools.vntextpatch(), b"unused native fixture").unwrap();
+        fs::write(
+            tools.root.join("vntextpatch/capstone.dll"),
+            b"unused capstone fixture",
+        )
+        .unwrap();
+        let pin: Value = read_json(&assets.join("third_party/engine-tools/current.json")).unwrap();
+        let relative = format!(
+            "references/{}/library.zip",
+            pin["revision"].as_str().unwrap()
+        );
+        let target = tools.root.join("engine-tools").join(&relative);
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::copy(
+            assets.join("third_party/engine-tools").join(relative),
+            target,
+        )
+        .unwrap();
+        write_json(&tools.root.join("engine-tools/current.json"), &pin).unwrap();
+        let service =
+            EngineService::new(&assets, tools).with_shared_directory(root.path().join("shared"));
+        fs::create_dir_all(workspace.join("src")).unwrap();
+        fs::create_dir_all(workspace.join("resources")).unwrap();
+        fs::write(
+            workspace.join("src/adapter.py"),
+            include_str!("../tests/fixtures/json_adapter.py"),
+        )
+        .unwrap();
+        fs::write(
+            request.game_directory.join("text.json"),
+            "[\"原文\",\"second\"]",
+        )
+        .unwrap();
+        fs::copy(
+            request.game_directory.join("text.json"),
+            workspace.join("resources/text.json"),
+        )
+        .unwrap();
+        state.extra.insert(
+            "resourceHashes".into(),
+            json!({"text.json":hash_file(&request.game_directory.join("text.json")).unwrap()}),
+        );
+        register_python(&mut state, "src/adapter.py").unwrap();
+        request.limits.maximum_turns = 3;
+        let tool_response = |id: &str, name: &str, args: Value| json!({"id":id,"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","tool_calls":[{"id":id,"type":"function","function":{"name":name,"arguments":args.to_string()}}]}}],"usage":{"prompt_tokens":100,"completion_tokens":20}});
+        let (provider, server) = model(vec![
+            tool_response(
+                "trial",
+                "test_adapter",
+                json!({"kind":"engine","key":"fixture","name":"Fixture","resourcePatterns":["*.json"],"trialFiles":["text.json"]}),
+            ),
+            tool_response("finish", "finish", json!({"summary":"Fixture verified"})),
+        ]);
+        let events = std::sync::Mutex::new(Vec::new());
+        let result = run(
+            &service,
+            &request,
+            &provider,
+            &workspace,
+            &workspace.join("session.json"),
+            &mut state,
+            "continue".into(),
+            &CancellationToken::new(),
+            None,
+            &|event| {
+                events.lock().unwrap().push(event);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 2);
+        let host: Vec<_> = events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| event["operation"] == "host-step-end")
+            .cloned()
+            .collect();
+        assert_eq!(host.len(), 1);
+        assert_eq!(host[0]["stage"], "finish-ready");
+        assert_eq!(host[0]["passed"], true);
+        assert_eq!(result.0, AdaptationStatus::Activated);
+        assert!(
+            requests[1]["messages"]
+                .to_string()
+                .contains("宿主已按现有参数自动执行")
+        );
+        assert_eq!(
+            fs::read_to_string(request.game_directory.join("text.json")).unwrap(),
+            "[\"原文\",\"second\"]"
+        );
+    }
+
+    #[tokio::test]
+    async fn identical_failed_verification_defers_a_third_model_decision() {
+        let root = tempfile::tempdir().unwrap();
+        let (service, mut request, workspace, mut state) = fixture(root.path());
+        request.limits.maximum_turns = 5;
+        let response = |id: &str| json!({"id":id,"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","tool_calls":[{"id":id,"type":"function","function":{"name":"test_adapter","arguments":json!({"kind":"engine","key":"fixture","name":"Fixture","resourcePatterns":["*.json"]}).to_string()}}]}}],"usage":{"prompt_tokens":100,"completion_tokens":20}});
+        let (provider, server) = model(vec![response("first"), response("same")]);
+        let result = run(
+            &service,
+            &request,
+            &provider,
+            &workspace,
+            &workspace.join("session.json"),
+            &mut state,
+            "continue".into(),
+            &CancellationToken::new(),
+            None,
+            &|_| Ok(()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(server.join().unwrap().len(), 2);
+        assert_eq!(result.0, AdaptationStatus::Incomplete);
+        assert!(result.1.contains("没有新增证据"));
+        assert_eq!(state.repairs.len(), 1);
     }
 
     #[test]

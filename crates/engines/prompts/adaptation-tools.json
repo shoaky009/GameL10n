@@ -28,6 +28,7 @@
         "remove_file",
         "run_tool",
         "run_engine_python",
+        "inspect_font_coverage",
         "test_adapter",
         "update_release_files",
         "finish"
@@ -1347,6 +1348,23 @@
             "executable",
             "arguments"
           ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "inspect_font_coverage",
+        "description": "Batch-check all Unicode characters from a local translation corpus against 1..4 SFNT/TTC fonts. Rust reads cmap, including supplementary characters, and saves full missing-codepoint results in work/. Returns bounded findings and hashes. Does not install/convert fonts, change translations or prove engine fallback, atlas or rendering. Unreadable formats remain unknown. Use windows-font-metrics for actual GDI/GDI+ requests.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "translationsFile": {"type": "string", "description": "Workspace UTF-8 JSON: array of strings or ID-to-translation strings, up to 64 MiB."},
+            "fonts": {"type": "array", "minItems": 1, "maxItems": 4, "items": {"type":"object", "properties":{"path":{"type":"string"},"faceIndex":{"type":"integer","minimum":0}},"required":["path"],"additionalProperties":false}},
+            "reportFile": {"type": "string", "description": "Separate work/*.json report path."}
+          },
+          "required": ["translationsFile", "fonts", "reportFile"],
           "additionalProperties": false
         }
       }
