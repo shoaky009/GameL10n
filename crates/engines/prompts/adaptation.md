@@ -36,6 +36,12 @@ Preserve usable partial code and build on confirmed results. On continuation, us
 do not restart discovery or research an already resolved layer. Missing implementation is work remaining, not incompatibility.
 Research one concrete uncertainty that affects the current implementation, decide what result would change your approach, and probe it.
 Batch known addresses/boundaries into one parameterized script. Reuse that script and one findings file instead of adding one per check.
+When the decisive question changes, accompany the next normal tools with report_progress(problem, hypotheses, evidenceRefs).
+Use workflow for shared orchestration, engineFamily for reusable format/component behavior, and engineVariant for conditional layouts/parameters.
+Keep the problem id stable while investigating it. Record concise concrete findings and existing tool call IDs, including failed experiments;
+supported/refuted are model judgments, never host acceptance. Do not add a model request just to update this state.
+Requests contain current host state, relevant evidence and a few complete recent exchanges. Earlier calls, layouts and output remain available
+through read_tool_result/read_session_history. Read precise missing evidence rather than restarting an investigation.
 Prioritize the current game's real text paths and reported omissions. Expand coverage using actual format/runtime evidence;
 do not postpone implementation indefinitely to prove every hypothetical input, name/config combination or unrelated EXE subsystem.
 An observed collision or corruption must be fixed or explicitly excluded from support, never silently ignored.
@@ -83,11 +89,17 @@ Tool execution:
 - Batch independent reads/searches (prefer 2-6 calls). Results are saved in order.
 - Prefer replace_text for local changes: supply one exact unique oldText and its replacement; unchanged text stays intact.
   Split new implementations into small Python files and deliver one executable piece at a time rather than generating the full adapter in one turn.
-- Batch up to 8 known write_file/replace_text calls, optionally ending with ONE run_engine_python or run_tool. Writes run first;
+- Batch up to 8 known write_file/replace_text calls, optionally ending with ONE run_engine_python, run_tool or test_adapter (counts toward 8). Writes run first;
   a failure/uncertain interruption skips the dependent operations. Wait for results before deciding further work.
-- Staging, copying dependencies, test_adapter, finish, checkpoint and report_blocker each require a standalone call.
+- When all arguments are already known, batch stage_resources → compose_adapter_template → test_adapter (first/last optional).
+  This uses the existing components and verifier; do not guess arguments that depend on an unseen result. Every step is saved;
+  a failure or uncertain interruption stops dependent steps. Copying dependencies, finish, checkpoint and report_blocker remain standalone.
 - Temporary analysis/probe scripts must be work/*.py, executed with run_engine_python and the bundled shared interpreter.
   For a new or updated probe, supply script + content in one run_engine_python call instead of separate write/run turns.
+  For multi-candidate experiments, add questionId and reportFile=work/...json. Write the full JSON to GAMEL10N_REPORT_FILE;
+  include status=completed/partial/failed, optional tested/matched, a concise summary and representative string failures.
+  The host returns bounded findings with the report hash; read_file retrieves details. stdout/stderr remain in read_tool_result.
+  A report is an observation from your script, not independent verification or publication permission.
   Formal adapter entry is src/adapter.py. Reuse standard-library, pinned engine APIs and precompiled components;
   never generate C# or create MSBuild/project/restore/compiler shell scaffolding.
   Keep readable source lines. Inspect the reported traceback line and bounds before retrying;

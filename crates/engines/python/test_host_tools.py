@@ -91,6 +91,85 @@ class HostToolsTest(unittest.TestCase):
         self.assertIn('1 MiB', large['error'])
         self.assertLessEqual(len(large['stdout'].encode()) + len(large['stderr'].encode()), 1 << 20)
 
+    def test_experiment_report_returns_bounded_observations_and_retains_full_local_details(self):
+        result = self.execute('run', script='work/report.py', questionId='archive-filter',
+                              reportFile='work/reports/report.json', workingDirectory='work/nested', content='''
+import json, os
+from pathlib import Path
+report = dict(status='completed', tested=24, matched=2, summary='结论' * 2000,
+              failures=['failure' * 1000] * 20, details=list(range(20000)), passed=True)
+Path(os.environ['GAMEL10N_REPORT_FILE']).write_text(json.dumps(report), encoding='utf-8')
+print(os.environ['GAMEL10N_QUESTION_ID'])
+''')
+        report = result['report']
+        self.assertTrue(result['success'])
+        self.assertEqual(result['questionId'], 'archive-filter')
+        self.assertEqual((report['tested'], report['matched']), (24, 2))
+        self.assertEqual(report['source'], 'script-observation')
+        self.assertFalse(report['validation'])
+        self.assertLess(len(json.dumps(report, ensure_ascii=False).encode('utf-8')), 6144)
+        self.assertNotIn('passed', report)
+        self.assertEqual(len(report['failures']), 4)
+        self.assertEqual(report['failureCount'], 20)
+        data = (self.root / report['file']).read_bytes()
+        self.assertEqual(report['sha256'], __import__('hashlib').sha256(data).hexdigest())
+        self.assertEqual(len(json.loads(data)['details']), 20000)
+        self.assertEqual(len(result['scriptSha256']), 64)
+
+    def test_missing_stale_or_malformed_report_does_not_erase_process_diagnostics(self):
+        for data in (None, '{invalid', '{"status":"completed"}'):
+            with self.subTest(data=data):
+                path = self.root / 'work/result.json'
+                path.unlink(missing_ok=True)
+                if data is not None:
+                    path.write_text(data, encoding='utf-8')
+                result = self.execute('run', script='work/stale.py', reportFile='work/result.json',
+                                      content='import sys;print("original diagnostic",file=sys.stderr);sys.exit(3)')
+                self.assertFalse(result['success'])
+                self.assertEqual(result['exitCode'], 3)
+                self.assertIn('original diagnostic', result['stderr'])
+                self.assertIn('reportError', result)
+                self.assertNotIn('report', result)
+        missing = self.execute('run', script='work/missing.py', reportFile='work/absent.json', content='pass')
+        self.assertFalse(missing['success'])
+        self.assertEqual(missing['phase'], 'report')
+
+    def test_failed_probe_keeps_partial_report_without_granting_verification(self):
+        result = self.execute('run', script='work/partial.py', reportFile='work/partial.json', content='''
+import os, sys
+from pathlib import Path
+Path(os.environ['GAMEL10N_REPORT_FILE']).write_text('{"status":"partial","tested":4,"matched":1}')
+print('later candidate failed', file=sys.stderr)
+sys.exit(3)
+''')
+        self.assertFalse(result['success'])
+        self.assertEqual(result['exitCode'], 3)
+        self.assertEqual(result['report']['status'], 'partial')
+        self.assertFalse(result['report']['validation'])
+
+    def test_report_scope_and_question_id_are_checked_before_execution(self):
+        for args in (dict(reportFile='../escaped.json'), dict(reportFile='src/report.json'),
+                     dict(reportFile='work/report.txt'), dict(questionId='bad/id'), dict(questionId=True)):
+            with self.subTest(args=args), self.assertRaises(ValueError):
+                self.execute('run', script='work/should-not-write.py', content='raise RuntimeError("executed")', **args)
+        self.assertFalse((self.root / 'work/should-not-write.py').exists())
+
+    def test_invalid_report_fields_and_oversized_reports_reject_the_observation(self):
+        for data in ('{}', '[]', '{"status":"passed"}', '{"status":"completed","tested":true}',
+                     '{"status":"completed","tested":1,"matched":2}', '{"status":"completed","summary":[]}',
+                     '{"status":"completed","failures":[1]}', '{"status":"completed","tested":NaN}',
+                     ' ' * ((8 << 20) + 1)):
+            with self.subTest(data=data[:80]):
+                result = self.execute('run', script='work/invalid-report.py', reportFile='work/invalid.json',
+                                      stdin=data, content='''
+import os, sys
+from pathlib import Path
+Path(os.environ['GAMEL10N_REPORT_FILE']).write_text(sys.stdin.read(), encoding='utf-8')
+''')
+                self.assertFalse(result['success'])
+                self.assertEqual(result['phase'], 'report')
+                self.assertNotIn('report', result)
+
     def test_timeout_retains_output_and_explicit_run_phase(self):
         result = self.execute('run', script='work/slow.py', timeoutSeconds=1,
                               content='import time;print("started",flush=True);time.sleep(5)')

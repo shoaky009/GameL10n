@@ -116,7 +116,7 @@
       "type": "function",
       "function": {
         "name": "report_progress",
-        "description": "Brief Chinese progress for the user when evidence or direction changes. exploring: unresolved issue and next probe; breakthrough: observed evidence and what it enables; implementing: established route; correction: retract an earlier claim. <=400 characters, no private reasoning, percentages or ETA. Accompany normal tools in the same response; no extra model turn. This report never validates or publishes an adapter.",
+        "description": "Brief Chinese progress when evidence/direction changes: exploring, breakthrough, implementing or correction. <=400 characters, no private reasoning, percentages or ETA. Accompany normal tools; no extra model turn. Optional problem/hypotheses/evidenceRefs update decision state before the associated work. Model hypotheses and script observations never validate or publish an adapter.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -133,6 +133,38 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 400
+            },
+            "problem": {
+              "type": "object",
+              "description": "Current uncertainty. Stable id within a problem; changing id selects new evidence and resets hypotheses unless supplied.",
+              "properties": {
+                "id": {"type": "string", "minLength": 1, "maxLength": 80},
+                "layer": {"type": "string", "enum": ["workflow", "engineFamily", "engineVariant"]},
+                "question": {"type": "string", "minLength": 1, "maxLength": 600}
+              },
+              "required": ["id", "layer", "question"],
+              "additionalProperties": false
+            },
+            "hypotheses": {
+              "type": "array",
+              "maxItems": 4,
+              "description": "Replaces current model hypotheses, not host verification. Retain precise layout/parameter findings here; evidence uses existing tool call IDs.",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "statement": {"type": "string", "minLength": 1, "maxLength": 600},
+                  "status": {"type": "string", "enum": ["open", "supported", "refuted"]},
+                  "evidence": {"type": "array", "maxItems": 3, "items": {"type": "string"}}
+                },
+                "required": ["statement", "status"],
+                "additionalProperties": false
+              }
+            },
+            "evidenceRefs": {
+              "type": "array",
+              "maxItems": 8,
+              "items": {"type": "string"},
+              "description": "Associate existing tool call IDs with this problem, including archived results. Unknown IDs reject the update."
             }
           },
           "required": [
@@ -888,7 +920,7 @@
       "type": "function",
       "function": {
         "name": "run_engine_python",
-        "description": "Run one script OR pinned library module. For a new/updated work/*.py probe, supply script + content to write and run in ONE call; a failed write prevents execution. Omit content to rerun an existing script or call a module CLI directly. Bundled portable Python, UTF-8 IO, no downloads/pip/pycache. Use staged samples and concise counts/differences/samples. Long output is previewed; read_tool_result retrieves the retained original. Can follow edits in one ordered batch.",
+        "description": "Run one script OR pinned library module. Supply script + content to write/run a work/*.py probe in ONE call. Use staged samples, shared Python, UTF-8, no pip/downloads. Optional reportFile stores full JSON locally and returns bounded status/counts/summary/failures plus hash; use GAMEL10N_REPORT_FILE (absolute) in the script. Report requires status=completed/partial/failed; tested/matched, summary and failures are optional. Reports are observations, not verification. Long stdout is previewed; read_tool_result retains original output. Can follow edits in one ordered batch.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -922,6 +954,15 @@
               "minimum": 1,
               "maximum": 600,
               "default": 120
+            },
+            "questionId": {
+              "type": "string",
+              "maxLength": 80,
+              "description": "Problem id for this observation (letters/digits/-_.); defaults to the current problem."
+            },
+            "reportFile": {
+              "type": "string",
+              "description": "Workspace-relative work/*.json output, <=8 MiB. Script must create/update it in this run; full details stay in this file."
             }
           },
           "required": [],
@@ -1016,7 +1057,7 @@
       "type": "function",
       "function": {
         "name": "compose_adapter_template",
-        "description": "Compose a complete standalone adapter from list_adapters.templates: resource rules, fixed archive entry, bundled script parser, protocol glue and release selection. No model-written wrapper, pip or downloads; preserves differing existing files. Optional resourcePatterns narrows discovery; defaults come from the template. XP3 requires independently established filter=none. Returns testArguments for mandatory test_adapter; does not stage samples, verify, publish or activate. Call alone.",
+        "description": "Compose a standalone adapter from list_adapters.templates: resource rules, archive entry, bundled script parser, protocol glue and release selection. No wrapper/pip/downloads; preserves differing files. Optional resourcePatterns narrows discovery. XP3 requires independently established filter=none. Returns testArguments for mandatory test_adapter. May follow stage_resources and/or precede test_adapter in one ordered batch when every argument is already known. Generation never verifies or publishes support.",
         "parameters": {
           "type": "object",
           "properties": {

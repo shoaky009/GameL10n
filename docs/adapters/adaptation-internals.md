@@ -127,13 +127,43 @@ VNTextPatch 原生依赖按内容哈希保留于 `extensions/engine-tools/native
 
 继续任务读取源码清单、暂存资源、验收结果、笔记和未完成步骤，跳过首次匹配。切换模型或协议保留这份进度快照。
 
+每次模型请求由当前目标、约束、问题、假设、相关证据及最近最多四轮完整交互构成，通常将交互控制在 64 KiB 内；最后一轮完整保留。发送前先选取交互，再生成工具预览，避免反复复制全部历史源码。问题改变时重新选择证据与工具组，目标或补充要求改变时清除旧问题和假设，已有源码与历史仍保留。旧版会话可从现有工具结果建立证据索引，无须重新调查。
+
 工具结果首次发送后保持预览稳定，普通成功结果超过 8 KiB 时提供首尾与读取入口；重复结果引用已有内容。完整消息保存在[会话历史](../data-storage.md#提交与恢复)，通过 `read_tool_result` 或 `read_session_history` 查询，不重跑工具。
 
 切换任务目标或更新补充要求时，宿主在下一次请求前保存阶段快照，避免修复任务持续重放最初开发阶段的全部工作历史；要求未变化的普通继续不触发此操作。当前目标内，资源发现、原文回填、局部试验或完整验收首次取得真实进展，且可见历史超过 64 KiB 或参与请求的原始历史超过 256 KiB 时，直接压缩历史，不额外要求模型生成总结。缓存验收和 `report_progress` 不触发阶段压缩，也不证明验收完成。
 
 其他情况下，可见历史超过 192 KiB 或参与请求的原始历史超过 768 KiB 时提醒 `checkpoint`，未响应时宿主自动压缩。阶段快照保留当前目标、最新用户要求、已有笔记、验证状态、源码和工作文件位置，以及最多八项失败工具的诊断摘录与原始证据位置；不会将单次工具失败推断为整条路线已被否定。各类压缩均保留最近最多四轮完整交互，通常控制在 64 KiB 内；最后一轮即使超出该上限也完整保留，避免丢失当前修改或拆散多工具结果。工具调用、结果和关联的 Responses 推理项成组保留，不局部改写推理。更早的精确消息、源码写入和失败输出仍可定向查回。
 
-支持独立只读批次，以及最多 8 项的顺序写入批次：前置项为 `write_file`／`replace_text`，最后可执行一次 `run_engine_python`／`run_tool`。每项单独提交，前置失败或结果未确认时后续不执行；暂存、验收、发布及 checkpoint 不参与批次。
+支持独立只读批次，以及最多 8 项的顺序编辑批次：前置项为 `write_file`／`replace_text`，最后可执行一次 `run_engine_python`／`run_tool`／`test_adapter`，末项计入上限。另可按 `stage_resources → compose_adapter_template → test_adapter` 连续执行，首末项可省略；每步参数必须已确定。仍使用原有资源准备、模板和验收器，没有按模型说明推断出的自动发布。每项执行前后保存状态，前置失败或结果未确认时后续不执行；发布、checkpoint 和停止须单独调用。继续会话时，尚未开始的步骤可恢复，中断时正在执行及其依赖步骤须重新判断。
+
+## 决策状态与实验报告
+
+会话的 `decision` 保存当前问题、模型假设与工具证据引用，不另存一套资源哈希、覆盖范围或验收结论。三层职责为：
+
+| 层面 | 职责 |
+| --- | --- |
+| 所有引擎（`workflow`） | 问题状态、上下文构造、执行调度与统一验收 |
+| 引擎家族（`engineFamily`） | 复用解析器、封包组件、组合模板及成批实验 |
+| 具体配置（`engineVariant`） | 保存已确认布局、参数和字段规则，随现有适配器及固定依赖发布 |
+
+`report_progress` 可在正常操作的同一次响应中附带 `problem`、`hypotheses` 与 `evidenceRefs`。问题 ID 保持稳定；改变 ID 会重选证据，并清除未再次提交的旧假设。假设状态 `open`／`supported`／`refuted` 均为模型判断，不授予兼容或发布资格。引用必须对应已经保存的工具结果，尚未执行的调用不能作为证据。
+
+证据使用原始 `toolCallId` 和稳定的 `messageIndex` 定位，跨历史归档及重启仍可回查。引用附带当时已登记暂存资源哈希的摘要；摘要变化会在请求中标出，未知版本保留为未知。这只提示实验的输入范围，验收缓存的复用仍由既有指纹校验决定。原始消息、Responses 推理项和调用结果不因请求筛选而改写。
+
+`run_engine_python` 可增加可选的 `questionId` 和 `reportFile`，一次执行遍历、筛选与比较，将完整报告保留在 `work/`：
+
+```json
+{
+  "script": "work/check_candidates.py",
+  "questionId": "archive-filter",
+  "reportFile": "work/reports/filter-check.json"
+}
+```
+
+脚本通过环境变量 `GAMEL10N_REPORT_FILE` 取得报告的绝对路径，不受 `workingDirectory` 影响；`GAMEL10N_QUESTION_ID` 提供问题 ID。报告须为至多 8 MiB 的 JSON 对象，含 `status=completed/partial/failed`；可选非负整数 `tested`／`matched`、字符串 `summary` 与字符串数组 `failures`，详细候选、字段和偏移可放在其他字段。
+
+工具回传状态、计数、有限摘要、最多四条代表性失败，以及脚本和报告哈希。完整报告用工作区文件工具读取，完整标准输出与错误输出经 `read_tool_result` 回查。报告缺失、未更新、格式无效或超限会明确报错；脚本失败时保留原进程诊断及可读的部分报告。自编报告属于实验观察，不能代替独立原文、中文回填和发布验收。
 
 ## 中断与停止判定
 
@@ -164,6 +194,7 @@ Token 旁的“第 X 轮”统计 API 请求，包含失败与重试，不包含
 | 输入、输出与 `cachedTokens` | 服务商用量，缓存属于输入，缺失与零值区分 |
 | `cacheHitRate`、`missingCacheUsage` | 有缓存计数请求的缓存／输入总量，以及计数缺失请求数 |
 | 上下文与工具定义大小 | 实际请求、保留历史和裁剪规模 |
+| `decisionHistoryStart`、`decisionEvidenceCount`、`problemId` | 当前请求选取的历史起点、证据数量与问题 |
 | 调用 ID、参数指纹、路径、范围与诊断 | 定位工具执行和重复工作 |
 | `verification-phase`、`fingerprintStats` | 验收阶段、修改条数、哈希与探测的读取规模 |
 | `automatic-template` | 模板阶段、输入／脚本／实际读取量及脚本和媒体包数量 |
@@ -177,6 +208,7 @@ Token 旁的“第 X 轮”统计 API 请求，包含失败与重试，不包含
 | 代码 | 职责 |
 | --- | --- |
 | `crates/engines/src/adaptation_flow.rs` | 会话、提示、恢复与停止 |
+| `crates/engines/src/adaptation_decision.rs` | 问题、证据引用与决策上下文 |
 | `crates/core/src/engine_tasks.rs` | 项目原文与识别结果提交 |
 | `crates/engines/src/service.rs` | 候选、复用验收与失败证据 |
 | `crates/engines/src/adaptation.rs` | 工具参数、分派与批次 |

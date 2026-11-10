@@ -591,6 +591,19 @@ def prepare_siglus_zip(request):
 
 def run(request):
     workspace = Path(request['workspace']).resolve()
+    report = request.get('reportFile')
+    previous_report = None
+    if report is not None:
+        if not isinstance(report, str) or not report.startswith('work/') or not report.endswith('.json'):
+            raise ValueError('reportFile 必须是 work/ 下的 JSON 输出文件。')
+        report_path = safe(workspace, report)
+        if report_path.exists():
+            stat = report_path.stat()
+            previous_report = (stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size)
+    question = request.get('questionId')
+    if question is not None and (not isinstance(question, str) or not 1 <= len(question.encode('utf-8')) <= 80
+                                 or not all(c.isalnum() or c in '-_.' for c in question)):
+        raise ValueError('questionId 必须为 1～80 字节的字母、数字或 -_.。')
     script = request.get('script')
     module = request.get('module')
     if bool(script) == bool(module):
@@ -621,7 +634,66 @@ def run(request):
     paths = request.get('toolPaths') or {}
     if paths.get('hostCommand'): environment['GAMEL10N_ADAPTER_HOST'] = json.dumps(paths['hostCommand'])
     if paths.get('vnTextPatchCommand'): environment['GAMEL10N_VNTEXTPATCH_COMMAND'] = json.dumps(paths['vnTextPatchCommand'])
-    return run_process([sys.executable, '-I', '-X', 'utf8', '-c', code, *target, *arguments], workspace, request, environment)
+    # Reports are workspace-relative even when the probe uses a different working directory.
+    if report is not None:
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        environment['GAMEL10N_REPORT_FILE'] = str(report_path)
+    if question is not None:
+        environment['GAMEL10N_QUESTION_ID'] = question
+    script_hash = hashlib.sha256(path.read_bytes()).hexdigest() if script else None
+    result = run_process([sys.executable, '-I', '-X', 'utf8', '-c', code, *target, *arguments], workspace, request, environment)
+    if question is not None:
+        result['questionId'] = question
+    if script_hash is not None:
+        result['scriptSha256'] = script_hash
+    if report is not None:
+        try:
+            # Recheck scope after running user-written code; a stale report is never a new observation.
+            report_path = safe(workspace, report)
+            stat = report_path.stat()
+            if previous_report == (stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size):
+                raise ValueError('脚本未更新 reportFile，不能复用上次实验报告。')
+            with report_path.open('rb') as stream:
+                data = stream.read((8 << 20) + 1)
+            if len(data) > 8 << 20:
+                raise ValueError('实验报告超过 8 MiB，请拆分实验或缩小报告。')
+            result['report'] = experiment_report(data)
+            result['report'].update(file=report, sha256=hashlib.sha256(data).hexdigest(), bytes=len(data),
+                                    source='script-observation', validation=False)
+            if result['report']['status'] == 'failed':
+                result['success'] = False
+                result['error'] = result['error'] or '实验报告记录失败，请检查报告与诊断。'
+        except (OSError, ValueError, RecursionError) as error:
+            result['reportError'] = str(error)
+            if result['success']:
+                result.update(success=False, phase='report', error=str(error))
+    return result
+
+
+def experiment_report(data):
+    def invalid_constant(value):
+        raise ValueError('实验报告不能包含非有限数字。')
+    value = json.loads(data.decode('utf-8-sig'), parse_constant=invalid_constant)
+    if not isinstance(value, dict) or value.get('status') not in ('completed', 'partial', 'failed'):
+        raise ValueError('实验报告必须是包含 status=completed/partial/failed 的 JSON 对象。')
+    result = dict(status=value['status'])
+    for name in ('tested', 'matched'):
+        if name in value:
+            if type(value[name]) is not int or value[name] < 0 or value[name] > (1 << 63) - 1:
+                raise ValueError(f'报告 {name} 必须是非负整数。')
+            result[name] = value[name]
+    if 'tested' in result and result.get('matched', 0) > result['tested']:
+        raise ValueError('报告 matched 不能超过 tested。')
+    if 'summary' in value:
+        if not isinstance(value['summary'], str):
+            raise ValueError('报告 summary 必须是字符串。')
+        result['summary'] = value['summary'][:600]
+    if 'failures' in value:
+        if not isinstance(value['failures'], list) or not all(isinstance(f, str) for f in value['failures']):
+            raise ValueError('报告 failures 必须是字符串数组。')
+        result['failureCount'] = len(value['failures'])
+        result['failures'] = [failure[:160] for failure in value['failures'][:4]]
+    return result
 
 
 def run_process(command, workspace, request, environment=None):

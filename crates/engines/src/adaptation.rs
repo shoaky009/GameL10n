@@ -22,6 +22,8 @@ use serde_json::{Value, json};
 mod automatic;
 #[path = "adaptation_components.rs"]
 mod components;
+#[path = "adaptation_decision.rs"]
+mod decision;
 #[path = "adaptation_failure.rs"]
 mod failure;
 #[path = "adaptation_flow.rs"]
@@ -180,6 +182,7 @@ pub(crate) struct Session {
     pub family: Value,
     pub text_coverage: Value,
     pub progress_note: Value,
+    pub decision: decision::DecisionState,
     pub verified_package: Option<Value>,
     pub verified_fingerprint: Option<String>,
     pub verification: Option<VerificationResult>,
@@ -798,8 +801,11 @@ impl EngineService {
                         "进度说明必须为 1 到 400 字符。".into(),
                     ));
                 }
+                decision::update(state, args)?;
                 let changed = state.update_progress(kind, message, Some(name), progress);
-                Ok(json!({"changed":changed,"note":state.progress_note,"validation":false}))
+                Ok(
+                    json!({"changed":changed,"note":state.progress_note,"problem":state.decision.current_problem,"validation":false}),
+                )
             }
             "list_files" | "read_file" | "search_text" => {
                 let mut params = args.clone();
@@ -1195,9 +1201,19 @@ impl EngineService {
                     .await
             }
             "run_engine_python" => {
+                if let Some(id) = args.get("questionId") {
+                    decision::validate_question_id(id.as_str().ok_or_else(|| {
+                        EngineError::Protocol("questionId 必须是字符串。".into())
+                    })?)?;
+                }
                 let mut params = args.clone();
                 params["operation"] = json!("run");
                 params["workspace"] = json!(workspace);
+                if params.get("questionId").is_none()
+                    && let Some(problem) = &state.decision.current_problem
+                {
+                    params["questionId"] = json!(problem.id);
+                }
                 params["toolPaths"] = self
                     .tool_paths(Some(&workspace.join("src")), cancellation)
                     .await?;
@@ -3849,12 +3865,26 @@ fn validate_batch(calls: &[ToolCall]) -> Result<(), String> {
             "replace_text",
             "run_engine_python",
             "run_tool",
+            "test_adapter",
         ]
         .contains(&work[work.len() - 1].name.as_str())
     {
         return Ok(());
     }
-    Err("本批未执行：可批量最多 6 项独立读取，或按顺序提交最多 8 项 write_file/replace_text（末项可为一次 run_engine_python/run_tool，计入 8 项）。其他操作，尤其暂存、验证、发布、checkpoint 和停止，请单独调用。".into())
+    let names: Vec<_> = work.iter().map(|call| call.name.as_str()).collect();
+    if matches!(
+        names.as_slice(),
+        ["stage_resources", "compose_adapter_template"]
+            | ["compose_adapter_template", "test_adapter"]
+            | [
+                "stage_resources",
+                "compose_adapter_template",
+                "test_adapter"
+            ]
+    ) {
+        return Ok(());
+    }
+    Err("本批未执行：可批量最多 6 项独立读取；或顺序提交最多 8 项编辑，末项可为一次 run_engine_python/run_tool/test_adapter；或按 stage_resources → compose_adapter_template → test_adapter 顺序组合（首末可省略）。所有参数须已明确，前置失败即跳过后续。发布、checkpoint 和停止请单独调用。".into())
 }
 
 pub(crate) fn definition(
@@ -4873,8 +4903,8 @@ mod tests {
     }
 
     #[test]
-    fn write_batches_count_the_final_local_run_toward_eight_operations() {
-        for run in ["run_engine_python", "run_tool"] {
+    fn write_batches_count_the_final_run_or_verification_toward_eight_operations() {
+        for run in ["run_engine_python", "run_tool", "test_adapter"] {
             let mut names = vec!["write_file"; 7];
             names.push(run);
             assert!(validate_batch(&batch_calls(&names)).is_ok(), "{run}");
@@ -4891,11 +4921,33 @@ mod tests {
             vec!["run_engine_python", "write_file"],
             vec!["write_file", "run_engine_python", "run_tool"],
             vec!["stage_resources", "read_file"],
-            vec!["write_file", "test_adapter"],
             vec!["write_file", "finish"],
             vec!["read_file", "checkpoint"],
             vec!["fetch_url", "inspect_engine_reference"],
             vec!["inspect_siglus_game", "read_file"],
+        ] {
+            assert!(validate_batch(&batch_calls(&names)).is_err(), "{names:?}");
+        }
+    }
+
+    #[test]
+    fn template_batches_allow_only_explicit_preparation_composition_and_verification() {
+        for names in [
+            vec!["stage_resources", "compose_adapter_template"],
+            vec!["compose_adapter_template", "test_adapter"],
+            vec![
+                "stage_resources",
+                "compose_adapter_template",
+                "test_adapter",
+            ],
+        ] {
+            assert!(validate_batch(&batch_calls(&names)).is_ok(), "{names:?}");
+        }
+        for names in [
+            vec!["stage_resources", "test_adapter"],
+            vec!["compose_adapter_template", "stage_resources"],
+            vec!["compose_adapter_template", "finish"],
+            vec!["test_adapter", "write_file"],
         ] {
             assert!(validate_batch(&batch_calls(&names)).is_err(), "{names:?}");
         }

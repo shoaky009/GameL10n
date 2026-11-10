@@ -1094,6 +1094,28 @@ pub(crate) fn knowledge_context(
     Ok(KnowledgeContext { context, entries })
 }
 
+pub(crate) fn builtin_guidance(state: &Session, disabled: &BTreeSet<String>) -> &'static str {
+    if state
+        .extra
+        .get("builtinDiscovery")
+        .and_then(|r| r["candidates"].as_array())
+        .is_some_and(|candidates| {
+            candidates.iter().any(|candidate| {
+                matches!(
+                    candidate["format"].as_str(),
+                    Some("KirikiriKs" | "KirikiriSoc")
+                ) && !candidate["adapterId"]
+                    .as_str()
+                    .is_some_and(|id| disabled.contains(id))
+            })
+        })
+    {
+        KIRIKIRI_SUMMARY
+    } else {
+        ""
+    }
+}
+
 pub(crate) fn builtin_context(
     state: &Session,
     disabled: &BTreeSet<String>,
@@ -1158,14 +1180,10 @@ pub(crate) fn builtin_context(
         "\n尚无通过的解析样本时，用 inspect_builtin_adapter 查看相关能力，stage_resources 准备样本，try_builtin_adapter 验证；已有调查按当前进度继续。解析可用时 copy_adapter 复用解析库，只补缺失环节。"
     };
     context += "记录的试验只覆盖列出的文件及哈希，不替代当前资源的最终 test_adapter；样本未变时沿用结论，勿重复调查。";
-    if candidates.iter().any(|candidate| {
-        matches!(
-            candidate["format"].as_str(),
-            Some("KirikiriKs" | "KirikiriSoc")
-        )
-    }) {
+    let guidance = builtin_guidance(state, disabled);
+    if !guidance.is_empty() {
         context.push('\n');
-        context += KIRIKIRI_SUMMARY;
+        context += guidance;
     }
     Ok(context)
 }
@@ -1333,6 +1351,13 @@ mod tests {
         assert!(context.contains("不要重复起步调查"));
         assert!(context.contains(KIRIKIRI_SUMMARY));
         assert!(!context.contains("privateDetail"));
+        assert!(
+            builtin_guidance(
+                &state,
+                &BTreeSet::from(["engine.vntextpatch-kirikiri-ks".into()])
+            )
+            .is_empty()
+        );
     }
 
     #[test]

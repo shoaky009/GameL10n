@@ -86,7 +86,12 @@ fn process_preview(value: &Value, original: &str, id: &str) -> String {
         if !target.is_object() {
             continue;
         }
-        for (name, limit, start) in [("stdout", 4000, 2000), ("stderr", 3000, 1000)] {
+        let reported = target["report"].is_object();
+        for (name, limit, start) in if reported {
+            [("stdout", 512, 256), ("stderr", 2048, 1024)]
+        } else {
+            [("stdout", 4000, 2000), ("stderr", 3000, 1000)]
+        } {
             let Some(text) = target[name].as_str() else {
                 continue;
             };
@@ -147,7 +152,8 @@ pub(super) fn for_request(history: &[Value]) -> Replay {
         result.process_bytes_saved += original.len().saturating_sub(preview.len());
         let fingerprint = (original.len() > 2048).then(|| hash_text(original));
         let previous = fingerprint.as_ref().and_then(|key| seen.get(key));
-        if (success && preview.len() > 8192) || previous.is_some() {
+        let reported = parsed["report"].is_object() || parsed["result"]["report"].is_object();
+        if (success && preview.len() > 8192 && !reported) || previous.is_some() {
             message["content"] = json!(json!({"success":success,"previousResultOmitted":true,"toolCallId":id,"originalCharacters":original.chars().count(),"identicalTo":previous,"preview":head(&preview,1536),"tail":tail(&preview,512),"readBack":if previous.is_some(){"Exact repeat of the earlier identicalTo result; use that result or read_tool_result to retrieve the retained original without rerunning the operation."}else{"read_tool_result(toolCallId, offset, length, query) reads the retained original result. Omitted is not missing or failed."}}).to_string());
             result.omitted += 1;
         } else if preview != original {
@@ -217,6 +223,31 @@ pub(super) fn recent_call_names(history: &[Value]) -> BTreeSet<String> {
                 .map(|(_, name)| name)
         })
         .collect()
+}
+
+/// Select whole exchanges before previewing or cloning their potentially large source writes.
+pub(super) fn decision_window(history: &[Value], problem_start: usize) -> std::ops::Range<usize> {
+    let mut start = history.len();
+    let mut bytes = 0;
+    for group in exchanges(history).iter().rev().take(4) {
+        if start != history.len() && group.end <= problem_start {
+            break;
+        }
+        let size = history[group.clone()]
+            .iter()
+            .map(visible_json_bytes)
+            .sum::<usize>();
+        if start != history.len() && bytes + size > 64 * 1024 {
+            break;
+        }
+        start = group.start;
+        bytes += size;
+    }
+    if start == history.len() {
+        // The initial inventory and trailing host notices are ordinary user messages.
+        start = 0;
+    }
+    start..history.len()
 }
 
 pub(super) fn recent(history: &[Value], skip_latest: bool) -> Vec<Value> {
@@ -314,6 +345,26 @@ mod tests {
         assert_eq!(preview["timedOut"], true);
         assert_eq!(replay.messages[2], original[2]);
         assert_eq!(original, copy);
+    }
+
+    #[test]
+    fn report_previews_keep_the_structured_findings_and_original_streams_retrievable() {
+        let result = json!({"success":true,"stdout":"x".repeat(20000),"stderr":"y".repeat(8000),
+            "report":{"status":"completed","tested":24,"matched":2,"summary":"说明".repeat(600),"failures":vec!["失败".repeat(160);4]}});
+        let messages =
+            [json!({"role":"tool","tool_call_id":"experiment","content":result.to_string()})];
+        let preview = for_request(&messages);
+        let value: Value =
+            serde_json::from_str(preview.messages[0]["content"].as_str().unwrap()).unwrap();
+        assert_eq!(value["report"], result["report"]);
+        assert!(value["stdout"].as_str().unwrap().len() < 1024);
+        assert!(
+            value["processOutputPreview"]["readBack"]
+                .as_str()
+                .unwrap()
+                .contains("read_tool_result")
+        );
+        assert_eq!(messages[0]["content"], result.to_string());
     }
     #[test]
     fn recent_exchanges_do_not_split_responses_batches_or_reasoning() {
