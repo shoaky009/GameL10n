@@ -93,6 +93,8 @@ pub struct VerificationResult {
     pub passed: bool,
     pub original_roundtrip_passed: bool,
     pub diagnostics: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub issues: Vec<crate::VerificationIssue>,
     pub units: usize,
     pub runtime_tested: bool,
     pub resource_hashes: BTreeMap<String, String>,
@@ -1764,6 +1766,7 @@ impl EngineService {
             preparation_started.elapsed().as_millis() as u64,
         );
         let mut phase = "initial-extraction";
+        let mut issue = None;
         let mut phase_started = Instant::now();
         let adapter_fingerprint = verified_adapter_fingerprint(adapter)?;
         let mut verified_extraction = None;
@@ -1820,6 +1823,13 @@ impl EngineService {
                         || unit.kind != previous.kind
                         || token_set(unit) != token_set(previous)
                 }) {
+                    issue = Some(
+                        crate::VerificationIssue::new(
+                            crate::VerificationIssueCode::IdentityMismatch,
+                            phase,
+                        )
+                        .at(&previous.resource_path, Some(&previous.id)),
+                    );
                     return Err(EngineError::Rejected(format!(
                         "已有文本身份或上下文发生变化：{}",
                         previous.id
@@ -1945,6 +1955,13 @@ impl EngineService {
                             .map_err(|error| EngineError::Protocol(error.to_string()))?
                             != before[relative]
                     {
+                        issue = Some(
+                            crate::VerificationIssue::new(
+                                crate::VerificationIssueCode::ByteRoundtrip,
+                                phase,
+                            )
+                            .at(relative, None),
+                        );
                         return Err(EngineError::Rejected(format!(
                             "原文回填改变了资源字节：{relative}"
                         )));
@@ -2003,10 +2020,24 @@ impl EngineService {
                     .map(|unit| (verification_key(adapter, unit), unit))
                     .collect();
                 if after.len() != units.len() {
+                    issue = Some(
+                        crate::VerificationIssue::new(
+                            crate::VerificationIssueCode::TextCount,
+                            phase,
+                        )
+                        .difference(&units.len().to_string(), &after.len().to_string()),
+                    );
                     return Err(EngineError::Rejected(format!("{stage}改变了文本数量。")));
                 }
                 for unit in &units {
                     let actual = after.get(&verification_key(adapter, unit)).ok_or_else(|| {
+                        issue = Some(
+                            crate::VerificationIssue::new(
+                                crate::VerificationIssueCode::MissingUnit,
+                                phase,
+                            )
+                            .at(&unit.resource_path, Some(&unit.id)),
+                        );
                         EngineError::Rejected(format!("回填丢失文本 ID：{}", unit.id))
                     })?;
                     let expected = translations.get(&unit.id).unwrap_or(&unit.source_text);
@@ -2024,6 +2055,18 @@ impl EngineService {
                         || actual.kind != unit.kind
                         || token_set(actual) != token_set(unit)
                     {
+                        let code = if actual.source_text != expected {
+                            crate::VerificationIssueCode::TextMismatch
+                        } else if token_set(actual) != token_set(unit) {
+                            crate::VerificationIssueCode::ProtectedTokens
+                        } else {
+                            crate::VerificationIssueCode::IdentityMismatch
+                        };
+                        issue = Some(
+                            crate::VerificationIssue::new(code, phase)
+                                .at(&unit.resource_path, Some(&unit.id))
+                                .difference(&expected, &actual.source_text),
+                        );
                         return Err(EngineError::Rejected(format!(
                             "{stage}未保留文本、身份或上下文：{}",
                             unit.id
@@ -2116,6 +2159,9 @@ impl EngineService {
                     &error,
                     EngineError::Io(_) | EngineError::Timeout | EngineError::ToolMissing(_)
                 );
+                result.issues.push(
+                    issue.unwrap_or_else(|| crate::VerificationIssue::from_error(phase, &error)),
+                );
                 result.diagnostics.push(format!("[{phase}] {error}"));
             }
         }
@@ -2133,6 +2179,13 @@ impl EngineService {
                 Ok(_) => {
                     result.passed = false;
                     result.cacheable = false;
+                    result.issues.push(
+                        crate::VerificationIssue::new(
+                            crate::VerificationIssueCode::InputChanged,
+                            "original-resource-check",
+                        )
+                        .difference(description, "content changed"),
+                    );
                     result
                         .diagnostics
                         .push(format!("验收期间{description}发生变化。"));
@@ -2140,6 +2193,13 @@ impl EngineService {
                 Err(error) => {
                     result.passed = false;
                     result.cacheable = false;
+                    result.issues.push(
+                        crate::VerificationIssue::new(
+                            crate::VerificationIssueCode::Storage,
+                            "original-resource-check",
+                        )
+                        .difference(description, &error.to_string()),
+                    );
                     result
                         .diagnostics
                         .push(format!("{description}完整性复核失败：{error}"));
@@ -2829,6 +2889,69 @@ mod tests {
             .python()
             .is_file()
             .then(|| EngineService::new(&root, tools))
+    }
+
+    #[tokio::test]
+    async fn ignored_chinese_writes_produce_a_bounded_independent_counterexample() {
+        let root = tempfile::tempdir().unwrap();
+        let tools = ToolPaths::development();
+        #[cfg(unix)]
+        let tools = if !tools.python().is_file() {
+            let tools = ToolPaths::new(root.path().join("tools"));
+            fs::create_dir_all(tools.python().parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink("/usr/bin/python3", tools.python()).unwrap();
+            tools
+        } else {
+            tools
+        };
+        let service =
+            EngineService::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."), tools)
+                .with_shared_directory(root.path().join("shared"));
+        let source = root.path().join("source");
+        fs::create_dir_all(&source).unwrap();
+        let original = "[\"原文\",\"second\"]";
+        fs::write(source.join("text.json"), original).unwrap();
+        let entry = root.path().join("adapter.py");
+        fs::write(
+            &entry,
+            include_str!("../tests/fixtures/json_adapter.py").replace(
+                "changed = [translations.get(str(i), value) for i,value in enumerate(data)]",
+                "changed = data",
+            ),
+        )
+        .unwrap();
+        let adapter = AdapterHandle::Python {
+            entry,
+            package_directory: None,
+            id: "engine.fixture".into(),
+            version: "1".into(),
+        };
+        let result = service
+            .verify(
+                &adapter,
+                &source,
+                &["text.json".into()],
+                &root.path().join("verify"),
+                &[],
+                &CancellationToken::new(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(!result.passed);
+        assert!(result.original_roundtrip_passed);
+        let issue = &result.issues[0];
+        assert_eq!(issue.code, crate::VerificationIssueCode::TextMismatch);
+        assert_eq!(issue.stage, "partial-translation-re-extraction");
+        assert_eq!(issue.resource_path.as_deref(), Some("text.json"));
+        assert_eq!(issue.unit_id.as_deref(), Some("0"));
+        assert_ne!(issue.expected, issue.actual);
+        assert_eq!(
+            fs::read_to_string(source.join("text.json")).unwrap(),
+            original
+        );
+        let legacy: VerificationResult = serde_json::from_value(json!({"passed":false,"originalRoundtripPassed":false,"diagnostics":[],"units":0,"runtimeTested":false,"resourceHashes":{}})).unwrap();
+        assert!(legacy.issues.is_empty());
     }
 
     #[tokio::test]

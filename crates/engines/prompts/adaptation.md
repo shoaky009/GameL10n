@@ -40,6 +40,9 @@ When the decisive question changes, accompany the next normal tools with report_
 Use workflow for shared orchestration, engineFamily for reusable format/component behavior, and engineVariant for conditional layouts/parameters.
 Keep the problem id stable while investigating it. Record concise concrete findings and existing tool call IDs, including failed experiments;
 supported/refuted are model judgments, never host acceptance. Do not add a model request just to update this state.
+Host repairTickets identify the failing contract, scope, input version, counterexample and previous attempts.
+Use report_progress(repair={ticketId,approach}) with actual work when choosing a different repair. Check noNewVerificationEvidence;
+do not repeat the same analysis/test of unchanged inputs and implementation. A trial cannot close a full-verification failure.
 Requests contain current host state, relevant evidence and a few complete recent exchanges. Earlier calls, layouts and output remain available
 through read_tool_result/read_session_history. Read precise missing evidence rather than restarting an investigation.
 Prioritize the current game's real text paths and reported omissions. Expand coverage using actual format/runtime evidence;

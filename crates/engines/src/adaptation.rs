@@ -32,6 +32,8 @@ mod flow;
 mod history;
 #[path = "adaptation_reuse.rs"]
 mod published_reuse;
+#[path = "adaptation_repair.rs"]
+mod repair;
 #[path = "adaptation_resources.rs"]
 mod resources;
 #[path = "adaptation_session.rs"]
@@ -183,6 +185,7 @@ pub(crate) struct Session {
     pub text_coverage: Value,
     pub progress_note: Value,
     pub decision: decision::DecisionState,
+    pub repairs: Vec<repair::Ticket>,
     pub verified_package: Option<Value>,
     pub verified_fingerprint: Option<String>,
     pub verification: Option<VerificationResult>,
@@ -801,7 +804,12 @@ impl EngineService {
                         "进度说明必须为 1 到 400 字符。".into(),
                     ));
                 }
+                let repair_update = repair::approach(state, args)?;
                 decision::update(state, args)?;
+                if let Some((index, approach)) = repair_update {
+                    state.repairs[index].approach = Some(approach);
+                    state.repairs[index].status = repair::Status::Analyzing;
+                }
                 let changed = state.update_progress(kind, message, Some(name), progress);
                 Ok(
                     json!({"changed":changed,"note":state.progress_note,"problem":state.decision.current_problem,"validation":false}),
@@ -2454,7 +2462,9 @@ impl EngineService {
         cancellation: &CancellationToken,
         progress: ProgressCallback<'_>,
     ) -> Result<Value, EngineError> {
-        verification::test_adapter(
+        let scope = repair::Scope::from_args(args);
+        repair::begin(state, &scope);
+        let result = verification::test_adapter(
             self,
             request,
             workspace,
@@ -2463,7 +2473,42 @@ impl EngineService {
             cancellation,
             progress,
         )
-        .await
+        .await;
+        let implementation = workspace_fingerprint(workspace, state).unwrap_or_default();
+        match result {
+            Ok(mut result) => {
+                repair::observe(state, scope, &implementation, &result);
+                result["repairTickets"] = repair::packet(state);
+                Ok(result)
+            }
+            Err(EngineError::Cancelled) => Err(EngineError::Cancelled),
+            Err(error) => {
+                let stage = if [
+                    "verificationCache",
+                    "trialVerificationCache",
+                    "discoveryVerificationCache",
+                ]
+                .iter()
+                .any(|key| {
+                    state
+                        .extra
+                        .get(*key)
+                        .is_some_and(|cache| cache["compilationError"].is_string())
+                }) {
+                    "compilation"
+                } else {
+                    "preparation"
+                };
+                let issue = crate::VerificationIssue::from_error(stage, &error);
+                repair::observe(
+                    state,
+                    scope,
+                    &implementation,
+                    &json!({"passed":false,"issues":[issue],"diagnostics":[error.to_string()]}),
+                );
+                Err(error)
+            }
+        }
     }
 
     async fn finish_adapter(

@@ -316,6 +316,7 @@ fn verification_summary(state: &Session, key: &str) -> Option<Value> {
         "version",
         "trialFiles",
         "diagnostics",
+        "issues",
         "nextAction",
     ] {
         if let Some(value) = result.get(key) {
@@ -355,6 +356,7 @@ fn snapshot(state: &Session, workspace: &Path, disabled: &BTreeSet<String>) -> V
         "problem":state.decision.current_problem,"modelHypotheses":state.decision.hypotheses,
         "notes":short(&state.notes,8000),"workNotes":work_notes,"lastModelSummary":short(&state.summary,1600),"nextAction":state.next_action,
         "modelProgress":state.progress_note,
+        "repairTickets":super::repair::packet(state),
         "hostState":{
             "recognition":bounded(&json!(state.recognition),2048),"family":bounded(&state.family,2048),
             "verification":verification_summary(state,"verificationCache"),

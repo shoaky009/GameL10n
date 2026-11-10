@@ -13,6 +13,7 @@ mod research;
 pub mod review;
 pub mod service;
 mod tool_activity;
+mod verification_diagnostic;
 pub mod vntextpatch;
 
 use std::path::{Path, PathBuf};
@@ -27,6 +28,7 @@ pub use service::{
     GeneratedAdapterReuseFailure, ProgressCallback, VerificationResult, VerifiedExtraction,
 };
 pub use tokio_util::sync::CancellationToken;
+pub use verification_diagnostic::{VerificationIssue, VerificationIssueCode};
 
 #[derive(Debug, Error)]
 pub enum EngineError {

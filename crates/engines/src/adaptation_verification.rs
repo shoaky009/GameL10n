@@ -2,7 +2,7 @@
 use super::*;
 use crate::protocol::ProbeResult;
 
-const VERIFIER_REVISION: u32 = 9;
+const VERIFIER_REVISION: u32 = 10;
 
 fn verified_public_dependency(
     service: &EngineService,
@@ -1058,6 +1058,26 @@ pub(super) async fn test_adapter(
         );
     }
     let mut result = json!({"passed":passed,"stage":stage,"diagnostics":diagnostics,"id":id,"version":version,"compileMs":compile_ms,"verificationMs":verification_ms,"verificationStagesMs":if reused {None}else{verification.as_ref().map(|result|&result.stage_timings_ms)},"trialFiles":trial,"probe":probe,"nextAction":if !passed{"修复 diagnostics 后重新验收。"}else if stage=="trial"{"小范围试验通过；省略 trialFiles 执行完整验收后才能 finish。"}else if stage=="discovery"{"资源发现通过；执行完整 test_adapter 后才能发布。"}else{"完整资源验收通过，当前目标完成后 finish；已知遗漏需要 allowPartial 并明确披露。"}});
+    result["issues"] = json!(
+        verification
+            .as_ref()
+            .map(|verification| verification.issues.clone())
+            .unwrap_or_default()
+    );
+    result["evidenceFile"] = json!(verification_directory.as_ref().and_then(|directory| {
+        directory
+            .join("verification.json")
+            .strip_prefix(workspace)
+            .ok()
+            .map(|path| path.to_string_lossy().replace('\\', "/"))
+    }));
+    if !passed && result["issues"].as_array().is_none_or(Vec::is_empty) {
+        result["issues"] = json!([crate::VerificationIssue::new(
+            crate::VerificationIssueCode::AdapterOperation,
+            stage
+        )
+        .difference("verification passes", &diagnostics.join("; "))]);
+    }
     if let Some(files) = &trial {
         result["trialBytes"] = json!(
             files

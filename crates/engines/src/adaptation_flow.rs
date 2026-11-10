@@ -43,6 +43,11 @@ fn append_failure(state: &mut Session, call: &ToolCall, reason: &str) {
 
 pub(super) fn recover(state: &mut Session, request: &AdaptationRequest<'_>, identity: &str) {
     if let Some(interrupted) = state.running_tool_id.take() {
+        for ticket in &mut state.repairs {
+            if ticket.status == repair::Status::Verifying {
+                ticket.status = repair::Status::Patched;
+            }
+        }
         let dependent = state.extra.get("pendingCallsAreSequential") == Some(&json!(true))
             || sequential(&state.pending_calls);
         let mut remaining = Vec::new();
@@ -689,6 +694,17 @@ pub(super) async fn run(
                 object.entry("success").or_insert(json!(true));
             }
             let success = history::successful(&value);
+            if success
+                && value["changed"] == true
+                && matches!(call.name.as_str(), "write_file" | "replace_text")
+                && args
+                    .as_ref()
+                    .ok()
+                    .and_then(|args| args["path"].as_str())
+                    .is_some_and(|path| path.replace('\\', "/").starts_with("src/"))
+            {
+                repair::patched(state);
+            }
             record_tool(state, &call, args.as_ref().unwrap_or(&Value::Null), &value);
             decision::record(state, &call, args.as_ref().unwrap_or(&Value::Null));
             verification_phase |= record_verification_phase(state, &call, &value);
@@ -919,6 +935,7 @@ pub(super) async fn run(
         }
         let started = Instant::now();
         turns += 1;
+        repair::analyzing(state);
         let requests_before = provider.request_count();
         let response = provider
             .complete_agent(&messages, &active, &known_tools, requested, cancellation)
