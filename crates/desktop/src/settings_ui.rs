@@ -9,6 +9,8 @@ use gamel10n_core::{
 use serde_json::{Value, json};
 use slint::{ComponentHandle, ModelRc, VecModel};
 
+const REASONING_PRESETS: [&str; 6] = ["", "low", "medium", "high", "xhigh", "max"];
+
 pub async fn refresh(ctx: &Context, project_id: Option<&str>) -> Result<(), CoreError> {
     let host = ctx.app().await;
     let settings = host.settings().await?;
@@ -211,6 +213,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                 a.set_api_protocol(0);
                 a.set_api_format(0);
                 a.set_api_reasoning(0);
+                a.set_api_reasoning_custom("".into());
                 a.set_api_remember_key(true);
                 a.set_error("".into());
                 a.set_modal("api".into());
@@ -244,12 +247,14 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                 a.set_api_remember_key(!p.requires_session_key);
                 a.set_api_protocol(i32::from(p.protocol == "Responses"));
                 a.set_api_format(i32::from(p.translation_format == "PlainText"));
+                let effort = p.analysis_reasoning_effort.as_deref().unwrap_or("");
                 a.set_api_reasoning(
-                    ["", "low", "medium", "high", "xhigh"]
+                    REASONING_PRESETS
                         .iter()
-                        .position(|s| *s == p.analysis_reasoning_effort.as_deref().unwrap_or(""))
-                        .unwrap_or(0) as i32,
+                        .position(|s| *s == effort)
+                        .unwrap_or(REASONING_PRESETS.len()) as i32,
                 );
+                a.set_api_reasoning_custom(effort.into());
                 a.set_modal("api".into());
             });
         }
@@ -278,17 +283,12 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                 "JsonBatch"
             }
             .into();
-            p.analysis_reasoning_effort = [
-                None,
-                Some("low"),
-                Some("medium"),
-                Some("high"),
-                Some("xhigh"),
-            ]
-            .get(input.api_reasoning.max(0) as usize)
-            .copied()
-            .flatten()
-            .map(str::to_owned);
+            let effort = REASONING_PRESETS
+                .get(input.api_reasoning.max(0) as usize)
+                .copied()
+                .unwrap_or(&input.api_reasoning_custom)
+                .trim();
+            p.analysis_reasoning_effort = (!effort.is_empty()).then(|| effort.to_owned());
             if let Err(error) = host
                 .save_api_profile(p, Some(input.api_key.trim().into()), input.api_remember_key)
                 .await

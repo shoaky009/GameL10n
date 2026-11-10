@@ -232,10 +232,9 @@ impl OpenAiProvider {
             .analysis_reasoning_effort
             .as_deref()
             .is_some_and(|effort| {
-                !matches!(
-                    effort,
-                    "none" | "minimal" | "low" | "medium" | "high" | "xhigh"
-                )
+                effort.trim().is_empty()
+                    || effort.len() > 256
+                    || effort.chars().any(char::is_control)
             })
         {
             return Err(ProviderError::new("configuration", "分析思考等级无效。"));
@@ -1546,6 +1545,49 @@ mod tests {
             }
         });
         (format!("http://{address}/v1"), receiver, handle)
+    }
+
+    #[tokio::test]
+    async fn agent_requests_forward_max_and_custom_reasoning_effort_for_both_protocols() {
+        for protocol in [ApiProtocol::ChatCompletions, ApiProtocol::Responses] {
+            for effort in [Some("max"), Some("provider_Custom-7"), None] {
+                let response = match protocol {
+                    ApiProtocol::ChatCompletions => {
+                        json!({"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"Complete"}}]})
+                    }
+                    ApiProtocol::Responses => {
+                        json!({"status":"completed","output":[{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"Complete"}]}]})
+                    }
+                };
+                let server = mock_agent(vec![response]);
+                let provider = OpenAiProvider::new(ProviderSettings {
+                    endpoint: server.0,
+                    api_key: String::new(),
+                    model: "local-agent".into(),
+                    protocol,
+                    translation_format: TranslationFormat::JsonBatch,
+                    analysis_reasoning_effort: effort.map(str::to_owned),
+                })
+                .unwrap();
+                provider
+                    .complete_agent(
+                        &agent_messages(),
+                        &agent_tools(),
+                        &[],
+                        128,
+                        &CancellationToken::new(),
+                    )
+                    .await
+                    .unwrap();
+                let request = server.1.recv().unwrap();
+                let sent = match protocol {
+                    ApiProtocol::ChatCompletions => request["reasoning_effort"].as_str(),
+                    ApiProtocol::Responses => request["reasoning"]["effort"].as_str(),
+                };
+                assert_eq!(sent, effort);
+                server.2.join().unwrap();
+            }
+        }
     }
 
     #[tokio::test]

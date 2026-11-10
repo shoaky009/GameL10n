@@ -21,7 +21,7 @@
 
 ## 分析思考等级
 
-可选接口默认、`low`、`medium`、`high` 或 `xhigh`，仅用于智能适配。接口默认不发送该参数，支持范围由服务商决定；更高等级可能增加耗时和 Token 消耗。
+可选接口默认、`low`、`medium`、`high`、`xhigh`、`max` 或自定义值，仅用于智能适配。选择“自定义”后输入服务商支持的等级值，去除首尾空白后按填写内容发送；留空或选择接口默认时不发送该参数。支持范围由服务商决定；更高等级可能增加耗时和 Token 消耗。
 
 Responses 发送 `reasoning.effort`，Chat Completions 发送 `reasoning_effort`。调整后开始或继续任务生效。
 

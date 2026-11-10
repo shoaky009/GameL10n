@@ -13,7 +13,8 @@ export component DialogLayer inherits Rectangle {
                 HorizontalLayout { ComboBox { model: ["Chat Completions", "Responses"]; current-index <=> App.api-protocol; } LineEdit { text <=> App.api-model; placeholder-text: "模型名称"; horizontal-stretch: 1; } }
                 Caption { text: "API Key（本地服务可留空）"; } LineEdit { text <=> App.api-key; input-type: password; }
                 CheckBox { text: "记住 API Key（在本机加密保存）"; checked <=> App.api-remember-key; }
-                Caption { text: "分析思考等级（仅用于智能识别与适配）"; } ComboBox { model: ["接口默认", "low", "medium", "high", "xhigh"]; current-index <=> App.api-reasoning; }
+                Caption { text: "分析思考等级（仅用于智能识别与适配）"; } ComboBox { model: ["接口默认", "low", "medium", "high", "xhigh", "max", "自定义"]; current-index <=> App.api-reasoning; }
+                if App.api-reasoning == 6: LineEdit { text <=> App.api-reasoning-custom; placeholder-text: "输入服务商支持的等级值，留空使用接口默认"; }
                 Caption { text: "翻译输入格式"; } ComboBox { model: ["批量 JSON", "逐条纯文本（本地翻译模型）"]; current-index <=> App.api-format; }
             }
             if App.modal == "patch-texts": ScrollView { height: 360px; horizontal-scrollbar-policy: always-off; content-width: self.visible-width;
