@@ -158,6 +158,7 @@ function Usage-Summary($items) {
         inputTokens = if ($known.Count -gt 0 -or @($items).Count -eq 0) { Sum-Field $entries 'inputTokens' } else { $null }
         outputTokens = if ($known.Count -gt 0 -or @($items).Count -eq 0) { Sum-Field $entries 'outputTokens' } else { $null }
         cachedTokens = $cached
+        uncachedTokens = if ($null -ne $cached) { $cacheInput - $cached } else { $null }
         cacheMeasuredInputTokens = $cacheInput
         cacheHitRate = if ($cacheInput -gt 0) { [Math]::Round($cached / $cacheInput, 4) } else { $null }
         cacheUsageRequests = $cacheEntries.Count
@@ -253,10 +254,17 @@ function Verification-Scope($row) {
 $verificationTests = @($toolRows | Where-Object { $_.entry.tool -eq 'test_adapter' })
 $fullTests = @($verificationTests | Where-Object { (Verification-Scope $_) -eq 'full' })
 $lastTest = $fullTests | Select-Object -Last 1
+$prefixRows = @($modelRows | Where-Object { $null -ne $_.entry.contextComponents.requestPrefix })
 $result = [ordered]@{
     project = [IO.Path]::GetFullPath($ProjectDirectory)
     window = [ordered]@{ since = $Since; until = $Until.ToString('o'); fromTurn = $FromTurn; toTurn = $ToTurn; firstEvent = $rows[0].at; lastEvent = $rows[-1].at }
     usage = Usage-Summary $attempts
+    requestPrefixes = [ordered]@{
+        preserved = @($prefixRows | Where-Object { $_.entry.contextComponents.requestPrefix.preserved -eq $true }).Count
+        changed = @($prefixRows | Where-Object { $_.entry.contextComponents.requestPrefix.preserved -eq $false }).Count
+        boundaries = @($prefixRows | Where-Object { $null -eq $_.entry.contextComponents.requestPrefix.preserved }).Count
+        missing = $modelRows.Count - $prefixRows.Count
+    }
     timing = [ordered]@{
         modelSeconds = Seconds (Sum-Field @($modelRows | ForEach-Object { $_.entry }) 'elapsedMs')
         toolSeconds = Seconds (Sum-Field @($toolRows | ForEach-Object { $_.entry }) 'elapsedMs')
@@ -340,9 +348,11 @@ if ($Detail) {
         $item.status = $_.row.entry.status; $item.usageSource = $_.usageSource
         $item.inputTokens = $_.usage.inputTokens; $item.outputTokens = $_.usage.outputTokens
         $item.cachedTokens = $_.usage.cachedTokens
+        $item.uncachedTokens = if ($null -ne $_.usage.cachedTokens -and $_.usage.estimated -ne $true) { $_.usage.inputTokens - $_.usage.cachedTokens } else { $null }
         $item.seconds = Seconds $_.row.entry.elapsedMs
         $item.visibleHistoryBytes = $_.row.entry.visibleHistoryBytes
         $item.instructionBytes = $_.row.entry.instructionBytes; $item.toolDefinitionBytes = $_.row.entry.toolDefinitionBytes
+        $item.instructionFingerprint = $_.row.entry.instructionFingerprint
         $item.toolDefinitionFingerprint = $_.row.entry.toolDefinitionFingerprint
         $item.contextComponents = $_.row.entry.contextComponents
         $item.verificationConfigured = $_.row.entry.verificationConfigured

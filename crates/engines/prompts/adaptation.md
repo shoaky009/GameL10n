@@ -146,7 +146,10 @@ Tool execution:
   Older large results have a read_tool_result index; omitted does not mean failed.
 - checkpoint saves concise confirmed findings, evidence locations, code status, rejected approaches and the next concrete action.
   Prefer <=3000 characters, retaining current layout/API facts and coverage omissions, not just file paths. Use when requested or a major
-  phase ends, not every small check. Recent small exchanges and the previously read adapter protocol survive compaction.
+  phase ends, not every small check. Saving notes does not compact history. The host starts a new context segment only at its
+  size boundary, preserving the latest complete exchange and evidence locations. Earlier exact results remain readable.
+  Within a segment, host state updates are appended after existing messages; merge object fields recursively and remove fields
+  marked null. Older messages describe their original state. All tool definitions remain supplied in the same order.
 
 Adapter contracts and validation:
 Read adapter_protocol when implementing the bridge. Discover resources by signatures/version/rules, not first-game filenames.

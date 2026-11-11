@@ -117,12 +117,7 @@ fn process_preview(value: &Value, original: &str, id: &str) -> String {
 }
 
 pub(super) fn for_request(history: &[Value]) -> Replay {
-    let retrieved: BTreeSet<_> = history
-        .iter()
-        .flat_map(calls)
-        .filter(|(_, name)| name == "read_tool_result")
-        .map(|(id, _)| id)
-        .collect();
+    let mut retrieved = BTreeSet::new();
     let mut result = Replay {
         messages: history.to_vec(),
         omitted: 0,
@@ -130,6 +125,11 @@ pub(super) fn for_request(history: &[Value]) -> Replay {
     };
     let mut seen = BTreeMap::new();
     for message in &mut result.messages {
+        for (id, name) in calls(message) {
+            if name == "read_tool_result" {
+                retrieved.insert(id);
+            }
+        }
         if message["role"] != "tool" {
             continue;
         }
@@ -211,77 +211,10 @@ fn exchanges(history: &[Value]) -> Vec<std::ops::Range<usize>> {
     groups
 }
 
-pub(super) fn recent_call_names(history: &[Value]) -> BTreeSet<String> {
+pub(super) fn recent(history: &[Value]) -> Vec<Value> {
     exchanges(history)
-        .iter()
-        .rev()
-        .take(4)
-        .flat_map(|group| {
-            history[group.clone()]
-                .iter()
-                .flat_map(calls)
-                .map(|(_, name)| name)
-        })
-        .collect()
-}
-
-/// Select whole exchanges before previewing or cloning their potentially large source writes.
-pub(super) fn decision_window(history: &[Value], problem_start: usize) -> std::ops::Range<usize> {
-    let groups = exchanges(history);
-    let problem_index = groups.partition_point(|group| group.end <= problem_start);
-    let active = if problem_index < groups.len() {
-        &groups[problem_index..]
-    } else {
-        &groups[groups.len().saturating_sub(1)..]
-    };
-    let anchor = if active.len() <= 4 {
-        0
-    } else {
-        ((active.len() - 2) / 3) * 3
-    };
-    let mut start = history.len();
-    let mut bytes = 0;
-    for group in active[anchor..].iter().rev() {
-        let size = history[group.clone()]
-            .iter()
-            .map(visible_json_bytes)
-            .sum::<usize>();
-        if start != history.len() && bytes + size > 64 * 1024 {
-            break;
-        }
-        start = group.start;
-        bytes += size;
-    }
-    if start == history.len() {
-        // The initial inventory and trailing host notices are ordinary user messages.
-        start = 0;
-    }
-    start..history.len()
-}
-
-pub(super) fn recent(history: &[Value], skip_latest: bool) -> Vec<Value> {
-    let replay = for_request(history);
-    let groups = exchanges(history);
-    let count = groups.len().saturating_sub(usize::from(skip_latest));
-    let Some(last) = groups.get(count.saturating_sub(1)).filter(|_| count > 0) else {
-        return vec![];
-    };
-    let end = last.end;
-    let mut start = end;
-    for group in groups[..count].iter().rev().take(4) {
-        if group.end != start
-            || (start != end
-                && replay.messages[group.start..end]
-                    .iter()
-                    .map(visible_json_bytes)
-                    .sum::<usize>()
-                    > 64 * 1024)
-        {
-            break;
-        }
-        start = group.start;
-    }
-    history[start..end].to_vec()
+        .last()
+        .map_or_else(Vec::new, |group| history[group.clone()].to_vec())
 }
 
 pub(super) fn failures(history: &[Value], start: usize, base: usize) -> Vec<Value> {
@@ -354,6 +287,21 @@ mod tests {
         assert_eq!(preview["timedOut"], true);
         assert_eq!(replay.messages[2], original[2]);
         assert_eq!(original, copy);
+        let mut extended = original.clone();
+        extended.extend([
+            json!({"role":"assistant","tool_calls":[{"id":"next","function":{"name":"read_tool_result","arguments":"{}"}}]}),
+            json!({"role":"tool","tool_call_id":"next","content":failure}),
+            json!({"role":"tool","tool_call_id":"repeat","content":failure}),
+        ]);
+        let next = for_request(&extended);
+        assert_eq!(next.messages[..replay.messages.len()], replay.messages);
+        assert_eq!(next.messages[4], extended[4]);
+        assert!(
+            next.messages[5]["content"]
+                .as_str()
+                .unwrap()
+                .contains("identicalTo")
+        );
     }
 
     #[test]
@@ -387,8 +335,8 @@ mod tests {
             json!({"role":"assistant","tool_calls":[{"id":"c","function":{"name":"checkpoint"}}]}),
             json!({"role":"tool","tool_call_id":"c","content":"ok"}),
         ];
-        assert_eq!(recent(&history, true), history[1..6]);
-        assert_eq!(recent(&history, false), history[1..]);
+        assert_eq!(recent(&history[..6]), history[1..6]);
+        assert_eq!(recent(&history), history[6..]);
     }
 
     #[test]
@@ -403,7 +351,7 @@ mod tests {
             json!({"role":"tool","tool_call_id":"old","content":"old"}),
         ];
         history.extend(batch.clone());
-        assert_eq!(recent(&history, false), batch);
+        assert_eq!(recent(&history), batch);
         let failures = failures(&history, 0, 10);
         assert_eq!(failures[0]["toolCallId"], "b");
         assert_eq!(failures[0]["callMessageIndex"], 12);

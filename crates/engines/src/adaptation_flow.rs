@@ -2,6 +2,7 @@
 use super::history;
 use super::*;
 
+#[cfg(test)]
 const CHECKPOINT_REQUEST: &str = "当前会话较长。下一步先调用 checkpoint，保存已确认的引擎和版本、现有源码及资源路径、已通过与失败的验证、排除的方案和下一项具体操作。摘要优先控制在 3000 字内，保留当前实现必需的字段顺序、数组步长、调用约定和证据位置；明确已覆盖、已知遗漏和未调查的文字类别。详细反汇编和源码引用路径及范围，避免复制全文。这是保存已有进度，不需要重新扫描游戏、查找同一资料或重跑已完成测试。";
 
 pub(super) fn objective_context(objective: &str) -> &'static str {
@@ -92,15 +93,8 @@ pub(super) fn recover(state: &mut Session, request: &AdaptationRequest<'_>, iden
         state.verified_package = None;
         state.verified_fingerprint = None;
     }
-    if changed_objective || (changed_instruction && !state.messages.is_empty()) {
-        state.extra.insert(
-            "contextBoundary".into(),
-            json!(if changed_objective {
-                "objective-changed"
-            } else {
-                "instruction-changed"
-            }),
-        );
+    state.extra.remove("contextBoundary");
+    if changed_objective || changed_instruction {
         state.extra.remove("contextVerificationPhases");
     }
     if changed_instruction {
@@ -118,6 +112,7 @@ pub(super) fn recover(state: &mut Session, request: &AdaptationRequest<'_>, iden
             );
         }
         state.history_start = state.messages.len();
+        decision::reset_context(state);
         state.extra.remove("preferredOutputTokens");
     }
     state.extra.insert("modelIdentity".into(), json!(identity));
@@ -156,12 +151,8 @@ pub(super) fn compact_context(
     Ok(context)
 }
 
-fn compact_history(
-    state: &mut Session,
-    checkpoint: bool,
-    disabled: &BTreeSet<String>,
-) -> Result<(), EngineError> {
-    if checkpoint && !state.checkpoint.is_empty() {
+fn compact_history(state: &mut Session, disabled: &BTreeSet<String>) -> Result<(), EngineError> {
+    if !state.checkpoint.is_empty() {
         state.notes.clone_from(&state.checkpoint);
         state
             .extra
@@ -196,53 +187,15 @@ fn compact_history(
             session_store::base(state),
         ),
     );
-    let recent = history::recent(&state.messages[state.history_start..], checkpoint);
+    let recent = history::recent(&state.messages[state.history_start..]);
     let context = compact_context(state, disabled)?;
     state.history_start = state.messages.len();
     state
         .messages
         .push(json!({"role":"user","content":context}));
     state.messages.extend(recent);
+    decision::reset_context(state);
     Ok(())
-}
-
-fn record_verification_phase(state: &mut Session, call: &ToolCall, value: &Value) -> bool {
-    if call.name != "test_adapter" || value["reused"] == true {
-        return false;
-    }
-    let phase = match value["stage"].as_str() {
-        Some("finish-ready") if value["passed"] == true => "complete",
-        Some("trial") if value["passed"] == true => "trial",
-        Some("discovery") if value["passed"] == true => "discovery",
-        Some("verification") => {
-            // Non-trial tests clear verification before running and replace it only
-            // with their own result. Trial stages never consult the retained full test.
-            if state
-                .verification
-                .as_ref()
-                .is_some_and(|result| result.original_roundtrip_passed)
-            {
-                "original-roundtrip"
-            } else {
-                "discovery"
-            }
-        }
-        _ => return false,
-    };
-    // These phases belong to the current task requirements. The lifetime highest
-    // milestone may already be Complete when a published adapter enters Repair.
-    let phases = state
-        .extra
-        .entry("contextVerificationPhases".into())
-        .or_insert(json!([]));
-    let Some(phases) = phases.as_array_mut() else {
-        return false;
-    };
-    if phases.contains(&json!(phase)) {
-        return false;
-    }
-    phases.push(json!(phase));
-    true
 }
 
 pub(super) fn continuation(
@@ -252,7 +205,7 @@ pub(super) fn continuation(
     baseline: usize,
     _disabled: &BTreeSet<String>,
 ) -> Result<String, EngineError> {
-    // The decision builder supplies current state on every request; retain only run notices here.
+    // The decision builder appends host state changes; retain only run notices here.
     let mut context = String::new();
     if state.extra.get("instructionCleared") == Some(&json!(true)) {
         context.push_str("\n用户已清空之前的补充要求，按原任务目标继续。");
@@ -277,76 +230,6 @@ pub(super) fn continuation(
         }
     }
     Ok(context)
-}
-
-fn tool_hints(state: &Session, workspace: &Path) -> BTreeSet<String> {
-    let mut hints = BTreeSet::new();
-    if state.extra.get("protocolRead") == Some(&json!(true))
-        || state.extra.contains_key("engineReference")
-        || !state.release_files.is_empty()
-        || state.verified_package.is_some()
-        || workspace.join("src").is_dir()
-        || !state.objective.eq_ignore_ascii_case("develop")
-    {
-        hints.insert("development".into());
-    }
-    if state
-        .extra
-        .get("builtinDiscovery")
-        .and_then(|d| d["candidates"].as_array())
-        .is_some_and(|candidates| !candidates.is_empty())
-        || state
-            .extra
-            .get("reuseFailures")
-            .and_then(Value::as_array)
-            .is_some_and(|failures| !failures.is_empty())
-        || state
-            .extra
-            .get("matchedKnowledge")
-            .and_then(Value::as_array)
-            .is_some_and(|entries| !entries.is_empty())
-        || !state.objective.eq_ignore_ascii_case("develop")
-    {
-        hints.insert("reuse".into());
-    }
-    if state
-        .extra
-        .get("builtinDiscovery")
-        .and_then(|d| d["candidates"].as_array())
-        .is_some_and(|candidates| candidates.iter().any(|c| c["format"] == "Siglus"))
-    {
-        hints.insert("siglus".into());
-    }
-    hints
-}
-
-fn tool_groups(
-    state: &mut Session,
-    all: &[Value],
-    workspace: &Path,
-) -> Result<Vec<Value>, EngineError> {
-    let mut groups = vec![];
-    let hints = tool_hints(state, workspace);
-    let catalog = tool_catalog()?;
-    let visible = &state.messages[state.history_start..];
-    let mut active_names = history::recent_call_names(visible);
-    active_names.extend(state.pending_calls.iter().map(|call| call.name.clone()));
-    for group in &catalog.groups {
-        if group.tools.iter().any(|name| active_names.contains(name))
-            && !groups.contains(&json!(group.name))
-        {
-            groups.push(json!(group.name));
-        }
-    }
-    for hint in hints {
-        if !groups.contains(&json!(hint)) {
-            groups.push(json!(hint));
-        }
-    }
-    state
-        .extra
-        .insert("enabledToolGroups".into(), json!(groups));
-    filter_tools(all, &groups)
 }
 
 fn selectors(args: &Value) -> Value {
@@ -523,6 +406,39 @@ fn record_tool(state: &mut Session, call: &ToolCall, args: &Value, value: &Value
     }
 }
 
+fn request_prefix(
+    state: &mut Session,
+    messages: &[Value],
+    instructions: &str,
+    tools: &str,
+) -> Value {
+    let segment_start = session_store::base(state) + state.history_start;
+    let previous = state.extra.get("requestPrefix");
+    let same_segment = previous.is_some_and(|previous| {
+        previous["segmentStart"] == segment_start
+            && previous["instructions"] == instructions
+            && previous["tools"] == tools
+    });
+    let previous_messages = previous
+        .and_then(|value| value["messages"].as_u64())
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or(0);
+    let preserved = if same_segment {
+        Some(
+            previous_messages <= messages.len()
+                && previous.is_some_and(|previous| {
+                    previous["sha256"]
+                        == hash_text(&json!(&messages[..previous_messages]).to_string())
+                }),
+        )
+    } else {
+        None
+    };
+    let result = json!({"segmentStart":segment_start,"preserved":preserved,"previousMessages":previous_messages,"messages":messages.len()});
+    state.extra.insert("requestPrefix".into(), json!({"segmentStart":segment_start,"instructions":instructions,"tools":tools,"messages":messages.len(),"sha256":hash_text(&json!(messages).to_string())}));
+    result
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "Explicit persisted session and model/tool boundaries avoid hidden mutable state."
@@ -553,15 +469,7 @@ pub(super) async fn run(
     state
         .extra
         .insert("matchedKnowledge".into(), json!(knowledge.entries));
-    let mut active = tool_groups(state, &all, workspace)?;
-    let mut preloaded = tool_hints(state, workspace);
     let mut continuation = Some(continuation);
-    let mut checkpoint_requested = state.messages[state.history_start..].iter().any(|m| {
-        m["role"] == "user"
-            && m["content"]
-                .as_str()
-                .is_some_and(|s| s.starts_with("当前会话较长。下一步先调用 checkpoint"))
-    });
     let mut turns = 0;
     let mut output_limit = request
         .limits
@@ -592,16 +500,24 @@ pub(super) async fn run(
     if state.verified_package.is_some() {
         set_number(state, "highestVerificationMilestone", 4);
     }
-    let instructions = format!(
-        "{}\n{}\n{}{}\n{}",
-        include_str!("../prompts/adaptation.md"),
-        tool_group_context(),
-        objective_context(&state.objective),
+    state.decision.references = format!(
+        "{}\n{}",
         knowledge.context,
         crate::adaptation_context::builtin_guidance(state, &service.disabled_families)
+    )
+    .trim()
+    .to_owned();
+    let instructions = format!(
+        "{}\n{}",
+        include_str!("../prompts/adaptation.md"),
+        tool_group_context()
     );
+    let instruction_fingerprint = hash_text(&instructions);
+    let tool_definitions = serde_json::to_string(&all)?;
+    let tools_bytes = tool_definitions.len();
+    let tool_fingerprint = hash_text(&tool_definitions);
     trace_run(
-        json!({"operation":"engine-knowledge","entries":knowledge.entries,"instructionFingerprint":hash_text(&instructions)}),
+        json!({"operation":"engine-knowledge","entries":knowledge.entries,"instructionFingerprint":instruction_fingerprint}),
     )?;
     loop {
         if cancellation.is_cancelled() {
@@ -611,7 +527,6 @@ pub(super) async fn run(
                 None,
             ));
         }
-        let mut verification_phase = false;
         let sequential = sequential(&state.pending_calls);
         state
             .extra
@@ -714,7 +629,6 @@ pub(super) async fn run(
                 &value,
             );
             decision::record(state, &call, args.as_ref().unwrap_or(&Value::Null));
-            verification_phase |= record_verification_phase(state, &call, &value);
             let content = value.to_string();
             let trace_result = result_trace(&value);
             trace_run(
@@ -735,17 +649,6 @@ pub(super) async fn run(
                 }
             }
             save_session(path, state).await?;
-            if call.name == "load_tool_groups" {
-                active = filter_tools(
-                    &all,
-                    state
-                        .extra
-                        .get("enabledToolGroups")
-                        .and_then(Value::as_array)
-                        .map(Vec::as_slice)
-                        .unwrap_or_default(),
-                )?;
-            }
             if call.name == "finish" && success {
                 let directory = PathBuf::from(text(&value, "packageDirectory")?);
                 return Ok((
@@ -805,16 +708,7 @@ pub(super) async fn run(
                 object.remove("repairTickets");
             }
             state.messages.push(json!({"role":"user","content":format!("宿主已按现有参数自动执行 test_adapter，原始验收标准未变。结果：{}",value)}));
-            verification_phase = true;
             save_session(path, state).await?;
-        }
-        if let Some(reason) = state.extra.get("contextBoundary").cloned() {
-            compact_history(state, false, &service.disabled_families)?;
-            state.extra.remove("contextBoundary");
-            checkpoint_requested = false;
-            trace_run(
-                json!({"operation":"history-compacted","turn":state.total_turns,"reason":reason,"historyStart":state.history_start}),
-            )?;
         }
         if let Some(continuation) = continuation.take() {
             state
@@ -823,10 +717,8 @@ pub(super) async fn run(
             state.extra.remove("instructionCleared");
         }
         if !state.checkpoint.is_empty() {
-            compact_history(state, true, &service.disabled_families)?;
-            state.checkpoint.clear();
-            checkpoint_requested = false;
-            active = tool_groups(state, &all, workspace)?;
+            state.notes = std::mem::take(&mut state.checkpoint);
+            set_number(state, "notesTurn", state.total_turns);
         }
         let implementation_review = state.total_turns.saturating_sub(
             number(state, "lastImplementationTurn").max(number(state, "lastEfficiencyReviewTurn")),
@@ -864,7 +756,7 @@ pub(super) async fn run(
             ));
         }
         let mut decision_context = decision::build(state, workspace, &service.disabled_families)?;
-        let retained = state.messages[state.history_start..]
+        let mut retained = state.messages[state.history_start..]
             .iter()
             .map(visible_json_bytes)
             .sum::<usize>();
@@ -874,35 +766,13 @@ pub(super) async fn run(
             .iter()
             .map(visible_json_bytes)
             .sum::<usize>();
-        // The retained history includes exchanges outside the decision window, so its
-        // compaction thresholds must discount process previews over that same history.
-        let process_bytes_saved = if retained > 256 * 1024 {
-            history::for_request(&state.messages[state.history_start..]).process_bytes_saved
-        } else {
-            decision_context.replay.process_bytes_saved
-        };
+        let process_bytes_saved = decision_context.replay.process_bytes_saved;
         let checkpoint_bytes = retained.saturating_sub(process_bytes_saved);
-        let milestone =
-            verification_phase && (visible > 64 * 1024 || checkpoint_bytes > 256 * 1024);
-        if checkpoint_requested
-            || milestone
-            || visible > 192 * 1024
-            || checkpoint_bytes > 768 * 1024
-        {
-            if checkpoint_requested || milestone || state.verified_package.is_some() {
-                compact_history(state, false, &service.disabled_families)?;
-                checkpoint_requested = false;
-                active = tool_groups(state, &all, workspace)?;
-                trace_run(
-                    json!({"operation":"history-compacted","turn":state.total_turns,"reason":if milestone{"verification-milestone"}else{"history-size"},"visibleHistoryBytes":visible,"retainedHistoryBytes":retained,"checkpointHistoryBytes":checkpoint_bytes,"historyStart":state.history_start}),
-                )?;
-            } else {
-                state.messages.push(json!({"role":"user","content":format!("{CHECKPOINT_REQUEST}\n{}",objective_context(&state.objective))}));
-                checkpoint_requested = true;
-                trace_run(
-                    json!({"operation":"checkpoint-request","turn":state.total_turns,"reason":if milestone{"verification-milestone"}else{"history-size"},"visibleHistoryBytes":visible,"retainedHistoryBytes":retained,"checkpointHistoryBytes":checkpoint_bytes}),
-                )?;
-            }
+        if visible > 192 * 1024 || checkpoint_bytes > 768 * 1024 {
+            compact_history(state, &service.disabled_families)?;
+            trace_run(
+                json!({"operation":"history-compacted","turn":state.total_turns,"reason":"history-size","visibleHistoryBytes":visible,"retainedHistoryBytes":retained,"checkpointHistoryBytes":checkpoint_bytes,"historyStart":state.history_start}),
+            )?;
             decision_context = decision::build(state, workspace, &service.disabled_families)?;
             visible = decision_context
                 .replay
@@ -910,36 +780,18 @@ pub(super) async fn run(
                 .iter()
                 .map(visible_json_bytes)
                 .sum();
+            retained = state.messages[state.history_start..]
+                .iter()
+                .map(visible_json_bytes)
+                .sum();
         }
-        let mut selected = state
-            .extra
-            .get("enabledToolGroups")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        let mut changed = false;
-        for hint in tool_hints(state, workspace) {
-            if preloaded.insert(hint.clone()) && !selected.contains(&json!(hint)) {
-                selected.push(json!(hint));
-                changed = true;
-            }
-        }
-        if changed {
-            state
-                .extra
-                .insert("enabledToolGroups".into(), json!(selected));
-            active = filter_tools(&all, &selected)?;
-        }
-        save_session(path, state).await?;
-        let tool_definitions = serde_json::to_string(&active)?;
-        let tools_bytes = tool_definitions.len();
-        let tool_fingerprint = hash_text(&tool_definitions);
         let estimated = (visible + instructions.len() + tools_bytes) as u64 / 3 + 1;
         let remaining = request
             .limits
             .maximum_tokens
             .saturating_sub(tokens(&state.usage).saturating_sub(initial_usage));
         if turns >= request.limits.maximum_turns || remaining < estimated + 256 {
+            save_session(path, state).await?;
             return Ok((
                 AdaptationStatus::BudgetExhausted,
                 "已达到本次分析预算，源码和进度已保存，可继续适配。".into(),
@@ -948,6 +800,13 @@ pub(super) async fn run(
         }
         let mut messages = history::flatten(&decision_context.replay.messages);
         messages.insert(0, json!({"role":"system","content":instructions}));
+        decision_context.components["requestPrefix"] = request_prefix(
+            state,
+            &messages,
+            &instruction_fingerprint,
+            &tool_fingerprint,
+        );
+        save_session(path, state).await?;
         let requested = output_limit.min((remaining - estimated).min(u64::from(u32::MAX)) as u32);
         if let Some(progress) = progress {
             progress(EngineProgress {
@@ -973,7 +832,7 @@ pub(super) async fn run(
         repair::analyzing(state);
         let requests_before = provider.request_count();
         let response = provider
-            .complete_agent(&messages, &active, &known_tools, requested, cancellation)
+            .complete_agent(&messages, &all, &known_tools, requested, cancellation)
             .await;
         state.record_api_requests(provider.request_count().saturating_sub(requests_before));
         let response = match response {
@@ -981,7 +840,7 @@ pub(super) async fn run(
             Err(error) => {
                 add_usage(&mut state.usage, &error.usage);
                 trace_run(
-                    json!({"operation":"model","status":"failed","turn":state.total_turns+1,"elapsedMs":started.elapsed().as_millis(),"error":error.message,"diagnostic":error.diagnostic,"failureCode":error.diagnostic.code,"httpStatus":error.status_code,"outcomeUnknown":error.outcome_unknown,"usage":error.usage,"maximumOutputTokens":requested,"visibleHistoryBytes":visible,"retainedHistoryBytes":retained,"contextComponents":decision_context.components,"instructionBytes":instructions.len(),"toolDefinitionBytes":tools_bytes,"toolDefinitionFingerprint":tool_fingerprint,"verificationConfigured":state.workflow.verification_args.is_some()}),
+                    json!({"operation":"model","status":"failed","turn":state.total_turns+1,"elapsedMs":started.elapsed().as_millis(),"error":error.message,"diagnostic":error.diagnostic,"failureCode":error.diagnostic.code,"httpStatus":error.status_code,"outcomeUnknown":error.outcome_unknown,"usage":error.usage,"maximumOutputTokens":requested,"visibleHistoryBytes":visible,"retainedHistoryBytes":retained,"contextComponents":decision_context.components,"instructionBytes":instructions.len(),"instructionFingerprint":instruction_fingerprint,"toolDefinitionBytes":tools_bytes,"toolDefinitionFingerprint":tool_fingerprint,"verificationConfigured":state.workflow.verification_args.is_some()}),
                 )?;
                 save_session(path, state).await?;
                 if error.is_cancelled() {
@@ -1032,7 +891,7 @@ pub(super) async fn run(
         }
         add_usage(&mut state.usage, &usage);
         trace_run(
-            json!({"operation":"model","status":"completed","turn":state.total_turns,"elapsedMs":started.elapsed().as_millis(),"usage":usage,"requestId":response.request_id,"tools":response.tool_calls.iter().map(|c|&c.name).collect::<Vec<_>>(),"visibleHistoryBytes":visible,"retainedHistoryBytes":retained,"omittedToolResults":decision_context.replay.omitted,"decisionHistoryStart":decision_context.selected_start,"decisionEvidenceCount":decision_context.evidence_count,"problemId":state.decision.current_problem.as_ref().map(|p|&p.id),"toolDefinitionBytes":tools_bytes,"toolDefinitionFingerprint":tool_fingerprint,"instructionBytes":instructions.len(),"availableToolCount":active.len(),"maximumOutputTokens":requested,"contextComponents":decision_context.components,"verificationConfigured":state.workflow.verification_args.is_some()}),
+            json!({"operation":"model","status":"completed","turn":state.total_turns,"elapsedMs":started.elapsed().as_millis(),"usage":usage,"requestId":response.request_id,"tools":response.tool_calls.iter().map(|c|&c.name).collect::<Vec<_>>(),"visibleHistoryBytes":visible,"retainedHistoryBytes":retained,"omittedToolResults":decision_context.replay.omitted,"decisionHistoryStart":decision_context.selected_start,"decisionEvidenceCount":decision_context.evidence_count,"problemId":state.decision.current_problem.as_ref().map(|p|&p.id),"toolDefinitionBytes":tools_bytes,"toolDefinitionFingerprint":tool_fingerprint,"instructionBytes":instructions.len(),"instructionFingerprint":instruction_fingerprint,"availableToolCount":all.len(),"maximumOutputTokens":requested,"contextComponents":decision_context.components,"verificationConfigured":state.workflow.verification_args.is_some()}),
         )?;
         if let Some(data) = response.provider_data {
             state
@@ -1050,26 +909,6 @@ pub(super) async fn run(
         }
         assistant_progress(state, &response.text, &response.tool_calls, progress);
         state.pending_calls = response.tool_calls;
-        let mut selected = state
-            .extra
-            .get("enabledToolGroups")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        for group in tool_catalog()?.groups {
-            if state
-                .pending_calls
-                .iter()
-                .any(|call| group.tools.contains(&call.name))
-                && !selected.contains(&json!(group.name))
-            {
-                selected.push(json!(group.name));
-            }
-        }
-        state
-            .extra
-            .insert("enabledToolGroups".into(), json!(selected));
-        active = filter_tools(&all, &selected)?;
         save_session(path, state).await?;
         if tokens(&state.usage).saturating_sub(initial_usage) > request.limits.maximum_tokens {
             return Ok((
@@ -1090,11 +929,7 @@ pub(super) async fn run(
                     None,
                 ));
             }
-            state
-                .extra
-                .insert("enabledToolGroups".into(), json!(["all"]));
-            active = all.clone();
-            state.messages.push(json!({"role":"user","content":format!("{}\n主程序已补齐全部工具定义，可直接选择下一项操作。{}如果确实需要用户提供资料或操作，或调查后已确认无法支持，请单独调用 report_blocker，说明已尝试的方案、具体卡点和可执行的下一步。",objective_context(&state.objective),if state.verified_package.is_some(){"完整资源验收已通过。若当前目标已完成，请直接 finish；在 summary 披露已知覆盖遗漏和仍需用户验证的运行效果。不要因未进游戏验证而重新开始研究或扩展其他类别。"}else{"适配尚未发布。请执行下一项工具操作，继续解决真实验证失败，包括中文编码和字体支持；不要仅返回阶段总结。"})}));
+            state.messages.push(json!({"role":"user","content":format!("{}\n全部工具定义均已提供，请直接选择下一项操作。{}如果确实需要用户提供资料或操作，或调查后已确认无法支持，请单独调用 report_blocker，说明已尝试的方案、具体卡点和可执行的下一步。",objective_context(&state.objective),if state.verified_package.is_some(){"完整资源验收已通过。若当前目标已完成，请直接 finish；在 summary 披露已知覆盖遗漏和仍需用户验证的运行效果。不要因未进游戏验证而重新开始研究或扩展其他类别。"}else{"适配尚未发布。请执行下一项工具操作，继续解决真实验证失败，包括中文编码和字体支持；不要仅返回阶段总结。"})}));
         } else {
             summaries = 0;
         }
@@ -1184,6 +1019,13 @@ mod tests {
     }
 
     fn model(responses: Vec<Value>) -> (OpenAiProvider, std::thread::JoinHandle<Vec<Value>>) {
+        model_with_protocol(responses, ApiProtocol::ChatCompletions)
+    }
+
+    fn model_with_protocol(
+        responses: Vec<Value>,
+        protocol: ApiProtocol,
+    ) -> (OpenAiProvider, std::thread::JoinHandle<Vec<Value>>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
         let thread = std::thread::spawn(move || {
@@ -1227,7 +1069,7 @@ mod tests {
             endpoint,
             api_key: String::new(),
             model: "fixture".into(),
-            protocol: ApiProtocol::ChatCompletions,
+            protocol,
             translation_format: TranslationFormat::JsonBatch,
             analysis_reasoning_effort: None,
         })
@@ -1237,6 +1079,186 @@ mod tests {
 
     fn summary_response(reason: &str) -> Value {
         json!({"id":"fixture","choices":[{"finish_reason":reason,"message":{"role":"assistant","content":"仍在探索：正在核对资源结构。"}}],"usage":{"prompt_tokens":100,"completion_tokens":20,"prompt_tokens_details":{"cached_tokens":50}}})
+    }
+
+    #[tokio::test]
+    async fn hundred_turn_sessions_preserve_wire_prefixes_across_resume_and_capacity_boundaries() {
+        for protocol in [ApiProtocol::ChatCompletions, ApiProtocol::Responses] {
+            let root = tempfile::tempdir().unwrap();
+            let (service, mut request, workspace, mut state) = fixture(root.path());
+            request.limits.maximum_turns = 50;
+            let responses = (1..=100).map(|turn| {
+                let (name,args) = match turn {
+                    1 => ("adapter_protocol", json!({})),
+                    20 => ("load_tool_groups", json!({"mode":"replace","groups":[]})),
+                    60 => ("load_tool_groups", json!({"mode":"replace","groups":["research","development"]})),
+                    30 | 70 => ("checkpoint", json!({"summary":format!("Confirmed layout at revision {turn}; next edit is work/probe.py.")})),
+                    _ => ("write_file", json!({"path":"work/probe.py","content":format!("# revision {turn}\n{}", "# bounded experiment\n".repeat(180))})),
+                };
+                let calls = [
+                    (format!("work-{turn}"), name, args),
+                    (format!("progress-{turn}"), "report_progress", json!({"kind":"exploring","message":format!("正在核对第 {turn} 组布局。"),"problem":{"id":format!("layout-{}",turn / 10),"layer":"workflow","question":format!("Which field locates the text at revision {turn}?")}})),
+                ];
+                match protocol {
+                    ApiProtocol::ChatCompletions => json!({"id":format!("response-{turn}"),"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":null,"reasoning_content":format!("original reasoning {turn}"),"tool_calls":calls.iter().map(|(id,name,args)|json!({"id":id,"type":"function","function":{"name":name,"arguments":args.to_string()}})).collect::<Vec<_>>()}}],"usage":{"prompt_tokens":100,"completion_tokens":20,"prompt_cache_hit_tokens":50}}),
+                    ApiProtocol::Responses => {
+                        let mut output=vec![json!({"type":"reasoning","id":format!("reason-{turn}"),"encrypted_content":format!("opaque-{turn}"),"summary":[],"provider_extension":{"original":turn}})];
+                        output.extend(calls.iter().map(|(id,name,args)|json!({"type":"function_call","id":format!("item-{id}"),"call_id":id,"name":name,"arguments":args.to_string(),"status":"completed"})));
+                        json!({"id":format!("response-{turn}"),"status":"completed","output":output,"usage":{"input_tokens":100,"output_tokens":20,"input_tokens_details":{"cached_tokens":50}}})
+                    }
+                }
+            }).collect::<Vec<_>>();
+            let original_responses = responses.clone();
+            let (provider, server) = model_with_protocol(responses, protocol);
+            recover(&mut state, &request, provider.identity());
+            let events = std::sync::Mutex::new(Vec::new());
+            let trace = |entry| {
+                events.lock().unwrap().push(entry);
+                Ok(())
+            };
+            let path = workspace.join("session.json");
+            for half in 0..2 {
+                let result = run(
+                    &service,
+                    &request,
+                    &provider,
+                    &workspace,
+                    &path,
+                    &mut state,
+                    "Continue with the existing layout evidence.".into(),
+                    &CancellationToken::new(),
+                    None,
+                    &trace,
+                )
+                .await
+                .unwrap();
+                assert_eq!(result.0, AdaptationStatus::BudgetExhausted);
+                if half == 0 {
+                    state = load_session(&path).unwrap();
+                    request.objective = "Repair".into();
+                    request.user_instruction = "保留文本 ID，仅修正字段定位。".into();
+                    recover(&mut state, &request, provider.identity());
+                }
+            }
+            let requests = server.join().unwrap();
+            assert_eq!(requests.len(), 100);
+            assert_eq!(state.total_turns, 100);
+            assert_eq!(state.api_requests(), 100);
+            assert_eq!(state.usage.cached_tokens, Some(5000));
+            let events = events.into_inner().unwrap();
+            let turns = events
+                .iter()
+                .filter(|event| event["operation"] == "model")
+                .collect::<Vec<_>>();
+            assert_eq!(turns.len(), 100);
+            let compactions = events
+                .iter()
+                .filter(|event| event["operation"] == "history-compacted")
+                .collect::<Vec<_>>();
+            assert!(!compactions.is_empty());
+            assert!(
+                compactions
+                    .iter()
+                    .all(|event| event["reason"] == "history-size"
+                        && (event["visibleHistoryBytes"].as_u64().unwrap() > 192 * 1024
+                            || event["checkpointHistoryBytes"].as_u64().unwrap() > 768 * 1024))
+            );
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| event["operation"] == "checkpoint-request"
+                        || event["operation"] == "tool-batch-rejected")
+            );
+            let field = if protocol == ApiProtocol::Responses {
+                "input"
+            } else {
+                "messages"
+            };
+            let mut preserved = 0;
+            for (index, (wire, turn)) in requests.iter().zip(&turns).enumerate() {
+                assert_eq!(
+                    wire["tools"],
+                    requests[0]["tools"],
+                    "{protocol:?} turn {}",
+                    index + 1
+                );
+                assert_eq!(
+                    turn["instructionFingerprint"],
+                    turns[0]["instructionFingerprint"]
+                );
+                if protocol == ApiProtocol::Responses {
+                    assert_eq!(wire["instructions"], requests[0]["instructions"]);
+                } else {
+                    assert_eq!(wire["messages"][0], requests[0]["messages"][0]);
+                }
+                let prefix = &turn["contextComponents"]["requestPrefix"];
+                if prefix["preserved"] == true {
+                    preserved += 1;
+                    let previous = requests[index - 1][field].as_array().unwrap();
+                    assert_eq!(
+                        &wire[field].as_array().unwrap()[..previous.len()],
+                        previous,
+                        "{protocol:?} turn {}",
+                        index + 1
+                    );
+                } else {
+                    assert!(
+                        prefix["preserved"].is_null(),
+                        "{protocol:?} broken prefix at turn {}",
+                        index + 1
+                    );
+                    if index > 0 {
+                        assert!(prefix["segmentStart"].as_u64()>turns[index-1]["contextComponents"]["requestPrefix"]["segmentStart"].as_u64());
+                    }
+                }
+                if index > 0 {
+                    let input = wire[field].as_array().unwrap();
+                    if protocol == ApiProtocol::Responses {
+                        for original in original_responses[index - 1]["output"].as_array().unwrap()
+                        {
+                            assert!(
+                                input.contains(original),
+                                "original Responses item missing at turn {}",
+                                index + 1
+                            );
+                        }
+                    } else {
+                        assert!(
+                            input.contains(&original_responses[index - 1]["choices"][0]["message"])
+                        );
+                    }
+                }
+            }
+            assert!(
+                preserved >= 95,
+                "{protocol:?}: {preserved} preserved requests"
+            );
+            assert_eq!(
+                turns[50]["contextComponents"]["requestPrefix"]["preserved"],
+                true
+            );
+            assert_eq!(
+                turns[30]["contextComponents"]["requestPrefix"]["preserved"],
+                true
+            );
+            assert_eq!(
+                turns[70]["contextComponents"]["requestPrefix"]["preserved"],
+                true
+            );
+            let restored = load_session(&path).unwrap();
+            assert!(session_store::base(&restored) > 0);
+            assert!(
+                read_session_history(&restored, &json!({"query":"revision 2"})).unwrap()["found"]
+                    == true
+            );
+            assert!(
+                read_tool_result(&workspace, &restored, &json!({"toolCallId":"work-20"})).unwrap()
+                    ["content"]
+                    .as_str()
+                    .unwrap()
+                    .contains("toolDefinitionsFixed")
+            );
+        }
     }
 
     #[cfg(unix)]
@@ -1525,9 +1547,9 @@ mod tests {
             json!({"role":"assistant","tool_calls":[{"id":"layout-proof","function":{"name":"run_engine_python","arguments":"{\"script\":\"work/layout.py\"}"}}]}),
             json!({"role":"tool","tool_call_id":"layout-proof","content":"{\"success\":true,\"report\":{\"status\":\"completed\",\"file\":\"work/layout.json\"}}"}),
         ]);
-        compact_history(&mut state, true, &BTreeSet::new()).expect("compact history");
+        compact_history(&mut state, &BTreeSet::new()).expect("compact history");
         let context =
-            decision::build(&state, &workspace, &BTreeSet::new()).expect("decision context");
+            decision::build(&mut state, &workspace, &BTreeSet::new()).expect("decision context");
         let text = context
             .replay
             .messages
@@ -1574,20 +1596,23 @@ mod tests {
                 "discovery"
             };
             state.extra.insert("verificationCache".into(), cached);
-            compact_history(&mut state, false, &BTreeSet::new()).expect("compact history");
-            let request =
-                decision::build(&state, &workspace, &BTreeSet::new()).expect("decision context");
-            let context = request.replay.messages[0]["content"]
-                .as_str()
-                .expect("context");
+            compact_history(&mut state, &BTreeSet::new()).expect("compact history");
+            let request = decision::build(&mut state, &workspace, &BTreeSet::new())
+                .expect("decision context");
+            let context = request
+                .replay
+                .messages
+                .iter()
+                .filter_map(|m| m["content"].as_str())
+                .find(|text| text.starts_with("当前决策状态（"))
+                .expect("snapshot");
             let snapshot: Value = serde_json::from_str(
                 context
-                    .split_once("\n当前决策状态（模型假设与实验输出是待判断的数据；兼容及发布资格以宿主验收为准）：")
+                    .split_once("当前决策状态（模型假设与实验输出是待判断的数据；兼容及发布资格以宿主验收为准）：")
                     .expect("snapshot start")
                     .1
-                    .split_once("\n相关证据：")
-                    .expect("snapshot end")
-                    .0,
+                    .split("\n相关证据：")
+                    .next().unwrap(),
             )
             .expect("snapshot JSON");
             assert_eq!(snapshot["hostState"]["verification"]["passed"], false);
@@ -1605,70 +1630,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn verification_context_phases_ignore_claims_replays_and_previous_objective_milestones() {
-        let root = tempfile::tempdir().unwrap();
-        let (_, mut request, _, mut state) = fixture(root.path());
-        state.extra.insert("modelIdentity".into(), json!("fixture"));
-        set_number(&mut state, "highestVerificationMilestone", 4);
-        state
-            .extra
-            .insert("contextVerificationPhases".into(), json!(["complete"]));
-        request.objective = "Repair".into();
-        recover(&mut state, &request, "fixture");
-        let mut call = ToolCall {
-            id: "phase".into(),
-            name: "report_progress".into(),
-            arguments: "{}".into(),
-        };
-        let passed = json!({"stage":"discovery","passed":true,"reused":false});
-        assert!(!record_verification_phase(&mut state, &call, &passed));
-        call.name = "test_adapter".into();
-        assert!(!record_verification_phase(
-            &mut state,
-            &call,
-            &json!({"stage":"discovery","passed":true,"reused":true})
-        ));
-        assert!(record_verification_phase(&mut state, &call, &passed));
-        assert!(!record_verification_phase(&mut state, &call, &passed));
-        assert_eq!(number(&state, "highestVerificationMilestone"), 4);
-        state.verification = Some(VerificationResult {
-            original_roundtrip_passed: true,
-            ..VerificationResult::default()
-        });
-        assert!(!record_verification_phase(
-            &mut state,
-            &call,
-            &json!({"stage":"trial","passed":false,"diagnostics":["trial failed"]})
-        ));
-        assert!(record_verification_phase(
-            &mut state,
-            &call,
-            &json!({"stage":"trial","passed":true})
-        ));
-        assert_eq!(
-            state.extra["contextVerificationPhases"],
-            json!(["discovery", "trial"])
-        );
-        state.verification = None;
-        assert!(!record_verification_phase(
-            &mut state,
-            &call,
-            &json!({"stage":"verification","passed":false,"diagnostics":["full test failed before original roundtrip"]})
-        ));
-        state.verification = Some(VerificationResult {
-            original_roundtrip_passed: true,
-            ..VerificationResult::default()
-        });
-        assert!(record_verification_phase(
-            &mut state,
-            &call,
-            &json!({"stage":"verification","passed":false,"diagnostics":["Chinese writeback failed"]})
-        ));
-    }
-
     #[tokio::test]
-    async fn repair_boundary_keeps_latest_batch_requirements_failures_and_archive_readback() {
+    async fn capacity_boundary_keeps_repair_requirements_latest_batch_and_archive_readback() {
         let root = tempfile::tempdir().unwrap();
         let (service, mut request, workspace, mut state) = fixture(root.path());
         state.extra.insert("modelIdentity".into(), json!("fixture"));
@@ -1724,7 +1687,11 @@ mod tests {
             first_request < original_bytes / 2,
             "{first_request} / {original_bytes}"
         );
-        let saved = messages[1]["content"].as_str().unwrap();
+        let saved = messages
+            .iter()
+            .filter_map(|m| m["content"].as_str())
+            .find(|text| text.starts_with("当前决策状态（"))
+            .unwrap();
         assert!(saved.contains("修复现有支持（Repair）"));
         assert!(saved.contains(&request.user_instruction));
         assert!(saved.contains("actual earlier failure diagnostic"));
@@ -1741,8 +1708,8 @@ mod tests {
                 .count(),
             1
         );
-        assert!(request_context.contains("主程序已将暂存资源与制作输入同步："));
-        assert!(request_context.contains("宿主制作输入："));
+        assert!(saved.contains("\"resourceChanges\":{\"changed\":[\"text.bin\"]}"));
+        assert!(saved.contains("\"inputBinding\":{\"source\":\"fixture-input\"}"));
         assert!(
             messages
                 .windows(latest.len())
@@ -1756,7 +1723,22 @@ mod tests {
         assert!(!state.extra.contains_key("contextBoundary"));
         request.user_instruction = "继续修正字体映射。".into();
         recover(&mut state, &request, "fixture");
-        assert_eq!(state.extra["contextBoundary"], "instruction-changed");
+        assert!(!state.extra.contains_key("contextBoundary"));
+        assert_eq!(session_store::base(&state), base);
+        let previous = decision::build(&mut state, &workspace, &BTreeSet::new())
+            .unwrap()
+            .replay
+            .messages;
+        request.user_instruction.clear();
+        recover(&mut state, &request, "fixture");
+        let current = decision::build(&mut state, &workspace, &BTreeSet::new()).unwrap();
+        assert_eq!(current.replay.messages[..previous.len()], previous);
+        assert!(
+            current.replay.messages.last().unwrap()["content"]
+                .as_str()
+                .unwrap()
+                .contains("\"userInstruction\":null")
+        );
     }
 
     #[tokio::test]
@@ -1800,7 +1782,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn large_process_output_outside_decision_window_does_not_repeat_checkpoint_requests() {
+    async fn large_process_output_preserves_segment_and_does_not_repeat_legacy_checkpoint_requests()
+    {
         let root = tempfile::tempdir().unwrap();
         let (service, request, workspace, mut state) = fixture(root.path());
         let output = format!(
@@ -1853,16 +1836,18 @@ mod tests {
         .unwrap();
         let requests = server.join().unwrap();
         assert!(requests.iter().all(|request| {
-            !request["messages"]
+            request["messages"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|message| {
+                .filter(|message| {
                     message["role"] == "user"
                         && message["content"]
                             .as_str()
                             .is_some_and(|content| content.starts_with(CHECKPOINT_REQUEST))
                 })
+                .count()
+                == 1
         }));
         assert!(
             !events
@@ -1872,7 +1857,7 @@ mod tests {
                 .any(|entry| entry["operation"] == "checkpoint-request")
         );
         let mut restored = load_session(&workspace.join("session.json")).unwrap();
-        assert!(session_store::base(&restored) > 0);
+        assert_eq!(session_store::base(&restored), 0);
         let original = read_tool_result(
             &workspace,
             &restored,
@@ -1918,7 +1903,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resumes_independent_reads_before_continuation_and_compacts_ignored_checkpoint() {
+    async fn resumes_independent_reads_before_continuation_and_keeps_request_prefix() {
         let root = tempfile::tempdir().unwrap();
         let (service, request, workspace, mut state) = fixture(root.path());
         fs::write(workspace.join("work/evidence.txt"), "confirmed evidence").unwrap();
@@ -1953,12 +1938,22 @@ mod tests {
         assert_eq!(result.0, AdaptationStatus::Incomplete);
         let requests = server.join().unwrap();
         let first = requests[0]["messages"].as_array().unwrap();
-        assert_eq!(first[3]["tool_call_id"], "missing");
-        assert_eq!(first[4]["tool_call_id"], "existing");
-        assert!(first[4]["content"].as_str().unwrap().contains("available"));
-        assert_eq!(first[5]["role"], "user");
+        let results = first
+            .iter()
+            .filter(|m| m["role"] == "tool")
+            .collect::<Vec<_>>();
+        assert_eq!(results[0]["tool_call_id"], "missing");
+        assert_eq!(results[1]["tool_call_id"], "existing");
+        assert!(
+            results[1]["content"]
+                .as_str()
+                .unwrap()
+                .contains("available")
+        );
         assert!(session_store::base(&state) > 0);
-        assert!(requests[1].to_string().len() < requests[0].to_string().len() / 2);
+        let next = requests[1]["messages"].as_array().unwrap();
+        assert_eq!(&next[..first.len()], first);
+        assert_eq!(requests[0]["tools"], requests[1]["tools"]);
         assert!(
             !state
                 .messages

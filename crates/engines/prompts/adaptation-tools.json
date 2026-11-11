@@ -76,7 +76,7 @@
       "type": "function",
       "function": {
         "name": "load_tool_groups",
-        "description": "Select tool schemas for the next request. mode=add (default) loads more groups; mode=replace keeps only the supplied groups, or basic tools with groups=[]. Load the relevant groups; all is available for broad inspection. Checkpoint/resume/model changes trim unused schemas, and any group can be reloaded. Local only; does not run tools or download anything. Call alone.",
+        "description": "Inspect a local tool-group classification. All tool schemas are already supplied in a fixed order for the entire adaptation session; this call does not change the API tool set and is not required before using any tool. mode=add (default) adds classification groups; mode=replace replaces the classification. Local only; does not run tools or download anything. Call alone.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -1817,7 +1817,7 @@
       "type": "function",
       "function": {
         "name": "checkpoint",
-        "description": "Compact when requested or a major phase ends, not after each probe. Prefer <=3000 characters: preserve exact field order/stride/API facts needed by the current implementation, evidence locations, failed hypotheses, coverage/omissions and next action. Do not copy source/disassembly. Recent small tool exchanges and the previously read adapter protocol survive. Call alone.",
+        "description": "Save confirmed implementation notes at a major milestone. This does not force context compaction; the host starts a new context segment only when its size budget is reached. Prefer <=3000 characters: preserve exact field order/stride/API facts, evidence locations, failed hypotheses, coverage/omissions and next action. Do not copy source/disassembly. Call alone.",
         "parameters": {
           "type": "object",
           "properties": {

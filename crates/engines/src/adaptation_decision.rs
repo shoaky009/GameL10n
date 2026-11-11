@@ -1,4 +1,4 @@
-//! Problem-scoped model context. Evidence locations reference the unchanged session archive.
+//! Append-only host context within bounded segments. Evidence locations reference the session archive.
 use super::*;
 
 const MAX_REFERENCES: usize = 48;
@@ -10,6 +10,16 @@ pub(crate) struct DecisionState {
     pub hypotheses: Vec<Hypothesis>,
     pub evidence_refs: Vec<EvidenceRef>,
     pub problem_start: usize,
+    pub references: String,
+    sent_context: SentContext,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", default)]
+struct SentContext {
+    snapshot: Value,
+    evidence: BTreeMap<String, String>,
+    protocol_sent: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -61,6 +71,29 @@ pub(super) struct Context {
     pub selected_start: usize,
     pub evidence_count: usize,
     pub components: Value,
+}
+
+pub(super) fn reset_context(state: &mut Session) {
+    state.decision.sent_context = SentContext::default();
+}
+
+fn changes(before: &Value, after: &Value) -> Option<Value> {
+    if before == after {
+        return None;
+    }
+    let (Some(before), Some(after)) = (before.as_object(), after.as_object()) else {
+        return Some(after.clone());
+    };
+    let mut updated = serde_json::Map::new();
+    for (key, value) in after {
+        if let Some(change) = changes(before.get(key).unwrap_or(&Value::Null), value) {
+            updated.insert(key.clone(), change);
+        }
+    }
+    for key in before.keys().filter(|key| !after.contains_key(*key)) {
+        updated.insert(key.clone(), Value::Null);
+    }
+    Some(Value::Object(updated))
 }
 
 fn short(value: &str, limit: usize) -> String {
@@ -381,12 +414,6 @@ fn snapshot(
             }
             bounded(&report, 4000)
         });
-    let last_summary = (!has_recent_turns).then(|| short(&state.summary, 1600));
-    let progress = if has_recent_turns {
-        state.extra.get("lastBreakthrough")
-    } else {
-        Some(&state.progress_note)
-    };
     let probes = (!has_recent_turns)
         .then(|| state.extra.get("successfulProbes"))
         .flatten()
@@ -424,11 +451,12 @@ fn snapshot(
     let mut result = json!({
         "objective":state.objective,"userInstruction":state.user_instruction,
         "problem":state.decision.current_problem,"modelHypotheses":state.decision.hypotheses,
-        "notes":short(&state.notes,8000),"workNotes":work_notes,"lastModelSummary":last_summary,"nextAction":state.next_action,
+        "objectiveGuidance":flow::objective_context(&state.objective),
+        "references":state.decision.references,
+        "notes":short(&state.notes,8000),"workNotes":work_notes,"nextAction":state.next_action,
         "notesTurn":notes_turn,
         "notesUse":(!state.notes.is_empty()).then_some("Historical model notes; current source and host verification take precedence. Use saved evidence locations instead of rediscovering established facts."),
         "implementationChangedSinceNotes":notes_turn.zip(state.extra.get("lastImplementationTurn").and_then(Value::as_u64)).map(|(notes,implementation)| implementation>notes),
-        "modelProgress":progress,
         "repairTickets":super::repair::packet(state),
         "capabilityGaps":super::capability::gaps(state, workspace),
         "hostState":host_state,
@@ -439,18 +467,14 @@ fn snapshot(
 }
 
 pub(super) fn build(
-    state: &Session,
+    state: &mut Session,
     workspace: &Path,
     disabled: &BTreeSet<String>,
 ) -> Result<Context, EngineError> {
     let base = session_store::base(state) + state.history_start;
-    let history = &state.messages[state.history_start..];
-    let window =
-        history::decision_window(history, state.decision.problem_start.saturating_sub(base));
-    let selected_start = base + window.start;
-    let selected = &history[window];
+    let selected_start = base;
+    let selected = &state.messages[state.history_start..];
     let visible_results: BTreeSet<_> = selected.iter().filter_map(message_id).collect();
-    let mut replay = history::for_request(selected);
     let pinned: BTreeSet<_> = state
         .decision
         .hypotheses
@@ -535,56 +559,86 @@ pub(super) fn build(
         }
     }
     let fingerprint = input_fingerprint(state);
-    let evidence: Vec<_> = refs.iter().map(|r| json!({"reference":r,"inputChanged":r.input_fingerprint.as_ref().zip(fingerprint.as_ref()).map(|(old,new)| old!=new),"olderObservation":excerpts.get(&r.message_index)})).collect();
+    let evidence: Vec<_> = refs.iter()
+        .filter(|reference| !visible_results.contains(reference.tool_call_id.as_str()))
+        .map(|reference| json!({"reference":reference,"inputChanged":reference.input_fingerprint.as_ref().zip(fingerprint.as_ref()).map(|(old,new)|old!=new),"olderObservation":excerpts.get(&reference.message_index)}))
+        .collect();
+    let evidence_count = evidence.len();
     let has_recent_turns = !visible_results.is_empty();
-    let snapshot = snapshot(state, workspace, disabled, has_recent_turns).to_string();
-    let evidence = json!(evidence).to_string();
+    let snapshot = snapshot(state, workspace, disabled, has_recent_turns);
+    let full = state.decision.sent_context.snapshot.is_null();
+    let updates = changes(&state.decision.sent_context.snapshot, &snapshot);
     let retrieval_ids: BTreeSet<_> = selected
         .iter()
         .flat_map(history::calls)
         .filter(|(_, name)| matches!(name.as_str(), "read_tool_result" | "read_session_history"))
         .map(|(id, _)| id)
         .collect();
-    let retrieval_bytes = |messages: &[Value]| {
-        messages
-            .iter()
-            .filter(|message| message_id(message).is_some_and(|id| retrieval_ids.contains(id)))
-            .map(visible_json_bytes)
-            .sum::<usize>()
-    };
-    let mut components = json!({
-        "snapshotBytes":snapshot.len(),
-        "evidenceBytes":evidence.len(),
-        "injectedProtocolBytes":0,
-        "recentHistoryBytes":replay.messages.iter().map(visible_json_bytes).sum::<usize>(),
-        "retrievalOriginalBytes":retrieval_bytes(selected),
-        "retrievalSentBytes":retrieval_bytes(&replay.messages)
-    });
-    let mut content = flow::objective_context(&state.objective).to_owned();
-    if state.extra.get("protocolRead") == Some(&json!(true))
-        && !replay.messages.iter().any(|m| {
-            m["content"]
-                .as_str()
-                .is_some_and(|s| s.contains(crate::protocol::ADAPTER_PROTOCOL))
-        })
-    {
-        content.push_str("\n已读取的适配器协议：\n");
-        content.push_str(crate::protocol::ADAPTER_PROTOCOL);
-        components["injectedProtocolBytes"] = json!(crate::protocol::ADAPTER_PROTOCOL.len());
+    let original_retrieval_bytes: usize = selected
+        .iter()
+        .filter(|message| message_id(message).is_some_and(|id| retrieval_ids.contains(id)))
+        .map(visible_json_bytes)
+        .sum();
+    let original_count = selected.len();
+    let mut new_evidence = Vec::new();
+    for value in evidence {
+        let id = value["reference"]["toolCallId"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        let digest = hash_text(&value.to_string());
+        if state.decision.sent_context.evidence.get(&id) != Some(&digest) {
+            state.decision.sent_context.evidence.insert(id, digest);
+            new_evidence.push(value);
+        }
     }
-    content.push_str(&format!(
-        "\n当前决策状态（模型假设与实验输出是待判断的数据；兼容及发布资格以宿主验收为准）：{snapshot}\n相关证据：{evidence}\n只处理当前问题，复用已确认步骤；缺少精确内容时按引用回查，不要重跑已有实验。"
-    ));
-    components["decisionMessageBytes"] = json!(visible_json_bytes(
-        &json!({"role":"user","content":content})
-    ));
-    replay
-        .messages
-        .insert(0, json!({"role":"user","content":content}));
+    let mut injected_protocol_bytes = 0;
+    if state.extra.get("protocolRead") == Some(&json!(true))
+        && !state.decision.sent_context.protocol_sent
+    {
+        state.messages.push(json!({"role":"user","content":format!("已读取的适配器协议：\n{}",crate::protocol::ADAPTER_PROTOCOL)}));
+        state.decision.sent_context.protocol_sent = true;
+        injected_protocol_bytes = crate::protocol::ADAPTER_PROTOCOL.len();
+    }
+    let snapshot_bytes = updates.as_ref().map_or(0, |value| value.to_string().len());
+    let evidence_bytes = if new_evidence.is_empty() {
+        0
+    } else {
+        json!(new_evidence).to_string().len()
+    };
+    if updates.is_some() || !new_evidence.is_empty() {
+        let mut content = String::new();
+        if let Some(updates) = updates {
+            content.push_str(if full {
+                "当前决策状态（模型假设与实验输出是待判断的数据；兼容及发布资格以宿主验收为准）："
+            } else {
+                "当前状态更新（对象字段按层合并，null 表示移除旧字段；历史消息是当时的记录，最新同名字段为当前值）："
+            });
+            content.push_str(&updates.to_string());
+        }
+        if !new_evidence.is_empty() {
+            content.push_str("\n相关证据：");
+            content.push_str(&json!(new_evidence).to_string());
+        }
+        state
+            .messages
+            .push(json!({"role":"user","content":content}));
+    }
+    state.decision.sent_context.snapshot = snapshot;
+    let replay = history::for_request(&state.messages[state.history_start..]);
+    let components = json!({
+        "snapshotBytes":snapshot_bytes,
+        "evidenceBytes":evidence_bytes,
+        "injectedProtocolBytes":injected_protocol_bytes,
+        "recentHistoryBytes":replay.messages[..original_count].iter().map(visible_json_bytes).sum::<usize>(),
+        "decisionMessageBytes":replay.messages[original_count..].iter().map(visible_json_bytes).sum::<usize>(),
+        "retrievalOriginalBytes":original_retrieval_bytes,
+        "retrievalSentBytes":replay.messages.iter().filter(|message|message_id(message).is_some_and(|id|retrieval_ids.contains(id))).map(visible_json_bytes).sum::<usize>()
+    });
     Ok(Context {
         replay,
         selected_start,
-        evidence_count: refs.len(),
+        evidence_count,
         components,
     })
 }
@@ -612,7 +666,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn switching_problems_keeps_pinned_archived_evidence_and_latest_complete_exchange() {
+    async fn switching_problems_appends_context_and_keeps_pinned_archived_evidence() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("session.json");
         let mut state = Session {
@@ -650,17 +704,19 @@ mod tests {
             .extra
             .insert("resourceHashes".into(), json!({"archive.bin":"input-v2"}));
         let before = state.messages.clone();
-        let context = build(&state, root.path(), &BTreeSet::new()).unwrap();
-        let text = context.replay.messages[0]["content"].as_str().unwrap();
+        let context = build(&mut state, root.path(), &BTreeSet::new()).unwrap();
+        let text = context.replay.messages.last().unwrap()["content"]
+            .as_str()
+            .unwrap();
         assert!(text.contains("key 1 failed; key 2 remains untested"));
         assert!(text.contains("\"inputChanged\":true"));
         assert!(text.contains("script-layout"));
         assert!(!text.contains("unrelatedunrelated"));
         assert_eq!(
-            &context.replay.messages[1..],
-            &state.messages[state.messages.len() - 2..]
+            &context.replay.messages[..before.len()],
+            history::for_request(&before).messages
         );
-        assert_eq!(before, state.messages);
+        assert_eq!(before, state.messages[..before.len()]);
         assert!(
             read_tool_result(root.path(), &state, &json!({"toolCallId":"filter-proof"}))
                 .unwrap()
@@ -669,12 +725,26 @@ mod tests {
         );
         assert!(state.verified_package.is_none());
         session_store::save(&path, &mut state).await.unwrap();
-        let restored = load_session(&path).unwrap();
+        let mut restored = load_session(&path).unwrap();
         assert_eq!(
-            restored.decision.current_problem.unwrap().id,
+            restored.decision.current_problem.as_ref().unwrap().id,
             "script-layout"
         );
         assert_eq!(restored.decision.hypotheses[0].evidence, ["filter-proof"]);
+        let resumed = build(&mut restored, root.path(), &BTreeSet::new()).unwrap();
+        assert_eq!(resumed.replay.messages, context.replay.messages);
+        assert_eq!(resumed.components["decisionMessageBytes"], 0);
+        restored.decision.hypotheses[0].status = HypothesisStatus::Refuted;
+        let updated = build(&mut restored, root.path(), &BTreeSet::new()).unwrap();
+        assert_eq!(
+            updated.replay.messages[..resumed.replay.messages.len()],
+            resumed.replay.messages
+        );
+        let delta = updated.replay.messages.last().unwrap()["content"]
+            .as_str()
+            .unwrap();
+        assert!(delta.contains("refuted"));
+        assert!(!delta.contains("相关证据"));
     }
 
     #[test]
@@ -711,7 +781,7 @@ mod tests {
     }
 
     #[test]
-    fn bounded_context_preserves_current_failure_and_raw_responses_reasoning() {
+    fn segment_keeps_previews_current_failure_and_raw_responses_reasoning() {
         let root = tempfile::tempdir().unwrap();
         let mut state = Session::default();
         for index in 0..30 {
@@ -727,17 +797,13 @@ mod tests {
             json!({"success":false,"phase":"build","stderr":"layout mismatch at offset 64"}),
         );
         let original: usize = state.messages.iter().map(visible_json_bytes).sum();
-        let baseline: usize = history::for_request(&state.messages)
-            .messages
-            .iter()
-            .map(visible_json_bytes)
-            .sum();
-        let context = build(&state, root.path(), &BTreeSet::new()).unwrap();
+        let saved = state.messages.clone();
+        let baseline = history::for_request(&saved).messages;
+        let context = build(&mut state, root.path(), &BTreeSet::new()).unwrap();
         let visible: usize = context.replay.messages.iter().map(visible_json_bytes).sum();
-        eprintln!(
-            "context replay: retainedHistoryBytes={original}, baselineRequestBytes={baseline}, decisionRequestBytes={visible}"
-        );
-        assert!(visible < baseline / 2, "{visible} / {baseline}");
+        assert!(visible < original / 2, "{visible} / {original}");
+        assert_eq!(context.replay.messages[..baseline.len()], baseline);
+        assert_eq!(state.messages[..saved.len()], saved);
         assert_eq!(context.replay.messages.last(), state.messages.last());
         assert!(
             context
@@ -781,7 +847,7 @@ mod tests {
             json!({"role":"tool","tool_call_id":"retrieve","content":json!({"success":true,"content":"exact saved evidence ".repeat(2000)}).to_string()}),
         ];
         let saved = state.messages.clone();
-        let context = build(&state, root.path(), &BTreeSet::new()).unwrap();
+        let context = build(&mut state, root.path(), &BTreeSet::new()).unwrap();
         let sizes = &context.components;
         assert_eq!(
             sizes["injectedProtocolBytes"].as_u64().unwrap() as usize,
@@ -790,16 +856,19 @@ mod tests {
         assert!(sizes["retrievalOriginalBytes"].as_u64() > sizes["retrievalSentBytes"].as_u64());
         assert_eq!(
             sizes["recentHistoryBytes"].as_u64().unwrap() as usize,
-            context.replay.messages[1..]
+            context.replay.messages[..saved.len()]
                 .iter()
                 .map(visible_json_bytes)
                 .sum::<usize>()
         );
         assert_eq!(
             sizes["decisionMessageBytes"].as_u64().unwrap() as usize,
-            visible_json_bytes(&context.replay.messages[0])
+            context.replay.messages[saved.len()..]
+                .iter()
+                .map(visible_json_bytes)
+                .sum::<usize>()
         );
-        assert_eq!(state.messages, saved);
+        assert_eq!(state.messages[..saved.len()], saved);
     }
 
     #[test]
@@ -807,7 +876,12 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let mut state = Session::default();
         state.extra.insert("builtinDiscovery".into(),json!({"candidates":[{"format":"Age","adapterId":"engine.age"},{"format":"Renpy","adapterId":"engine.renpy"}]}));
-        let context = build(&state, root.path(), &BTreeSet::from(["engine.age".into()])).unwrap();
+        let context = build(
+            &mut state,
+            root.path(),
+            &BTreeSet::from(["engine.age".into()]),
+        )
+        .unwrap();
         let text = context.replay.messages[0]["content"].as_str().unwrap();
         assert!(!text.contains("engine.age"));
         assert!(text.contains("engine.renpy"));
@@ -825,7 +899,7 @@ mod tests {
         let original_index = state.decision.evidence_refs[0].message_index;
         state.history_start = state.messages.len();
         state.messages.extend(state.messages.clone());
-        let context = build(&state, root.path(), &BTreeSet::new()).unwrap();
+        let context = build(&mut state, root.path(), &BTreeSet::new()).unwrap();
         let text = context
             .replay
             .messages
@@ -856,19 +930,31 @@ mod tests {
         state.messages.push(json!({"role":"assistant","tool_calls":[{"id":"proto","function":{"name":"adapter_protocol","arguments":"{}"}}]}));
         record(&mut state, &protocol_call, &json!({}));
         state.messages.push(json!({"role":"tool","tool_call_id":"proto","content":json!({"success":true,"protocol":crate::protocol::ADAPTER_PROTOCOL}).to_string()}));
-        let first = build(&state, root.path(), &BTreeSet::new()).unwrap();
-        let first_decision = first.replay.messages[0]["content"].as_str().unwrap();
-        assert!(first_decision.contains(crate::protocol::ADAPTER_PROTOCOL));
+        let first = build(&mut state, root.path(), &BTreeSet::new()).unwrap();
         assert!(
-            first_decision.find(crate::protocol::ADAPTER_PROTOCOL)
-                < first_decision.find("当前决策状态（")
+            first.replay.messages[2]["content"]
+                .as_str()
+                .unwrap()
+                .contains(crate::protocol::ADAPTER_PROTOCOL)
+        );
+        assert!(
+            first.replay.messages[3]["content"]
+                .as_str()
+                .unwrap()
+                .starts_with("当前决策状态（")
         );
 
         state.summary = "turn 2 transient note".into();
         state.progress_note = json!({"kind":"exploring","message":"transient progress"});
         experiment(&mut state, "step-2", json!({"success":true,"items":[1,2]}));
-        let second = build(&state, root.path(), &BTreeSet::new()).unwrap();
-        assert_eq!(second.replay.messages[0], first.replay.messages[0]);
+        let second = build(&mut state, root.path(), &BTreeSet::new()).unwrap();
+        assert_eq!(second.components["injectedProtocolBytes"], 0);
+        assert_eq!(second.components["snapshotBytes"], 0);
+        assert!(!second.replay.messages.iter().any(|m| {
+            m["content"]
+                .as_str()
+                .is_some_and(|v| v.contains("transient"))
+        }));
         assert_eq!(
             &second.replay.messages[..first.replay.messages.len()],
             &first.replay.messages[..]
@@ -876,8 +962,8 @@ mod tests {
 
         state.summary = "turn 3 transient note".into();
         experiment(&mut state, "step-3", json!({"success":true,"items":[3,4]}));
-        let third = build(&state, root.path(), &BTreeSet::new()).unwrap();
-        assert_eq!(third.replay.messages[0], second.replay.messages[0]);
+        let third = build(&mut state, root.path(), &BTreeSet::new()).unwrap();
+        assert_eq!(third.components["injectedProtocolBytes"], 0);
         assert_eq!(
             &third.replay.messages[..second.replay.messages.len()],
             &second.replay.messages[..]

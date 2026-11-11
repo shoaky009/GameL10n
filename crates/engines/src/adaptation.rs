@@ -792,7 +792,10 @@ impl EngineService {
                 state
                     .extra
                     .insert("enabledToolGroups".into(), json!(selected));
-                Ok(json!({"groups":selected,"success":true}))
+                let classified = filter_tools(&tool_definitions()?, &selected)?;
+                Ok(
+                    json!({"groups":selected,"groupTools":classified.iter().filter_map(|tool|tool["function"]["name"].as_str()).collect::<Vec<_>>(),"toolDefinitionsFixed":true,"success":true,"nextAction":"全部工具定义均已提供，请直接调用所需工具；工具组分类不改变 API 工具集。"}),
+                )
             }
             "report_progress" => {
                 let kind = text(args, "kind")?;
