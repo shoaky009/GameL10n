@@ -19,6 +19,11 @@ pub async fn refresh(ctx: &Context, project_id: Option<&str>) -> Result<(), Core
     } else {
         None
     };
+    let api_summary = if let Some(id) = project_id {
+        Some(host.task_api_summary(id).await?)
+    } else {
+        None
+    };
     let ps = project
         .as_ref()
         .map(|p| p.settings.clone())
@@ -87,6 +92,11 @@ pub async fn refresh(ctx: &Context, project_id: Option<&str>) -> Result<(), Core
         a.set_chain(ModelRc::new(VecModel::from(chain)));
         a.set_analysis_index(index);
         a.set_loaded_analysis_index(index);
+        if !a.get_busy()
+            && let Some(api_summary) = api_summary
+        {
+            a.set_task_api_summary(api_summary.into());
+        }
         a.set_chain_index(if ids.is_empty() { -1 } else { 0 });
         a.set_candidate_api_index(if settings.api_configuration.profiles.is_empty() {
             -1

@@ -2,7 +2,7 @@ use crate::{
     Context, UiSession, install_actions,
     view::{App, MainWindow},
 };
-use gamel10n_core::{Application, StoredAnalysis, ToolPaths};
+use gamel10n_core::{Application, StoredAnalysis, ToolPaths, settings::ApiProfile};
 use gamel10n_engines::protocol::ExtractionResult;
 use gamel10n_translation::{TranslationUnit, files::write_json};
 use slint::{ComponentHandle, Model};
@@ -117,7 +117,7 @@ async fn wait_for_actions(ui: &MainWindow, ctx: &Context, action: &str) {
 }
 
 #[test]
-fn workbench_actions_keep_selection_and_saved_editor_in_sync_across_pages_and_filters() {
+fn project_actions_keep_settings_selection_and_saved_edits_in_sync_across_tabs() {
     i_slint_backend_testing::init_integration_test_with_system_time();
     let root = tempfile::tempdir().unwrap();
     let game = root.path().join("game");
@@ -183,6 +183,9 @@ fn workbench_actions_keep_selection_and_saved_editor_in_sync_across_pages_and_fi
         tools,
     };
     install_actions(&ui, &ctx);
+    ui.global::<App>().on_task_api_for(|operation, summary| {
+        crate::recognition_ui::task_api(&operation, &summary).into()
+    });
     ui.global::<App>().set_project_id(project.id.clone().into());
     ui.global::<App>().set_page(0);
     ui.global::<App>().set_tab(1);
@@ -389,6 +392,53 @@ fn workbench_actions_keep_selection_and_saved_editor_in_sync_across_pages_and_fi
                 .as_deref(),
             Some("离开项目前保存")
         );
+
+        let host = ctx.app().await;
+        for (id, protocol) in [("first", "ChatCompletions"), ("second", "Responses")] {
+            host.save_api_profile(
+                ApiProfile {
+                    id: id.into(),
+                    name: id.into(),
+                    model: format!("{id}-model"),
+                    endpoint: "http://127.0.0.1:1/v1".into(),
+                    protocol: protocol.into(),
+                    ..Default::default()
+                },
+                Some(String::new()),
+                true,
+            )
+            .await
+            .unwrap();
+        }
+        app.set_task_operation("adapt".into());
+        app.set_task_api_summary(
+            host.task_api_summary(&other_project.id)
+                .await
+                .unwrap()
+                .into(),
+        );
+        for (index, id, protocol) in [(1, "second", "Responses"), (0, "first", "ChatCompletions")] {
+            invoke_action(&ui, &ctx, "tab", "3").await;
+            app.set_analysis_index(index);
+            invoke_action(&ui, &ctx, "analysis-api", "").await;
+            invoke_action(&ui, &ctx, "tab", "0").await;
+            let (provider, _) = host.analysis_provider(&other_project.id).await.unwrap();
+            assert_eq!(provider.model(), format!("{id}-model"));
+            assert_eq!(
+                app.get_task_api().as_str(),
+                format!("{id}（{} · {protocol}）", provider.model())
+            );
+            assert_eq!(
+                host.settings()
+                    .await
+                    .unwrap()
+                    .api_configuration
+                    .analysis_profile_id
+                    .as_deref(),
+                Some("first")
+            );
+            assert_eq!(app.get_loaded_analysis_index(), index);
+        }
 
         slint::quit_event_loop().unwrap();
     })
