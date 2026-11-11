@@ -136,11 +136,13 @@ pub(super) fn workspace_files(workspace: &Path, subdirectory: &str, limit: usize
         .filter(|entry| entry.path().is_file())
         .collect();
     files.sort_by_key(|entry| std::cmp::Reverse(entry.metadata().and_then(|m| m.modified()).ok()));
-    files
+    let mut names: Vec<_> = files
         .into_iter()
         .take(limit)
         .map(|entry| format!("{subdirectory}/{}", entry.file_name().to_string_lossy()))
-        .collect()
+        .collect();
+    names.sort();
+    names
 }
 
 pub(super) fn compact_context(
@@ -382,12 +384,7 @@ fn tool_groups(
     let hints = tool_hints(state, workspace);
     let catalog = tool_catalog()?;
     let visible = &state.messages[state.history_start..];
-    let start = state
-        .decision
-        .problem_start
-        .saturating_sub(session_store::base(state) + state.history_start);
-    let mut active_names =
-        history::recent_call_names(&visible[history::decision_window(visible, start)]);
+    let mut active_names = history::recent_call_names(visible);
     active_names.extend(state.pending_calls.iter().map(|call| call.name.clone()));
     for group in &catalog.groups {
         if group.tools.iter().any(|name| active_names.contains(name))
@@ -570,7 +567,7 @@ fn record_tool(state: &mut Session, call: &ToolCall, args: &Value, value: &Value
                 .or_insert(json!([]));
             if let Some(probes) = probes.as_array_mut() {
                 probes.retain(|p| p["arguments"] != args);
-                probes.push(json!({"tool":call.name,"arguments":args,"turn":state.total_turns}));
+                probes.push(json!({"tool":call.name,"arguments":args}));
                 if probes.len() > 3 {
                     probes.remove(0);
                 }
@@ -667,13 +664,7 @@ pub(super) async fn run(
                 None,
             ));
         }
-        let mut advanced = false;
         let mut verification_phase = false;
-        let previous_problem = state
-            .decision
-            .current_problem
-            .as_ref()
-            .map(|p| p.id.clone());
         let sequential = sequential(&state.pending_calls);
         state
             .extra
@@ -778,12 +769,6 @@ pub(super) async fn run(
             );
             decision::record(state, &call, args.as_ref().unwrap_or(&Value::Null));
             verification_phase |= record_verification_phase(state, &call, &value);
-            advanced |= number(state, "highestVerificationMilestone") > previous_milestone
-                && number(state, "highestVerificationMilestone") >= 2
-                || call.name == "test_adapter"
-                    && value["stage"] == "trial"
-                    && value["passed"] == true
-                    && value["reused"] != true;
             let content = value.to_string();
             let trace_result = result_trace(&value);
             trace_run(
@@ -895,16 +880,6 @@ pub(super) async fn run(
             compact_history(state, workspace, true, &service.disabled_families)?;
             state.checkpoint.clear();
             checkpoint_requested = false;
-            active = tool_groups(state, &all, workspace)?;
-        }
-        if advanced
-            || previous_problem.as_deref()
-                != state
-                    .decision
-                    .current_problem
-                    .as_ref()
-                    .map(|p| p.id.as_str())
-        {
             active = tool_groups(state, &all, workspace)?;
         }
         let implementation_review = state.total_turns.saturating_sub(

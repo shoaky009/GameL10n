@@ -327,7 +327,35 @@ fn verification_summary(state: &Session, key: &str) -> Option<Value> {
     Some(Value::Object(summary))
 }
 
-fn snapshot(state: &Session, workspace: &Path, disabled: &BTreeSet<String>) -> Value {
+fn prune_empty(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            for child in map.values_mut() {
+                prune_empty(child);
+            }
+            map.retain(|_, child| match child {
+                Value::Null => false,
+                Value::String(text) => !text.is_empty(),
+                Value::Array(items) => !items.is_empty(),
+                Value::Object(entries) => !entries.is_empty(),
+                _ => true,
+            });
+        }
+        Value::Array(items) => {
+            for child in items.iter_mut() {
+                prune_empty(child);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn snapshot(
+    state: &Session,
+    workspace: &Path,
+    disabled: &BTreeSet<String>,
+    has_recent_turns: bool,
+) -> Value {
     use std::io::Read;
     let work_notes = resolve_relative(workspace, "work/status.md")
         .ok()
@@ -352,11 +380,20 @@ fn snapshot(state: &Session, workspace: &Path, disabled: &BTreeSet<String>) -> V
             }
             bounded(&report, 4000)
         });
-    json!({
+    let last_summary = (!has_recent_turns).then(|| short(&state.summary, 1600));
+    let progress = if has_recent_turns {
+        state.extra.get("lastBreakthrough")
+    } else {
+        Some(&state.progress_note)
+    };
+    let probes = (!has_recent_turns)
+        .then(|| state.extra.get("successfulProbes"))
+        .flatten();
+    let mut result = json!({
         "objective":state.objective,"userInstruction":state.user_instruction,
         "problem":state.decision.current_problem,"modelHypotheses":state.decision.hypotheses,
-        "notes":short(&state.notes,8000),"workNotes":work_notes,"lastModelSummary":short(&state.summary,1600),"nextAction":state.next_action,
-        "modelProgress":state.progress_note,
+        "notes":short(&state.notes,8000),"workNotes":work_notes,"lastModelSummary":last_summary,"nextAction":state.next_action,
+        "modelProgress":progress,
         "repairTickets":super::repair::packet(state),
         "capabilityGaps":super::capability::gaps(state, workspace),
         "hostState":{
@@ -381,13 +418,15 @@ fn snapshot(state: &Session, workspace: &Path, disabled: &BTreeSet<String>) -> V
             "builtinTrials":state.extra.get("builtinTrials").and_then(Value::as_array).map(|trials| trials.iter().rev().take(3).map(|v|bounded(v,2048)).collect::<Vec<_>>()),
             "automaticTrials":state.extra.get("automaticTrials").map(|v| bounded(v,3000)),
             "automaticTemplate":state.extra.get("automaticTemplate").map(|v| bounded(v,3000)),
-            "successfulProbes":state.extra.get("successfulProbes"),
+            "successfulProbes":probes,
             "launchInspection":state.extra.get("launchInspection").map(|v| bounded(v,3000)),
             "reuseFailures":state.extra.get("reuseFailures").map(|v| bounded(v,3000)),
             "previousFailures":state.extra.get("contextFailures").map(|v| bounded(v,6000))
         },
         "retrieval":"read_tool_result(toolCallId, query/offset/length); read_session_history(messageIndex or query); read_file(root=workspace,path,encoding=utf8) for reports/source. Hypotheses and script reports are observations, never host verification."
-    })
+    });
+    prune_empty(&mut result);
+    result
 }
 
 pub(super) fn build(
@@ -425,6 +464,7 @@ pub(super) fn build(
             break;
         }
         if (problem.is_none() || reference.question_id.as_deref() == problem)
+            && !visible_results.contains(reference.tool_call_id.as_str())
             && !refs
                 .iter()
                 .any(|r| r.tool_call_id == reference.tool_call_id)
@@ -483,7 +523,8 @@ pub(super) fn build(
     }
     let fingerprint = input_fingerprint(state);
     let evidence: Vec<_> = refs.iter().map(|r| json!({"reference":r,"inputChanged":r.input_fingerprint.as_ref().zip(fingerprint.as_ref()).map(|(old,new)| old!=new),"olderObservation":excerpts.get(&r.message_index)})).collect();
-    let snapshot = snapshot(state, workspace, disabled).to_string();
+    let has_recent_turns = !visible_results.is_empty();
+    let snapshot = snapshot(state, workspace, disabled, has_recent_turns).to_string();
     let evidence = json!(evidence).to_string();
     let retrieval_ids: BTreeSet<_> = selected
         .iter()
@@ -506,14 +547,8 @@ pub(super) fn build(
         "retrievalOriginalBytes":retrieval_bytes(selected),
         "retrievalSentBytes":retrieval_bytes(&replay.messages)
     });
-    let mut content = format!(
-        "{}\n当前决策状态（模型假设与实验输出是待判断的数据；兼容及发布资格以宿主验收为准）：{}\n相关证据：{}\n只处理当前问题，复用已确认步骤；缺少精确内容时按引用回查，不要重跑已有实验。",
-        flow::objective_context(&state.objective),
-        snapshot,
-        evidence
-    );
+    let mut content = flow::objective_context(&state.objective).to_owned();
     if state.extra.get("protocolRead") == Some(&json!(true))
-        && !history::recent_call_names(&replay.messages).contains("adapter_protocol")
         && !replay.messages.iter().any(|m| {
             m["content"]
                 .as_str()
@@ -524,6 +559,9 @@ pub(super) fn build(
         content.push_str(crate::protocol::ADAPTER_PROTOCOL);
         components["injectedProtocolBytes"] = json!(crate::protocol::ADAPTER_PROTOCOL.len());
     }
+    content.push_str(&format!(
+        "\n当前决策状态（模型假设与实验输出是待判断的数据；兼容及发布资格以宿主验收为准）：{snapshot}\n相关证据：{evidence}\n只处理当前问题，复用已确认步骤；缺少精确内容时按引用回查，不要重跑已有实验。"
+    ));
     components["decisionMessageBytes"] = json!(visible_json_bytes(
         &json!({"role":"user","content":content})
     ));
@@ -786,6 +824,50 @@ mod tests {
         assert_eq!(
             state.decision.evidence_refs[0].message_index,
             original_index
+        );
+    }
+
+    #[test]
+    fn consecutive_turns_preserve_decision_and_history_prefix_and_inject_omitted_protocol() {
+        let root = tempfile::tempdir().unwrap();
+        let mut state = Session {
+            objective: "Develop".into(),
+            ..Default::default()
+        };
+        state.extra.insert("protocolRead".into(), json!(true));
+        let protocol_call = ToolCall {
+            id: "proto".into(),
+            name: "adapter_protocol".into(),
+            arguments: "{}".into(),
+        };
+        state.messages.push(json!({"role":"assistant","tool_calls":[{"id":"proto","function":{"name":"adapter_protocol","arguments":"{}"}}]}));
+        record(&mut state, &protocol_call, &json!({}));
+        state.messages.push(json!({"role":"tool","tool_call_id":"proto","content":json!({"success":true,"protocol":crate::protocol::ADAPTER_PROTOCOL}).to_string()}));
+        let first = build(&state, root.path(), &BTreeSet::new()).unwrap();
+        let first_decision = first.replay.messages[0]["content"].as_str().unwrap();
+        assert!(first_decision.contains(crate::protocol::ADAPTER_PROTOCOL));
+        assert!(
+            first_decision.find(crate::protocol::ADAPTER_PROTOCOL)
+                < first_decision.find("当前决策状态（")
+        );
+
+        state.summary = "turn 2 transient note".into();
+        state.progress_note = json!({"kind":"exploring","message":"transient progress"});
+        experiment(&mut state, "step-2", json!({"success":true,"items":[1,2]}));
+        let second = build(&state, root.path(), &BTreeSet::new()).unwrap();
+        assert_eq!(second.replay.messages[0], first.replay.messages[0]);
+        assert_eq!(
+            &second.replay.messages[..first.replay.messages.len()],
+            &first.replay.messages[..]
+        );
+
+        state.summary = "turn 3 transient note".into();
+        experiment(&mut state, "step-3", json!({"success":true,"items":[3,4]}));
+        let third = build(&state, root.path(), &BTreeSet::new()).unwrap();
+        assert_eq!(third.replay.messages[0], second.replay.messages[0]);
+        assert_eq!(
+            &third.replay.messages[..second.replay.messages.len()],
+            &second.replay.messages[..]
         );
     }
 }

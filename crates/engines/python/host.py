@@ -40,7 +40,7 @@ def page(text, request):
     encoded = text.encode('utf-16-le', errors='surrogatepass')
     total = len(encoded) // 2
     offset = reference_number(request, 'offset', 0, 0, total)
-    length = reference_number(request, 'length', 8000, 1, 16000)
+    length = reference_number(request, 'length', 3200, 1, 16000)
     query = reference_argument(request, 'query', '')
     if len(query.encode('utf-16-le')) // 2 > 256:
         raise ValueError('检索词过长。')
@@ -126,10 +126,11 @@ def read_file(request):
         raise ValueError('不能读取凭据文件。')
     total = path.stat().st_size
     offset = reference_number(request, 'offset', 0, 0, total)
-    length = min(reference_number(request, 'length', 8192, 1, 32768), total - offset)
     encoding = request.get('encoding') or ('utf8' if workspace_text(request, logical) else 'hex')
     if encoding not in ('hex', 'utf8', 'cp932', 'cp936'):
         raise ValueError('encoding 必须是 hex、utf8、cp932 或 cp936。')
+    default_length = 2048 if encoding == 'hex' else 4096
+    length = min(reference_number(request, 'length', default_length, 1, 32768), total - offset)
     with path.open('rb') as stream:
         stream.seek(offset)
         data = stream.read(length)

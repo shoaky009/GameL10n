@@ -227,12 +227,21 @@ pub(super) fn recent_call_names(history: &[Value]) -> BTreeSet<String> {
 
 /// Select whole exchanges before previewing or cloning their potentially large source writes.
 pub(super) fn decision_window(history: &[Value], problem_start: usize) -> std::ops::Range<usize> {
+    let groups = exchanges(history);
+    let problem_index = groups.partition_point(|group| group.end <= problem_start);
+    let active = if problem_index < groups.len() {
+        &groups[problem_index..]
+    } else {
+        &groups[groups.len().saturating_sub(1)..]
+    };
+    let anchor = if active.len() <= 4 {
+        0
+    } else {
+        ((active.len() - 2) / 3) * 3
+    };
     let mut start = history.len();
     let mut bytes = 0;
-    for group in exchanges(history).iter().rev().take(4) {
-        if start != history.len() && group.end <= problem_start {
-            break;
-        }
+    for group in active[anchor..].iter().rev() {
         let size = history[group.clone()]
             .iter()
             .map(visible_json_bytes)
