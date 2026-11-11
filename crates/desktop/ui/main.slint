@@ -32,10 +32,11 @@ export component MainWindow inherits Window {
                     }
                 }
             }
-            Divider {} Caption { text: "全局"; }
+            Divider {}
             Button { text: "API 与任务默认值"; checked: App.page == 1; clicked => { App.action("navigate", "apis"); } }
             Button { text: "全局引擎库"; checked: App.page == 2; clicked => { App.action("navigate", "catalog"); } }
             Button { text: "程序设置"; checked: App.page == 3; clicked => { App.action("navigate", "settings"); } }
+            Button { text: "关于"; checked: App.page == 4; clicked => { App.action("navigate", "about"); } }
         }
         VerticalLayout { spacing: 12px;
             if App.page == 0: VerticalLayout { spacing: 12px; vertical-stretch: 1;
@@ -66,6 +67,14 @@ export component MainWindow inherits Window {
                 Divider {} Label { text: "同时翻译的游戏数量"; }
                 HorizontalLayout { SpinBox { value <=> App.concurrency; minimum: 1; maximum: 8; } Rectangle { horizontal-stretch: 1; } }
                 HorizontalLayout { Button { text: "保存程序设置"; primary: true; clicked => { App.action("save-application", ""); } } Rectangle { horizontal-stretch: 1; } }
+                Rectangle { vertical-stretch: 1; }
+            }
+            if App.page == 4: VerticalLayout { spacing: 18px;
+                Heading { text: "关于 GameL10n"; font-size: 26px; }
+                Label { text: "版本号"; font-weight: 600; }
+                LineEdit { text: App.software-version; read-only: true; }
+                Label { text: "构建 Git hash"; font-weight: 600; }
+                LineEdit { text: App.build-git-hash == "unknown" ? "未知" : App.build-git-hash; read-only: true; }
                 Rectangle { vertical-stretch: 1; }
             }
             if (App.page == 0 && App.project-id != "" && !(App.tab == 0 && App.recognition-running) && (App.tab != 0 || !App.recognition-ready || App.busy)) || App.activity != "" || App.error != "": TaskFeedback {}

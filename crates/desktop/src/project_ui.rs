@@ -186,6 +186,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
             let page = match input.argument.as_str() {
                 "apis" => 1,
                 "catalog" => 2,
+                "about" => 4,
                 _ => 3,
             };
             ctx.update(move |ui| {
@@ -198,7 +199,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                     a.invoke_action("catalog".into(), "0".into());
                 }
             });
-            if page != 2 {
+            if matches!(page, 1 | 3) {
                 settings_ui::refresh(ctx, None).await?;
             }
         }
