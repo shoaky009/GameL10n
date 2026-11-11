@@ -318,7 +318,7 @@ pub(super) fn failures(history: &[Value], start: usize, base: usize) -> Vec<Valu
             let diagnostics = [&result, &result["result"]]
                 .into_iter()
                 .flat_map(|value| {
-                    ["error", "diagnostics", "stage", "phase", "exitCode", "timedOut", "nextAction"]
+                    ["error", "diagnostics", "issues", "stage", "phase", "exitCode", "executionSucceeded", "reportError", "reportContract", "timedOut", "nextAction"]
                         .into_iter()
                         .filter_map(move |key| value.get(key).map(|value| format!("{key}: {}", head(&value.to_string(), 2048))))
                 })

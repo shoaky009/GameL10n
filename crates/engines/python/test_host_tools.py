@@ -133,6 +133,35 @@ print(os.environ['GAMEL10N_QUESTION_ID'])
         missing = self.execute('run', script='work/missing.py', reportFile='work/absent.json', content='pass')
         self.assertFalse(missing['success'])
         self.assertEqual(missing['phase'], 'report')
+        self.assertTrue(missing['executionSucceeded'])
+        self.assertEqual(missing['reportContract']['file'], 'work/absent.json')
+        self.assertIn('write_report', missing['nextAction'])
+
+    def test_report_helper_writes_actual_findings_without_imports_from_nested_directory(self):
+        result = self.execute('run', script='work/report-helper.py', reportFile='work/reports/helper.json',
+                              workingDirectory='work/nested', content='''
+write_report(status='partial', tested=4, matched=1, summary='仍有候选未检查', details={'offset': 128})
+''')
+        self.assertTrue(result['success'])
+        self.assertTrue(result['executionSucceeded'])
+        self.assertEqual(result['report']['status'], 'partial')
+        self.assertFalse(result['report']['validation'])
+        saved = json.loads((self.root / 'work/reports/helper.json').read_text(encoding='utf-8'))
+        self.assertEqual(saved['details'], {'offset': 128})
+
+    def test_report_helper_does_not_infer_success_or_accept_invalid_fields(self):
+        for content, phase in (("write_report(status='failed', summary='样本不匹配')", 'run'),
+                               ("write_report(status='completed', tested=True)", 'report'),
+                               ("write_report(summary='missing status')", 'run')):
+            with self.subTest(content=content):
+                result = self.execute('run', script='work/invalid-helper.py',
+                                      reportFile='work/helper.json', content=content)
+                self.assertFalse(result['success'])
+                self.assertEqual(result['phase'], phase)
+        missing = self.execute('run', script='work/no-report-path.py',
+                               content="write_report(status='completed')")
+        self.assertFalse(missing['success'])
+        self.assertIn('reportFile', missing['stderr'])
 
     def test_failed_probe_keeps_partial_report_without_granting_verification(self):
         result = self.execute('run', script='work/partial.py', reportFile='work/partial.json', content='''

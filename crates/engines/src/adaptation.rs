@@ -1529,6 +1529,9 @@ impl EngineService {
                 apply_coverage(state, args)?;
                 state.checkpoint = summary.into();
                 state.notes = summary.into();
+                state
+                    .extra
+                    .insert("notesTurn".into(), json!(state.total_turns));
                 Ok(
                     json!({"saved":true,"summary":state.checkpoint,"nextAction":"继续处理下一项具体实现或验收；完整验收通过后直接 finish。"}),
                 )
@@ -3905,6 +3908,7 @@ fn validate_batch(calls: &[ToolCall]) -> Result<(), String> {
         "read_tool_result",
         "read_session_history",
         "search_engine_references",
+        "inspect_engine_reference",
         "search_repositories",
         "fetch_url",
     ];
@@ -3939,7 +3943,10 @@ fn validate_batch(calls: &[ToolCall]) -> Result<(), String> {
     ) {
         return Ok(());
     }
-    Err("本批未执行：可批量最多 6 项独立读取；或顺序提交最多 8 项编辑，末项可为一次 run_engine_python/run_tool/test_adapter；或按 stage_resources → compose_adapter_template → test_adapter 顺序组合（首末可省略）。所有参数须已明确，前置失败即跳过后续。发布、checkpoint 和停止请单独调用。".into())
+    Err(format!(
+        "本批未执行：工具顺序 [{}] 不符合批次规则。可批量最多 6 项独立读取（含 inspect_engine_reference）；或顺序提交最多 8 项编辑，末项可为一次 run_engine_python/run_tool/test_adapter；或按 stage_resources → compose_adapter_template → test_adapter 顺序组合（首末可省略）。读取与运行须拆成不同批次；所有参数须已明确，前置失败即跳过后续。发布、checkpoint 和停止请单独调用。",
+        names.join(" → ")
+    ))
 }
 
 pub(crate) fn definition(
@@ -4941,6 +4948,7 @@ mod tests {
                 "search_repositories",
                 "fetch_url",
                 "search_engine_references",
+                "inspect_engine_reference",
                 "adapter_protocol",
             ],
         ] {
@@ -4955,6 +4963,13 @@ mod tests {
         assert!(validate_batch(&batch_calls(&names)).is_ok());
         names.push("read_file");
         assert!(validate_batch(&batch_calls(&names)).is_err());
+    }
+
+    #[test]
+    fn rejected_batches_identify_the_conflicting_tool_order() {
+        let error = validate_batch(&batch_calls(&["read_file", "run_engine_python"])).unwrap_err();
+        assert!(error.contains("read_file → run_engine_python"));
+        assert!(error.contains("读取与运行须拆成不同批次"));
     }
 
     #[test]
@@ -4978,7 +4993,7 @@ mod tests {
             vec!["stage_resources", "read_file"],
             vec!["write_file", "finish"],
             vec!["read_file", "checkpoint"],
-            vec!["fetch_url", "inspect_engine_reference"],
+            vec!["fetch_url", "use_engine_reference"],
             vec!["inspect_siglus_game", "read_file"],
         ] {
             assert!(validate_batch(&batch_calls(&names)).is_err(), "{names:?}");

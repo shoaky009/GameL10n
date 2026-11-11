@@ -897,7 +897,7 @@
       "type": "function",
       "function": {
         "name": "inspect_engine_reference",
-        "description": "Read one engine guide or a bounded source slice from the shared GalTransl Python toolkit. Uses the fixed source bundled with the app or already installed locally; no automatic download. Returns public function names, module paths and reuse instructions. engine is an exact ID from search_engine_references. Optional query/offset/length locate a relevant section. retryDownload retries local preparation after missing tool files are restored. Call alone.",
+        "description": "Read one engine guide or a bounded source slice from the shared GalTransl Python toolkit. Uses the fixed source bundled with the app or already installed locally; no automatic download. Returns public function names, module paths and reuse instructions. engine is an exact ID from search_engine_references. Optional query/offset/length locate a relevant section. retryDownload retries local preparation after missing tool files are restored. Can share a batch of up to 6 independent reads with known arguments.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -914,7 +914,10 @@
               "type": "integer"
             },
             "length": {
-              "type": "integer"
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 16000,
+              "default": 3200
             },
             "retryDownload": {
               "type": "boolean"
@@ -931,7 +934,7 @@
       "type": "function",
       "function": {
         "name": "run_engine_python",
-        "description": "Run one script OR pinned library module. Supply script + content to write/run a work/*.py probe in ONE call. Use staged samples, shared Python, UTF-8, no pip/downloads. Optional reportFile stores full JSON locally and returns bounded status/counts/summary/failures plus hash; use GAMEL10N_REPORT_FILE (absolute) in the script. Report requires status=completed/partial/failed; tested/matched, summary and failures are optional. Reports are observations, not verification. Long stdout is previewed; read_tool_result retains original output. Can follow edits in one ordered batch.",
+        "description": "Run one script OR pinned library module. Supply script + content to write/run a work/*.py probe in ONE call. Use staged samples, shared Python, UTF-8, no pip/downloads. With reportFile, call the injected write_report(status='completed', summary='...', tested=1, matched=1, details=...) helper; no import needed. Choose status=completed/partial/failed from the actual findings. It writes UTF-8 JSON to GAMEL10N_REPORT_FILE (absolute). Reports are observations, not verification. executionSucceeded describes the process separately from report errors. Long stdout is previewed; read_tool_result retains original output. Can follow edits in one ordered batch; split independent reads into a separate batch.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -973,7 +976,7 @@
             },
             "reportFile": {
               "type": "string",
-              "description": "Workspace-relative work/*.json output, <=8 MiB. Script must create/update it in this run; full details stay in this file."
+              "description": "Workspace-relative work/*.json output, <=8 MiB. Call write_report(status='completed'|'partial'|'failed', summary=..., **details) in the script to create/update this report. Manual JSON writes to GAMEL10N_REPORT_FILE remain supported; status is required."
             }
           },
           "required": [],

@@ -76,7 +76,7 @@ fn bounded(value: &Value, limit: usize) -> Value {
     }
 }
 
-fn input_fingerprint(state: &Session) -> Option<String> {
+pub(super) fn input_fingerprint(state: &Session) -> Option<String> {
     state
         .extra
         .get("resourceHashes")
@@ -316,6 +316,7 @@ fn verification_summary(state: &Session, key: &str) -> Option<Value> {
         "id",
         "version",
         "trialFiles",
+        "trialBytes",
         "diagnostics",
         "issues",
         "nextAction",
@@ -388,17 +389,13 @@ fn snapshot(
     };
     let probes = (!has_recent_turns)
         .then(|| state.extra.get("successfulProbes"))
-        .flatten();
-    let mut result = json!({
-        "objective":state.objective,"userInstruction":state.user_instruction,
-        "problem":state.decision.current_problem,"modelHypotheses":state.decision.hypotheses,
-        "notes":short(&state.notes,8000),"workNotes":work_notes,"lastModelSummary":last_summary,"nextAction":state.next_action,
-        "modelProgress":progress,
-        "repairTickets":super::repair::packet(state),
-        "capabilityGaps":super::capability::gaps(state, workspace),
-        "hostState":{
+        .flatten()
+        .map(|value| bounded(value, 6000));
+    let notes_turn = state.extra.get("notesTurn").and_then(Value::as_u64);
+    let host_state = json!({
             "recognition":bounded(&json!(state.recognition),2048),"family":bounded(&state.family,2048),
             "verification":verification_summary(state,"verificationCache"),
+            "recordedVerification":state.verification.as_ref().filter(|_|!state.extra.contains_key("verificationCache")).map(|v| json!({"passed":v.passed,"originalRoundtripPassed":v.original_roundtrip_passed,"diagnostics":v.diagnostics,"units":v.units,"runtimeTested":v.runtime_tested})),
             "discovery":verification_summary(state,"discoveryVerificationCache"),
             "trial":verification_summary(state,"trialVerificationCache"),
             "verificationUse":"Cached results describe their recorded inputs. Only the existing verifier can reuse them after checking current fingerprints; script reports and model claims cannot activate support.",
@@ -421,8 +418,20 @@ fn snapshot(
             "successfulProbes":probes,
             "launchInspection":state.extra.get("launchInspection").map(|v| bounded(v,3000)),
             "reuseFailures":state.extra.get("reuseFailures").map(|v| bounded(v,3000)),
-            "previousFailures":state.extra.get("contextFailures").map(|v| bounded(v,6000))
-        },
+            "previousFailures":state.extra.get("contextFailures").map(|v| bounded(v,6000)),
+            "recentEvidence":state.extra.get("recoveryEvidenceIndex").map(|v| bounded(v,6000))
+    });
+    let mut result = json!({
+        "objective":state.objective,"userInstruction":state.user_instruction,
+        "problem":state.decision.current_problem,"modelHypotheses":state.decision.hypotheses,
+        "notes":short(&state.notes,8000),"workNotes":work_notes,"lastModelSummary":last_summary,"nextAction":state.next_action,
+        "notesTurn":notes_turn,
+        "notesUse":(!state.notes.is_empty()).then_some("Historical model notes; current source and host verification take precedence. Use saved evidence locations instead of rediscovering established facts."),
+        "implementationChangedSinceNotes":notes_turn.zip(state.extra.get("lastImplementationTurn").and_then(Value::as_u64)).map(|(notes,implementation)| implementation>notes),
+        "modelProgress":progress,
+        "repairTickets":super::repair::packet(state),
+        "capabilityGaps":super::capability::gaps(state, workspace),
+        "hostState":host_state,
         "retrieval":"read_tool_result(toolCallId, query/offset/length); read_session_history(messageIndex or query); read_file(root=workspace,path,encoding=utf8) for reports/source. Hypotheses and script reports are observations, never host verification."
     });
     prune_empty(&mut result);
@@ -495,6 +504,10 @@ pub(super) fn build(
                     "exitCode",
                     "timedOut",
                     "report",
+                    "reportError",
+                    "reportContract",
+                    "executionSucceeded",
+                    "issues",
                     "scriptSha256",
                     "revision",
                     "questionId",

@@ -1823,15 +1823,22 @@ impl EngineService {
                         || unit.kind != previous.kind
                         || token_set(unit) != token_set(previous)
                 }) {
-                    issue = Some(
-                        crate::VerificationIssue::new(
-                            crate::VerificationIssueCode::IdentityMismatch,
-                            phase,
-                        )
-                        .at(&previous.resource_path, Some(&previous.id)),
+                    let mismatch = crate::VerificationIssue::new(
+                        crate::VerificationIssueCode::IdentityMismatch,
+                        phase,
+                    )
+                    .at(&previous.resource_path, Some(&previous.id))
+                    .unit_difference(
+                        previous,
+                        by_id.get(previous.id.as_str()).copied(),
+                        &previous.source_text,
+                        true,
+                        true,
                     );
+                    let fields = mismatch.field_names();
+                    issue = Some(mismatch);
                     return Err(EngineError::Rejected(format!(
-                        "已有文本身份或上下文发生变化：{}",
+                        "已有文本身份或上下文发生变化：{}（变化字段：{fields}）",
                         previous.id
                     )));
                 }
@@ -1854,21 +1861,43 @@ impl EngineService {
                 .filter(|unit| !unit.source_text.trim().is_empty())
                 .map(|unit| (unit.id.as_str(), unit))
                 .collect();
-            if repeated.len() != units.len()
-                || units.iter().any(|unit| {
-                    repeated.get(unit.id.as_str()).is_none_or(|again| {
-                        again.source_text != unit.source_text
-                            || again.resource_path != unit.resource_path
-                            || again.locator != unit.locator
-                            || again.kind != unit.kind
-                            || again.speaker != unit.speaker
-                            || token_set(again) != token_set(unit)
-                    })
-                })
-            {
+            if repeated.len() != units.len() {
+                issue = Some(
+                    crate::VerificationIssue::new(crate::VerificationIssueCode::TextCount, phase)
+                        .difference(&units.len().to_string(), &repeated.len().to_string()),
+                );
                 return Err(EngineError::Rejected(
                     "重复提取改变了文本内容或身份。".into(),
                 ));
+            }
+            if let Some(unit) = units.iter().find(|unit| {
+                repeated.get(unit.id.as_str()).is_none_or(|again| {
+                    again.source_text != unit.source_text
+                        || again.resource_path != unit.resource_path
+                        || again.locator != unit.locator
+                        || again.kind != unit.kind
+                        || again.speaker != unit.speaker
+                        || token_set(again) != token_set(unit)
+                })
+            }) {
+                let mismatch = crate::VerificationIssue::new(
+                    crate::VerificationIssueCode::IdentityMismatch,
+                    phase,
+                )
+                .at(&unit.resource_path, Some(&unit.id))
+                .unit_difference(
+                    unit,
+                    repeated.get(unit.id.as_str()).copied(),
+                    &unit.source_text,
+                    false,
+                    true,
+                );
+                let fields = mismatch.field_names();
+                issue = Some(mismatch);
+                return Err(EngineError::Rejected(format!(
+                    "重复提取改变了文本内容或身份：{}（变化字段：{fields}）。",
+                    unit.id
+                )));
             }
             let changed: BTreeMap<_, _> = units
                 .iter()
@@ -2062,13 +2091,13 @@ impl EngineService {
                         } else {
                             crate::VerificationIssueCode::IdentityMismatch
                         };
-                        issue = Some(
-                            crate::VerificationIssue::new(code, phase)
-                                .at(&unit.resource_path, Some(&unit.id))
-                                .difference(&expected, &actual.source_text),
-                        );
+                        let mismatch = crate::VerificationIssue::new(code, phase)
+                            .at(&unit.resource_path, Some(&unit.id))
+                            .unit_difference(unit, Some(actual), &expected, overlay, !builtin_sfa);
+                        let fields = mismatch.field_names();
+                        issue = Some(mismatch);
                         return Err(EngineError::Rejected(format!(
-                            "{stage}未保留文本、身份或上下文：{}",
+                            "{stage}未保留文本、身份或上下文：{}（变化字段：{fields}）",
                             unit.id
                         )));
                     }

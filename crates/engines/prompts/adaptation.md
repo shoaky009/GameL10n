@@ -96,7 +96,7 @@ For GitHub source paths use fetch_url mode=github_tree with a path query, then r
 Keep pinned dependencies and license notices; do not copy external workflow/backup conventions or install system runtimes/pip.
 
 Tool execution:
-- Batch independent reads/searches (prefer 2-6 calls). Results are saved in order.
+- Batch independent reads/searches, including inspect_engine_reference (prefer 2-6 calls with known arguments). Results are saved in order. Split reads from process execution.
 - Prefer replace_text for local changes: supply one exact unique oldText and its replacement; unchanged text stays intact.
   Split new implementations into small Python files and deliver one executable piece at a time rather than generating the full adapter in one turn.
 - Batch up to 8 known write_file/replace_text calls, optionally ending with ONE run_engine_python, run_tool or test_adapter (counts toward 8). Writes run first;
@@ -106,8 +106,9 @@ Tool execution:
   a failure or uncertain interruption stops dependent steps. Copying dependencies, finish, checkpoint and report_blocker remain standalone.
 - Temporary analysis/probe scripts must be work/*.py, executed with run_engine_python and the bundled shared interpreter.
   For a new or updated probe, supply script + content in one run_engine_python call instead of separate write/run turns.
-  For multi-candidate experiments, add questionId and reportFile=work/...json. Write the full JSON to GAMEL10N_REPORT_FILE;
-  include status=completed/partial/failed, optional tested/matched, a concise summary and representative string failures.
+  For multi-candidate experiments, add questionId and reportFile=work/...json. Use the injected helper (no import):
+  write_report(status='completed', tested=24, matched=2, summary='actual findings', details=results).
+  Choose completed/partial/failed from the actual experiment; optional failures must be strings. Manual JSON writes to GAMEL10N_REPORT_FILE remain supported.
   The host returns bounded findings with the report hash; read_file retrieves details. stdout/stderr remain in read_tool_result.
   A report is an observation from your script, not independent verification or publication permission.
   Formal adapter entry is src/adapter.py. Reuse standard-library, pinned engine APIs and precompiled components;

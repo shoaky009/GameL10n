@@ -120,7 +120,9 @@ RPYC2 编译脚本优先使用 `loose-renpy-rpyc` 或 `rpa3-renpy-rpyc`，直接
 
 Python 探针使用 `run_engine_python`，其他本地工具使用 `run_tool`。临时脚本、报告和解包结果放在 `work/`；原始资源副本放在 `resources/`。只有正式解析代码和运行依赖进入 `src/` 及 `src/tools/`。完整路径和保留规则见[产物说明](../docs/adapters/artifacts.md)。
 
-独立的只读查询可以批量提交。写入与运行批次最多 8 项，前面的项为 `write_file` 或 `replace_text`，最后一项也可为一次 `run_engine_python` 或 `run_tool`。前项失败或中断时先核对结果，再继续。暂存、依赖复制、验收、发布和 `checkpoint` 单独调用。
+参数已知的独立只读查询可以批量提交，最多 6 项，包含 `inspect_engine_reference`；读取与进程运行须拆批。写入与运行批次最多 8 项，前面的项为 `write_file` 或 `replace_text`，最后一项也可为一次 `run_engine_python`、`run_tool` 或 `test_adapter`。前项失败或中断时先核对结果，再继续。另可按 `stage_resources → compose_adapter_template → test_adapter` 顺序组合，首末项可省略；依赖复制、发布和 `checkpoint` 单独调用。
+
+带 `reportFile=work/*.json` 的探针可直接调用执行器注入的 `write_report(status='completed', summary='实际结论', details=results)`，无需导入。按实际结果选择 `completed`／`partial`／`failed`；退出码为零不代替报告结论。手动写入 `GAMEL10N_REPORT_FILE` 也须包含合法 `status`。报告错误时先查看 `reportError`、写入提示和已保留的输出，避免为恢复已有结果重跑实验。
 
 ## 验收与发布文件
 

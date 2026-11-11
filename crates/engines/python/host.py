@@ -590,6 +590,29 @@ def prepare_siglus_zip(request):
     return dict(request['reference'], entry=str(entry), library=str(target))
 
 
+PROBE_RUNNER = '''
+import json, os, runpy, sys
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+
+def write_report(*, status, **fields):
+    path = os.environ.get('GAMEL10N_REPORT_FILE')
+    if not path:
+        raise ValueError('write_report 需要 run_engine_python 的 reportFile 参数。')
+    Path(path).write_text(json.dumps(dict(status=status, **fields), ensure_ascii=False,
+                                    allow_nan=False), encoding='utf-8')
+
+args = sys.argv[1:]
+sys.argv = args[1:] if args[0] == '-m' else args
+globals_ = dict(write_report=write_report)
+if args[0] == '-m':
+    runpy.run_module(args[1], run_name='__main__', init_globals=globals_)
+else:
+    runpy.run_path(args[0], run_name='__main__', init_globals=globals_)
+'''
+
+
 def run(request):
     workspace = Path(request['workspace']).resolve()
     report = request.get('reportFile')
@@ -627,11 +650,13 @@ def run(request):
             raise ValueError('只能调用已固定的引擎库模块。')
         target = ['-m', module]
     extra = [str(workspace / 'src'), str(workspace), request.get('library', '')]
-    code = "import runpy,sys;sys.dont_write_bytecode=True;sys.path[:0]=" + repr([p for p in extra if p]) + ";a=sys.argv[1:];sys.argv=a[1:] if a[0]=='-m' else a;runpy.run_module(a[1],run_name='__main__') if a[0]=='-m' else runpy.run_path(a[0],run_name='__main__')"
+    code = 'import sys;sys.path[:0]=' + repr([p for p in extra if p]) + '\n' + PROBE_RUNNER
     arguments = request.get('arguments', [])
     if not isinstance(arguments, list) or len(arguments) > 128 or not all(isinstance(v, str) for v in arguments) or sum(len(v.encode('utf-16-le')) // 2 for v in arguments) > 65536:
         raise ValueError('参数无效。')
     environment = os.environ.copy()
+    environment.pop('GAMEL10N_REPORT_FILE', None)
+    environment.pop('GAMEL10N_QUESTION_ID', None)
     paths = request.get('toolPaths') or {}
     if paths.get('hostCommand'): environment['GAMEL10N_ADAPTER_HOST'] = json.dumps(paths['hostCommand'])
     if paths.get('vnTextPatchCommand'): environment['GAMEL10N_VNTEXTPATCH_COMMAND'] = json.dumps(paths['vnTextPatchCommand'])
@@ -643,6 +668,7 @@ def run(request):
         environment['GAMEL10N_QUESTION_ID'] = question
     script_hash = hashlib.sha256(path.read_bytes()).hexdigest() if script else None
     result = run_process([sys.executable, '-I', '-X', 'utf8', '-c', code, *target, *arguments], workspace, request, environment)
+    result['executionSucceeded'] = result['success']
     if question is not None:
         result['questionId'] = question
     if script_hash is not None:
@@ -666,6 +692,11 @@ def run(request):
                 result['error'] = result['error'] or '实验报告记录失败，请检查报告与诊断。'
         except (OSError, ValueError, RecursionError) as error:
             result['reportError'] = str(error)
+            result['reportContract'] = dict(file=report, writer="write_report(status='completed', summary='...')",
+                                          statuses=['completed', 'partial', 'failed'])
+            result['nextAction'] = ('检查已保留的 stdout/stderr 和已有报告，修正脚本的报告写入；'
+                                    'write_report 由执行器提供，按实际实验结论指定 status。'
+                                    '无需为恢复已有输出重新运行实验。')
             if result['success']:
                 result.update(success=False, phase='report', error=str(error))
     return result

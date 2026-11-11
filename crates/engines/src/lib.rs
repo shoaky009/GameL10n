@@ -28,7 +28,9 @@ pub use service::{
     GeneratedAdapterReuseFailure, ProgressCallback, VerificationResult, VerifiedExtraction,
 };
 pub use tokio_util::sync::CancellationToken;
-pub use verification_diagnostic::{VerificationIssue, VerificationIssueCode};
+pub use verification_diagnostic::{
+    VerificationFieldDifference, VerificationIssue, VerificationIssueCode,
+};
 
 #[derive(Debug, Error)]
 pub enum EngineError {

@@ -382,3 +382,64 @@ fn changed_selected_source_rejects_a_published_manifest() {
     fs::write(fixture.path().join("src/adapter.py"), "print('changed')").expect("change");
     assert!(manifest.handle(fixture.path()).is_err());
 }
+
+#[tokio::test]
+async fn partial_translation_reports_speaker_drift_without_a_text_mismatch() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    let service = service(fixture.path().join("shared"));
+    if !service.tools.python().is_file() {
+        return;
+    }
+    let game = fixture.path().join("game");
+    fs::create_dir(&game).expect("fixture");
+    fs::write(
+        game.join("text.json"),
+        r#"["name","dialogue","third","untouched"]"#,
+    )
+    .expect("fixture");
+    let entry = fixture.path().join("adapter.py");
+    fs::write(
+        &entry,
+        ADAPTER.replace(
+            "'kind':'dialogue'",
+            "'kind':'dialogue','speaker':data[0] if i==1 else None",
+        ),
+    )
+    .expect("adapter");
+    let adapter = AdapterHandle::Python {
+        entry,
+        package_directory: None,
+        id: "fixture".into(),
+        version: "1".into(),
+    };
+    let result = service
+        .verify(
+            &adapter,
+            &game,
+            &["text.json".into()],
+            &fixture.path().join("verify"),
+            &[],
+            &CancellationToken::new(),
+            None,
+        )
+        .await
+        .expect("verification");
+    assert!(!result.passed);
+    assert!(result.original_roundtrip_passed);
+    let issue = &result.issues[0];
+    assert_eq!(issue.stage, "partial-translation-re-extraction");
+    assert_eq!(
+        issue.code,
+        gamel10n_engines::VerificationIssueCode::IdentityMismatch
+    );
+    assert_eq!(issue.field_differences.len(), 1);
+    assert_eq!(issue.field_differences[0].field, "speaker");
+    assert_eq!(issue.expected, "\"name\"");
+    assert_ne!(issue.expected, issue.actual);
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|message| message.contains("speaker"))
+    );
+}

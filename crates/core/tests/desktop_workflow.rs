@@ -318,7 +318,8 @@ async fn selected_edit_patch_install_restore_and_restart_preserve_originals() {
         .generate_patch(&project.id, Some(vec![selected.clone()]), false)
         .await
         .unwrap();
-    let text = fs::read_to_string(patch.join("script.rpy")).unwrap();
+    let payload = patch.join(gamel10n_core::patching::PAYLOAD_DIRECTORY);
+    let text = fs::read_to_string(payload.join("script.rpy")).unwrap();
     assert!(text.contains("你好！"));
     assert!(text.contains("A quiet morning."));
     assert_eq!(hash_file(&script).unwrap(), original_hash);
@@ -379,7 +380,7 @@ async fn selected_edit_patch_install_restore_and_restart_preserve_originals() {
     app.install_patch(&project.id).await.unwrap();
     assert_eq!(
         hash_file(&script).unwrap(),
-        hash_file(&patch.join("script.rpy")).unwrap()
+        hash_file(&payload.join("script.rpy")).unwrap()
     );
     app.restore_game(&project.id).await.unwrap();
     assert_eq!(hash_file(&script).unwrap(), original_hash);
