@@ -149,7 +149,7 @@ pub(super) fn gaps(state: &Session, workspace: &Path) -> Value {
         gaps.push(json!({"capability":"adapter-implementation","reason":"No executable adapter entry","resolution":"reuse a compatible parser/template/package or implement the unknown layer"}));
     }
     if state.workflow.verification_args.is_none() && state.verified_package.is_none() {
-        gaps.push(json!({"capability":"verification-recipe","reason":"Current family/resource conditions have not been supplied","resolution":"provide test_adapter parameters once; the host continues known checks"}));
+        gaps.push(json!({"capability":"verification-recipe","reason":"Current family/resource conditions have not been supplied","resolution":"include testArguments when writing src/adapter.py, or call test_adapter once; the host continues known checks after edits"}));
     }
     let input = repair::input_key(state);
     for ticket in state

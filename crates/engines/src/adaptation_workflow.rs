@@ -23,6 +23,15 @@ fn key(state: &Session, workspace: &Path, args: &Value) -> Result<String, Engine
     Ok(hash_text(&json!({"implementation":workspace_fingerprint(workspace,state)?,"inputs":repair::input_key(state),"arguments":args}).to_string()))
 }
 
+pub(super) fn register(state: &mut Session, arguments: Value) {
+    if state.workflow.verification_args.as_ref() != Some(&arguments) {
+        state.workflow.verification_args = Some(arguments);
+        state.workflow.needs_verification = true;
+        state.verified_package = None;
+        state.verified_fingerprint = None;
+    }
+}
+
 pub(super) fn observe(
     state: &mut Session,
     workspace: &Path,
@@ -107,6 +116,7 @@ pub(super) fn next(state: &mut Session, workspace: &Path) -> Result<Option<Step>
         return Ok(None);
     };
     if state.release_files.is_empty()
+        || !workspace.join("src/adapter.py").is_file()
         || state
             .extra
             .get("resourceHashes")

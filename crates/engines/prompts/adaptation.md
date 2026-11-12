@@ -111,8 +111,13 @@ Tool execution:
   Choose completed/partial/failed from the actual experiment; optional failures must be strings. Manual JSON writes to GAMEL10N_REPORT_FILE remain supported.
   The host returns bounded findings with the report hash; read_file retrieves details. stdout/stderr remain in read_tool_result.
   A report is an observation from your script, not independent verification or publication permission.
-  Formal adapter entry is src/adapter.py. Reuse standard-library, pinned engine APIs and precompiled components;
-  never generate C# or create MSBuild/project/restore/compiler shell scaffolding.
+  Formal adapter entry is src/adapter.py. Reuse standard-library, pinned engine APIs and precompiled components.
+  When writing the executable entry, include testArguments={kind,key,name,resourcePatterns} once. The host saves the recipe
+  and verifies after the entire successful edit batch when the entry, registered files and staged resources exist.
+  Later edits reuse that recipe. Registering parameters is not acceptance; fix host diagnostics and finish after full verification.
+  Use write_file(copyFrom='work/module.py',path='src/module.py') to reuse suitable UTF-8 modules, then replace_text for changes.
+  Keep new modules focused and update existing source locally so a response fits the output budget; avoid regenerating known code.
+  Never generate C# or create MSBuild/project/restore/compiler shell scaffolding.
   Keep readable source lines. Inspect the reported traceback line and bounds before retrying;
   don't guess layout changes repeatedly after the same exception. Preserve partial findings when a later probe fails.
 - run_tool executes prepared native EXE tools, not PowerShell, a general shell or compilers. Tools run as the current user; respect scoped paths.
@@ -153,6 +158,8 @@ Tool execution:
 
 Adapter contracts and validation:
 Read adapter_protocol when implementing the bridge. Discover resources by signatures/version/rules, not first-game filenames.
+Use host test_adapter early for protocol/discovery and roundtrip/Chinese-edit checks. Keep custom probes for unknown format facts
+and independently located original text; existing host acceptance checks already cover complete resource preservation.
 probe initially sees only 64 KiB per candidate. Request bounded footer/index/PE ranges with probeReads; full parsing belongs in extract/build.
 Stage only relevant scripts/containers/fonts/EXEs/locale profiles. Dispatch by resource type; don't feed EXE/profile companions to parsers.
 Use test_adapter(discoveryOnly=true) early to compare real-game and staged discovery; it does not permit publication.

@@ -4,6 +4,8 @@ One UTF-8 JSON request is read from standard input. The adapter writes one UTF-8
 
 Request fields: `protocolVersion` (1), `operation` (`probe`, `extract`, `build`, `validate`), `sourceDirectory`, `outputDirectory`, `resourceFiles` (current relative candidates), optional `probeFiles`, `responseFile`, `translationsFile`, and `translations` (object mapping unit ID to translated text). When `translationsFile` is present, load that UTF-8 JSON dictionary instead of inline `translations`. These additive v1 fields preserve the existing inline request/response format used by published legacy packages.
 
+Python adapters can read the UTF-8 request through either `sys.stdin` or `sys.stdin.buffer`; the host bootstrap preserves text and byte input streams.
+
 Response fields: `protocolVersion` (1), `success` (boolean), optional `error` (string), and the operation's result under `probe`, `extraction`, `build`, or `validation`.
 
 `outputDirectory` is the root for game-consumable files. Write outputs at their game-relative paths without an extra packaging directory. The host stores this directory as `files/` in the final patch and keeps its manifest, reports and validation records outside it.

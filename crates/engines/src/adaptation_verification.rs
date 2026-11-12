@@ -607,6 +607,29 @@ async fn inspect_inputs(
     Ok((discovery, fingerprint?))
 }
 
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct TestArguments {
+    kind: String,
+    key: String,
+    name: String,
+    resource_patterns: Vec<String>,
+}
+
+impl TestArguments {
+    pub(super) fn parse(args: &Value) -> Result<Self, EngineError> {
+        let value: Self = serde_json::from_value(args.clone())?;
+        validate_family(&value.kind, &value.key, &value.name)?;
+        if value.resource_patterns.len() > 1024 {
+            return Err(EngineError::Protocol("数组参数过长。".into()));
+        }
+        for pattern in &value.resource_patterns {
+            validate_pattern(pattern)?;
+        }
+        Ok(value)
+    }
+}
+
 pub(super) async fn test_adapter(
     service: &EngineService,
     request: &AdaptationRequest<'_>,
@@ -629,15 +652,11 @@ pub(super) async fn test_adapter(
         );
         state.extra.insert("resourceChanges".into(), json!(changes));
     }
-    let kind = text(args, "kind")?;
-    let key = text(args, "key")?;
-    let name = text(args, "name")?;
-    validate_family(kind, key, name)?;
-    state.family = json!({"kind":kind,"key":key,"name":name});
-    state.resource_patterns = strings(args, "resourcePatterns")?;
-    for pattern in &state.resource_patterns {
-        validate_pattern(pattern)?;
-    }
+    let parameters = TestArguments::parse(
+        &json!({"kind":text(args,"kind")?,"key":text(args,"key")?,"name":text(args,"name")?,"resourcePatterns":strings(args,"resourcePatterns")?}),
+    )?;
+    state.family = json!({"kind":parameters.kind,"key":parameters.key,"name":parameters.name});
+    state.resource_patterns = parameters.resource_patterns;
     if let Some(recognition) = args.get("recognition") {
         state.recognition = if recognition.is_null() {
             None
@@ -770,7 +789,7 @@ pub(super) async fn test_adapter(
     };
     let package_was_valid = prepared.is_some();
     let directory = workspace.join("builds").join(&implementation[..20]);
-    let id = format!("{kind}.{key}");
+    let id = format!("{}.{}", parameters.kind, parameters.key);
     let version = implementation[..16].to_string();
     let (package, parsed, handle) = if let Some(prepared) = prepared {
         prepared

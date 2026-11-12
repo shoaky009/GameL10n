@@ -4,7 +4,7 @@ use std::{
     borrow::Cow,
     collections::{BTreeMap, BTreeSet},
     fs::{self, OpenOptions},
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
     sync::Arc,
     time::Instant,
@@ -1031,13 +1031,44 @@ impl EngineService {
                 let normalized = text(args, "path")?.replace('\\', "/");
                 let relative = normalized.as_str();
                 let path = write_path(workspace, relative)?;
-                let content = text(args, "content")?;
+                let content = match (args.get("content"), args.get("copyFrom")) {
+                    (Some(_), None) => Cow::Borrowed(text(args, "content")?),
+                    (None, Some(_)) => {
+                        let source = write_path(workspace, text(args, "copyFrom")?)?;
+                        let mut bytes = Vec::new();
+                        fs::File::open(source)?
+                            .take(512 * 1024 + 1)
+                            .read_to_end(&mut bytes)?;
+                        Cow::Owned(String::from_utf8(bytes).map_err(|_| {
+                            EngineError::Protocol(
+                                "copyFrom 必须是工作区中的 UTF-8 文本文件。".into(),
+                            )
+                        })?)
+                    }
+                    _ => {
+                        return Err(EngineError::Protocol(
+                            "content 与 copyFrom 必须且只能提供一项。".into(),
+                        ));
+                    }
+                };
                 if content.len() > 512 * 1024 {
                     return Err(EngineError::Rejected(
                         "单次源码写入过大，请拆分实现。".into(),
                     ));
                 }
                 let release_files = written_selection(state, relative, args)?;
+                let test_arguments = args
+                    .get("testArguments")
+                    .map(|arguments| {
+                        if relative != "src/adapter.py" {
+                            return Err(EngineError::Protocol(
+                                "testArguments 只能随 src/adapter.py 登记。".into(),
+                            ));
+                        }
+                        serde_json::to_value(verification::TestArguments::parse(arguments)?)
+                            .map_err(EngineError::from)
+                    })
+                    .transpose()?;
                 if let Some(parent) = path.parent() {
                     fs::create_dir_all(parent)?;
                 }
@@ -1046,6 +1077,9 @@ impl EngineService {
                     write_source_file(&path, content.as_bytes())?;
                 }
                 state.release_files = release_files;
+                if let Some(arguments) = test_arguments {
+                    workflow::register(state, arguments);
+                }
                 if changed {
                     state.verified_fingerprint = None;
                     if relative.starts_with("src/") {
@@ -1054,7 +1088,9 @@ impl EngineService {
                             .insert("lastImplementationTurn".into(), json!(state.total_turns));
                     }
                 }
-                Ok(json!({"path":args["path"],"bytes":content.len(),"changed":changed}))
+                Ok(
+                    json!({"path":args["path"],"bytes":content.len(),"changed":changed,"copyFrom":args.get("copyFrom"),"testArgumentsRegistered":args.get("testArguments").is_some(),"verificationConfigured":state.workflow.verification_args.is_some(),"nextAction":editing_next_action(state,relative)}),
+                )
             }
             "replace_text" => {
                 let relative = text(args, "path")?.replace('\\', "/");
@@ -1085,7 +1121,9 @@ impl EngineService {
                             .insert("lastImplementationTurn".into(), json!(state.total_turns));
                     }
                 }
-                Ok(json!({"path":args["path"],"bytes":updated.len(),"changed":changed}))
+                Ok(
+                    json!({"path":args["path"],"bytes":updated.len(),"changed":changed,"nextAction":editing_next_action(state,&relative)}),
+                )
             }
             "remove_file" => {
                 let normalized = text(args, "path")?.replace('\\', "/");
@@ -3045,6 +3083,18 @@ fn write_path(root: &Path, relative: &str) -> Result<PathBuf, EngineError> {
     }
     resolve_relative(root, relative)
 }
+fn editing_next_action(state: &Session, relative: &str) -> &'static str {
+    if relative.starts_with("work/") && relative.ends_with(".py") {
+        "新建或更新探针可直接用 run_engine_python(script, content, reportFile) 合并写入与运行；已保存脚本可直接运行。"
+    } else if relative == "src/adapter.py" && state.workflow.verification_args.is_none() {
+        "正式入口已保存；用 write_file 的 testArguments 登记 kind/key/name/resourcePatterns，或调用 test_adapter 进入宿主验收。"
+    } else if state.workflow.needs_verification {
+        "本批编辑完成且所选文件与资源齐备后，宿主将按已登记参数验收。"
+    } else {
+        "继续已确定的编辑或验收；局部变化用 replace_text，复用已有代码可用 copyFrom。"
+    }
+}
+
 fn workspace_file(relative: &str) -> String {
     if relative.starts_with("tools/") {
         format!("src/{relative}")
@@ -4924,6 +4974,121 @@ mod tests {
         assert!(failed.is_err());
         assert_eq!(fs::read_to_string(&path).expect("source"), original);
         assert!(write_path(&workspace, "work/probe.CSPROJ").is_err());
+    }
+
+    #[tokio::test]
+    async fn copied_entry_preserves_utf8_bytes_and_persists_its_verification_recipe() {
+        let root = tempfile::tempdir().unwrap();
+        let (service, request, workspace, mut state) = fixture(root.path());
+        fs::create_dir_all(workspace.join("work")).unwrap();
+        let source = "\u{feff}# 中文😀\r\nVALUE = 1\r\n";
+        fs::write(workspace.join("work/entry.py"), source).unwrap();
+        state.verified_fingerprint = Some("old".into());
+        state.verified_package = Some(json!({"id":"old"}));
+        let recipe = json!({"kind":"engine","key":"copy-fixture","name":"Copy fixture","resourcePatterns":["*.json"]});
+        let args =
+            json!({"path":"src\\adapter.py","copyFrom":"work\\entry.py","testArguments":recipe});
+        let result = service
+            .adaptation_tool(
+                &request,
+                &workspace,
+                &mut state,
+                "write_file",
+                &args,
+                &CancellationToken::new(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            fs::read(workspace.join("src/adapter.py")).unwrap(),
+            source.as_bytes()
+        );
+        assert!(
+            result["testArgumentsRegistered"] == true && result["verificationConfigured"] == true
+        );
+        assert!(state.verified_fingerprint.is_none() && state.verified_package.is_none());
+        assert!(
+            state
+                .release_files
+                .iter()
+                .any(|file| file.path == "src/adapter.py" && file.role == "source")
+        );
+        let path = workspace.join("session.json");
+        save_session(&path, &mut state).await.unwrap();
+        let mut restored = load_session(&path).unwrap();
+        assert_eq!(restored.workflow.verification_args, Some(recipe));
+        assert!(restored.workflow.needs_verification);
+        restored.workflow.needs_verification = false;
+        restored.verified_fingerprint = Some("current".into());
+        let result = service
+            .adaptation_tool(
+                &request,
+                &workspace,
+                &mut restored,
+                "write_file",
+                &args,
+                &CancellationToken::new(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["changed"], false);
+        assert!(!restored.workflow.needs_verification);
+        assert_eq!(restored.verified_fingerprint.as_deref(), Some("current"));
+    }
+
+    #[tokio::test]
+    async fn invalid_copy_or_recipe_preserves_existing_source_selection_and_verification() {
+        let root = tempfile::tempdir().unwrap();
+        let (service, request, workspace, mut state) = fixture(root.path());
+        fs::create_dir_all(workspace.join("work")).unwrap();
+        fs::write(workspace.join("work/large.py"), vec![b'x'; 512 * 1024 + 1]).unwrap();
+        fs::write(workspace.join("work/binary.py"), [0xff]).unwrap();
+        let path = workspace.join("src/adapter.py");
+        let source = fs::read(&path).unwrap();
+        state.verified_fingerprint = Some("verified".into());
+        let selection = serde_json::to_value(&state.release_files).unwrap();
+        let recipe =
+            json!({"kind":"engine","key":"fixture","name":"Fixture","resourcePatterns":["*.json"]});
+        let mut invalid_recipe = recipe.clone();
+        invalid_recipe["resourcePatterns"] = json!(["../outside"]);
+        for args in [
+            json!({"path":"src/adapter.py"}),
+            json!({"path":"src/adapter.py","copyFrom":"work/binary.py","content":"new"}),
+            json!({"path":"src/adapter.py","copyFrom":"../outside.py"}),
+            json!({"path":"src/adapter.py","copyFrom":"resources/text.py"}),
+            json!({"path":"src/adapter.py","copyFrom":"work/missing.py"}),
+            json!({"path":"src/adapter.py","copyFrom":"work/large.py"}),
+            json!({"path":"src/adapter.py","copyFrom":"work/binary.py"}),
+            json!({"path":"src/adapter.py","content":"new","testArguments":invalid_recipe}),
+            json!({"path":"src/adapter.py","content":"new","testArguments":{"kind":"engine","key":"Invalid","name":"Fixture","resourcePatterns":["*.json"]}}),
+            json!({"path":"work/entry.py","content":"new","testArguments":recipe}),
+        ] {
+            assert!(
+                service
+                    .adaptation_tool(
+                        &request,
+                        &workspace,
+                        &mut state,
+                        "write_file",
+                        &args,
+                        &CancellationToken::new(),
+                        None
+                    )
+                    .await
+                    .is_err(),
+                "{args}"
+            );
+            assert_eq!(fs::read(&path).unwrap(), source);
+            assert_eq!(
+                serde_json::to_value(&state.release_files).unwrap(),
+                selection
+            );
+            assert_eq!(state.verified_fingerprint.as_deref(), Some("verified"));
+            assert!(state.workflow.verification_args.is_none());
+        }
+        assert!(!workspace.join("work/entry.py").exists());
     }
 
     fn batch_calls(names: &[&str]) -> Vec<ToolCall> {

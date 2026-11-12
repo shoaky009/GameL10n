@@ -1238,7 +1238,7 @@
       "type": "function",
       "function": {
         "name": "write_file",
-        "description": "Write UTF-8 Python code or analysis files under src/ or work/, replacing without backup. New src/*.py files auto-register as release source. For tools set releaseRole and purpose once; edits inherit existing registration. Temporary analysis scripts must be Python under work/. Batch known writes followed by one run_engine_python/run_tool to execute in order; failure skips remaining calls. Reuse existing probe scripts and one findings file rather than adding a file per small check.",
+        "description": "Write UTF-8 text under src/ or work/. Supply exactly one of content or copyFrom (an existing UTF-8 src/work file, <=512 KiB). Reuse suitable probes/modules with copyFrom, then make local changes with replace_text instead of regenerating source. New src/*.py auto-register as release source; tools use releaseRole/purpose. When writing src/adapter.py, include testArguments once to register full host verification after the complete edit batch and staged inputs are ready; registration is not acceptance. Temporary probes use run_engine_python(script, content, reportFile) to write and run in one call. Known edits can precede one run or test_adapter in a batch; failure skips dependent steps.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -1260,11 +1260,46 @@
             "purpose": {
               "type": "string",
               "maxLength": 240
+            },
+            "copyFrom": {
+              "type": "string",
+              "description": "Workspace-relative UTF-8 source under src/ or work/. Mutually exclusive with content."
+            },
+            "testArguments": {
+              "type": "object",
+              "description": "Full verification recipe, only with path=src/adapter.py. Saved across restart; the host runs existing test_adapter when batch, entry, selected files and staged inputs are ready. Other test_adapter options remain available through test_adapter.",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "engine",
+                    "template"
+                  ]
+                },
+                "key": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "resourcePatterns": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "kind",
+                "key",
+                "name",
+                "resourcePatterns"
+              ],
+              "additionalProperties": false
             }
           },
           "required": [
-            "path",
-            "content"
+            "path"
           ],
           "additionalProperties": false
         }

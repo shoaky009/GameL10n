@@ -52,6 +52,9 @@ pub(super) fn recover(state: &mut Session, request: &AdaptationRequest<'_>, iden
         }
         let dependent = state.extra.get("pendingCallsAreSequential") == Some(&json!(true))
             || sequential(&state.pending_calls);
+        if dependent {
+            state.workflow.needs_verification = false;
+        }
         let mut remaining = Vec::new();
         for call in std::mem::take(&mut state.pending_calls) {
             if call.id == interrupted {
@@ -245,6 +248,7 @@ fn selectors(args: &Value) -> Value {
         "directory",
         "discoveryOnly",
         "script",
+        "copyFrom",
         "module",
         "questionId",
         "reportFile",
@@ -282,6 +286,8 @@ fn result_trace(value: &Value) -> Value {
         "revision",
         "questionId",
         "changed",
+        "verificationConfigured",
+        "testArgumentsRegistered",
         "referenceOnly",
         "reused",
         "compileMs",
@@ -532,6 +538,7 @@ pub(super) async fn run(
             .extra
             .insert("pendingCallsAreSequential".into(), json!(sequential));
         if let Err(error) = validate_batch(&state.pending_calls) {
+            state.workflow.needs_verification = false;
             trace_run(
                 json!({"operation":"tool-batch-rejected","turn":state.total_turns,"error":error,"tools":state.pending_calls.iter().map(|call| &call.name).collect::<Vec<_>>()}),
             )?;
@@ -640,6 +647,7 @@ pub(super) async fn run(
             state.pending_calls.remove(0);
             state.running_tool_id = None;
             if sequential && !success && call.name != "report_progress" {
+                state.workflow.needs_verification = false;
                 for pending in std::mem::take(&mut state.pending_calls) {
                     append_failure(
                         state,
@@ -1090,6 +1098,7 @@ mod tests {
             let responses = (1..=100).map(|turn| {
                 let (name,args) = match turn {
                     1 => ("adapter_protocol", json!({})),
+                    10 => ("write_file", json!({"path":"src/adapter.py","copyFrom":"work/probe.py","testArguments":{"kind":"engine","key":"prefix-fixture","name":"Prefix fixture","resourcePatterns":["*.json"]}})),
                     20 => ("load_tool_groups", json!({"mode":"replace","groups":[]})),
                     60 => ("load_tool_groups", json!({"mode":"replace","groups":["research","development"]})),
                     30 | 70 => ("checkpoint", json!({"summary":format!("Confirmed layout at revision {turn}; next edit is work/probe.py.")})),
@@ -1246,6 +1255,10 @@ mod tests {
                 true
             );
             let restored = load_session(&path).unwrap();
+            assert_eq!(
+                restored.workflow.verification_args.as_ref().unwrap()["key"],
+                "prefix-fixture"
+            );
             assert!(session_store::base(&restored) > 0);
             assert!(
                 read_session_history(&restored, &json!({"query":"revision 2"})).unwrap()["found"]
@@ -1258,6 +1271,103 @@ mod tests {
                     .unwrap()
                     .contains("toolDefinitionsFixed")
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn registered_entry_verifies_after_the_complete_edit_batch_and_stops_on_failure() {
+        let paths = crate::ToolPaths::development();
+        if !paths.python().is_file() || !paths.vntextpatch().is_file() {
+            return;
+        }
+        for fail_edit in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let (_, mut request, workspace, mut state) = fixture(root.path());
+            let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+            let service = EngineService::new(assets, paths.clone())
+                .with_shared_directory(root.path().join("shared"));
+            fs::write(
+                request.game_directory.join("text.json"),
+                "[\"原文\",\"second\"]",
+            )
+            .unwrap();
+            resources::stage(
+                &request,
+                &workspace,
+                &mut state,
+                &["text.json".into()],
+                false,
+                &CancellationToken::new(),
+                None,
+            )
+            .unwrap();
+            fs::write(
+                workspace.join("work/entry.py"),
+                format!(
+                    "import helper\n{}",
+                    include_str!("../tests/fixtures/json_adapter.py")
+                ),
+            )
+            .unwrap();
+            request.limits.maximum_turns = 1;
+            let mut helper = json!({"path":"src/helper.py","content":"VALUE = 1\n"});
+            if fail_edit {
+                helper["releaseRole"] = json!("runtime");
+                helper["purpose"] = json!("invalid source role");
+            }
+            let response = json!({"id":"entry","choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","tool_calls":[
+                {"id":"entry","type":"function","function":{"name":"write_file","arguments":json!({"path":"src/adapter.py","copyFrom":"work/entry.py","testArguments":{"kind":"engine","key":"fixture","name":"Fixture","resourcePatterns":["*.json"]}}).to_string()}},
+                {"id":"helper","type":"function","function":{"name":"write_file","arguments":helper.to_string()}}
+            ]}}],"usage":{"prompt_tokens":100,"completion_tokens":20}});
+            let (provider, server) = model(vec![response]);
+            let events = std::sync::Mutex::new(Vec::new());
+            run(
+                &service,
+                &request,
+                &provider,
+                &workspace,
+                &workspace.join("session.json"),
+                &mut state,
+                "Implement the prepared adapter.".into(),
+                &CancellationToken::new(),
+                None,
+                &|event| {
+                    events.lock().unwrap().push(event);
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(server.join().unwrap().len(), 1);
+            let events = events.into_inner().unwrap();
+            let steps = events
+                .iter()
+                .filter(|event| event["operation"] == "host-step-end")
+                .collect::<Vec<_>>();
+            if fail_edit {
+                assert!(steps.is_empty());
+                assert!(!state.workflow.needs_verification);
+                assert!(state.verified_package.is_none());
+                let mut restored = load_session(&workspace.join("session.json")).unwrap();
+                assert!(restored.workflow.verification_args.is_some());
+                assert!(workflow::next(&mut restored, &workspace).unwrap().is_none());
+            } else {
+                assert_eq!(steps.len(), 1);
+                assert_eq!(steps[0]["stage"], "finish-ready");
+                assert_eq!(steps[0]["passed"], true);
+                let helper_done = events
+                    .iter()
+                    .position(|event| {
+                        event["operation"] == "tool-end" && event["call"]["id"] == "helper"
+                    })
+                    .unwrap();
+                let verification_start = events
+                    .iter()
+                    .position(|event| event["operation"] == "host-step-start")
+                    .unwrap();
+                assert!(helper_done < verification_start);
+                assert!(state.verified_package.is_some());
+            }
         }
     }
 
