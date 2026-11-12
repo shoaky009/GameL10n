@@ -254,14 +254,11 @@ impl Application {
 
     pub async fn add_project(&self, game_directory: &Path) -> Result<GameProject, CoreError> {
         let id = crate::projects::project_id(game_directory)?;
-        {
-            let _project = self.lock_project(&id).await?;
-            let _lifecycle = self.project_lifecycle.lock().await;
-            self.store.add(game_directory).await?;
-            let _ = self.events.send(AppEvent::ProjectsChanged);
-        }
-        self.restore_known_adapter(&id).await?;
-        self.store.get(&id).await
+        let _project = self.lock_project(&id).await?;
+        let _lifecycle = self.project_lifecycle.lock().await;
+        let project = self.store.add(game_directory).await?;
+        let _ = self.events.send(AppEvent::ProjectsChanged);
+        Ok(project)
     }
 
     /// Reads saved metadata only; never starts recognition or resource hashing.
