@@ -11,6 +11,8 @@
 
 位置设置保存在 `%LOCALAPPDATA%\GameL10n\location.json`。`GAMEL10N_DATA` 环境变量优先，其次为兼容变量 `AVG_TRANSLATOR_DATA`；环境变量启动时，界面切换只影响本次运行。新目录没有设置或数据时，也可读取 `%LOCALAPPDATA%\AvgTranslator` 的既有位置和数据。
 
+窗口位置、大小和最大化状态保存在 `%LOCALAPPDATA%\GameL10n\ui-state.json`，独立于游戏数据目录，切换保存位置后仍沿用。
+
 ## 目录
 
 ```text

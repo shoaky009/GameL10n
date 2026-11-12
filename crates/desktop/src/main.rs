@@ -8,6 +8,7 @@ mod settings_ui;
 mod time_ui;
 mod token_ui;
 mod window_redraw;
+mod window_state;
 #[cfg(test)]
 mod workbench_tests;
 mod workbench_ui;
@@ -396,7 +397,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
     let host = runtime.block_on(Application::open(data.clone(), &tools))?;
     let ui = MainWindow::new()?;
-    window_redraw::install(ui.window());
+    let window_state = window_state::WindowState::install(ui.window());
     ui.global::<App>()
         .set_software_version(gamel10n_core::metrics::SOFTWARE_VERSION.into());
     ui.global::<App>()
@@ -452,6 +453,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     {
         let ctx = context.clone();
+        let window_state = window_state.clone();
         ui.window().on_close_requested(move || {
             if ctx.switching.swap(true, Ordering::AcqRel) {
                 return slint::CloseRequestResponse::KeepWindowShown;
@@ -459,6 +461,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let Some(ui) = ctx.window.upgrade() else {
                 return slint::CloseRequestResponse::HideWindow;
             };
+            window_state.capture(ui.window());
             let mut input = UiInput::capture(&ui, String::new());
             settings_ui::cancel_api_test(&ctx);
             ctx.prepare_action(&ui, "close", &mut input);
@@ -504,6 +507,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
     ui.run()?;
+    if let Err(error) = window_state.save() {
+        eprintln!("无法保存窗口状态：{error}");
+    }
     runtime.shutdown_timeout(std::time::Duration::from_secs(3));
     Ok(())
 }

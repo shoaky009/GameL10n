@@ -1,11 +1,13 @@
 //! Restore the software-rendered window after Windows discards its surface.
 
+use slint::winit_030::{EventResult, winit::event::WindowEvent};
+
 #[cfg(target_os = "windows")]
-pub fn install(window: &slint::Window) {
-    use slint::winit_030::{EventResult, WinitWindowAccessor, winit::event::WindowEvent};
+pub fn event_filter() -> impl FnMut(&slint::Window, &WindowEvent) -> EventResult {
+    use slint::winit_030::WinitWindowAccessor;
 
     let mut surface_invalid = false;
-    window.on_winit_window_event(move |window, event| {
+    move |window, event| {
         match event {
             WindowEvent::Occluded(true) => surface_invalid = true,
             WindowEvent::Resized(size) if size.width == 0 || size.height == 0 => {
@@ -34,7 +36,7 @@ pub fn install(window: &slint::Window) {
             _ => {}
         }
         EventResult::Propagate
-    });
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -52,7 +54,9 @@ fn invalidate_surface(window: &slint::Window) {
 }
 
 #[cfg(not(target_os = "windows"))]
-pub fn install(_window: &slint::Window) {}
+pub fn event_filter() -> impl FnMut(&slint::Window, &WindowEvent) -> EventResult {
+    |_, _| EventResult::Propagate
+}
 
 #[cfg(all(test, target_os = "windows"))]
 mod tests {
