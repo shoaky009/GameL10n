@@ -46,9 +46,10 @@ supports large extractions). An inline stdout JSON response is also supported fo
 Each CLI operation is cancellable. Probe has a 45-second total budget; other operations have a ten-minute timeout. stdout/stderr diagnostics are limited to 8 MiB for new
 packages; extraction responses written to responseFile have no fixed byte limit. Do not print extraction data to stdout.
 Response: {protocolVersion:1,success:true,error:null,probe|extraction|build|validation:...}; failures use success:false,error.
-An extraction may additionally return errorKind:"incompatible" only when its resource format/filter is unsupported.
-The host then records the evidence and tries other adapters. Missing dependencies, I/O errors, implementation errors
-and unknown failures must omit this classification and stop the operation; do not label every caught exception incompatible.
+Resource operations may return errorKind:"incompatible" when the current implementation cannot handle the resources.
+During regular recognition, failed extraction, original rebuild or readback allows other candidates and then intelligent
+adaptation; legacy failures without errorKind use this fallback too. Report I/O or missing dependencies explicitly as
+errorKind:"io" or "dependency" to stop instead. Do not classify cancellation or infrastructure failures as incompatibility.
 Probe: {engineId,adapterId,adapterVersion,description,requiredFiles:[relativePath],warnings:[],originalExecutable:null,buildHints:{}}.
 Optional probe.launch:{executable,arguments:"",workingDirectory:"."} declares the original game entry from established
 resource or launch-configuration evidence. Paths are relative to the game root with / separators. Omit when ambiguous;

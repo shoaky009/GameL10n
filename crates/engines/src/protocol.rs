@@ -236,7 +236,7 @@ pub struct AdapterResponse {
     pub success: bool,
     #[serde(default)]
     pub error: Option<String>,
-    /// Only an explicit resource incompatibility may select another adapter.
+    /// Explicit infrastructure failures stop recognition; legacy operation failures allow fallback.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_kind: Option<String>,
     #[serde(default)]
@@ -265,6 +265,24 @@ pub struct ProbeRead {
 }
 
 impl AdapterResponse {
+    /// Resource-operation failures make a candidate unusable, including unclassified legacy replies.
+    pub fn checked_for_operation(self, operation: &str) -> Result<Self, EngineError> {
+        let stage = match operation {
+            "extract" => Some("extraction"),
+            "build" => Some("build"),
+            "validate" => Some("validation"),
+            _ => None,
+        };
+        let candidate_failure =
+            matches!(self.error_kind.as_deref(), None | Some("" | "incompatible"));
+        self.checked().map_err(|error| match (error, stage) {
+            (EngineError::Rejected(message), Some(stage)) if candidate_failure => {
+                EngineError::Incompatible { stage, message }
+            }
+            (error, _) => error,
+        })
+    }
+
     pub fn checked(self) -> Result<Self, EngineError> {
         if self.protocol_version != 1 {
             return Err(EngineError::Protocol("不支持的协议版本。".into()));
@@ -282,6 +300,34 @@ impl AdapterResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_resource_errors_allow_fallback_without_hiding_infrastructure_or_protocol_failures() {
+        for operation in ["extract", "build", "validate"] {
+            for kind in [None, Some(""), Some("incompatible")] {
+                let response: AdapterResponse = serde_json::from_value(serde_json::json!({"protocolVersion":1,"success":false,"error":"format not supported","errorKind":kind})).unwrap();
+                assert!(matches!(
+                    response.checked_for_operation(operation),
+                    Err(EngineError::Incompatible { .. })
+                ));
+            }
+        }
+        for kind in ["io", "dependency", "cancelled", "unknown-kind"] {
+            let response: AdapterResponse = serde_json::from_value(serde_json::json!({"protocolVersion":1,"success":false,"error":"environment failure","errorKind":kind})).unwrap();
+            assert!(matches!(
+                response.checked_for_operation("extract"),
+                Err(EngineError::Rejected(_))
+            ));
+        }
+        let invalid: AdapterResponse = serde_json::from_value(
+            serde_json::json!({"protocolVersion":99,"success":false,"error":"invalid protocol"}),
+        )
+        .unwrap();
+        assert!(matches!(
+            invalid.checked_for_operation("extract"),
+            Err(EngineError::Protocol(_))
+        ));
+    }
 
     #[test]
     fn launch_metadata_supports_game_entries_and_rejects_conflicting_declarations() {

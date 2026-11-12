@@ -61,15 +61,7 @@ impl PythonAdapter {
             .with_response_file(response_file)
             .execute::<_, AdapterResponse>(&request, cancellation)
             .await?;
-        let incompatible = request.operation == "extract"
-            && response.error_kind.as_deref() == Some("incompatible");
-        response.checked().map_err(|error| match error {
-            EngineError::Rejected(message) if incompatible => EngineError::Incompatible {
-                stage: "extraction",
-                message,
-            },
-            error => error,
-        })
+        response.checked_for_operation(&request.operation)
     }
 }
 
@@ -79,7 +71,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     #[tokio::test]
-    async fn only_explicit_extraction_incompatibility_allows_another_adapter() {
+    async fn resource_failures_allow_fallback_but_explicit_infrastructure_errors_stop_it() {
         let paths = ToolPaths::development();
         if !paths.python().is_file() {
             return;
@@ -88,9 +80,15 @@ mod tests {
         let entry = directory.path().join("adapter.py");
         for (operation, kind, recoverable) in [
             ("extract", "incompatible", true),
-            ("extract", "", false),
+            ("extract", "", true),
             ("extract", "io", false),
-            ("build", "incompatible", false),
+            ("extract", "dependency", false),
+            ("extract", "unknown-kind", false),
+            ("build", "incompatible", true),
+            ("build", "", true),
+            ("build", "io", false),
+            ("validate", "", true),
+            ("probe", "", false),
         ] {
             std::fs::write(
                 &entry,

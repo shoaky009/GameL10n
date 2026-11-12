@@ -71,7 +71,7 @@ impl VnTextPatch {
         self.process
             .execute::<_, AdapterResponse>(request, cancellation)
             .await?
-            .checked()
+            .checked_for_operation(&request.operation)
     }
 
     pub async fn probe(

@@ -633,6 +633,7 @@ impl Application {
                         stage,
                         message,
                     })) => {
+                        let message = message.chars().take(2000).collect::<String>();
                         if !excluded.insert((adapter_id.clone(), version.clone())) {
                             return Err(CoreError::InvalidData(
                                 "候选适配器未被正确排除，识别已停止。".into(),
@@ -775,7 +776,10 @@ impl Application {
                 .execute(&adapter, &request, cancellation)
                 .await?
                 .build
-                .ok_or_else(|| CoreError::InvalidData("适配器未返回原文回填结果。".into()))?;
+                .ok_or_else(|| gamel10n_engines::EngineError::Incompatible {
+                    stage: "original-roundtrip",
+                    message: "适配器未返回原文回填结果。".into(),
+                })?;
             if built.mode == BuildMode::Overlay && !built.files.is_empty() {
                 let mut readback = built.extraction_request(&source, roundtrip.path(), &files);
                 readback.set_probe_context(&probe);
@@ -783,7 +787,10 @@ impl Application {
                     .execute(&adapter, &readback, cancellation)
                     .await?
                     .extraction
-                    .ok_or_else(|| CoreError::InvalidData("覆盖包未返回回读文本。".into()))?;
+                    .ok_or_else(|| gamel10n_engines::EngineError::Incompatible {
+                        stage: "original-roundtrip",
+                        message: "覆盖包未返回回读文本。".into(),
+                    })?;
                 let by_id: BTreeMap<_, _> = actual
                     .units
                     .iter()
@@ -808,7 +815,10 @@ impl Application {
                     .execute(&adapter, &request, cancellation)
                     .await?
                     .validation
-                    .ok_or_else(|| CoreError::InvalidData("覆盖包未返回结构验证结果。".into()))?;
+                    .ok_or_else(|| gamel10n_engines::EngineError::Incompatible {
+                        stage: "original-roundtrip",
+                        message: "覆盖包未返回结构验证结果。".into(),
+                    })?;
                 if !validation.passed || !validation.issues.is_empty() {
                     return Err(gamel10n_engines::EngineError::Incompatible {
                         stage: "original-roundtrip",
@@ -2507,7 +2517,7 @@ mod tests {
         let fixture = include_str!("../../engines/tests/fixtures/json_adapter.py");
         let rejected = fixture.replace(
             "elif r['operation'] == 'extract':",
-            "elif r['operation'] == 'extract':\n    out.update(success=False, errorKind='incompatible', error='unsupported XP3 info/name layout')",
+            "elif r['operation'] == 'extract':\n    out.update(success=False, error='unsupported XP3 info/name layout')",
         );
         register_json_adapter(&app, "fixture-a-invalid", &rejected);
         register_json_adapter(&app, "fixture-z-valid", fixture);
@@ -2544,7 +2554,7 @@ mod tests {
         let project = app.add_project(&game).await.unwrap();
         let rejected = include_str!("../../engines/tests/fixtures/json_adapter.py").replace(
             "elif r['operation'] == 'extract':",
-            "elif r['operation'] == 'extract':\n    out.update(success=False, errorKind='incompatible', error='unsupported XP3 info/name layout')",
+            "elif r['operation'] == 'extract':\n    out.update(success=False, error='unsupported XP3 info/name layout')",
         );
         register_json_adapter(&app, "fixture", &rejected);
         let error = app.recognize(&project.id).await.unwrap_err();
@@ -2562,7 +2572,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unclassified_extraction_failure_stops_without_model_fallback() {
+    async fn unclassified_roundtrip_build_failure_enters_smart_adaptation() {
+        let tools = crate::ToolPaths::development();
+        if !tools.python().is_file() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let game = root.path().join("game");
+        fs::create_dir(&game).unwrap();
+        let original = br#"["one","two"]"#;
+        fs::write(game.join("text.json"), original).unwrap();
+        let app = Application::open(root.path().join("data"), &tools)
+            .await
+            .unwrap();
+        let project = app.add_project(&game).await.unwrap();
+        let broken = include_str!("../../engines/tests/fixtures/json_adapter.py").replace(
+            "elif r['operation'] == 'build':",
+            "elif r['operation'] == 'build':\n    out.update(success=False, error='resource writer failed')",
+        );
+        register_json_adapter(&app, "fixture", &broken);
+        let error = app.recognize(&project.id).await.unwrap_err();
+        assert!(error.to_string().contains("API"), "{error}");
+        assert_eq!(
+            app.task_state(&project.id).await.unwrap().operation,
+            "adapt"
+        );
+        let saved = app.store.get(&project.id).await.unwrap();
+        let failure = &saved.extra["discovery"]["reuseFailures"][0];
+        assert_eq!(failure["failedStage"], "build");
+        assert_eq!(failure["evidence"][0], "resource writer failed");
+        assert!(!saved.extra.contains_key("analysis"));
+        assert_eq!(fs::read(game.join("text.json")).unwrap(), original);
+        assert!(
+            app.consumption_history()
+                .await
+                .unwrap()
+                .records
+                .iter()
+                .all(|r| r.api.requests == 0)
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_dependency_failure_stops_without_model_fallback() {
         let tools = crate::ToolPaths::development();
         if !tools.python().is_file() {
             return;
@@ -2577,7 +2629,7 @@ mod tests {
         let project = app.add_project(&game).await.unwrap();
         let broken = include_str!("../../engines/tests/fixtures/json_adapter.py").replace(
             "elif r['operation'] == 'extract':",
-            "elif r['operation'] == 'extract':\n    out.update(success=False, error='dependency unavailable')",
+            "elif r['operation'] == 'extract':\n    out.update(success=False, errorKind='dependency', error='dependency unavailable')",
         );
         register_json_adapter(&app, "fixture", &broken);
         let error = app.recognize(&project.id).await.unwrap_err();

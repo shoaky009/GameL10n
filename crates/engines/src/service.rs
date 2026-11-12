@@ -3127,7 +3127,7 @@ with open(r['responseFile'],'w',encoding='utf-8') as output: json.dump(out,outpu
 from pathlib import Path
 r=json.load(sys.stdin)
 (Path(r['sourceDirectory'])/'scripts.dat').write_bytes(b'changed')
-Path(r['responseFile']).write_text(json.dumps(dict(protocolVersion=1,success=False,errorKind='incompatible',error='unsupported layout')),encoding='utf8')
+Path(r['responseFile']).write_text(json.dumps(dict(protocolVersion=1,success=False,error='unsupported layout')),encoding='utf8')
 "#,
         )
         .expect("adapter");
