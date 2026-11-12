@@ -344,7 +344,8 @@ impl Application {
             translation_format: TranslationFormat::JsonBatch,
             analysis_reasoning_effort: p.analysis_reasoning_effort.clone(),
         })
-        .map_err(|e| CoreError::InvalidData(e.to_string()))?;
+        .map_err(|e| CoreError::InvalidData(e.to_string()))?
+        .with_display_name(p.name.clone());
         let limits = AdaptationLimits {
             maximum_tokens: project
                 .settings

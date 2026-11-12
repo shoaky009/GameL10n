@@ -194,6 +194,7 @@ async fn unmatched_recognition_uses_the_configured_api_and_resumes_its_session()
             endpoint,
             model: "fixture".into(),
             protocol: "ChatCompletions".into(),
+            analysis_reasoning_effort: Some("high".into()),
             ..ApiProfile::default()
         },
         None,
@@ -237,6 +238,11 @@ async fn unmatched_recognition_uses_the_configured_api_and_resumes_its_session()
             if turn == 1 { "new" } else { "continued" }
         );
         assert_eq!(history.records[0].model.as_deref(), Some("fixture"));
+        assert_eq!(
+            history.records[0].profile_name.as_deref(),
+            Some("Local fixture")
+        );
+        assert_eq!(history.records[0].reasoning_effort.as_deref(), Some("high"));
     }
     let requests = server.join().unwrap();
     assert!(

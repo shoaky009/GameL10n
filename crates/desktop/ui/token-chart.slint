@@ -1,0 +1,113 @@
+import { Theme, Label, Caption, TokenPoint, TokenSegment, MetricTick } from "state.slint";
+
+component TokenMarker inherits Rectangle {
+    in property <int> series;
+    in property <color> tint;
+    in property <bool> partial;
+    width: 7px; height: 7px;
+    if root.series < 2: Rectangle {
+        x: 0px; y: 0px; width: parent.width; height: parent.height;
+        background: root.partial ? Theme.background : root.tint;
+        border-color: root.tint; border-width: 1.5px;
+        border-radius: root.series == 0 ? self.height / 2 : 0px;
+    }
+    if root.series == 2: Path {
+        width: root.width; height: root.height; fit: preserve;
+        fill: root.partial ? Theme.background : root.tint;
+        stroke: root.tint; stroke-width: 1.5px;
+        MoveTo { x: root.width / 2px; y: 0; }
+        LineTo { x: root.width / 1px; y: root.height / 2px; }
+        LineTo { x: root.width / 2px; y: root.height / 1px; }
+        LineTo { x: 0; y: root.height / 2px; }
+        LineTo { x: root.width / 2px; y: 0; }
+    }
+}
+
+export component TokenChart inherits Rectangle {
+    in property <[TokenPoint]> points;
+    in property <[TokenSegment]> segments;
+    in property <[MetricTick]> ticks;
+    in property <bool> known;
+    private property <int> hovered: -1;
+    private property <int> selected: -1;
+    private property <int> active: max(0, min(points.length - 1, hovered >= 0 ? hovered : selected >= 0 ? selected : points.length - 1));
+    changed points => { root.hovered = -1; root.selected = -1; }
+    forward-focus: keyboard;
+    border-width: keyboard.has-focus ? 1px : 0px;
+    border-color: Theme.accent;
+    pure function series-color(series: int) -> color {
+        return series == 0 ? Theme.token-input : series == 1 ? Theme.token-output : Theme.token-cached;
+    }
+    Caption { x: 0px; y: 0px; text: "Token"; font-size: 12px; }
+    HorizontalLayout { x: 60px; y: 0px; width: parent.width - 80px; height: 20px; spacing: 24px;
+        for label[i] in ["输入", "输出", "缓存输入"]: HorizontalLayout { spacing: 6px; horizontal-stretch: 0;
+            Rectangle { width: 22px; height: 20px;
+                Rectangle { x: 0px; y: 9px; width: 22px; height: 2px; background: root.series-color(i); }
+                TokenMarker { x: 8px; y: 6px; series: i; tint: root.series-color(i); }
+            }
+            Caption { text: label; color: root.series-color(i); vertical-alignment: center; }
+        }
+        Rectangle { horizontal-stretch: 1; }
+    }
+    plot := Rectangle {
+        x: 60px; y: 32px; width: max(0px, root.width - 80px); height: max(40px, root.height - 122px);
+        for tick in root.ticks: Rectangle { x: 0px; y: tick.fraction * plot.height; width: plot.width; height: 1px; background: Theme.line; }
+        if root.points.length > 0: Rectangle { x: root.points[root.active].x * plot.width; y: 0px; width: 1px; height: plot.height; background: Theme.secondary.with-alpha(0.4); }
+        for segment in root.segments: Path {
+            x: 0px; y: 0px; width: plot.width; height: plot.height;
+            fit: preserve;
+            fill: transparent; stroke: root.series-color(segment.series);
+            stroke-width: segment.series == 0 ? 2.8px : 2px;
+            stroke-line-cap: round;
+            MoveTo { x: segment.x1 * plot.width / 1px; y: segment.y1 * plot.height / 1px; }
+            LineTo { x: segment.x2 * plot.width / 1px; y: segment.y2 * plot.height / 1px; }
+        }
+        for point[i] in root.points: Rectangle { x: point.x * plot.width; y: 0px; width: 0px; height: plot.height;
+            if point.input-known: TokenMarker { x: -self.width / 2; y: point.input-y * plot.height - self.height / 2; width: i == root.active ? 9px : 7px; height: self.width; series: 0; tint: Theme.token-input; partial: point.usage-partial; }
+            if point.output-known: TokenMarker { x: -self.width / 2; y: point.output-y * plot.height - self.height / 2; width: i == root.active ? 9px : 7px; height: self.width; series: 1; tint: Theme.token-output; partial: point.usage-partial; }
+            if point.cached-known: TokenMarker { x: -self.width / 2; y: point.cached-y * plot.height - self.height / 2; width: i == root.active ? 9px : 7px; height: self.width; series: 2; tint: Theme.token-cached; partial: point.cache-partial; }
+        }
+        if !root.known: Caption { x: 0px; y: max(0px, (plot.height - 20px) / 2); width: plot.width; text: "此范围没有已记录的 Token 用量"; horizontal-alignment: center; }
+        for point[i] in root.points: Rectangle {
+            private property <float> half-step: root.points.length > 1 ? 0.5 / (root.points.length - 1) : 0.5;
+            x: max(0px, (point.x - half-step) * plot.width);
+            width: min(plot.width, (point.x + half-step) * plot.width) - self.x;
+            y: 0px; height: plot.height;
+            accessible-role: button;
+            accessible-label: point.label + "，输入 " + point.input + "，输出 " + point.output + "，缓存输入 " + point.cached;
+            accessible-action-default => { root.selected = i; keyboard.focus(); }
+            TouchArea {
+                mouse-cursor: pointer;
+                changed has-hover => { if self.has-hover { root.hovered = i; } else if root.hovered == i { root.hovered = -1; } }
+                moved => { root.hovered = i; }
+                clicked => { root.selected = i; keyboard.focus(); }
+            }
+        }
+    }
+    for tick in root.ticks: Caption {
+        visible: plot.height >= 80px || tick.fraction == 0 || tick.fraction == 0.5 || tick.fraction == 1;
+        x: 0px; y: plot.y + tick.fraction * plot.height - 9px; width: 52px; height: 18px;
+        text: tick.label; horizontal-alignment: right; vertical-alignment: center; font-size: 12px;
+    }
+    for point in root.points: Caption {
+        x: max(plot.x - 14px, min(plot.x + plot.width - 86px, plot.x + point.x * plot.width - 45px));
+        y: plot.y + plot.height + 9px; width: 100px; height: 18px;
+        text: point.axis-label; horizontal-alignment: center; wrap: no-wrap; overflow: elide; font-size: 12px;
+    }
+    if root.points.length > 0: VerticalLayout {
+        x: 0px; y: plot.y + plot.height + 36px; width: root.width; height: 52px; spacing: 4px; alignment: start;
+        Label { text: root.points[root.active].label; font-weight: 600; wrap: no-wrap; overflow: elide; Tooltip { text: @markdown("\{root.points[root.active].label}\n\{root.points[root.active].detail}"); } }
+        Caption { text: "输入 " + root.points[root.active].input + "    输出 " + root.points[root.active].output + "    缓存输入 " + root.points[root.active].cached; }
+    }
+    keyboard := FocusScope {
+        width: 0px; height: 0px;
+        key-pressed(event) => {
+            if root.points.length > 0 && (event.text == Key.LeftArrow || event.text == Key.RightArrow) {
+                root.selected = max(0, min(root.points.length - 1, root.active + (event.text == Key.LeftArrow ? -1 : 1)));
+                root.hovered = -1;
+                return accept;
+            }
+            return reject;
+        }
+    }
+}

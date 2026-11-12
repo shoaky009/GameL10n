@@ -8,6 +8,9 @@ export struct TokenDisplay { text: string, exact: string }
 export struct CleanupRow { id: string, title: string, description: string, size: string, selected: bool }
 export struct MetricGroupRow { label: string, detail: string, value: string, fraction: float }
 export struct ConsumptionRow { identity: string, configuration: string, counters: string }
+export struct TokenPoint { label: string, axis-label: string, detail: string, input: string, output: string, cached: string, x: float, input-y: float, output-y: float, cached-y: float, input-known: bool, output-known: bool, cached-known: bool, usage-partial: bool, cache-partial: bool }
+export struct TokenSegment { x1: float, y1: float, x2: float, y2: float, series: int }
+export struct MetricTick { label: string, fraction: float }
 
 export global Theme {
     out property <bool> dark: Palette.color-scheme == ColorScheme.dark;
@@ -21,14 +24,22 @@ export global Theme {
     out property <color> muted: dark ? #96a6bc : #596b80;
     out property <color> line: dark ? #354254 : #dbe4ef;
     out property <color> error: dark ? #ffb1a7 : #ac3023;
+    out property <color> token-input: dark ? #94c5ff : #235b99;
+    out property <color> token-output: dark ? #ffb366 : #a84d0d;
+    out property <color> token-cached: dark ? #c5a6ed : #895db5;
 }
 
 export global App {
     in-out property <[MetricGroupRow]> metric-groups;
+    in-out property <[TokenPoint]> token-points;
+    in-out property <[TokenSegment]> token-segments;
+    in-out property <[MetricTick]> token-ticks;
+    in-out property <bool> token-chart-known;
     in-out property <[ConsumptionRow]> consumption-rows;
     in-out property <[string]> metrics-versions;
     in-out property <[string]> metrics-version-keys;
     in-out property <[string]> metrics-models;
+    in-out property <[string]> metrics-model-keys;
     in-out property <[string]> metrics-projects;
     in-out property <[string]> metrics-project-keys;
     in-out property <int> metrics-version-index;

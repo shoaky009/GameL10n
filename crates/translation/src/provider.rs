@@ -341,6 +341,9 @@ impl OpenAiProvider {
     pub fn model(&self) -> &str {
         &self.settings.model
     }
+    pub fn analysis_reasoning_effort(&self) -> Option<&str> {
+        self.settings.analysis_reasoning_effort.as_deref()
+    }
     pub fn display_name(&self) -> &str {
         &self.display_name
     }

@@ -28,6 +28,10 @@ pub struct ConsumptionRecord {
     pub software_version: String,
     pub build_git_hash: String,
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
     pub task: String,
     pub mode: String,
     pub status: String,
@@ -50,8 +54,26 @@ impl ConsumptionRecord {
         )
     }
 
-    pub fn model_label(&self) -> &str {
-        self.model.as_deref().unwrap_or("未调用模型")
+    pub fn model_key(&self) -> String {
+        serde_json::json!([self.profile_name, self.model, self.reasoning_effort]).to_string()
+    }
+
+    pub fn model_label(&self) -> String {
+        let Some(model) = &self.model else {
+            return "未调用模型".into();
+        };
+        let reasoning =
+            self.reasoning_effort
+                .as_deref()
+                .unwrap_or(if self.profile_name.is_some() {
+                    "默认"
+                } else {
+                    "未记录强度"
+                });
+        format!(
+            "{} / {model} / {reasoning}",
+            self.profile_name.as_deref().unwrap_or("未记录配置")
+        )
     }
 }
 
@@ -195,6 +217,8 @@ impl Application {
             software_version: SOFTWARE_VERSION.into(),
             build_git_hash: BUILD_GIT_HASH.into(),
             model: None,
+            profile_name: None,
+            reasoning_effort: None,
             task: task.into(),
             mode: "new".into(),
             status: "running".into(),
@@ -217,6 +241,8 @@ impl Application {
     pub(crate) async fn metrics_provider(&self, id: &str, provider: &OpenAiProvider) {
         if let Some(run) = self.metrics.lock().await.active.get_mut(id) {
             run.record.model = Some(provider.model().into());
+            run.record.profile_name = Some(provider.display_name().into());
+            run.record.reasoning_effort = provider.analysis_reasoning_effort().map(str::to_owned);
             run.provider = Some(provider.clone());
         }
     }
@@ -332,7 +358,7 @@ impl ConsumptionFilter {
         self.from.is_none_or(|from| date >= from)
             && self.through.is_none_or(|through| date <= through)
             && (self.version.is_empty() || self.version == record.version_key())
-            && (self.model.is_empty() || self.model == record.model_label())
+            && (self.model.is_empty() || self.model == record.model_key())
             && (self.project.is_empty() || self.project == record.project_id)
             && (self.task.is_empty() || self.task == record.task)
             && (self.mode.is_empty() || self.mode == record.mode)
@@ -419,9 +445,7 @@ pub fn consumption_groups(
                 (date.clone(), date)
             }
             ConsumptionDimension::Version => (record.version_key(), record.version_label()),
-            ConsumptionDimension::Model => {
-                (record.model_label().into(), record.model_label().into())
-            }
+            ConsumptionDimension::Model => (record.model_key(), record.model_label()),
             ConsumptionDimension::Task => (record.task.clone(), task_label(&record.task).into()),
             ConsumptionDimension::Project => {
                 (record.project_id.clone(), record.project_name.clone())
@@ -458,6 +482,8 @@ mod tests {
             software_version: "0.1.0".into(),
             build_git_hash: "aaaaaaaa11111111".into(),
             model: Some("model-a".into()),
+            profile_name: Some("Profile A".into()),
+            reasoning_effort: Some("high".into()),
             task: "adapt".into(),
             mode: "new".into(),
             status: "completed".into(),
@@ -520,7 +546,7 @@ mod tests {
             from: Some(date),
             through: Some(date),
             version: second.version_key(),
-            model: "model-b".into(),
+            model: second.model_key(),
             project: "game-a".into(),
             task: "repair".into(),
             mode: "continued".into(),
@@ -542,6 +568,52 @@ mod tests {
             ..Default::default()
         };
         assert!(!tomorrow.matches(&records[0]));
+    }
+
+    #[test]
+    fn model_configuration_groups_keep_profile_and_reasoning_snapshots_and_legacy_unknowns() {
+        let first = record("a", 100, Some(80));
+        let mut second = first.clone();
+        second.id = "b".into();
+        second.profile_name = Some("Profile B".into());
+        let mut third = first.clone();
+        third.id = "c".into();
+        third.reasoning_effort = Some("low".into());
+        let mut default_reasoning = first.clone();
+        default_reasoning.id = "default".into();
+        default_reasoning.reasoning_effort = None;
+        assert_eq!(
+            default_reasoning.model_label(),
+            "Profile A / model-a / 默认"
+        );
+        let mut legacy_value = serde_json::to_value(&first).unwrap();
+        legacy_value.as_object_mut().unwrap().remove("profileName");
+        legacy_value
+            .as_object_mut()
+            .unwrap()
+            .remove("reasoningEffort");
+        let mut legacy: ConsumptionRecord = serde_json::from_value(legacy_value).unwrap();
+        legacy.id = "legacy".into();
+        assert_eq!(legacy.model_label(), "未记录配置 / model-a / 未记录强度");
+        let filter = ConsumptionFilter {
+            model: first.model_key(),
+            ..Default::default()
+        };
+        assert!(filter.matches(&first));
+        assert!(
+            !filter.matches(&second)
+                && !filter.matches(&third)
+                && !filter.matches(&default_reasoning)
+                && !filter.matches(&legacy)
+        );
+        let records = [first, second, third, default_reasoning, legacy];
+        let (_, groups) = consumption_groups(
+            &records,
+            &ConsumptionFilter::default(),
+            ConsumptionDimension::Model,
+        );
+        assert_eq!(groups.len(), 5);
+        assert!(groups.iter().all(|group| group.totals.runs == 1));
     }
 
     #[test]
@@ -588,8 +660,21 @@ mod tests {
         app.begin(&project.id, "adapt", "Preparing adapter")
             .await
             .unwrap();
+        let provider = OpenAiProvider::new(gamel10n_translation::provider::ProviderSettings {
+            endpoint: "http://127.0.0.1:1/v1".into(),
+            api_key: String::new(),
+            model: "model-a".into(),
+            protocol: Default::default(),
+            translation_format: Default::default(),
+            analysis_reasoning_effort: Some("high".into()),
+        })
+        .unwrap()
+        .with_display_name("Profile A".into());
+        app.metrics_provider(&project.id, &provider).await;
+        drop(provider);
         let live = app.consumption_history().await.unwrap();
         assert_eq!(live.records[0].status, "running");
+        assert_eq!(live.records[0].model_label(), "Profile A / model-a / high");
         app.metrics
             .lock()
             .await
@@ -614,6 +699,15 @@ mod tests {
         append(app.data_directory(), &interrupted).unwrap();
         let history = app.consumption_history().await.unwrap();
         assert_eq!(history.records.len(), 3);
+        assert_eq!(
+            history
+                .records
+                .iter()
+                .find(|record| record.task == "adapt" && record.status == "completed")
+                .unwrap()
+                .model_label(),
+            "Profile A / model-a / high"
+        );
         assert!(
             history
                 .records

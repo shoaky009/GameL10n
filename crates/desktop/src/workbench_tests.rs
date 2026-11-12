@@ -441,6 +441,7 @@ fn project_actions_keep_settings_selection_and_saved_edits_in_sync_across_tabs()
             invoke_action(&ui, &ctx, "tab", "0").await;
             let (provider, _) = host.analysis_provider(&other_project.id).await.unwrap();
             assert_eq!(provider.model(), format!("{id}-model"));
+            assert_eq!(provider.display_name(), id);
             assert_eq!(
                 app.get_task_api().as_str(),
                 format!("{id}（{} · {protocol}）", provider.model())
@@ -459,9 +460,9 @@ fn project_actions_keep_settings_selection_and_saved_edits_in_sync_across_tabs()
 
         let directory = host.data_directory().join("metrics");
         std::fs::create_dir_all(&directory).unwrap();
-        let records = [("first-model", 100, 80), ("second-model", 1000, 900)].into_iter().enumerate().map(|(index, (model, input, cached))| serde_json::json!({
+        let records = [("Profile A", "high", 100, 80), ("Profile B", "low", 1000, 900)].into_iter().enumerate().map(|(index, (profile, reasoning, input, cached))| serde_json::json!({
             "id": format!("metrics-{index}"), "projectId": project.id, "projectName": "Metrics fixture",
-            "softwareVersion": "0.1.0", "buildGitHash": format!("build-{index}"), "model": model,
+            "softwareVersion": "0.1.0", "buildGitHash": format!("build-{index}"), "model": "shared-model", "profileName":profile, "reasoningEffort":reasoning,
             "task": "adapt", "mode": "new", "status": "completed", "startedAt": "2026-11-12T04:00:00Z", "endedAt": "2026-11-12T04:01:00Z", "elapsedMs": 60000,
             "api": {"requests":1,"usageRequests":1,"cacheRequests":1,"inputTokens":input,"outputTokens":20,"cachedTokens":cached,"cacheInputTokens":input,"apiMs":50000}
         }).to_string()).collect::<Vec<_>>().join("\n");
@@ -470,20 +471,24 @@ fn project_actions_keep_settings_selection_and_saved_edits_in_sync_across_tabs()
         assert_eq!(app.get_page(), 5);
         assert!(app.get_metrics_overview().contains("2 次运行"));
         app.set_metrics_dimension(2);
-        app.set_metrics_measure(1);
+        app.set_metrics_measure(0);
         invoke_action(&ui, &ctx, "metrics", "refresh").await;
         assert_eq!(app.get_metric_groups().row_count(), 2);
-        assert_eq!(app.get_metric_groups().row_data(1).unwrap().fraction, 1.0);
-        let model_index = app.get_metrics_models().iter().position(|model| model == "second-model").unwrap();
+        assert_eq!(app.get_token_points().row_count(), 2);
+        assert_eq!(app.get_token_segments().row_count(), 3);
+        let model_index = app.get_metrics_models().iter().position(|model| model == "Profile B / shared-model / low").unwrap();
         app.set_metrics_model_index(model_index as i32);
         invoke_action(&ui, &ctx, "metrics", "refresh").await;
         assert_eq!(app.get_metric_groups().row_count(), 1);
+        assert_eq!(app.get_token_points().row_count(), 1);
+        assert_eq!(app.get_token_segments().row_count(), 0);
         assert!(app.get_metrics_tokens().contains("1000"));
         app.set_metrics_date_range(4);
         app.set_metrics_from("invalid date".into());
         invoke_action(&ui, &ctx, "metrics", "refresh").await;
         assert!(!app.get_metrics_error().is_empty());
         assert_eq!(app.get_metric_groups().row_count(), 0);
+        assert_eq!(app.get_token_points().row_count(), 0);
         app.set_metrics_from("2026-11-13".into());
         invoke_action(&ui, &ctx, "metrics", "refresh").await;
         assert!(app.get_metrics_error().is_empty());

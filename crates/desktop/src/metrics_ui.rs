@@ -13,10 +13,11 @@ use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use crate::{
     Context, UiInput,
     token_ui::compact,
-    view::{App, ConsumptionRow, MetricGroupRow},
+    view::{App, ConsumptionRow, MetricGroupRow, MetricTick, TokenPoint, TokenSegment},
 };
 
 const PAGE_SIZE: usize = 20;
+const MEASURE_CHOICES: [i32; 9] = [0, 4, 5, 6, 7, 8, 9, 10, 11];
 const TASKS: [&str; 6] = ["", "recognize", "adapt", "repair", "expand", "review"];
 const MODES: [&str; 4] = ["", "new", "continued", "reused"];
 const STATUSES: [&str; 8] = [
@@ -30,7 +31,7 @@ const STATUSES: [&str; 8] = [
     "unsupported",
 ];
 const MEASURES: [&str; 12] = [
-    "总 Token",
+    "Token 用量",
     "输入 Token",
     "输出 Token",
     "缓存输入 Token",
@@ -76,7 +77,7 @@ impl MetricsInput {
                     app.get_metrics_version_keys(),
                     app.get_metrics_version_index(),
                 ),
-                model: selected(app.get_metrics_models(), app.get_metrics_model_index()),
+                model: selected(app.get_metrics_model_keys(), app.get_metrics_model_index()),
                 project: selected(
                     app.get_metrics_project_keys(),
                     app.get_metrics_project_index(),
@@ -99,7 +100,9 @@ impl MetricsInput {
             from: app.get_metrics_from().into(),
             through: app.get_metrics_through().into(),
             dimension: app.get_metrics_dimension(),
-            measure: app.get_metrics_measure(),
+            measure: *MEASURE_CHOICES
+                .get(app.get_metrics_measure().max(0) as usize)
+                .unwrap_or(&0),
             average: app.get_metrics_aggregation() == 1,
             tab: app.get_metrics_tab(),
             offset: app.get_metrics_offset().max(0) as usize,
@@ -251,6 +254,156 @@ fn bars(
         .collect()
 }
 
+#[derive(Default)]
+struct TokenChartData {
+    points: Vec<TokenPoint>,
+    segments: Vec<TokenSegment>,
+    ticks: Vec<MetricTick>,
+    known: bool,
+}
+
+fn token_chart(
+    groups: &[ConsumptionGroup],
+    average: bool,
+    offset: usize,
+    dates: bool,
+) -> TokenChartData {
+    let maximum = groups
+        .iter()
+        .flat_map(|group| {
+            [1, 2, 3]
+                .into_iter()
+                .filter_map(|measure| value(&group.totals, measure, average))
+        })
+        .fold(0.0, f64::max);
+    let magnitude = if maximum > 0.0 {
+        10_f64.powf(maximum.log10().floor())
+    } else {
+        1.0
+    };
+    let top = [1.0, 2.0, 5.0, 10.0]
+        .into_iter()
+        .find(|step| step * magnitude >= maximum)
+        .unwrap_or(10.0)
+        * magnitude;
+    let visible = groups
+        .iter()
+        .skip(offset)
+        .take(PAGE_SIZE)
+        .collect::<Vec<_>>();
+    let count = visible.len();
+    let tick_count = count.min(6);
+    let x_ticks = (0..tick_count)
+        .map(|index| {
+            if tick_count <= 1 {
+                0
+            } else {
+                (index * (count - 1) + (tick_count - 1) / 2) / (tick_count - 1)
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut chart = TokenChartData::default();
+    for (index, group) in visible.into_iter().enumerate() {
+        let values = [1, 2, 3].map(|measure| value(&group.totals, measure, average));
+        let normalized = values
+            .map(|value| value.map_or(1.0, |value| (1.0 - value / top).clamp(0.0, 1.0) as f32));
+        chart.known |= values.iter().any(Option::is_some);
+        let label = if dates {
+            group.label.get(5..).unwrap_or(&group.label)
+        } else {
+            &group.label
+        };
+        let mut axis_label = label.chars().take(12).collect::<String>();
+        if label.chars().count() > 12 {
+            axis_label.push('…');
+        }
+        chart.points.push(TokenPoint {
+            label: group.label.clone().into(),
+            axis_label: if x_ticks.contains(&index) {
+                axis_label.into()
+            } else {
+                "".into()
+            },
+            detail: format!(
+                "{} 次运行 · {} 次 API · 用量 {}/{} · 缓存 {}/{}",
+                group.totals.runs,
+                group.totals.requests,
+                group.totals.usage_requests,
+                group.totals.requests,
+                group.totals.cache_requests,
+                group.totals.requests
+            )
+            .into(),
+            input: display(&group.totals, 1, average).into(),
+            output: display(&group.totals, 2, average).into(),
+            cached: display(&group.totals, 3, average).into(),
+            x: if count <= 1 {
+                0.5
+            } else {
+                index as f32 / (count - 1) as f32
+            },
+            input_y: normalized[0],
+            output_y: normalized[1],
+            cached_y: normalized[2],
+            input_known: values[0].is_some(),
+            output_known: values[1].is_some(),
+            cached_known: values[2].is_some(),
+            usage_partial: group.totals.usage_requests < group.totals.requests,
+            cache_partial: group.totals.cache_requests < group.totals.requests,
+        });
+    }
+    for pair in chart.points.windows(2) {
+        let (left, right) = (&pair[0], &pair[1]);
+        for (series, known, y1, y2) in [
+            (
+                0,
+                left.input_known && right.input_known,
+                left.input_y,
+                right.input_y,
+            ),
+            (
+                1,
+                left.output_known && right.output_known,
+                left.output_y,
+                right.output_y,
+            ),
+            (
+                2,
+                left.cached_known && right.cached_known,
+                left.cached_y,
+                right.cached_y,
+            ),
+        ] {
+            if known {
+                chart.segments.push(TokenSegment {
+                    x1: left.x,
+                    y1,
+                    x2: right.x,
+                    y2,
+                    series,
+                });
+            }
+        }
+    }
+    if chart.known {
+        chart.ticks = (0..=4)
+            .map(|index| {
+                let fraction = index as f32 / 4.0;
+                let amount = top * (1.0 - f64::from(fraction));
+                MetricTick {
+                    fraction,
+                    label: if amount > 0.0 && amount < 10.0 {
+                        format!("{amount:.2}").into()
+                    } else {
+                        compact(amount.round() as u64).into()
+                    },
+                }
+            })
+            .collect();
+    }
+    chart
+}
+
 fn rows(
     records: &[ConsumptionRecord],
     filter: &ConsumptionFilter,
@@ -342,6 +495,10 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
             Err(error) => {
                 app.set_metrics_error(error.to_string().into());
                 app.set_metric_groups(ModelRc::default());
+                app.set_token_points(ModelRc::default());
+                app.set_token_segments(ModelRc::default());
+                app.set_token_ticks(ModelRc::default());
+                app.set_token_chart_known(false);
                 app.set_consumption_rows(ModelRc::default());
                 app.set_metrics_overview("".into());
                 app.set_metrics_tokens("".into());
@@ -353,11 +510,11 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
         };
         let mut versions = BTreeMap::new();
         let mut projects = BTreeMap::new();
-        let mut models = std::collections::BTreeSet::new();
+        let mut models = BTreeMap::new();
         for record in &history.records {
             versions.insert(record.version_key(), record.version_label());
             projects.insert(record.project_id.clone(), record.project_name.clone());
-            models.insert(record.model_label().to_owned());
+            models.insert(record.model_key(), record.model_label());
         }
         let index = |keys: &[String], selected: &str| {
             keys.iter().position(|key| key == selected).unwrap_or(0) as i32
@@ -368,8 +525,8 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
         let project_keys = std::iter::once(String::new())
             .chain(projects.keys().cloned())
             .collect::<Vec<_>>();
-        let model_names = std::iter::once("全部模型".to_owned())
-            .chain(models)
+        let model_keys = std::iter::once(String::new())
+            .chain(models.keys().cloned())
             .collect::<Vec<_>>();
         app.set_metrics_versions(strings(
             std::iter::once("全部版本".into()).chain(versions.into_values()),
@@ -381,8 +538,11 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
         ));
         app.set_metrics_project_index(index(&project_keys, &selection.filter.project));
         app.set_metrics_project_keys(strings(project_keys));
-        app.set_metrics_model_index(index(&model_names, &selection.filter.model));
-        app.set_metrics_models(strings(model_names));
+        app.set_metrics_model_index(index(&model_keys, &selection.filter.model));
+        app.set_metrics_model_keys(strings(model_keys));
+        app.set_metrics_models(strings(
+            std::iter::once("全部模型配置".into()).chain(models.into_values()),
+        ));
         let dimension = match selection.dimension {
             1 => ConsumptionDimension::Version,
             2 => ConsumptionDimension::Model,
@@ -403,6 +563,11 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
             .min(count.saturating_sub(1) / PAGE_SIZE * PAGE_SIZE);
         app.set_metrics_offset(offset as i32);
         app.set_metrics_total(count.min(i32::MAX as usize) as i32);
+        let chart = token_chart(&groups, selection.average, offset, selection.dimension == 0);
+        app.set_token_chart_known(chart.known);
+        app.set_token_points(ModelRc::new(VecModel::from(chart.points)));
+        app.set_token_segments(ModelRc::new(VecModel::from(chart.segments)));
+        app.set_token_ticks(ModelRc::new(VecModel::from(chart.ticks)));
         app.set_metric_groups(ModelRc::new(VecModel::from(bars(
             &groups,
             selection.measure,
@@ -480,4 +645,93 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
         );
     });
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn group(
+        label: &str,
+        input: u64,
+        output: u64,
+        cached: Option<u64>,
+        runs: usize,
+    ) -> ConsumptionGroup {
+        ConsumptionGroup {
+            key: label.into(),
+            label: label.into(),
+            totals: ConsumptionTotals {
+                runs,
+                requests: runs as u64,
+                usage_requests: runs as u64,
+                cache_requests: if cached.is_some() { runs as u64 } else { 0 },
+                input_tokens: input,
+                output_tokens: output,
+                cached_tokens: cached.unwrap_or(0),
+                cache_input_tokens: if cached.is_some() { input } else { 0 },
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn token_lines_share_a_scale_and_apply_the_same_run_average_to_each_series() {
+        let groups = [
+            group("a", 1000, 100, Some(800), 2),
+            group("b", 500, 50, Some(400), 1),
+        ];
+        let chart = token_chart(&groups, true, 0, false);
+        assert_eq!(chart.points.len(), 2);
+        assert_eq!(chart.segments.len(), 3);
+        assert!(
+            chart
+                .segments
+                .iter()
+                .all(|segment| segment.y1 == segment.y2)
+        );
+        assert!(
+            chart.points[0].input_y < chart.points[0].cached_y
+                && chart.points[0].cached_y < chart.points[0].output_y
+        );
+        assert!(chart.points[0].input.contains("500.0"));
+        assert_eq!(chart.points[0].x, 0.0);
+        assert_eq!(chart.points[1].x, 1.0);
+    }
+
+    #[test]
+    fn unknown_usage_breaks_lines_and_partial_usage_keeps_its_lower_bound() {
+        let mut partial = group("partial", 100, 20, Some(80), 2);
+        partial.totals.usage_requests = 1;
+        partial.totals.cache_requests = 1;
+        let mut unknown = group("unknown", 0, 0, None, 1);
+        unknown.totals.usage_requests = 0;
+        let chart = token_chart(
+            &[partial, unknown, group("known", 200, 25, None, 1)],
+            false,
+            0,
+            false,
+        );
+        assert!(chart.known);
+        assert!(chart.segments.is_empty());
+        assert!(chart.points[0].usage_partial && chart.points[0].cache_partial);
+        assert!(chart.points[0].input.starts_with("≥"));
+        assert!(
+            !chart.points[1].input_known
+                && !chart.points[1].output_known
+                && !chart.points[1].cached_known
+        );
+        assert_eq!(chart.points[1].input.as_str(), "未知");
+        assert!(chart.points[2].input_known && !chart.points[2].cached_known);
+    }
+
+    #[test]
+    fn a_single_point_is_centered_and_empty_charts_do_not_invent_usage() {
+        let chart = token_chart(&[group("single", 100, 20, Some(80), 1)], false, 0, false);
+        assert_eq!(chart.points[0].x, 0.5);
+        assert!(chart.segments.is_empty());
+        assert_eq!(chart.ticks.len(), 5);
+        let chart = token_chart(&[], false, 0, false);
+        assert!(chart.points.is_empty() && chart.ticks.is_empty() && !chart.known);
+    }
 }

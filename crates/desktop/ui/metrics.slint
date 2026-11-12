@@ -1,5 +1,6 @@
 import { Button, ComboBox, LineEdit, ListView } from "std-widgets.slint";
 import { App, Theme, Heading, Label, Caption, Divider } from "state.slint";
+import { TokenChart } from "token-chart.slint";
 
 export component ConsumptionMetrics inherits VerticalLayout {
     spacing: 12px;
@@ -18,7 +19,7 @@ export component ConsumptionMetrics inherits VerticalLayout {
     HorizontalLayout { spacing: 8px;
         ComboBox { model: ["全部日期", "今天", "近 7 天", "近 30 天", "自定义日期"]; current-index <=> App.metrics-date-range; selected => { App.metrics-offset = 0; App.action("metrics", "refresh"); } }
         ComboBox { model: App.metrics-versions; current-index <=> App.metrics-version-index; selected => { App.metrics-offset = 0; App.action("metrics", "refresh"); } }
-        ComboBox { model: App.metrics-models; current-index <=> App.metrics-model-index; selected => { App.metrics-offset = 0; App.action("metrics", "refresh"); } }
+        ComboBox { model: App.metrics-models; min-width: 0px; current-index <=> App.metrics-model-index; selected => { App.metrics-offset = 0; App.action("metrics", "refresh"); } Tooltip { text: @markdown("\{App.metrics-models[App.metrics-model-index]}"); } }
         ComboBox { model: App.metrics-projects; current-index <=> App.metrics-project-index; selected => { App.metrics-offset = 0; App.action("metrics", "refresh"); } }
     }
     if App.metrics-date-range == 4: HorizontalLayout { spacing: 8px;
@@ -48,14 +49,15 @@ export component ConsumptionMetrics inherits VerticalLayout {
     }
     if App.metrics-tab == 0: HorizontalLayout { spacing: 8px;
         Label { text: "分组"; vertical-alignment: center; }
-        ComboBox { model: ["日期", "软件版本", "模型", "任务类型", "游戏项目", "执行方式", "状态"]; current-index <=> App.metrics-dimension; selected => { App.metrics-offset = 0; App.action("metrics", "refresh"); } }
-        ComboBox { model: ["总 Token", "输入 Token", "输出 Token", "缓存输入 Token", "未缓存输入 Token", "缓存命中率", "总耗时", "API 耗时", "等待耗时", "本地及其他耗时", "API 请求次数", "失败请求次数"]; current-index <=> App.metrics-measure; selected => { App.action("metrics", "refresh"); } }
-        ComboBox { model: ["合计", "单次运行平均"]; current-index <=> App.metrics-aggregation; enabled: App.metrics-measure != 5; selected => { App.action("metrics", "refresh"); } }
+        ComboBox { model: ["日期", "软件版本", "模型配置", "任务类型", "游戏项目", "执行方式", "状态"]; current-index <=> App.metrics-dimension; selected => { App.metrics-offset = 0; App.action("metrics", "refresh"); } }
+        ComboBox { model: ["Token 用量", "未缓存输入 Token", "缓存命中率", "总耗时", "API 耗时", "等待耗时", "本地及其他耗时", "API 请求次数", "失败请求次数"]; current-index <=> App.metrics-measure; selected => { App.action("metrics", "refresh"); } }
+        ComboBox { model: ["合计", "单次运行平均"]; current-index <=> App.metrics-aggregation; enabled: App.metrics-measure != 2; selected => { App.action("metrics", "refresh"); } }
     }
     if App.metrics-tab == 0 && App.metrics-total > 0: Caption { text: App.metrics-chart-title; }
-    Rectangle { vertical-stretch: 1; min-height: 130px;
+    Rectangle { vertical-stretch: 1; min-height: App.metrics-tab == 0 && App.metrics-measure == 0 ? 162px : 130px;
         if App.metrics-total == 0 && App.metrics-error == "": Label { text: App.metrics-loading ? "正在读取指标…" : App.metrics-empty; x: 12px; y: 20px; width: parent.width - 24px; }
-        if App.metrics-tab == 0 && App.metrics-total > 0: ListView {
+        if App.metrics-tab == 0 && App.metrics-total > 0 && App.metrics-measure == 0: TokenChart { points: App.token-points; segments: App.token-segments; ticks: App.token-ticks; known: App.token-chart-known; }
+        if App.metrics-tab == 0 && App.metrics-total > 0 && App.metrics-measure != 0: ListView {
             for group in App.metric-groups: Rectangle { height: 82px;
                 VerticalLayout { padding-top: 6px; padding-bottom: 10px; padding-right: 12px; spacing: 5px;
                     HorizontalLayout { spacing: 12px;
