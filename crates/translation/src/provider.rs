@@ -190,6 +190,27 @@ pub struct OpenAiProvider {
     account_slot: Arc<tokio::sync::Semaphore>,
     display_name: String,
     request_count: Arc<AtomicU64>,
+    metrics: Arc<Mutex<RequestMetrics>>,
+}
+
+/// Observed usage belongs to HTTP attempts, including responses rejected by the caller.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct RequestMetrics {
+    pub requests: u64,
+    pub failed_requests: u64,
+    pub usage_requests: u64,
+    pub cache_requests: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cached_tokens: u64,
+    pub cache_input_tokens: u64,
+    pub api_ms: u64,
+    pub waiting_ms: u64,
+}
+
+fn milliseconds(duration: Duration) -> u64 {
+    duration.as_millis().min(u128::from(u64::MAX)) as u64
 }
 static ACCOUNT_SLOTS: LazyLock<Mutex<HashMap<String, Weak<tokio::sync::Semaphore>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -298,6 +319,7 @@ impl OpenAiProvider {
             account_slot,
             display_name,
             request_count: Arc::new(AtomicU64::new(0)),
+            metrics: Arc::new(Mutex::new(RequestMetrics::default())),
         })
     }
     pub fn identity(&self) -> &str {
@@ -306,6 +328,15 @@ impl OpenAiProvider {
     /// HTTP attempts by this provider and its clones, including retries.
     pub fn request_count(&self) -> u64 {
         self.request_count.load(Ordering::Relaxed)
+    }
+    pub fn request_metrics(&self) -> RequestMetrics {
+        let mut metrics = self
+            .metrics
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        metrics.requests = self.request_count();
+        metrics
     }
     pub fn model(&self) -> &str {
         &self.settings.model
@@ -384,11 +415,17 @@ impl OpenAiProvider {
         maximum_output_tokens: u32,
         cancellation: &CancellationToken,
     ) -> Result<Completion, ProviderError> {
-        let _account_permit = tokio::select! {
+        let waiting = std::time::Instant::now();
+        let permit = tokio::select! {
             biased;
-            _=cancellation.cancelled()=>return Err(ProviderError::new("cancelled","任务已取消。")),
-            permit=self.account_slot.acquire()=>permit.map_err(|_|ProviderError::new("scheduler","API 请求调度器不可用。"))?,
+            _=cancellation.cancelled()=>Err(ProviderError::new("cancelled","任务已取消。")),
+            permit=self.account_slot.acquire()=>permit.map_err(|_|ProviderError::new("scheduler","API 请求调度器不可用。")),
         };
+        self.metrics
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .waiting_ms += milliseconds(waiting.elapsed());
+        let _account_permit = permit?;
         let mut retries = 0;
         loop {
             let result = self
@@ -409,7 +446,15 @@ impl OpenAiProvider {
                     .retry_after
                     .unwrap_or(Duration::from_secs(retries + 1))
                     .min(Duration::from_secs(30));
-                tokio::select! {biased;_=cancellation.cancelled()=>return Err(ProviderError::new("cancelled","任务已取消。")),_=tokio::time::sleep(delay)=>{}}
+                let waiting = std::time::Instant::now();
+                let cancelled = tokio::select! {biased;_=cancellation.cancelled()=>true,_=tokio::time::sleep(delay)=>false};
+                self.metrics
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .waiting_ms += milliseconds(waiting.elapsed());
+                if cancelled {
+                    return Err(ProviderError::new("cancelled", "任务已取消。"));
+                }
                 retries += 1;
                 continue;
             }
@@ -514,11 +559,43 @@ impl OpenAiProvider {
         if !self.settings.api_key.is_empty() {
             request = request.bearer_auth(&self.settings.api_key);
         }
+        let started = std::time::Instant::now();
+        let mut attempted = false;
+        let result = self
+            .receive_completion(
+                request,
+                payload.len(),
+                known_tool_names,
+                cancellation,
+                &mut attempted,
+            )
+            .await;
+        if attempted {
+            let mut metrics = self
+                .metrics
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            metrics.api_ms = metrics
+                .api_ms
+                .saturating_add(milliseconds(started.elapsed()));
+            metrics.failed_requests += u64::from(result.is_err());
+        }
+        result
+    }
+    async fn receive_completion(
+        &self,
+        request: reqwest::RequestBuilder,
+        payload_len: usize,
+        known_tool_names: Option<&HashSet<String>>,
+        cancellation: &CancellationToken,
+        attempted: &mut bool,
+    ) -> Result<Completion, ProviderError> {
         let response = tokio::select! {
             biased;
             _=cancellation.cancelled()=>return Err(ProviderError::new("cancelled","任务已取消。")),
             result=async {
                 self.request_count.fetch_add(1, Ordering::Relaxed);
+                *attempted = true;
                 request.send().await
             }=>result.map_err(|error| {let mut failure=ProviderError::new(if error.is_timeout(){"request-timeout"}else{"network-error"},"API 请求失败，结果未知。请检查已保存的请求记录。");failure.outcome_unknown=true;failure})?,
         };
@@ -567,7 +644,23 @@ impl OpenAiProvider {
         }
         let root: Value = serde_json::from_slice(&bytes)
             .map_err(|_| ProviderError::new("api-json-syntax", "API 响应不是有效 JSON。"))?;
-        let usage = read_usage(&root, self.settings.protocol, payload.len(), bytes.len());
+        let usage = read_usage(&root, self.settings.protocol, payload_len, bytes.len());
+        if !usage.estimated {
+            let mut metrics = self
+                .metrics
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            metrics.usage_requests += 1;
+            metrics.input_tokens = metrics.input_tokens.saturating_add(usage.input_tokens);
+            metrics.output_tokens = metrics.output_tokens.saturating_add(usage.output_tokens);
+            if let Some(cached) = usage.cached_tokens {
+                metrics.cache_requests += 1;
+                metrics.cached_tokens = metrics.cached_tokens.saturating_add(cached);
+                metrics.cache_input_tokens = metrics
+                    .cache_input_tokens
+                    .saturating_add(usage.input_tokens);
+            }
+        }
         let request_id = root
             .get("id")
             .and_then(Value::as_str)
@@ -1612,6 +1705,15 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(provider.request_count(), 3);
+        let metrics = provider.request_metrics();
+        assert_eq!(
+            (
+                metrics.requests,
+                metrics.failed_requests,
+                metrics.usage_requests
+            ),
+            (3, 2, 0)
+        );
         let cancelled = CancellationToken::new();
         cancelled.cancel();
         assert!(
@@ -1622,6 +1724,81 @@ mod tests {
         );
         assert_eq!(provider.request_count(), 3);
         server.2.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn request_metrics_count_rejected_responses_once_and_keep_missing_usage_unknown() {
+        for protocol in [ApiProtocol::ChatCompletions, ApiProtocol::Responses] {
+            let usage = match protocol {
+                ApiProtocol::ChatCompletions => {
+                    json!({"prompt_tokens":100,"completion_tokens":20,"prompt_cache_hit_tokens":80})
+                }
+                ApiProtocol::Responses => {
+                    json!({"input_tokens":100,"output_tokens":20,"input_tokens_details":{"cached_tokens":80}})
+                }
+            };
+            let rejected = match protocol {
+                ApiProtocol::ChatCompletions => {
+                    json!({"choices":[{"finish_reason":"length","message":{"role":"assistant","content":"partial"}}],"usage":usage})
+                }
+                ApiProtocol::Responses => {
+                    json!({"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[],"usage":usage})
+                }
+            };
+            let valid = match protocol {
+                ApiProtocol::ChatCompletions => {
+                    json!({"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"complete"}}]})
+                }
+                ApiProtocol::Responses => {
+                    json!({"status":"completed","output":[{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"complete"}]}]})
+                }
+            };
+            let server = mock_agent(vec![rejected, valid]);
+            let provider = local_agent(server.0, protocol);
+            assert!(
+                provider
+                    .complete_agent(
+                        &agent_messages(),
+                        &agent_tools(),
+                        &[],
+                        128,
+                        &CancellationToken::new()
+                    )
+                    .await
+                    .is_err()
+            );
+            provider
+                .clone()
+                .complete_agent(
+                    &agent_messages(),
+                    &agent_tools(),
+                    &[],
+                    128,
+                    &CancellationToken::new(),
+                )
+                .await
+                .unwrap();
+            let metrics = provider.request_metrics();
+            assert_eq!(
+                (
+                    metrics.requests,
+                    metrics.failed_requests,
+                    metrics.usage_requests,
+                    metrics.cache_requests
+                ),
+                (2, 1, 1, 1)
+            );
+            assert_eq!(
+                (
+                    metrics.input_tokens,
+                    metrics.output_tokens,
+                    metrics.cached_tokens,
+                    metrics.cache_input_tokens
+                ),
+                (100, 20, 80, 100)
+            );
+            server.2.join().unwrap();
+        }
     }
 
     #[tokio::test]

@@ -14,6 +14,7 @@
 | 主题 | 文档 |
 | --- | --- |
 | 项目、校对、日志与导航 | [桌面交互](desktop.md) |
+| 版本与模型的 Token、耗时趋势 | [消耗指标](consumption-metrics.md) |
 | API、翻译链与失败重试 | [模型接口配置](model-providers.md) |
 | 保存位置、恢复与清理 | [数据目录与迁移](data-storage.md) |
 | 适配目标、费用与验证 | [识别与智能适配](adapters/automatic-adaptation.md) |

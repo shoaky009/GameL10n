@@ -5,7 +5,8 @@ import { Workbench } from "workbench.slint";
 import { Recognition, PatchPage, TaskFeedback } from "project.slint";
 import { EngineLibrary } from "catalog.slint";
 import { DialogLayer } from "dialogs.slint";
-export { App, ProjectRow, TextRow, NamedRow, EngineRow, TermRow, TokenDisplay, CleanupRow }
+import { ConsumptionMetrics } from "metrics.slint";
+export { App, ProjectRow, TextRow, NamedRow, EngineRow, TermRow, TokenDisplay, CleanupRow, MetricGroupRow, ConsumptionRow } from "state.slint";
 
 export component MainWindow inherits Window {
     title: "GameL10n"; preferred-width: 1420px; preferred-height: 900px; min-width: 1120px; min-height: 720px;
@@ -35,6 +36,7 @@ export component MainWindow inherits Window {
             Divider {}
             Button { text: "API 与任务默认值"; checked: App.page == 1; clicked => { App.action("navigate", "apis"); } }
             Button { text: "全局引擎库"; checked: App.page == 2; clicked => { App.action("navigate", "catalog"); } }
+            Button { text: "消耗指标"; checked: App.page == 5; clicked => { App.action("navigate", "metrics"); } }
             Button { text: "程序设置"; checked: App.page == 3; clicked => { App.action("navigate", "settings"); } }
             Button { text: "关于"; checked: App.page == 4; clicked => { App.action("navigate", "about"); } }
         }
@@ -58,6 +60,7 @@ export component MainWindow inherits Window {
             }
             if App.page == 1: GlobalApis {}
             if App.page == 2: EngineLibrary {}
+            if App.page == 5: ConsumptionMetrics {}
             if App.page == 3: VerticalLayout { spacing: 18px;
                 Heading { text: "程序设置"; font-size: 26px; }
                 Label { text: "数据保存位置"; font-weight: 600; }

@@ -9,6 +9,7 @@ pub mod engine_tasks;
 pub mod game_directory;
 mod legacy;
 pub mod logs;
+pub mod metrics;
 pub mod patching;
 mod project_views;
 pub mod projects;

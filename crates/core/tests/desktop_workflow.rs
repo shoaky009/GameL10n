@@ -227,6 +227,16 @@ async fn unmatched_recognition_uses_the_configured_api_and_resumes_its_session()
         let session: Value = read_json(&session_path).unwrap();
         assert_eq!(session["totalTurns"], turn);
         assert_eq!(session["usage"]["inputTokens"], turn * 100);
+        let history = app.consumption_history().await.unwrap();
+        assert_eq!(history.records.len(), turn as usize);
+        assert!(history.records.iter().all(|record| record.api.requests == 1
+            && record.api.input_tokens == 100
+            && record.api.output_tokens == 20));
+        assert_eq!(
+            history.records[0].mode,
+            if turn == 1 { "new" } else { "continued" }
+        );
+        assert_eq!(history.records[0].model.as_deref(), Some("fixture"));
     }
     let requests = server.join().unwrap();
     assert!(

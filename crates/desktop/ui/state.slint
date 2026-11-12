@@ -6,6 +6,8 @@ export struct EngineRow { id: string, name: string, detail: string, enabled: boo
 export struct TermRow { source: string, target: string }
 export struct TokenDisplay { text: string, exact: string }
 export struct CleanupRow { id: string, title: string, description: string, size: string, selected: bool }
+export struct MetricGroupRow { label: string, detail: string, value: string, fraction: float }
+export struct ConsumptionRow { identity: string, configuration: string, counters: string }
 
 export global Theme {
     out property <bool> dark: Palette.color-scheme == ColorScheme.dark;
@@ -22,6 +24,36 @@ export global Theme {
 }
 
 export global App {
+    in-out property <[MetricGroupRow]> metric-groups;
+    in-out property <[ConsumptionRow]> consumption-rows;
+    in-out property <[string]> metrics-versions;
+    in-out property <[string]> metrics-version-keys;
+    in-out property <[string]> metrics-models;
+    in-out property <[string]> metrics-projects;
+    in-out property <[string]> metrics-project-keys;
+    in-out property <int> metrics-version-index;
+    in-out property <int> metrics-model-index;
+    in-out property <int> metrics-project-index;
+    in-out property <int> metrics-task-index;
+    in-out property <int> metrics-mode-index;
+    in-out property <int> metrics-status-index;
+    in-out property <int> metrics-date-range;
+    in-out property <string> metrics-from;
+    in-out property <string> metrics-through;
+    in-out property <int> metrics-dimension;
+    in-out property <int> metrics-measure;
+    in-out property <int> metrics-aggregation;
+    in-out property <int> metrics-tab;
+    in-out property <int> metrics-offset;
+    in-out property <int> metrics-total;
+    in-out property <bool> metrics-loading;
+    in-out property <string> metrics-error;
+    in-out property <string> metrics-overview;
+    in-out property <string> metrics-tokens;
+    in-out property <string> metrics-timing;
+    in-out property <string> metrics-coverage;
+    in-out property <string> metrics-chart-title;
+    in-out property <string> metrics-empty;
     in-out property <[ProjectRow]> projects;
     in-out property <length> project-scroll-y;
     out property <length> project-row-height: 88px;

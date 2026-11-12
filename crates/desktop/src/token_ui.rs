@@ -1,6 +1,6 @@
 use crate::view::TokenDisplay;
 
-fn compact(value: u64) -> String {
+pub(crate) fn compact(value: u64) -> String {
     if value < 1_000 {
         return value.to_string();
     }

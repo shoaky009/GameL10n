@@ -339,6 +339,13 @@ impl Application {
                 },
             )
             .await?;
+        self.metrics_details(
+            id,
+            Some("recognize"),
+            continuing.then_some("continued"),
+            None,
+        )
+        .await;
         let result = async {
             if continuing {
                 let result = self.run_adaptation(
@@ -860,6 +867,18 @@ impl Application {
         // Validate configuration before creating an adaptation workspace or changing its state.
         let (provider, limits) = self.analysis_provider(id).await?;
         let objective = start.objective;
+        self.metrics_provider(id, &provider).await;
+        let task = match objective {
+            AdaptationObjective::Repair => Some("repair"),
+            AdaptationObjective::ExpandCoverage => Some("expand"),
+            AdaptationObjective::Develop => None,
+        };
+        let continuing = self
+            .project_directory(id)?
+            .join("adaptation/current/session.json")
+            .is_file();
+        self.metrics_details(id, task, continuing.then_some("continued"), None)
+            .await;
         let improve_existing = improving_existing(&project);
         let instruction =
             if objective == AdaptationObjective::Repair && instruction.trim().is_empty() {
@@ -982,6 +1001,21 @@ impl Application {
             self.engine_progress(id, "adapt", progress).await?;
         }
         let mut result = result?;
+        let status = match result.status {
+            gamel10n_engines::AdaptationStatus::Activated
+            | gamel10n_engines::AdaptationStatus::Reused => "completed",
+            gamel10n_engines::AdaptationStatus::Failed
+            | gamel10n_engines::AdaptationStatus::Unavailable => "failed",
+            gamel10n_engines::AdaptationStatus::Unsupported => "unsupported",
+            _ => "paused",
+        };
+        self.metrics_details(
+            id,
+            None,
+            (result.status == gamel10n_engines::AdaptationStatus::Reused).then_some("reused"),
+            Some(status),
+        )
+        .await;
         write_json(
             &self.project_directory(id)?.join("adaptation-result.json"),
             &result,
@@ -1045,6 +1079,7 @@ impl Application {
         operation: &str,
         progress: EngineProgress,
     ) -> Result<(), CoreError> {
+        self.checkpoint_metrics(id).await;
         if progress.status_only {
             self.update_task_progress(id, operation, &progress.message)
                 .await;
@@ -1082,6 +1117,7 @@ impl Application {
         let cancellation = self
             .begin(id, "review", "正在总结可供同类引擎复用的经验。")
             .await?;
+        self.metrics_provider(id, &provider).await;
         let result=async {
             let (tx,mut rx)=tokio::sync::mpsc::unbounded_channel::<EngineProgress>();let report=move|p|{let _=tx.send(p);};let service=self.engine_service();let directory=self.project_directory(id)?;let knowledge=self.data_directory().join("extensions/engine-knowledge");
             let api = self.task_api_summary(id).await?;
@@ -1089,6 +1125,7 @@ impl Application {
             let future=service.review(&directory,&knowledge,&provider,&limits,&cancellation,Some(&report));tokio::pin!(future);
             let result=loop {tokio::select! {result=&mut future=>break result?,Some(progress)=rx.recv()=>{self.engine_progress(id,"review",progress).await?;}}};
             while let Ok(progress)=rx.try_recv(){self.engine_progress(id,"review",progress).await?;}
+            if result.reused { self.metrics_details(id, None, Some("reused"), None).await; }
             write_json(&directory.join("engine-review-result.json"),&result)?;
             if let Some(entry) = &result.entry_id { EngineCatalog::open(self.data_directory())?.register_knowledge(entry)?; }
             Ok::<_,CoreError>(result)

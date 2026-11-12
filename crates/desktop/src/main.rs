@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod catalog_ui;
 mod log_ui;
+mod metrics_ui;
 mod project_ui;
 mod recognition_ui;
 mod settings_ui;
@@ -128,6 +129,7 @@ impl Context {
         input.view_revision = if navigation
             || matches!(action, "editor-step" | "review-next")
             || action == "texts" && input.argument != "refresh"
+            || action == "metrics" && input.argument != "auto"
         {
             self.generation.fetch_add(1, Ordering::SeqCst) + 1
         } else {
@@ -190,6 +192,7 @@ impl Context {
 
 #[derive(Clone, Default)]
 pub struct UiInput {
+    pub metrics: metrics_ui::MetricsInput,
     pub view_revision: u64,
     pub editor_revision: u64,
     pub visible_text_ids: Vec<String>,
@@ -261,6 +264,7 @@ impl UiInput {
     fn capture(ui: &MainWindow, argument: String) -> Self {
         let a = ui.global::<App>();
         Self {
+            metrics: metrics_ui::MetricsInput::capture(&a),
             view_revision: 0,
             editor_revision: 0,
             visible_text_ids: Vec::new(),
@@ -391,9 +395,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let ui = MainWindow::new()?;
     window_redraw::install(ui.window());
     ui.global::<App>()
-        .set_software_version(env!("CARGO_PKG_VERSION").into());
+        .set_software_version(gamel10n_core::metrics::SOFTWARE_VERSION.into());
     ui.global::<App>()
-        .set_build_git_hash(env!("GAMEL10N_BUILD_GIT_HASH").into());
+        .set_build_git_hash(gamel10n_core::metrics::BUILD_GIT_HASH.into());
     ui.global::<App>()
         .on_format_token_budget(|input| token_ui::budget(&input));
     ui.global::<App>()
@@ -608,7 +612,8 @@ async fn dispatch(ctx: &Context, action: &str, input: &UiInput) -> Result<(), Co
         ctx.update(|ui| ui.global::<App>().set_modal("".into()));
         return Box::pin(dispatch(ctx, action, &next)).await;
     }
-    if settings_ui::handle(ctx, action, input).await?
+    if metrics_ui::handle(ctx, action, input).await?
+        || settings_ui::handle(ctx, action, input).await?
         || catalog_ui::handle(ctx, action, input).await?
         || workbench_ui::handle(ctx, action, input).await?
         || project_ui::handle(ctx, action, input).await?

@@ -187,6 +187,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                 "apis" => 1,
                 "catalog" => 2,
                 "about" => 4,
+                "metrics" => 5,
                 _ => 3,
             };
             ctx.update(move |ui| {
@@ -197,6 +198,9 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                 a.set_editor_dirty(false);
                 if page == 2 {
                     a.invoke_action("catalog".into(), "0".into());
+                }
+                if page == 5 {
+                    a.invoke_action("metrics".into(), "refresh".into());
                 }
             });
             if matches!(page, 1 | 3) {

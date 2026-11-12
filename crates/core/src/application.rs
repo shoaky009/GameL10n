@@ -187,6 +187,7 @@ pub struct Application {
     pub(crate) project_lifecycle: Arc<Mutex<()>>,
     project_access: Arc<Mutex<HashMap<String, Weak<Mutex<()>>>>>,
     pub(crate) log_gate: Arc<Mutex<()>>,
+    pub(crate) metrics: Arc<Mutex<crate::metrics::MetricsState>>,
     pub(crate) session_keys: Arc<Mutex<HashMap<String, String>>>,
     pub(crate) tools: ToolPaths,
     pub(crate) workbenches: Arc<Mutex<HashMap<String, Arc<Mutex<crate::workbench::Workbench>>>>>,
@@ -207,6 +208,7 @@ impl Application {
             project_lifecycle: Arc::new(Mutex::new(())),
             project_access: Arc::new(Mutex::new(HashMap::new())),
             log_gate: Arc::new(Mutex::new(())),
+            metrics: Arc::new(Mutex::new(crate::metrics::MetricsState::default())),
             session_keys: Arc::new(Mutex::new(HashMap::new())),
             tools: tools.clone(),
             workbenches: Arc::new(Mutex::new(HashMap::new())),
@@ -741,6 +743,7 @@ impl Application {
                 order,
             },
         );
+        self.start_metrics(id, operation).await;
         let _ = self.events.send(AppEvent::TaskChanged(state));
         drop(_lifecycle);
         self.log_task_message(id, message).await;
@@ -811,6 +814,7 @@ impl Application {
             Ok(summary) => (summary, None),
             Err(error) => (task_summary(&state), Some(error)),
         };
+        self.finish_metrics(id, state.succeeded).await;
         let path = self.store.directory(id)?.join("rust-task.json");
         let saved = StoredTaskState {
             state: state.clone(),
@@ -900,7 +904,7 @@ impl Application {
         }
     }
 
-    fn report_task_warning(&self, id: &str, message: &str) {
+    pub(crate) fn report_task_warning(&self, id: &str, message: &str) {
         let _ = self.events.send(AppEvent::Log {
             project_id: id.into(),
             line: message.into(),
