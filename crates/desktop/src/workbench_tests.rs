@@ -193,6 +193,23 @@ fn project_actions_keep_settings_selection_and_saved_edits_in_sync_across_tabs()
     let _runtime_guard = runtime.enter();
     slint::spawn_local(async move {
         let app = ui.global::<App>();
+        let pending = crate::PendingGameAddition::start(&ui).unwrap();
+        assert!(app.get_adding_game());
+        for _ in 0..8 {
+            app.invoke_action("browse".into(), "".into());
+        }
+        assert_eq!(ctx.active_actions.load(Ordering::Acquire), 0);
+        drop(pending);
+        wait_for_actions(&ui, &ctx, "game addition released").await;
+        assert!(!app.get_adding_game());
+        let pending = crate::PendingGameAddition::start(&ui).unwrap();
+        let cancelled = async move {
+            let _pending = pending;
+            std::future::pending::<()>().await;
+        };
+        drop(cancelled);
+        wait_for_actions(&ui, &ctx, "game addition cancelled before execution").await;
+        assert!(!app.get_adding_game());
         invoke_action(&ui, &ctx, "texts", "0").await;
         assert_eq!(app.get_text_total(), 221);
         assert_eq!(app.get_texts().row_count(), 100);

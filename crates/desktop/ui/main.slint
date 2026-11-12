@@ -15,7 +15,7 @@ export component MainWindow inherits Window {
     HorizontalLayout { padding: 20px; spacing: 20px;
         VerticalLayout { width: 240px; spacing: 12px;
             Heading { text: "游戏项目"; font-size: 22px; }
-            Button { text: "添加游戏"; enabled: App.ready; clicked => { App.action("browse", ""); } }
+            Button { text: "添加游戏"; enabled: App.ready && !App.adding-game; clicked => { App.action("browse", ""); } }
             HorizontalLayout { Button { text: "多选"; checkable: true; checked <=> App.multi-projects; } Button { text: "移除"; enabled: App.project-id != "" || App.selected-projects > 0; clicked => { App.action("remove-dialog", ""); } } }
             LineEdit { text <=> App.project-query; placeholder-text: "搜索名称或路径"; edited => { App.action("projects", ""); } }
             ListView { vertical-stretch: 1; content-y <=> App.project-scroll-y;

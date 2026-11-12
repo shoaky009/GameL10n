@@ -531,11 +531,20 @@ fn install_actions(ui: &MainWindow, context: &Context) {
         if workbench_ui::selection_action(&action) && ui.global::<App>().get_selection_busy() {
             return;
         }
+        let pending_addition = if action == "browse" {
+            let Some(pending) = PendingGameAddition::start(&ui) else {
+                return;
+            };
+            Some(pending)
+        } else {
+            None
+        };
         ctx.prepare_action(&ui, &action, &mut input);
         let ctx = ctx.clone();
         ctx.active_actions.fetch_add(1, Ordering::AcqRel);
         ctx.runtime.clone().spawn(async move {
             let _pending = PendingAction(ctx.active_actions.clone());
+            let _addition = pending_addition;
             if let Err(error) = dispatch(&ctx, &action, &input).await {
                 let app = ctx.app().await;
                 let message = error.to_string();
@@ -574,6 +583,27 @@ fn install_actions(ui: &MainWindow, context: &Context) {
             }
         });
     });
+}
+
+struct PendingGameAddition(slint::Weak<MainWindow>);
+
+impl PendingGameAddition {
+    fn start(ui: &MainWindow) -> Option<Self> {
+        let app = ui.global::<App>();
+        if app.get_adding_game() {
+            return None;
+        }
+        app.set_adding_game(true);
+        Some(Self(ui.as_weak()))
+    }
+}
+
+impl Drop for PendingGameAddition {
+    fn drop(&mut self) {
+        let _ = self.0.upgrade_in_event_loop(|ui| {
+            ui.global::<App>().set_adding_game(false);
+        });
+    }
 }
 
 struct PendingAction(Arc<AtomicUsize>);
