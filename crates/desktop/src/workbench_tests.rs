@@ -500,6 +500,28 @@ fn project_actions_keep_settings_selection_and_saved_edits_in_sync_across_tabs()
         assert_eq!(app.get_consumption_rows().row_count(), 2);
         assert!(app.get_consumption_rows().row_data(0).unwrap().configuration.contains("build-"));
 
+        let pending = crate::settings_ui::PendingApiTest::start(&ctx, &ui).unwrap();
+        assert!(app.get_api_testing());
+        for _ in 0..8 { app.invoke_action("api-test".into(),"analysis".into()); }
+        assert_eq!(ctx.active_actions.load(Ordering::Acquire),0);
+        crate::settings_ui::cancel_api_test(&ctx);
+        assert!(ctx.session.lock().unwrap().api_test.as_ref().unwrap().is_cancelled());
+        drop(pending);
+        wait_for_actions(&ui,&ctx,"API test released").await;
+        assert!(!app.get_api_testing());
+        let settings_before = host.settings().await.unwrap().api_configuration.profiles.len();
+        invoke_action(&ui,&ctx,"navigate","apis").await;
+        invoke_action(&ui,&ctx,"api-add","").await;
+        app.set_api_name("Unsaved fixture".into());
+        app.set_api_endpoint("invalid endpoint".into());
+        app.set_api_model("fixture".into());
+        invoke_action(&ui,&ctx,"api-test","translation").await;
+        assert_eq!(app.get_modal(),"api");
+        assert!(app.get_api_test_failed());
+        assert!(app.get_api_test_result().contains("API 地址"));
+        assert!(!app.get_api_testing());
+        assert_eq!(host.settings().await.unwrap().api_configuration.profiles.len(),settings_before);
+
         slint::quit_event_loop().unwrap();
     })
     .unwrap();

@@ -6,10 +6,94 @@ use gamel10n_core::{
     CoreError,
     settings::{ApiProfile, GlobalSettings},
 };
+use gamel10n_translation::provider::ConnectionTestKind;
 use serde_json::{Value, json};
 use slint::{ComponentHandle, ModelRc, VecModel};
 
+pub struct PendingApiTest(Context);
+
+impl PendingApiTest {
+    pub fn start(ctx: &Context, ui: &crate::view::MainWindow) -> Option<Self> {
+        let mut session = ctx
+            .session
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if session.api_test.is_some() {
+            return None;
+        }
+        session.api_test = Some(gamel10n_core::CancellationToken::new());
+        let app = ui.global::<App>();
+        app.set_api_testing(true);
+        app.set_api_test_result("".into());
+        app.set_api_test_failed(false);
+        Some(Self(ctx.clone()))
+    }
+}
+
+impl Drop for PendingApiTest {
+    fn drop(&mut self) {
+        let session = self.0.session.clone();
+        let _ = self.0.window.upgrade_in_event_loop(move |ui| {
+            session
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .api_test = None;
+            ui.global::<App>().set_api_testing(false);
+        });
+    }
+}
+
+pub fn cancel_api_test(ctx: &Context) {
+    if let Some(token) = ctx
+        .session
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .api_test
+        .as_ref()
+    {
+        token.cancel();
+    }
+}
+
 const REASONING_PRESETS: [&str; 6] = ["", "low", "medium", "high", "xhigh", "max"];
+
+fn update_api_profile(profile: &mut ApiProfile, input: &UiInput) {
+    profile.id = input.api_id.clone();
+    profile.name = input.api_name.trim().into();
+    profile.endpoint = input.api_endpoint.trim().trim_end_matches('/').into();
+    profile.model = input.api_model.trim().into();
+    profile.protocol = if input.api_protocol == 1 {
+        "Responses"
+    } else {
+        "ChatCompletions"
+    }
+    .into();
+    profile.translation_format = if input.api_format == 1 {
+        "PlainText"
+    } else {
+        "JsonBatch"
+    }
+    .into();
+    let effort = REASONING_PRESETS
+        .get(input.api_reasoning.max(0) as usize)
+        .copied()
+        .unwrap_or(&input.api_reasoning_custom)
+        .trim();
+    profile.analysis_reasoning_effort = (!effort.is_empty()).then(|| effort.to_owned());
+}
+
+fn draft_matches(ui: &crate::view::MainWindow, input: &UiInput) -> bool {
+    let app = ui.global::<App>();
+    app.get_api_id().as_str() == input.api_id
+        && app.get_api_name().as_str() == input.api_name
+        && app.get_api_endpoint().as_str() == input.api_endpoint
+        && app.get_api_model().as_str() == input.api_model
+        && app.get_api_key().as_str() == input.api_key
+        && app.get_api_protocol() == input.api_protocol
+        && app.get_api_format() == input.api_format
+        && app.get_api_reasoning() == input.api_reasoning
+        && app.get_api_reasoning_custom().as_str() == input.api_reasoning_custom
+}
 
 pub async fn refresh(ctx: &Context, project_id: Option<&str>) -> Result<(), CoreError> {
     let host = ctx.app().await;
@@ -212,10 +296,97 @@ fn chain_rows(settings: &GlobalSettings, ids: &[String]) -> Vec<NamedRow> {
 
 pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool, CoreError> {
     match action {
+        "api-test-cancel" => cancel_api_test(ctx),
+        "api-test" => {
+            let host = ctx.app().await;
+            let kind = match input.argument.as_str() {
+                "translation" => ConnectionTestKind::Translation,
+                "analysis" => ConnectionTestKind::Analysis,
+                _ => return Err(CoreError::InvalidData("未知的接口测试类型。".into())),
+            };
+            let (profile, key) = if input.api_test_draft {
+                let mut profile = ApiProfile::default();
+                update_api_profile(&mut profile, input);
+                (profile, Some(input.api_key.trim().to_owned()))
+            } else {
+                let profile = host
+                    .settings()
+                    .await?
+                    .api_configuration
+                    .profiles
+                    .into_iter()
+                    .find(|profile| profile.id == input.api_id)
+                    .ok_or_else(|| CoreError::InvalidData("请先选择模型配置。".into()))?;
+                (profile, None)
+            };
+            let cancellation = ctx
+                .session
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .api_test
+                .clone()
+                .unwrap_or_default();
+            let result = host
+                .test_api_connection(&profile, key, kind, &cancellation)
+                .await;
+            let label = format!(
+                "{} / {} · {}",
+                if profile.name.is_empty() {
+                    "未命名配置"
+                } else {
+                    &profile.name
+                },
+                profile.model,
+                if kind == ConnectionTestKind::Analysis {
+                    "分析测试"
+                } else {
+                    "翻译测试"
+                }
+            );
+            let (failed, message) = match result {
+                Ok(report) => {
+                    let usage = if report.usage.requests == 0 {
+                        "未发起请求".into()
+                    } else if report.usage.usage_requests == 0 {
+                        format!("{} 次请求 · Token 未返回", report.usage.requests)
+                    } else {
+                        format!(
+                            "{} 次请求 · 输入 {} / 输出 {} Token",
+                            report.usage.requests,
+                            report.usage.input_tokens,
+                            report.usage.output_tokens
+                        )
+                    };
+                    (
+                        !report.passed,
+                        format!(
+                            "{label}\n{}\n{:.1} 秒 · {usage}",
+                            report.message,
+                            report.elapsed_ms as f64 / 1000.0
+                        ),
+                    )
+                }
+                Err(error) => (true, format!("{label}\n{error}")),
+            };
+            let input = input.clone();
+            ctx.update(move |ui| {
+                let app = ui.global::<App>();
+                if input.api_test_draft {
+                    if app.get_modal() != "api" || !draft_matches(&ui, &input) {
+                        return;
+                    }
+                } else if app.get_page() != 1 || app.get_api_id().as_str() != input.api_id {
+                    return;
+                }
+                app.set_api_test_failed(failed);
+                app.set_api_test_result(message.into());
+            });
+        }
         "api-add" => {
             ctx.update(|ui| {
                 let a = ui.global::<App>();
                 a.set_api_id("".into());
+                a.set_api_test_result("".into());
                 a.set_api_name("".into());
                 a.set_api_endpoint("".into());
                 a.set_api_model("".into());
@@ -241,6 +412,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
             ctx.update(move |ui| {
                 let a = ui.global::<App>();
                 a.set_api_id(p.id.into());
+                a.set_api_test_result("".into());
                 a.set_api_name(p.name.into());
                 a.set_api_endpoint(p.endpoint.into());
                 a.set_api_model(p.model.into());
@@ -277,28 +449,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                 .into_iter()
                 .find(|p| p.id == input.api_id);
             let mut p = old.unwrap_or_else(ApiProfile::default);
-            p.id = input.api_id.clone();
-            p.name = input.api_name.trim().into();
-            p.endpoint = input.api_endpoint.trim().trim_end_matches('/').into();
-            p.model = input.api_model.trim().into();
-            p.protocol = if input.api_protocol == 1 {
-                "Responses"
-            } else {
-                "ChatCompletions"
-            }
-            .into();
-            p.translation_format = if input.api_format == 1 {
-                "PlainText"
-            } else {
-                "JsonBatch"
-            }
-            .into();
-            let effort = REASONING_PRESETS
-                .get(input.api_reasoning.max(0) as usize)
-                .copied()
-                .unwrap_or(&input.api_reasoning_custom)
-                .trim();
-            p.analysis_reasoning_effort = (!effort.is_empty()).then(|| effort.to_owned());
+            update_api_profile(&mut p, input);
             if let Err(error) = host
                 .save_api_profile(p, Some(input.api_key.trim().into()), input.api_remember_key)
                 .await
@@ -308,17 +459,23 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
             }
             ctx.update(|ui| {
                 ui.global::<App>().set_api_key("".into());
+                ui.global::<App>().set_api_test_result("".into());
             });
             refresh(ctx, None).await?;
         }
         "api-delete-dialog" => show_dialog(
             ctx,
             "api-delete",
-            "删除 API 配置",
+            "删除模型配置",
             "项目中对此配置的独立引用会显示为不可用，可重新选择其他 API。".into(),
         ),
         "api-delete" => {
             ctx.app().await.delete_api_profile(&input.api_id).await?;
+            ctx.update(|ui| {
+                let app = ui.global::<App>();
+                app.set_api_id("".into());
+                app.set_api_test_result("".into());
+            });
             refresh(ctx, None).await?;
         }
         "analysis-api"

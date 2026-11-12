@@ -1,5 +1,26 @@
-import { Button, LineEdit, TextEdit, ComboBox, SpinBox, ScrollView, ListView } from "std-widgets.slint";
-import { App, Theme, Label, Caption, TokenCaption, Heading, Divider } from "state.slint";
+import { Button, LineEdit, TextEdit, ComboBox, SpinBox, ScrollView, ListView, ProgressIndicator } from "std-widgets.slint";
+import { App, Theme, Label, Caption, TokenCaption, Heading, Divider, ReportText } from "state.slint";
+
+export component ApiTestControls inherits VerticalLayout {
+    spacing: 8px;
+    private property <bool> available: !App.api-testing && (App.modal == "api" ? App.api-endpoint != "" && App.api-model != "" : App.api-id != "");
+    HorizontalLayout { spacing: 8px;
+        Button { text: "测试翻译"; enabled: root.available; clicked => { App.action("api-test", "translation"); } }
+        Button { text: "测试分析"; enabled: root.available; clicked => { App.action("api-test", "analysis"); } }
+        if App.api-testing: Button { text: "取消测试"; clicked => { App.action("api-test-cancel", ""); } }
+        Rectangle { horizontal-stretch: 1; }
+    }
+    if App.api-testing: VerticalLayout { spacing: 5px;
+        Caption { text: "正在测试，最多等待 45 秒…"; }
+        ProgressIndicator { indeterminate: true; height: 3px; }
+    }
+    if App.api-test-result != "": ScrollView {
+        height: min(100px, test-result.preferred-height); horizontal-scrollbar-policy: always-off;
+        content-width: self.visible-width; content-height: max(self.visible-height, test-result.height);
+        test-result := ReportText { width: parent.visible-width - 12px; text: App.api-test-result; color: App.api-test-failed ? Theme.error : Theme.ink; }
+    }
+    Caption { text: "测试发送一条简短请求，按接口规则计费；分析测试检查工具调用。"; }
+}
 
 component ApiSelection inherits VerticalLayout {
     spacing: 10px;
@@ -40,7 +61,7 @@ component ApiSelection inherits VerticalLayout {
 
 export component ProjectSettings inherits ScrollView {
     VerticalLayout { padding: 16px; spacing: 16px;
-        HorizontalLayout { Button { text: "管理全局 API 与任务默认值"; clicked => { App.action("navigate", "apis"); } } Rectangle { horizontal-stretch: 1; } }
+        HorizontalLayout { Button { text: "管理模型配置"; clicked => { App.action("navigate", "apis"); } } Rectangle { horizontal-stretch: 1; } }
         Caption { text: "未单独配置的项自动使用全局设置，修改后仅对当前项目生效。"; }
         ApiSelection {}
         Divider {} Heading { text: "翻译语言与术语"; }
@@ -62,16 +83,17 @@ export component ProjectSettings inherits ScrollView {
 }
 
 export component GlobalApis inherits VerticalLayout {
-    spacing: 16px; Heading { text: "API 与任务默认值"; font-size: 26px; }
+    spacing: 16px; Heading { text: "模型配置"; font-size: 26px; }
     ScrollView { VerticalLayout { spacing: 16px;
-        HorizontalLayout { Button { text: "新增 API 配置"; primary: true; clicked => { App.action("api-add", ""); } } Button { text: "编辑所选配置"; enabled: App.api-id != ""; clicked => { App.action("api-edit", App.api-id); } } Button { text: "删除所选配置"; enabled: App.api-id != ""; clicked => { App.action("api-delete-dialog", App.api-id); } } Rectangle { horizontal-stretch: 1; } }
+        HorizontalLayout { Button { text: "新增配置"; primary: true; enabled: !App.api-testing; clicked => { App.action("api-add", ""); } } Button { text: "编辑所选配置"; enabled: App.api-id != "" && !App.api-testing; clicked => { App.action("api-edit", App.api-id); } } Button { text: "删除所选配置"; enabled: App.api-id != "" && !App.api-testing; clicked => { App.action("api-delete-dialog", App.api-id); } } Rectangle { horizontal-stretch: 1; } }
         ListView { height: min(210px, max(50px, App.apis.length * 65px));
             for api in App.apis: Rectangle { height: 65px; background: App.api-id == api.id ? Theme.tint : Theme.surface;
                 VerticalLayout { padding: 10px; Label { text: api.name; font-weight: 600; } Caption { text: api.detail; } }
-                TouchArea { clicked => { App.api-id = api.id; } }
+                TouchArea { enabled: !App.api-testing; clicked => { App.api-id = api.id; App.api-test-result = ""; } }
             }
         }
-        if App.apis.length == 0: Caption { text: "还没有 API 配置。第一份配置同时用作分析和翻译的全局默认。"; }
+        if App.apis.length == 0: Caption { text: "尚未添加模型配置。第一份配置同时用作分析和翻译的全局默认。"; }
+        ApiTestControls {}
         ApiSelection {}
         HorizontalLayout { Button { text: "保存默认预算与轮数"; primary: true; clicked => { App.action("save-defaults", ""); } } Rectangle { horizontal-stretch: 1; } }
         Caption { text: "项目未单独配置的项自动使用这里的全局设置。修改后用于后续任务，无需重启。"; }

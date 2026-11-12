@@ -35,7 +35,7 @@ export component MainWindow inherits Window {
                 }
             }
             Divider {}
-            Button { text: "API 与任务默认值"; checked: App.page == 1; clicked => { App.action("navigate", "apis"); } }
+            Button { text: "模型配置"; checked: App.page == 1; clicked => { App.action("navigate", "apis"); } }
             Button { text: "全局引擎库"; checked: App.page == 2; clicked => { App.action("navigate", "catalog"); } }
             Button { text: "消耗指标"; checked: App.page == 5; clicked => { App.action("navigate", "metrics"); } }
             Button { text: "程序设置"; checked: App.page == 3; clicked => { App.action("navigate", "settings"); } }

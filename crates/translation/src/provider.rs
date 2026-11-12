@@ -28,6 +28,12 @@ pub enum TranslationFormat {
     JsonBatch,
     PlainText,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConnectionTestKind {
+    Translation,
+    Analysis,
+}
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderSettings {
@@ -379,6 +385,7 @@ impl OpenAiProvider {
             known.as_ref(),
             maximum_output_tokens,
             cancellation,
+            true,
         )
         .await
     }
@@ -406,6 +413,7 @@ impl OpenAiProvider {
             Some(&known),
             maximum_output_tokens,
             cancellation,
+            true,
         )
         .await
     }
@@ -417,6 +425,7 @@ impl OpenAiProvider {
         known_tool_names: Option<&HashSet<String>>,
         maximum_output_tokens: u32,
         cancellation: &CancellationToken,
+        retry_throttled: bool,
     ) -> Result<Completion, ProviderError> {
         let waiting = std::time::Instant::now();
         let permit = tokio::select! {
@@ -442,6 +451,7 @@ impl OpenAiProvider {
                 .await;
             if let Err(error) = &result
                 && tools.is_some()
+                && retry_throttled
                 && error.status_code == Some(429)
                 && retries < 2
             {
@@ -703,6 +713,18 @@ impl OpenAiProvider {
         feedback: &BTreeMap<String, Vec<String>>,
         cancellation: &CancellationToken,
     ) -> Result<TranslationResponse, ProviderError> {
+        self.translate_with_limit(units, policy, feedback, cancellation, 4096)
+            .await
+    }
+
+    async fn translate_with_limit(
+        &self,
+        units: &[TranslationUnit],
+        policy: &TranslationPolicy,
+        feedback: &BTreeMap<String, Vec<String>>,
+        cancellation: &CancellationToken,
+        maximum_output_tokens: u32,
+    ) -> Result<TranslationResponse, ProviderError> {
         if units.is_empty() || units.len() > self.maximum_batch_size() {
             return Err(ProviderError::new("configuration", "翻译批次大小无效。"));
         }
@@ -746,7 +768,7 @@ impl OpenAiProvider {
                     json!({"role":"user","content":data}),
                 ],
                 None,
-                4096,
+                maximum_output_tokens,
                 cancellation,
             )
             .await?;
@@ -800,6 +822,56 @@ impl OpenAiProvider {
             usage: completion.usage,
             provider_request_id: completion.request_id,
         })
+    }
+
+    /// Sends one fixed test request without game content, tools execution or retries.
+    pub async fn test_connection(
+        &self,
+        kind: ConnectionTestKind,
+        cancellation: &CancellationToken,
+    ) -> Result<(), ProviderError> {
+        if kind == ConnectionTestKind::Translation {
+            let unit = TranslationUnit {
+                id: "connection-test".into(),
+                resource_path: "connection-test".into(),
+                locator: "0".into(),
+                source_text: "Hello.".into(),
+                context: String::new(),
+                speaker: None,
+                kind: "dialogue".into(),
+                protected_tokens: None,
+            };
+            self.translate_with_limit(
+                &[unit],
+                &TranslationPolicy::default(),
+                &BTreeMap::new(),
+                cancellation,
+                512,
+            )
+            .await?;
+            return Ok(());
+        }
+        let tools = [json!({"type":"function","function":{
+            "name":"connection_check", "description":"Checks the model connection without executing actions.",
+            "parameters":{"type":"object","properties":{"value":{"type":"string","enum":["ok"]}},"required":["value"],"additionalProperties":false}
+        }})];
+        let known = agent_tool_names(&tools, &[])?;
+        let completion = self.complete_with_known_tools(
+            &[json!({"role":"user","content":"Call connection_check exactly once with value set to ok. Do not answer with text."})],
+            Some(&tools), Some(&known), 1024, cancellation, false,
+        ).await?;
+        if completion.tool_calls.len() != 1
+            || completion.tool_calls[0].name != "connection_check"
+            || serde_json::from_str::<Value>(&completion.tool_calls[0].arguments).ok()
+                != Some(json!({"value":"ok"}))
+        {
+            return Err(ProviderError::new(
+                "connection-tool-call",
+                "接口已响应，但未返回预期的工具调用。请检查模型和协议的工具调用支持。",
+            )
+            .with_usage(&completion.usage));
+        }
+        Ok(())
     }
 }
 
@@ -1641,6 +1713,168 @@ mod tests {
             }
         });
         (format!("http://{address}/v1"), receiver, handle)
+    }
+
+    #[tokio::test]
+    async fn connection_tests_use_the_configured_protocol_and_translation_format_once() {
+        for protocol in [ApiProtocol::ChatCompletions, ApiProtocol::Responses] {
+            for format in [TranslationFormat::JsonBatch, TranslationFormat::PlainText] {
+                let text = if format == TranslationFormat::PlainText {
+                    "你好。"
+                } else {
+                    r#"{"0":"你好。"}"#
+                };
+                let response = match protocol {
+                    ApiProtocol::ChatCompletions => {
+                        json!({"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":text}}],"usage":{"prompt_tokens":12,"completion_tokens":4}})
+                    }
+                    ApiProtocol::Responses => {
+                        json!({"status":"completed","output":[{"type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":text}]}],"usage":{"input_tokens":12,"output_tokens":4}})
+                    }
+                };
+                let (endpoint, requests, server) = mock_agent(vec![response]);
+                let provider = OpenAiProvider::new(ProviderSettings {
+                    endpoint,
+                    api_key: String::new(),
+                    model: "test-model".into(),
+                    protocol,
+                    translation_format: format,
+                    analysis_reasoning_effort: Some("max".into()),
+                })
+                .unwrap();
+                provider
+                    .test_connection(ConnectionTestKind::Translation, &CancellationToken::new())
+                    .await
+                    .unwrap();
+                let request = requests.recv().unwrap();
+                server.join().unwrap();
+                assert!(request.get("tools").is_none());
+                assert!(
+                    request.get("reasoning").is_none() && request.get("reasoning_effort").is_none()
+                );
+                let limit = if protocol == ApiProtocol::Responses {
+                    "max_output_tokens"
+                } else if format == TranslationFormat::PlainText {
+                    "max_tokens"
+                } else {
+                    "max_completion_tokens"
+                };
+                assert_eq!(request[limit], 512);
+                assert_eq!(provider.request_metrics().requests, 1);
+                assert_eq!(
+                    (
+                        provider.request_metrics().input_tokens,
+                        provider.request_metrics().output_tokens
+                    ),
+                    (12, 4)
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn analysis_connection_tests_require_a_real_tool_call_for_both_protocols() {
+        for protocol in [ApiProtocol::ChatCompletions, ApiProtocol::Responses] {
+            let response = match protocol {
+                ApiProtocol::ChatCompletions => {
+                    json!({"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","tool_calls":[{"id":"test-call","type":"function","function":{"name":"connection_check","arguments":"{\"value\":\"ok\"}"}}]}}]})
+                }
+                ApiProtocol::Responses => {
+                    json!({"status":"completed","output":[{"type":"function_call","id":"output-call","call_id":"test-call","name":"connection_check","arguments":"{\"value\":\"ok\"}"}]})
+                }
+            };
+            let (endpoint, requests, server) = mock_agent(vec![response]);
+            let provider = local_agent(endpoint, protocol);
+            provider
+                .test_connection(ConnectionTestKind::Analysis, &CancellationToken::new())
+                .await
+                .unwrap();
+            let request = requests.recv().unwrap();
+            server.join().unwrap();
+            assert_eq!(request["tools"].as_array().unwrap().len(), 1);
+            assert_eq!(provider.request_metrics().requests, 1);
+            if protocol == ApiProtocol::Responses {
+                assert_eq!(request["reasoning"]["effort"], "high");
+            } else {
+                assert_eq!(request["reasoning_effort"], "high");
+            }
+
+            let (endpoint, _requests, server) = mock_agent(vec![match protocol {
+                ApiProtocol::ChatCompletions => {
+                    json!({"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}]})
+                }
+                ApiProtocol::Responses => {
+                    json!({"status":"completed","output":[{"type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]})
+                }
+            }]);
+            let error = local_agent(endpoint, protocol)
+                .test_connection(ConnectionTestKind::Analysis, &CancellationToken::new())
+                .await
+                .unwrap_err();
+            assert_eq!(error.diagnostic.code, "connection-tool-call");
+            server.join().unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn connection_test_cancellation_stops_an_in_flight_request() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let provider = local_agent(
+            format!("http://{}/v1", listener.local_addr().unwrap()),
+            ApiProtocol::ChatCompletions,
+        );
+        let cancellation = CancellationToken::new();
+        let stop = cancellation.clone();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut buffer = [0; 4096];
+            assert!(stream.read(&mut buffer).unwrap() > 0);
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 1000\r\n\r\n").unwrap();
+            stop.cancel();
+        });
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            provider.test_connection(ConnectionTestKind::Analysis, &cancellation),
+        )
+        .await
+        .unwrap();
+        server.join().unwrap();
+        assert!(result.unwrap_err().is_cancelled());
+        assert_eq!(provider.request_metrics().requests, 1);
+    }
+
+    #[tokio::test]
+    async fn connection_tests_do_not_retry_authentication_or_rate_limit_failures() {
+        for status in [401, 429] {
+            let (endpoint, requests, server) = mock_agent_status(vec![(
+                status,
+                json!({"error":{"message":"fixture failure"}}),
+            )]);
+            let provider = local_agent(endpoint, ApiProtocol::ChatCompletions);
+            let error = provider
+                .test_connection(ConnectionTestKind::Analysis, &CancellationToken::new())
+                .await
+                .unwrap_err();
+            server.join().unwrap();
+            assert_eq!(error.status_code, Some(status));
+            assert_eq!(requests.try_iter().count(), 1);
+            assert_eq!(provider.request_metrics().requests, 1);
+        }
+        let provider = local_agent("http://127.0.0.1:1/v1".into(), ApiProtocol::ChatCompletions);
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        assert!(
+            provider
+                .test_connection(ConnectionTestKind::Translation, &cancellation)
+                .await
+                .unwrap_err()
+                .is_cancelled()
+        );
+        assert_eq!(provider.request_metrics().requests, 0);
     }
 
     #[tokio::test]

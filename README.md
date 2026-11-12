@@ -20,7 +20,7 @@ GameL10n 是面向游戏文本汉化的 Windows 桌面工具，提供从资源�
 
 ## 快速开始
 
-1. 从 [GitHub Releases](https://github.com/shoaky009/GameL10n/releases) 下载并解压，运行 `GameL10n.exe`，在“API 与任务默认值”中配置模型服务。
+1. 从 [GitHub Releases](https://github.com/shoaky009/GameL10n/releases) 下载并解压，运行 `GameL10n.exe`，在“模型配置”中配置模型服务。
 2. 点击“添加游戏”选择安装目录，在“识别与适配”中提取文本。
 3. 在“翻译与校对”中选段试译或批量翻译，并编辑、校对译文。
 4. 生成补丁，在“补丁与验证”中安装并进入游戏确认效果。

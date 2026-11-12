@@ -2,9 +2,18 @@
 use crate::{AppEvent, Application, CoreError};
 use gamel10n_engines::{CancellationToken, ToolProcess};
 use gamel10n_translation::files::{hash_text, read_json, write_json};
+use gamel10n_translation::provider::{ConnectionTestKind, RequestMetrics};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, time::Duration};
+
+#[derive(Clone, Debug)]
+pub struct ApiConnectionTest {
+    pub passed: bool,
+    pub message: String,
+    pub elapsed_ms: u64,
+    pub usage: RequestMetrics,
+}
 
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -67,6 +76,82 @@ impl Default for GlobalSettings {
 }
 
 impl Application {
+    /// Tests an existing profile or unsaved draft without updating settings or projects.
+    pub async fn test_api_connection(
+        &self,
+        profile: &ApiProfile,
+        key: Option<String>,
+        kind: ConnectionTestKind,
+        cancellation: &crate::CancellationToken,
+    ) -> Result<ApiConnectionTest, CoreError> {
+        use gamel10n_translation::provider::{
+            ApiProtocol, OpenAiProvider, ProviderSettings, TranslationFormat,
+        };
+        let key = match key {
+            Some(key) => key,
+            None => self.decrypt_key(profile).await?,
+        };
+        let provider = OpenAiProvider::new(ProviderSettings {
+            endpoint: profile.endpoint.clone(),
+            api_key: key,
+            model: profile.model.clone(),
+            protocol: match profile.protocol.as_str() {
+                "ChatCompletions" => ApiProtocol::ChatCompletions,
+                "Responses" => ApiProtocol::Responses,
+                _ => return Err(CoreError::InvalidData("API 协议无效。".into())),
+            },
+            translation_format: if profile.translation_format == "PlainText" {
+                TranslationFormat::PlainText
+            } else {
+                TranslationFormat::JsonBatch
+            },
+            analysis_reasoning_effort: profile.analysis_reasoning_effort.clone(),
+        })
+        .map_err(|error| CoreError::InvalidData(error.to_string()))?;
+        let started = std::time::Instant::now();
+        let result = tokio::time::timeout(
+            Duration::from_secs(45),
+            provider.test_connection(kind, cancellation),
+        )
+        .await;
+        let (passed, message) = match result {
+            Ok(Ok(())) => (
+                true,
+                match kind {
+                    ConnectionTestKind::Translation => "翻译测试通过：响应格式正常。".into(),
+                    ConnectionTestKind::Analysis => "分析测试通过：工具调用返回正常。".into(),
+                },
+            ),
+            Ok(Err(error)) => (
+                false,
+                if matches!(
+                    error.diagnostic.code.as_str(),
+                    "connection-tool-call" | "configuration"
+                ) {
+                    error.to_string()
+                } else if error.diagnostic.code == "output-token-limit" {
+                    "响应达到测试长度上限，未能确认测试结果。".into()
+                } else {
+                    error.failure_summary()
+                },
+            ),
+            Err(_) => (
+                false,
+                if provider.request_metrics().requests == 0 {
+                    "等待执行超时（45 秒），可在其他模型任务结束后重试。".into()
+                } else {
+                    "接口响应超时（45 秒），请检查网络或模型响应速度。".into()
+                },
+            ),
+        };
+        Ok(ApiConnectionTest {
+            passed,
+            message,
+            elapsed_ms: started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+            usage: provider.request_metrics(),
+        })
+    }
+
     pub async fn remember_project(&self, id: &str) -> Result<(), CoreError> {
         if self.settings().await?.last_game_id.as_deref() == Some(id) {
             return Ok(());
@@ -435,6 +520,107 @@ fn validate_profiles(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn api_tests_keep_drafts_unsaved_and_use_saved_session_keys_without_changing_settings() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            for key in [None, Some("session-key-fixture")] {
+                let (mut connection, _) = listener.accept().unwrap();
+                connection
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut bytes = Vec::new();
+                let mut chunk = [0_u8; 4096];
+                loop {
+                    let count = connection.read(&mut chunk).unwrap();
+                    assert!(count > 0);
+                    bytes.extend_from_slice(&chunk[..count]);
+                    if let Some(split) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&bytes[..split]);
+                        let length = headers
+                            .lines()
+                            .find_map(|line| {
+                                line.to_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .map(|length| length.trim().parse::<usize>().unwrap())
+                            })
+                            .unwrap();
+                        if bytes.len() >= split + 4 + length {
+                            break;
+                        }
+                    }
+                }
+                let headers = String::from_utf8_lossy(&bytes).to_lowercase();
+                if let Some(key) = key {
+                    assert!(headers.contains(&format!("authorization: bearer {key}")));
+                } else {
+                    assert!(!headers.contains("authorization:"));
+                }
+                let body = json!({"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"{\"0\":\"你好。\"}"}}],"usage":{"prompt_tokens":16,"completion_tokens":5}}).to_string();
+                write!(connection,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
+            }
+        });
+        let root = tempfile::tempdir().unwrap();
+        let app = Application::open(root.path().join("data"), &crate::ToolPaths::new("missing"))
+            .await
+            .unwrap();
+        let profile = ApiProfile {
+            name: "Unsaved profile".into(),
+            model: "fixture".into(),
+            endpoint,
+            protocol: "ChatCompletions".into(),
+            ..Default::default()
+        };
+        let result = app
+            .test_api_connection(
+                &profile,
+                Some(String::new()),
+                ConnectionTestKind::Translation,
+                &crate::CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(result.passed);
+        assert_eq!(
+            (
+                result.usage.requests,
+                result.usage.input_tokens,
+                result.usage.output_tokens
+            ),
+            (1, 16, 5)
+        );
+        assert!(!app.data_directory().join("settings.json").exists());
+        assert!(app.list_projects("").await.is_empty());
+        assert!(app.consumption_history().await.unwrap().records.is_empty());
+        app.save_api_profile(profile, Some("session-key-fixture".into()), false)
+            .await
+            .unwrap();
+        let saved = app
+            .settings()
+            .await
+            .unwrap()
+            .api_configuration
+            .profiles
+            .remove(0);
+        let settings_path = app.data_directory().join("settings.json");
+        let settings_before = std::fs::read(&settings_path).unwrap();
+        let saved_result = app
+            .test_api_connection(
+                &saved,
+                None,
+                ConnectionTestKind::Translation,
+                &crate::CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        server.join().unwrap();
+        assert!(saved_result.passed);
+        assert_eq!(saved_result.usage.requests, 1);
+        assert_eq!(std::fs::read(&settings_path).unwrap(), settings_before);
+    }
 
     #[tokio::test]
     async fn queued_removal_only_excludes_the_target_project() {

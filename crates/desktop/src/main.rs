@@ -46,6 +46,7 @@ struct Arguments {
 
 #[derive(Default)]
 pub struct UiSession {
+    pub api_test: Option<gamel10n_core::CancellationToken>,
     pub engine_selection: BTreeSet<String>,
     pub engine_selection_anchor: Option<String>,
     pub engine_visible_ids: Vec<String>,
@@ -224,6 +225,7 @@ pub struct UiInput {
     pub page: i32,
     pub tab: i32,
     pub api_id: String,
+    pub api_test_draft: bool,
     pub api_name: String,
     pub api_endpoint: String,
     pub api_model: String,
@@ -324,6 +326,7 @@ impl UiInput {
             page: a.get_page(),
             tab: a.get_tab(),
             api_id: a.get_api_id().into(),
+            api_test_draft: a.get_modal() == "api",
             api_name: a.get_api_name().into(),
             api_endpoint: a.get_api_endpoint().into(),
             api_model: a.get_api_model().into(),
@@ -457,6 +460,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 return slint::CloseRequestResponse::HideWindow;
             };
             let mut input = UiInput::capture(&ui, String::new());
+            settings_ui::cancel_api_test(&ctx);
             ctx.prepare_action(&ui, "close", &mut input);
             ui.global::<App>().set_ready(false);
             ui.global::<App>()
@@ -543,12 +547,21 @@ fn install_actions(ui: &MainWindow, context: &Context) {
         } else {
             None
         };
+        let pending_api_test = if action == "api-test" {
+            let Some(pending) = settings_ui::PendingApiTest::start(&ctx, &ui) else {
+                return;
+            };
+            Some(pending)
+        } else {
+            None
+        };
         ctx.prepare_action(&ui, &action, &mut input);
         let ctx = ctx.clone();
         ctx.active_actions.fetch_add(1, Ordering::AcqRel);
         ctx.runtime.clone().spawn(async move {
             let _pending = PendingAction(ctx.active_actions.clone());
             let _addition = pending_addition;
+            let _api_test = pending_api_test;
             if let Err(error) = dispatch(&ctx, &action, &input).await {
                 let app = ctx.app().await;
                 let message = error.to_string();
@@ -618,6 +631,9 @@ impl Drop for PendingAction {
 }
 
 async fn dispatch(ctx: &Context, action: &str, input: &UiInput) -> Result<(), CoreError> {
+    if action == "switch-directory" {
+        settings_ui::cancel_api_test(ctx);
+    }
     if action == "confirm" {
         let mut next = input.clone();
         let action = match input.argument.as_str() {

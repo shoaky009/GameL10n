@@ -1,22 +1,26 @@
 import { Button, LineEdit, TextEdit, ComboBox, CheckBox, SpinBox, ScrollView, ProgressIndicator } from "std-widgets.slint";
 import { App, Theme, Label, Caption, TokenCaption, Heading, ReportText, Link } from "state.slint";
+import { ApiTestControls } from "settings.slint";
 export component DialogLayer inherits Rectangle {
     background: #00000066;
     TouchArea {}
     Rectangle { width: min(parent.width - 100px, 660px); height: min(parent.height - 80px, modal-content.preferred-height + 40px); x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; background: Theme.surface; border-radius: 8px;
         modal-content := VerticalLayout { padding: 20px; spacing: 12px;
-            if App.modal != "engine-review": Heading { text: App.modal == "api" ? "API 配置" : App.modal == "patch-texts" ? "本次补丁文本" : App.modal == "feedback" ? "任务需要处理" : App.modal-title; }
+            if App.modal != "engine-review": Heading { text: App.modal == "api" ? "模型配置" : App.modal == "patch-texts" ? "本次补丁文本" : App.modal == "feedback" ? "任务需要处理" : App.modal-title; }
             if App.modal == "engine-review": Link { text: "同类引擎经验"; font-size: 20px; strong: true; clicked => { App.modal = ""; App.action("open", "knowledge"); } }
-            if App.modal == "api": VerticalLayout { spacing: 10px;
-                Caption { text: "配置名称"; } LineEdit { text <=> App.api-name; }
-                Caption { text: "API 地址"; } LineEdit { text <=> App.api-endpoint; placeholder-text: "http://localhost:8080/v1"; }
-                HorizontalLayout { ComboBox { model: ["Chat Completions", "Responses"]; current-index <=> App.api-protocol; } LineEdit { text <=> App.api-model; placeholder-text: "模型名称"; horizontal-stretch: 1; } }
-                Caption { text: "API Key（本地服务可留空）"; } LineEdit { text <=> App.api-key; input-type: password; }
+            if App.modal == "api": ScrollView { height: min(420px, root.height - 300px - (App.api-test-result != "" ? 80px : 0px) - (App.api-testing ? 32px : 0px)); horizontal-scrollbar-policy: always-off; content-width: self.visible-width;
+              VerticalLayout { spacing: 10px;
+                Caption { text: "配置名称"; } LineEdit { text <=> App.api-name; edited => { App.api-test-result = ""; } }
+                Caption { text: "API 地址"; } LineEdit { text <=> App.api-endpoint; placeholder-text: "http://localhost:8080/v1"; edited => { App.api-test-result = ""; } }
+                HorizontalLayout { ComboBox { model: ["Chat Completions", "Responses"]; current-index <=> App.api-protocol; selected => { App.api-test-result = ""; } } LineEdit { text <=> App.api-model; placeholder-text: "模型名称"; horizontal-stretch: 1; edited => { App.api-test-result = ""; } } }
+                Caption { text: "API Key（本地服务可留空）"; } LineEdit { text <=> App.api-key; input-type: password; edited => { App.api-test-result = ""; } }
                 CheckBox { text: "记住 API Key（在本机加密保存）"; checked <=> App.api-remember-key; }
-                Caption { text: "分析思考等级（仅用于智能识别与适配）"; } ComboBox { model: ["接口默认", "low", "medium", "high", "xhigh", "max", "自定义"]; current-index <=> App.api-reasoning; }
-                if App.api-reasoning == 6: LineEdit { text <=> App.api-reasoning-custom; placeholder-text: "输入服务商支持的等级值，留空使用接口默认"; }
-                Caption { text: "翻译输入格式"; } ComboBox { model: ["批量 JSON", "逐条纯文本（本地翻译模型）"]; current-index <=> App.api-format; }
+                Caption { text: "分析思考等级（仅用于智能识别与适配）"; } ComboBox { model: ["接口默认", "low", "medium", "high", "xhigh", "max", "自定义"]; current-index <=> App.api-reasoning; selected => { App.api-test-result = ""; } }
+                if App.api-reasoning == 6: LineEdit { text <=> App.api-reasoning-custom; placeholder-text: "输入服务商支持的等级值，留空使用接口默认"; edited => { App.api-test-result = ""; } }
+                Caption { text: "翻译输入格式"; } ComboBox { model: ["批量 JSON", "逐条纯文本（本地翻译模型）"]; current-index <=> App.api-format; selected => { App.api-test-result = ""; } }
+              }
             }
+            if App.modal == "api": ApiTestControls {}
             if App.modal == "patch-texts": ScrollView { height: 360px; horizontal-scrollbar-policy: always-off; content-width: self.visible-width;
                 VerticalLayout { spacing: 12px; alignment: start;
                     ReportText { text: App.modal-message; }
@@ -70,7 +74,7 @@ export component DialogLayer inherits Rectangle {
             if App.modal == "patch": ComboBox { model: ["全部有效译文", "仅所选文本", "仅已校对译文"]; current-index <=> App.patch-scope; }
             if App.modal == "verify-version": VerticalLayout { spacing: 8px; Caption { text: "用于验证的游戏项目"; } ComboBox { model: App.verification-project-names; current-index <=> App.verification-project-index; } }
             if App.modal == "directory": VerticalLayout { spacing: 10px; HorizontalLayout { LineEdit { text <=> App.new-directory; horizontal-stretch: 1; } Button { text: "浏览…"; clicked => { App.action("browse-data", ""); } } } CheckBox { text: "迁移现有数据（保留原目录）"; checked <=> App.migrate-data; } }
-            HorizontalLayout { Rectangle { horizontal-stretch: 1; } Button { text: App.modal == "engine-review" || App.modal == "feedback" || App.modal == "patch-texts" ? "关闭" : "取消"; clicked => { if App.modal == "adapt" { App.action("adapt-cancel", ""); } App.modal = ""; App.api-key = ""; } } if App.modal == "resume-translation": Button { text: "改为全量翻译"; clicked => { App.modal = ""; App.action("translate", "force-all"); } } if App.modal != "patch-texts" && App.modal != "engine-review" && App.modal != "feedback": Button { text: App.modal == "resume-translation" ? "继续原选区" : App.modal == "cleanup" ? "清理所选文件" : "确认"; enabled: App.modal != "cleanup" || (!App.cleanup-loading && App.cleanup-selected); primary: true; clicked => { App.action("confirm", App.modal); } } }
+            HorizontalLayout { Rectangle { horizontal-stretch: 1; } Button { text: App.modal == "engine-review" || App.modal == "feedback" || App.modal == "patch-texts" ? "关闭" : "取消"; clicked => { if App.modal == "adapt" { App.action("adapt-cancel", ""); } if App.modal == "api" && App.api-testing { App.action("api-test-cancel", ""); } App.modal = ""; App.api-key = ""; } } if App.modal == "resume-translation": Button { text: "改为全量翻译"; clicked => { App.modal = ""; App.action("translate", "force-all"); } } if App.modal != "patch-texts" && App.modal != "engine-review" && App.modal != "feedback": Button { text: App.modal == "resume-translation" ? "继续原选区" : App.modal == "cleanup" ? "清理所选文件" : "确认"; enabled: (App.modal != "api" || !App.api-testing) && (App.modal != "cleanup" || (!App.cleanup-loading && App.cleanup-selected)); primary: true; clicked => { App.action("confirm", App.modal); } } }
         }
     }
 }
