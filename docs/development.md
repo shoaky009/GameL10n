@@ -62,7 +62,7 @@ rustup target add i686-pc-windows-msvc
 
 [发布流程](../.github/workflows/release.yml)仅在推送 `vX.Y.Z` tag 时触发，例如 `v1.0.0`。
 
-将 [CHANGELOG.md](../CHANGELOG.md) 的待发布内容整理为 `## [1.0.0] - YYYY-MM-DD`，填入实际日期，顶部保留空的 `## [Unreleased]`。提交后推送：
+将 [CHANGELOG.md](../CHANGELOG.md) 的待发布内容整理为 `## [1.0.0]`，顶部保留空的 `## [Unreleased]`。提交后推送：
 
 ```powershell
 git add CHANGELOG.md
