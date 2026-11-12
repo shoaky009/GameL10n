@@ -440,6 +440,7 @@ async fn discover_inputs(
         // Output naming uses the real candidate inventory, including unstaged media volumes.
         probe: ProbeResult {
             build_hints: actual.build_hints,
+            launch: actual.launch.or_else(|| sample.launch.clone()),
             ..sample
         },
         game_launch_files: launch_files(&game),

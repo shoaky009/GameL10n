@@ -190,6 +190,8 @@ export component Recognition inherits VerticalLayout {
         LineEdit { text: App.project-path; font-size: 13px; read-only: true; horizontal-stretch: 1; }
         Button { text: "项目文件"; clicked => { App.action("open", "project"); } }
         Button { text: "游戏目录"; clicked => { App.action("open", "game"); } }
+        Button { text: "启动游戏"; enabled: !App.busy && App.launch-can-run; clicked => { App.action("launch-game", ""); } }
+        Button { text: "启动设置"; enabled: !App.busy; clicked => { App.action("launch-settings", ""); } }
     }
     HorizontalLayout { spacing: 8px;
         Button { text: "识别与适配"; enabled: !App.busy; clicked => { App.action("adapt-dialog", ""); } }
@@ -234,6 +236,8 @@ export component PatchPage inherits ScrollView {
         Caption { text: "安装到：" + App.project-path; }
         LineEdit { text: App.patch-path; read-only: true; }
         Label { text: App.patch-launch; }
+        Caption { text: "当前启动：" + App.launch-summary; }
+        HorizontalLayout { Button { text: "启动游戏"; enabled: !App.busy && App.launch-can-run; clicked => { App.action("launch-game", ""); } } Button { text: "启动设置…"; enabled: !App.busy; clicked => { App.action("launch-settings", ""); } } Rectangle { horizontal-stretch: 1; } }
         if App.warnings != "": VerticalLayout { spacing: 8px;
             SectionHeading { text: "补丁注意事项"; }
             ReportText { text: App.warnings; }

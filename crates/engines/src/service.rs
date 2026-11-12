@@ -724,6 +724,9 @@ impl EngineService {
             probe.adapter_version.clone_from(version);
         }
         if let Some(probe) = &response.probe {
+            if let Some(launch) = &probe.launch {
+                launch.validate_relative()?;
+            }
             if probe.required_files.is_empty() {
                 return Err(EngineError::Protocol("适配器没有选择必需资源。".into()));
             }
@@ -839,6 +842,15 @@ impl EngineService {
                     )));
                 }
             }
+            let launch = build.launch_target()?;
+            if let Some(launch) = &launch
+                && launch.location == crate::protocol::LaunchLocation::Patch
+                && !declared.contains(&launch.configuration.executable.to_lowercase())
+            {
+                return Err(EngineError::Protocol(
+                    "补丁启动程序必须包含在声明输出中。".into(),
+                ));
+            }
             if let Some(executable) = &build.launch_executable
                 && (!declared.contains(&executable.to_lowercase())
                     || !executable.to_lowercase().ends_with(".exe"))
@@ -860,7 +872,7 @@ impl EngineService {
                     .unwrap_or("")
                     .to_lowercase();
                 if ["exe", "bat", "cmd", "ps1"].contains(&extension.as_str())
-                    && build.launch_executable.is_none()
+                    && launch.is_none()
                     && !resolve_relative(&request.source_directory, &file.path)?.is_file()
                 {
                     return Err(EngineError::Protocol(

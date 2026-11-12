@@ -396,8 +396,14 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
             "请关闭游戏及汉化启动器。程序会核对原文件哈希，恢复原文件并移除工具添加的补丁文件。"
                 .into(),
         ),
-        "install" => ctx.app().await.install_patch(&input.project_id).await?,
-        "restore" => ctx.app().await.restore_game(&input.project_id).await?,
+        "install" => {
+            ctx.app().await.install_patch(&input.project_id).await?;
+            crate::launch_ui::refresh(ctx, &input.project_id, false).await?;
+        }
+        "restore" => {
+            ctx.app().await.restore_game(&input.project_id).await?;
+            crate::launch_ui::refresh(ctx, &input.project_id, false).await?;
+        }
         "cleanup-dialog" => {
             crate::workbench_ui::flush_editor(ctx, input).await?;
             let id = input.project_id.clone();
@@ -722,6 +728,7 @@ pub async fn refresh_project(ctx: &Context, id: &str, opening: bool) -> Result<(
         session.text_selection.get(id).map_or(0, Vec::len)
     };
     let selected_id = id.to_owned();
+    crate::launch_ui::refresh(ctx, id, false).await?;
     let session = ctx.session.clone();
     ctx.update(move |ui| {
         let a = ui.global::<App>();
@@ -900,9 +907,30 @@ pub async fn refresh_patch(ctx: &Context, id: &str) -> Result<(), CoreError> {
                 .into(),
             );
             a.set_patch_launch(
-                p.launch_executable
-                    .map(|p| format!("启动方式：{p}"))
-                    .unwrap_or_else(|| "沿用原游戏的启动方式。".into())
+                p.extra
+                    .get("launch")
+                    .and_then(|value| {
+                        serde_json::from_value::<gamel10n_engines::protocol::LaunchTarget>(
+                            value.clone(),
+                        )
+                        .ok()
+                    })
+                    .map(|launch| {
+                        format!(
+                            "补丁声明入口：{}{}",
+                            launch.configuration.executable,
+                            if launch.configuration.arguments.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" {}", launch.configuration.arguments)
+                            }
+                        )
+                    })
+                    .or_else(|| {
+                        p.launch_executable
+                            .map(|path| format!("补丁声明入口：{path}"))
+                    })
+                    .unwrap_or_else(|| "此补丁沿用项目原游戏的启动配置。".into())
                     .into(),
             );
             a.set_warnings(p.warnings.join("\n").into());

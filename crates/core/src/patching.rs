@@ -8,7 +8,7 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
-use gamel10n_engines::protocol::BuildMode;
+use gamel10n_engines::protocol::{BuildMode, LaunchLocation, LaunchTarget};
 use gamel10n_translation::files::{hash_file, hash_text, read_json, write_json};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -28,6 +28,8 @@ pub struct PatchManifest {
     pub mode: BuildMode,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub required_sources: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch: Option<LaunchTarget>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -119,6 +121,7 @@ pub struct PatchInstaller {
     project_directory: PathBuf,
     cancellation: Option<crate::CancellationToken>,
     progress: Option<FileProgress>,
+    launch_fallback: Option<LaunchTarget>,
 }
 
 struct InstallationLock {
@@ -132,11 +135,17 @@ impl PatchInstaller {
             project_directory: project_directory.into(),
             cancellation: None,
             progress: None,
+            launch_fallback: None,
         }
     }
 
     pub fn journal_path(&self) -> PathBuf {
         self.project_directory.join("installation.json")
+    }
+
+    pub fn with_launch_fallback(mut self, launch: Option<LaunchTarget>) -> Self {
+        self.launch_fallback = launch;
+        self
     }
 
     pub fn with_cancellation(mut self, cancellation: crate::CancellationToken) -> Self {
@@ -182,8 +191,39 @@ impl PatchInstaller {
         if paths_overlap(&game, &patch) {
             return Err(invalid("游戏目录与补丁目录必须分开。"));
         }
-        let manifest = read_manifest(&patch)?;
+        let mut manifest = read_manifest(&patch)?;
+        if manifest.launch.is_none() {
+            manifest.launch.clone_from(&self.launch_fallback);
+            validate_manifest(&mut manifest)?;
+        }
         let payload = directory_root(&safe_path(&patch, PAYLOAD_DIRECTORY)?)?;
+        if let Some(launch) = &manifest.launch {
+            let executable = safe_path(
+                if launch.location == LaunchLocation::Patch {
+                    &payload
+                } else {
+                    &game
+                },
+                &launch.configuration.executable,
+            )?;
+            if !executable.is_file() {
+                return Err(invalid(format!("启动程序不存在：{}", executable.display())));
+            }
+            let working = &launch.configuration.working_directory;
+            let directory = if working == "." {
+                game.clone()
+            } else {
+                safe_path(&game, working)?
+            };
+            let output_directory = if working == "." {
+                payload.clone()
+            } else {
+                safe_path(&payload, working)?
+            };
+            if !directory.is_dir() && !output_directory.is_dir() {
+                return Err(invalid("补丁启动工作目录不存在。"));
+            }
+        }
         let targets: HashSet<_> = manifest
             .files
             .iter()
@@ -399,6 +439,9 @@ impl PatchInstaller {
             };
             self.record_missing_directories(&game, &target, &mut journal)?;
             journal.entries[position].pending_sha256 = Some(file.sha256.clone());
+            journal
+                .extra
+                .insert("launchPending".into(), Value::Bool(true));
             self.save_journal(&game, &journal)?;
             let entry = &journal.entries[position];
             let mut expected_current = current.as_deref();
@@ -426,6 +469,21 @@ impl PatchInstaller {
             self.save_journal(&game, &journal)?;
             result.installed_files += 1;
         }
+        journal.extra.remove("launchPending");
+        if let Some(launch) = &manifest.launch {
+            journal.extra.insert(
+                "launch".into(),
+                serde_json::to_value(&launch.configuration).map_err(|e| invalid(e.to_string()))?,
+            );
+            journal.extra.insert(
+                "launchPatch".into(),
+                Value::String(hash_file(&patch.join(MANIFEST_FILENAME))?),
+            );
+        } else {
+            journal.extra.remove("launch");
+            journal.extra.remove("launchPatch");
+        }
+        self.save_journal(&game, &journal)?;
         Ok(result)
     }
 
@@ -433,7 +491,14 @@ impl PatchInstaller {
         let game = directory_root(game_directory)?;
         let _lock = self.operation_lock(&game)?;
         let mut journal = self.load_journal(&game, true)?;
-        self.restore_selected(&game, &mut journal, |_| true)
+        let result = self.restore_selected(&game, &mut journal, |_| true)?;
+        if result.conflicts.is_empty() {
+            journal.extra.remove("launch");
+            journal.extra.remove("launchPatch");
+            journal.extra.remove("launchPending");
+            self.save_journal(&game, &journal)?;
+        }
+        Ok(result)
     }
 
     fn restore_selected(
@@ -499,6 +564,9 @@ impl PatchInstaller {
                 None
             };
             journal.entries[position].restoring = true;
+            journal
+                .extra
+                .insert("launchPending".into(), Value::Bool(true));
             self.save_journal(game, journal)?;
             let entry = &journal.entries[position];
             ensure_hash(&target, entry.installed_sha256.as_deref())?;
@@ -1087,6 +1155,7 @@ pub fn build_manifest(
         files: Vec::new(),
         mode: BuildMode::Replace,
         required_sources: BTreeMap::new(),
+        launch: None,
     };
     for relative in paths {
         manifest.files.push(PatchFile {
@@ -1104,6 +1173,17 @@ pub fn build_manifest(
 }
 
 fn validate_manifest(manifest: &mut PatchManifest) -> Result<(), CoreError> {
+    if let Some(launch) = &manifest.launch {
+        launch.configuration.validate_relative()?;
+        if launch.location == LaunchLocation::Patch
+            && !manifest.files.iter().any(|file| {
+                file.relative_path
+                    .eq_ignore_ascii_case(&launch.configuration.executable)
+            })
+        {
+            return Err(invalid("补丁启动程序必须包含在补丁文件清单中。"));
+        }
+    }
     if manifest.schema_version != 2 {
         return Err(invalid("补丁清单版本不支持，请重新生成补丁。"));
     }
@@ -2443,6 +2523,7 @@ mod tests {
             schema_version: 2,
             mode: BuildMode::Replace,
             required_sources: BTreeMap::new(),
+            launch: None,
             files: vec![
                 PatchFile {
                     relative_path: "Data.bin".into(),

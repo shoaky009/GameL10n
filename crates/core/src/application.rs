@@ -642,9 +642,10 @@ impl Application {
             );
         }
         let path = self.project_directory(id)?.join("extraction/native.json");
-        let stored = tokio::task::spawn_blocking(move || -> Result<StoredAnalysis, CoreError> {
+        let (stored, project) = tokio::task::spawn_blocking(move || -> Result<_, CoreError> {
+            crate::launch::discover(&mut project, stored.probe.as_ref())?;
             write_json(&path, &stored)?;
-            Ok(stored)
+            Ok((stored, project))
         })
         .await??;
         // The extraction file is the commit point. Even if the lightweight summary

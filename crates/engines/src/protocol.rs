@@ -66,6 +66,8 @@ pub struct ProbeResult {
     pub warnings: Vec<String>,
     #[serde(default)]
     pub original_executable: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch: Option<LaunchConfiguration>,
     /// Per-game build choices derived from bounded discovery, not additional source files.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub build_hints: BTreeMap<String, serde_json::Value>,
@@ -89,6 +91,65 @@ pub struct BuildResult {
     pub warnings: Vec<String>,
     #[serde(default)]
     pub launch_executable: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch: Option<LaunchTarget>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LaunchConfiguration {
+    pub executable: String,
+    #[serde(default)]
+    pub arguments: String,
+    #[serde(default = "game_directory")]
+    pub working_directory: String,
+}
+
+fn game_directory() -> String {
+    ".".into()
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum LaunchLocation {
+    #[default]
+    Game,
+    Patch,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LaunchTarget {
+    #[serde(default)]
+    pub location: LaunchLocation,
+    #[serde(flatten)]
+    pub configuration: LaunchConfiguration,
+}
+
+impl LaunchConfiguration {
+    /// Adapter paths are relative to the game root; arguments are a Windows command-line tail.
+    pub fn validate_relative(&self) -> Result<(), EngineError> {
+        use std::path::{Component, Path};
+        let relative = |value: &str| {
+            !value.is_empty()
+                && !value.contains(['\\', ':'])
+                && !value.chars().any(char::is_control)
+                && Path::new(value)
+                    .components()
+                    .all(|part| matches!(part, Component::Normal(_) | Component::CurDir))
+        };
+        if !relative(&self.executable)
+            || !self.executable.to_ascii_lowercase().ends_with(".exe")
+            || !relative(&self.working_directory)
+            || self.arguments.len() > 30000
+            || self.arguments.chars().any(|c| c.is_control() && c != '\t')
+        {
+            return Err(EngineError::Protocol(
+                "启动配置需要相对 EXE 路径、有效工作目录和启动参数。".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -106,6 +167,31 @@ impl BuildMode {
 }
 
 impl BuildResult {
+    pub fn launch_target(&self) -> Result<Option<LaunchTarget>, EngineError> {
+        if let Some(launch) = &self.launch {
+            launch.configuration.validate_relative()?;
+            if self.launch_executable.as_ref().is_some_and(|executable| {
+                launch.location != LaunchLocation::Patch
+                    || executable != &launch.configuration.executable
+            }) {
+                return Err(EngineError::Protocol(
+                    "补丁的两份启动入口声明不一致。".into(),
+                ));
+            }
+            return Ok(Some(launch.clone()));
+        }
+        Ok(self
+            .launch_executable
+            .as_ref()
+            .map(|executable| LaunchTarget {
+                location: LaunchLocation::Patch,
+                configuration: LaunchConfiguration {
+                    executable: executable.clone(),
+                    arguments: String::new(),
+                    working_directory: ".".into(),
+                },
+            }))
+    }
     pub fn set_output_context(&self, request: &mut AdapterRequest) {
         if self.mode == BuildMode::Overlay {
             request
@@ -196,6 +282,55 @@ impl AdapterResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launch_metadata_supports_game_entries_and_rejects_conflicting_declarations() {
+        let build: BuildResult = serde_json::from_value(serde_json::json!({
+            "files":["story.bin"],"launch":{"location":"game","executable":"game.exe","arguments":"--mode \"中文 test\""}
+        })).unwrap();
+        let launch = build.launch_target().unwrap().unwrap();
+        assert_eq!(launch.location, LaunchLocation::Game);
+        assert_eq!(launch.configuration.working_directory, ".");
+        assert_eq!(launch.configuration.arguments, "--mode \"中文 test\"");
+        let legacy: BuildResult = serde_json::from_value(
+            serde_json::json!({"files":["launcher.exe"],"launchExecutable":"launcher.exe"}),
+        )
+        .unwrap();
+        assert_eq!(
+            legacy.launch_target().unwrap().unwrap().location,
+            LaunchLocation::Patch
+        );
+        let mut conflict = build;
+        conflict.launch_executable = Some("launcher.exe".into());
+        assert!(conflict.launch_target().is_err());
+    }
+
+    #[test]
+    fn adapter_launch_metadata_rejects_paths_outside_the_game_and_invalid_arguments() {
+        for executable in [
+            "../outside.exe",
+            "/outside.exe",
+            "C:/outside.exe",
+            "folder\\game.exe",
+            "launch.cmd",
+        ] {
+            let configuration = LaunchConfiguration {
+                executable: executable.into(),
+                arguments: String::new(),
+                working_directory: ".".into(),
+            };
+            assert!(configuration.validate_relative().is_err(), "{executable}");
+        }
+        let mut configuration = LaunchConfiguration {
+            executable: "game.exe".into(),
+            arguments: String::new(),
+            working_directory: "../outside".into(),
+        };
+        assert!(configuration.validate_relative().is_err());
+        configuration.working_directory = ".".into();
+        configuration.arguments = "invalid\0argument".into();
+        assert!(configuration.validate_relative().is_err());
+    }
 
     #[test]
     fn legacy_builds_keep_replace_mode_and_optional_probe_hints_are_retained() {

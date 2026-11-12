@@ -6,7 +6,18 @@ export component DialogLayer inherits Rectangle {
     TouchArea {}
     Rectangle { width: min(parent.width - 100px, 660px); height: min(parent.height - 80px, modal-content.preferred-height + 40px); x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; background: Theme.surface; border-radius: 8px;
         modal-content := VerticalLayout { padding: 20px; spacing: 12px;
-            if App.modal != "engine-review": Heading { text: App.modal == "api" ? "模型配置" : App.modal == "patch-texts" ? "本次补丁文本" : App.modal == "feedback" ? "任务需要处理" : App.modal-title; }
+            if App.modal != "engine-review": Heading { text: App.modal == "launch" ? "游戏启动设置" : App.modal == "api" ? "模型配置" : App.modal == "patch-texts" ? "本次补丁文本" : App.modal == "feedback" ? "任务需要处理" : App.modal-title; }
+            if App.modal == "launch": VerticalLayout { spacing: 10px;
+                Caption { text: App.launch-summary; }
+                if App.launch-reason != "": ReportText { text: App.launch-reason; }
+                if App.launch-candidates.length > 0: Caption { text: "检测到的候选入口"; }
+                if App.launch-candidates.length > 0: ComboBox { model: App.launch-candidates; current-index <=> App.launch-candidate-index; selected(value) => { App.launch-executable = value; } }
+                Caption { text: "启动程序"; }
+                HorizontalLayout { LineEdit { text <=> App.launch-executable; placeholder-text: "游戏目录下的相对路径或完整 EXE 路径"; horizontal-stretch: 1; } Button { text: "浏览…"; clicked => { App.action("launch-browse", ""); } } }
+                Caption { text: "启动参数（可留空）"; } LineEdit { text <=> App.launch-arguments; placeholder-text: "按启动器要求填写，含空格的参数使用引号"; }
+                Caption { text: "工作目录（留空使用游戏目录）"; } LineEdit { text <=> App.launch-directory; }
+                HorizontalLayout { Button { text: "检测入口"; clicked => { App.action("launch-detect", ""); } } Button { text: "使用自动配置"; clicked => { App.action("launch-reset", ""); } } Rectangle { horizontal-stretch: 1; } }
+            }
             if App.modal == "engine-review": Link { text: "同类引擎经验"; font-size: 20px; strong: true; clicked => { App.modal = ""; App.action("open", "knowledge"); } }
             if App.modal == "api": ScrollView { height: min(420px, root.height - 300px - (App.api-test-result != "" ? 80px : 0px) - (App.api-testing ? 32px : 0px)); horizontal-scrollbar-policy: always-off; content-width: self.visible-width;
               VerticalLayout { spacing: 10px;

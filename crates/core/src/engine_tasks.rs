@@ -1509,6 +1509,13 @@ impl Application {
         }
         source_guard.restore()?;
         let mut manifest = build_manifest(patch.path(), &hashes)?;
+        manifest.launch = built.launch_target()?;
+        if let Some(launch) = &manifest.launch
+            && launch.location == gamel10n_engines::protocol::LaunchLocation::Game
+        {
+            let game = self.store.get(id).await?;
+            crate::launch::validate_configuration(&game.game_directory, &launch.configuration)?;
+        }
         if built.mode == BuildMode::Overlay {
             manifest.mode = built.mode;
             manifest.required_sources.clone_from(&hashes);
@@ -1557,7 +1564,10 @@ impl Application {
                 &serde_json::to_string(&hashes)
                     .map_err(|e| CoreError::InvalidData(e.to_string()))?,
             ),
-            extra: BTreeMap::from([("adapterVersionRef".into(), json!(adapter_version))]),
+            extra: BTreeMap::from([
+                ("adapterVersionRef".into(), json!(adapter_version)),
+                ("launch".into(), json!(manifest.launch)),
+            ]),
         };
         // The selection is tied to this immutable patch, so later edits do not change its preview.
         write_json(
@@ -1599,7 +1609,18 @@ impl Application {
             .await?;
         let result = self
             .run_file_task(id, "install", move |progress| {
+                let fallback = patch.launch_executable.as_ref().map(|executable| {
+                    gamel10n_engines::protocol::LaunchTarget {
+                        location: gamel10n_engines::protocol::LaunchLocation::Patch,
+                        configuration: gamel10n_engines::protocol::LaunchConfiguration {
+                            executable: executable.clone(),
+                            arguments: String::new(),
+                            working_directory: ".".into(),
+                        },
+                    }
+                });
                 PatchInstaller::new(root)
+                    .with_launch_fallback(fallback)
                     .with_cancellation(cancellation)
                     .with_progress(progress)
                     .install(&project.game_directory, &patch.patch_directory)
@@ -3098,6 +3119,7 @@ mod tests {
             required_files: vec!["text.json".into()],
             warnings: vec![],
             original_executable: None,
+            launch: None,
             build_hints: BTreeMap::new(),
         };
         app.extract_adapter(

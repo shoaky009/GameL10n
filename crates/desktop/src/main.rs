@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod catalog_ui;
+mod launch_ui;
 mod log_ui;
 mod metrics_ui;
 mod project_ui;
@@ -262,6 +263,9 @@ pub struct UiInput {
     pub patch_scope: i32,
     pub patch_path: String,
     pub runtime_note: String,
+    pub launch_executable: String,
+    pub launch_arguments: String,
+    pub launch_directory: String,
 }
 impl UiInput {
     fn capture(ui: &MainWindow, argument: String) -> Self {
@@ -373,6 +377,9 @@ impl UiInput {
             patch_scope: a.get_patch_scope(),
             patch_path: a.get_patch_path().into(),
             runtime_note: a.get_runtime_note().into(),
+            launch_executable: a.get_launch_executable().into(),
+            launch_arguments: a.get_launch_arguments().into(),
+            launch_directory: a.get_launch_directory().into(),
         }
     }
 }
@@ -644,6 +651,7 @@ async fn dispatch(ctx: &Context, action: &str, input: &UiInput) -> Result<(), Co
         let mut next = input.clone();
         let action = match input.argument.as_str() {
             "api" => "api-save",
+            "launch" => "launch-save",
             "adapt" => "adapt",
             "remove" => "remove",
             "patch" => "generate-patch",
@@ -669,6 +677,7 @@ async fn dispatch(ctx: &Context, action: &str, input: &UiInput) -> Result<(), Co
         return Box::pin(dispatch(ctx, action, &next)).await;
     }
     if metrics_ui::handle(ctx, action, input).await?
+        || launch_ui::handle(ctx, action, input).await?
         || settings_ui::handle(ctx, action, input).await?
         || catalog_ui::handle(ctx, action, input).await?
         || workbench_ui::handle(ctx, action, input).await?

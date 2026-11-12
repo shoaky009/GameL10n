@@ -522,6 +522,33 @@ fn project_actions_keep_settings_selection_and_saved_edits_in_sync_across_tabs()
         assert!(!app.get_api_testing());
         assert_eq!(host.settings().await.unwrap().api_configuration.profiles.len(),settings_before);
 
+        app.set_modal("".into());
+        invoke_action(&ui, &ctx, "project", &project.id).await;
+        let game_directory = host.open_project(&project.id).await.unwrap().game_directory;
+        std::fs::write(game_directory.join("game.exe"), "launch fixture").unwrap();
+        std::fs::write(game_directory.join("Config.exe"), "configuration fixture").unwrap();
+        invoke_action(&ui, &ctx, "launch-settings", "").await;
+        assert_eq!(app.get_modal(), "launch");
+        invoke_action(&ui, &ctx, "launch-detect", "").await;
+        assert_eq!(app.get_launch_executable(), "game.exe");
+        assert!(app.get_launch_can_run());
+        app.set_launch_arguments("--name \"空格 参数\" \"\"".into());
+        invoke_action(&ui, &ctx, "confirm", "launch").await;
+        assert_eq!(app.get_modal(), "");
+        assert_eq!(host.launch_view(&project.id).await.unwrap().configuration.unwrap().arguments, "--name \"空格 参数\" \"\"");
+        invoke_action(&ui, &ctx, "launch-settings", "").await;
+        app.set_launch_executable("missing.exe".into());
+        app.invoke_action("confirm".into(), "launch".into());
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while app.get_error().is_empty() { tokio::time::sleep(Duration::from_millis(1)).await; }
+        }).await.unwrap();
+        assert_eq!(app.get_modal(), "launch");
+        assert!(app.get_error().contains("启动程序不存在"));
+        assert!(app.get_launch_reason().contains("启动程序不存在"));
+        invoke_action(&ui, &ctx, "launch-reset", "").await;
+        assert_eq!(app.get_launch_executable(), "game.exe");
+        assert!(app.get_error().is_empty());
+
         slint::quit_event_loop().unwrap();
     })
     .unwrap();

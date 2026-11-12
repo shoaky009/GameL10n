@@ -1711,7 +1711,7 @@ impl EngineService {
                 let inventory=Inventory::scan(temporary.path())?;
                 let actual:BTreeSet<_>=inventory.files.iter().map(|file|file.path.to_lowercase()).collect();
                 let reported:BTreeSet<_>=build.files.iter().map(|file|file.replace('\\',"/").to_lowercase()).collect();
-                if !inventory.complete || actual!=selected || reported!=selected || build.files.len()!=selected.len() || build.launch_executable.is_some() {
+                if !inventory.complete || actual!=selected || reported!=selected || build.files.len()!=selected.len() || build.launch_executable.is_some() || build.launch.is_some() {
                     return Err(EngineError::Rejected("原文回填产生的完整文件集合与所选样本不一致。".into()));
                 }
                 if hashes(temporary.path(),&files)?!=source_hashes { return Err(EngineError::Rejected("原文回填改变了样本字节。".into())); }

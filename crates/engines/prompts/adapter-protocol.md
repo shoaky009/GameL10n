@@ -50,6 +50,9 @@ An extraction may additionally return errorKind:"incompatible" only when its res
 The host then records the evidence and tries other adapters. Missing dependencies, I/O errors, implementation errors
 and unknown failures must omit this classification and stop the operation; do not label every caught exception incompatible.
 Probe: {engineId,adapterId,adapterVersion,description,requiredFiles:[relativePath],warnings:[],originalExecutable:null,buildHints:{}}.
+Optional probe.launch:{executable,arguments:"",workingDirectory:"."} declares the original game entry from established
+resource or launch-configuration evidence. Paths are relative to the game root with / separators. Omit when ambiguous;
+do not choose the first/largest EXE or research extra facts solely to fill this field. This does not add the EXE to requiredFiles.
 Optional buildHints stores small per-game build choices derived from candidate names, e.g. an unused overlay volume path.
 The host persists and forwards it to extract/build/validate, including verification. Compute it in bounded probe from the candidate
 filenames; do not stage/hash unrelated media to choose an output name. Real-game hints take precedence over the staged subset's hints.
@@ -74,6 +77,11 @@ Dialogue_* is only one possible source. Internal object names and IL2CPP metadat
 With stripped type trees, establish field layout and consumers before rewriting. Add scenes/metadata to discovery and requiredFiles
 only when the implemented path needs them. Report observed unhandled categories in warnings; resource tests do not prove full coverage.
 Build: {files:[relativePath],mode:"replace"|"overlay",warnings:[],launchExecutable:null}. Missing mode means replace.
+Optional build.launch:{location:"game"|"patch",executable,arguments:"",workingDirectory:"."} declares one complete launch
+configuration. game refers to an existing game EXE and need not copy it into files; patch requires that EXE in files.
+workingDirectory is relative to the installed game root; arguments is an unmodified Windows command-line tail.
+launchExecutable remains supported for a patch-output EXE with empty arguments and the game root as working directory.
+If both fields are returned they must select the same patch EXE. Omit launch metadata to inherit the project's original entry.
 Write files only inside outputDirectory and declare all outputs. New paths including a launch EXE are permitted.
 In replace mode, original-text build must reproduce every source resource byte for byte under its original path;
 translated builds must also preserve every source resource path.
@@ -97,11 +105,11 @@ Keep the original executable name and launch entry by default. EXE changes need 
 output necessary changes under the original relative path in replace mode. The host handles installation backups;
 do not modify sources, create adapter-managed backups or emit a renamed game EXE merely to preserve the original.
 Only when launch-time setup requires a launcher, output a standalone EXE, explain the need, include it in files
-and set launchExecutable to that relative path.
-New EXE/CMD/BAT/PowerShell outputs require an explicit launchExecutable (original EXE or standalone launcher EXE);
+and declare that relative path through launch or launchExecutable.
+New EXE/CMD/BAT/PowerShell outputs require an explicit EXE launch entry through launch or launchExecutable;
 the host rejects ambiguous entry points. Per-EXE .le.config files must be discovered and included alongside selected EXEs,
 preserved byte for byte during translated builds. Host checks these conditions before publication.
-launchExecutable:null retains the original launch entry; it must not hide a required font or locale launcher.
+Omitting both launch declarations retains the original entry; do not hide a required font or locale launcher.
 Preserve the original locale launch route/profile and working directory. Existing *.exe.le.config is strong evidence of
 a Locale Emulator dependency; directly starting the game EXE can bypass it. Script encoding, cmd chcp and managed culture
 do not establish the native process ACP/locale needed for ANSI filenames, movie paths, window titles and UI.
