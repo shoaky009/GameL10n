@@ -186,6 +186,7 @@ pub struct EngineService {
     pub(crate) disabled_families: BTreeSet<String>,
     excluded_adapters: BTreeSet<(String, String)>,
     preferred_adapter: Option<String>,
+    ordered_packages_only: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -204,11 +205,18 @@ impl EngineService {
             disabled_families: BTreeSet::new(),
             excluded_adapters: BTreeSet::new(),
             preferred_adapter: None,
+            ordered_packages_only: false,
         }
     }
 
     pub fn with_shared_directory(mut self, directory: impl Into<PathBuf>) -> Self {
         self.shared_directory = directory.into();
+        self
+    }
+
+    /// Checks supplied packages in their given order without built-in fallback.
+    pub fn with_ordered_packages_only(mut self) -> Self {
+        self.ordered_packages_only = true;
         self
     }
 
@@ -960,7 +968,8 @@ impl EngineService {
             .files
             .iter()
             .any(|file| file.path.to_lowercase().ends_with(".xp3"));
-        let probe_smil = has_xp3
+        let probe_smil = !self.ordered_packages_only
+            && has_xp3
             && self
                 .preferred_adapter
                 .as_deref()
@@ -1056,7 +1065,9 @@ impl EngineService {
                 }
             }
         }
-        candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.0));
+        if !self.ordered_packages_only {
+            candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.0));
+        }
         for (recognition_evidence, directory, manifest, resources) in candidates {
             if cancellation.is_cancelled() {
                 return Err(EngineError::Cancelled);
@@ -1254,6 +1265,17 @@ impl EngineService {
                     diagnostics.push(message);
                 }
             }
+        }
+        if self.ordered_packages_only {
+            return Ok(DiscoveryResult {
+                adapter: None,
+                probe: None,
+                diagnostics,
+                file_count: inventory.files.len(),
+                complete: inventory.complete,
+                reuse_failures,
+                builtin_probes,
+            });
         }
         let mut builtins = Vec::new();
         if inventory

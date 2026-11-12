@@ -78,6 +78,12 @@ struct AdaptationStart {
     require_model_analysis: bool,
 }
 
+struct ExistingRecognition {
+    extracted: Option<usize>,
+    inventory: Inventory,
+    known_game: bool,
+}
+
 fn catalog_adapter(project: &crate::GameProject) -> Option<AdapterVersion> {
     crate::adapter_feedback::current_adapter(&project.extra).filter(|adapter| {
         adapter.adapter_id.starts_with("engine.") || adapter.adapter_id.starts_with("template.")
@@ -161,6 +167,12 @@ fn has_unfinished_adaptation(
     directory: &Path,
     previous_task: Option<&crate::TaskState>,
 ) -> Result<bool, CoreError> {
+    if previous_task
+        .is_some_and(|task| task.operation == "recognize" && task.succeeded == Some(true))
+        && directory.join("extraction/native.json").is_file()
+    {
+        return Ok(false);
+    }
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct SavedStatus {
@@ -231,6 +243,66 @@ fn adaptation_task_outcome(result: &AdaptationResult) -> Result<String, String> 
 }
 
 impl Application {
+    pub(crate) async fn restore_known_adapter(&self, id: &str) -> Result<(), CoreError> {
+        if self.task_state(id).await.is_some_and(|state| state.running)
+            || self
+                .project_directory(id)?
+                .join("extraction/native.json")
+                .is_file()
+        {
+            return Ok(());
+        }
+        let root = self.data_directory().to_owned();
+        let game_id = id.to_owned();
+        let known = tokio::task::spawn_blocking(move || -> Result<bool, CoreError> {
+            Ok(EngineCatalog::open(&root)?
+                .discovery_candidates_for_game(&game_id, None)?
+                .iter()
+                .any(|candidate| candidate.is_known_game))
+        })
+        .await??;
+        if !known {
+            return Ok(());
+        }
+        if self.cached_analysis(id).await?.is_some() {
+            return Ok(());
+        }
+        let cancellation = match self
+            .begin(id, "recognize", "正在找回此游戏已有的适配器并恢复文本。")
+            .await
+        {
+            Ok(cancellation) => cancellation,
+            Err(CoreError::ProjectBusy) => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        let result = async {
+            let recovered = self.recognize_existing(id, &cancellation, true).await?;
+            if let Some(count) = recovered.extracted.filter(|count| *count > 0) {
+                self.metrics_details(id, None, Some("reused"), None).await;
+                return Ok(format!(
+                    "已复用此游戏已有的适配器，本地校验完成，已提取 {count} 条文本。"
+                ));
+            }
+            let project = self.store.get(id).await?;
+            let details = project
+                .extra
+                .get("discovery")
+                .and_then(|discovery| discovery["diagnostics"].as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .take(3)
+                .collect::<Vec<_>>()
+                .join("\n");
+            Err(CoreError::InvalidData(format!(
+                "已有适配器未能匹配当前游戏资源。\n{details}\n请在“识别与适配”查看原因，处理后重新识别。"
+            )))
+        }
+        .await;
+        self.finish(id, "recognize", result.map_err(|error| error.to_string()))
+            .await
+    }
+
     pub fn engine_service(&self) -> EngineService {
         EngineService::new(self.tools.asset_root(), self.tools.clone())
             .with_shared_directory(self.data_directory().join("extensions/engine-tools"))
@@ -374,11 +446,14 @@ impl Application {
                 ).await?;
                 return Ok(RecognitionResult::Adapted(Box::new(result)));
             }
-            let (extracted, inventory) = self.recognize_existing(id, &cancellation).await?;
+            let recognized = self.recognize_existing(id, &cancellation, false).await?;
+            let extracted = recognized.extracted;
+            let inventory = recognized.inventory;
             if cancellation.is_cancelled() {
                 return Err(gamel10n_engines::EngineError::Cancelled.into());
             }
-            if let Some(count) = extracted.filter(|count| *count >= SMALL_EXTRACTION_THRESHOLD) {
+            if let Some(count) = extracted.filter(|count| *count > 0 && (*count >= SMALL_EXTRACTION_THRESHOLD || recognized.known_game)) {
+                if recognized.known_game { self.metrics_details(id, None, Some("reused"), None).await; }
                 return Ok(RecognitionResult::Extracted(count));
             }
             operation = "adapt";
@@ -426,22 +501,36 @@ impl Application {
         &self,
         id: &str,
         cancellation: &CancellationToken,
-    ) -> Result<(Option<usize>, Inventory), CoreError> {
+        known_only: bool,
+    ) -> Result<ExistingRecognition, CoreError> {
         let project = self.store.get(id).await?;
         let root = self.data_directory().to_path_buf();
         let game = crate::game_directory::validate(&project.game_directory)?;
         let game_id = id.to_owned();
         let pin = catalog_adapter(&project).map(|adapter| (adapter.adapter_id, adapter.version));
-        let preferred_adapter = pin.as_ref().map(|(id, _)| id.clone());
-        let (packages, inventory, disabled) =
+        let (packages, inventory, disabled, preferred_adapter, known_versions) =
             tokio::task::spawn_blocking(move || -> Result<_, CoreError> {
                 let catalog = EngineCatalog::open(&root)?;
                 let inventory = gamel10n_engines::discovery::Inventory::scan(&game)?;
-                let candidates = catalog.discovery_candidates_for_game(
+                let mut candidates = catalog.discovery_candidates_for_game(
                     &game_id,
                     pin.as_ref()
                         .map(|(id, version)| (id.as_str(), version.as_str())),
                 )?;
+                if known_only {
+                    candidates.retain(|candidate| candidate.is_known_game);
+                }
+                let preferred_adapter = pin.as_ref().map(|(id, _)| id.clone()).or_else(|| {
+                    candidates
+                        .iter()
+                        .find(|candidate| candidate.is_known_game)
+                        .map(|candidate| candidate.adapter_id.clone())
+                });
+                let known_versions = candidates
+                    .iter()
+                    .filter(|candidate| candidate.is_known_game)
+                    .map(|candidate| (candidate.adapter_id.clone(), candidate.version.clone()))
+                    .collect::<BTreeSet<_>>();
                 let packages = candidates
                     .into_iter()
                     .filter(|candidate| candidate.matches_inventory(&inventory))
@@ -451,7 +540,13 @@ impl Application {
                 if let Some((id, _)) = pin {
                     disabled.remove(&id);
                 }
-                Ok((packages, inventory, disabled))
+                Ok((
+                    packages,
+                    inventory,
+                    disabled,
+                    preferred_adapter,
+                    known_versions,
+                ))
             })
             .await??;
         self.progress(
@@ -467,15 +562,19 @@ impl Application {
         let mut excluded = BTreeSet::new();
         let mut reuse_failures = Vec::new();
         let mut builtin_probes = BTreeMap::new();
+        let mut diagnostics = Vec::new();
         loop {
             if cancellation.is_cancelled() {
                 return Err(gamel10n_engines::EngineError::Cancelled.into());
             }
-            let service = self
+            let mut service = self
                 .engine_service()
                 .with_disabled_families(disabled.clone())
                 .with_preferred_adapter(preferred_adapter.clone())
                 .with_excluded_adapters(excluded.clone());
+            if known_only {
+                service = service.with_ordered_packages_only();
+            }
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<EngineProgress>();
             let report = move |progress| {
                 let _ = tx.send(progress);
@@ -503,12 +602,20 @@ impl Application {
                 self.progress(id, "recognize", &progress.message).await;
             }
             let discovered = discovered?;
+            diagnostics.extend(
+                discovered
+                    .diagnostics
+                    .into_iter()
+                    .map(|message| message.chars().take(2000).collect::<String>()),
+            );
+            diagnostics.truncate(12);
             reuse_failures.extend(discovered.reuse_failures);
             for observation in discovered.builtin_probes {
                 builtin_probes.insert(observation.format.clone(), observation);
             }
             let mut retry = false;
             let mut extracted = None;
+            let mut known_game = false;
             if let Some(adapter) = discovered.adapter {
                 let probe = discovered
                     .probe
@@ -534,7 +641,10 @@ impl Application {
                     .extract_adapter(id, adapter, probe, cancellation, false, None, None, None)
                     .await
                 {
-                    Ok(count) => extracted = Some(count),
+                    Ok(count) => {
+                        extracted = Some(count);
+                        known_game = known_versions.contains(&(adapter_id, version));
+                    }
                     Err(CoreError::Engine(gamel10n_engines::EngineError::Incompatible {
                         stage,
                         message,
@@ -573,11 +683,16 @@ impl Application {
                 json!({
                     "reuseFailures": reuse_failures,
                     "builtinProbes": builtin_probes.values().collect::<Vec<_>>(),
+                    "diagnostics": diagnostics,
                 }),
             );
             self.store.save(&current).await?;
             if !retry {
-                return Ok((extracted, inventory));
+                return Ok(ExistingRecognition {
+                    extracted,
+                    inventory,
+                    known_game,
+                });
             }
         }
     }
@@ -2251,7 +2366,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn regular_recognition_reimports_deleted_projects_without_development_checks() {
+    async fn adding_known_game_reimports_locally_without_development_checks() {
         let tools = crate::ToolPaths::development();
         if !tools.python().is_file() {
             return;
@@ -2278,10 +2393,14 @@ mod tests {
             .await
             .unwrap();
         let reimported = app.add_project(&game).await.unwrap();
-        assert!(matches!(
-            app.recognize(&reimported.id).await.unwrap(),
-            RecognitionResult::Extracted(SMALL_EXTRACTION_THRESHOLD)
-        ));
+        assert_eq!(
+            reimported.extra["analysis"]["unitCount"],
+            SMALL_EXTRACTION_THRESHOLD
+        );
+        assert_eq!(
+            app.task_state(&reimported.id).await.unwrap().succeeded,
+            Some(true)
+        );
         assert_eq!(
             fs::read_to_string(package.join("src/calls.log"))
                 .unwrap()
@@ -2451,6 +2570,253 @@ mod tests {
                 .unwrap()
                 .join("adaptation")
                 .exists()
+        );
+    }
+
+    #[tokio::test]
+    async fn adding_deleted_game_recovers_its_trial_adapter_without_promoting_other_games() {
+        let tools = crate::ToolPaths::development();
+        if !tools.python().is_file() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let game = root.path().join("game");
+        fs::create_dir(&game).unwrap();
+        let original = br#"["one","two","three","four"]"#;
+        fs::write(game.join("text.json"), original).unwrap();
+        let app = Application::open(root.path().join("data"), &tools)
+            .await
+            .unwrap();
+        let project = app.add_project(&game).await.unwrap();
+        let package = register_json_adapter(
+            &app,
+            "fixture",
+            include_str!("../../engines/tests/fixtures/json_adapter.py"),
+        );
+        let adapter = PackageManifest::load(&package)
+            .unwrap()
+            .handle(&package)
+            .unwrap();
+        let token = CancellationToken::new();
+        let probe = app
+            .engine_service()
+            .execute(&adapter, &AdapterRequest::new("probe", &game), &token)
+            .await
+            .unwrap()
+            .probe
+            .unwrap();
+        app.extract_adapter(&project.id, adapter, probe, &token, true, None, None, None)
+            .await
+            .unwrap();
+        let original_ids = app
+            .text_page(&project.id, "", 0, 100)
+            .await
+            .unwrap()
+            .units
+            .into_iter()
+            .map(|unit| unit.id)
+            .collect::<Vec<_>>();
+        app.save_translation_edit(&project.id, "0", "已校对译文".into(), true)
+            .await
+            .unwrap();
+        app.remove_projects(std::slice::from_ref(&project.id), false)
+            .await
+            .unwrap();
+        app.add_project(&game).await.unwrap();
+        let saved = app.workbench_row(&project.id, "0").await.unwrap();
+        assert!(saved.reviewed);
+        assert_eq!(saved.text.as_deref(), Some("已校对译文"));
+
+        app.remove_projects(std::slice::from_ref(&project.id), true)
+            .await
+            .unwrap();
+        let restored = app.add_project(&game).await.unwrap();
+        assert_eq!(restored.id, project.id);
+        assert_eq!(restored.extra["analysis"]["unitCount"], 4);
+        assert_eq!(restored.extra["analysis"]["adapterVersion"], "1");
+        let restored_ids = app
+            .text_page(&project.id, "", 0, 100)
+            .await
+            .unwrap()
+            .units
+            .into_iter()
+            .map(|unit| unit.id)
+            .collect::<Vec<_>>();
+        assert_eq!(restored_ids, original_ids);
+        let catalog = EngineCatalog::open(app.data_directory()).unwrap();
+        let detail = catalog.version_detail("engine.fixture", "1").unwrap();
+        assert!(detail.lifecycle.requires_confirmation && detail.lifecycle.feedback.is_empty());
+        assert!(!detail.is_candidate);
+        assert!(catalog.discovery_candidates(None).unwrap().is_empty());
+        assert!(
+            catalog
+                .discovery_candidates_for_game("another-game", None)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            catalog
+                .discovery_candidates_for_game(&project.id, None)
+                .unwrap()[0]
+                .is_known_game
+        );
+
+        let session = app
+            .project_directory(&project.id)
+            .unwrap()
+            .join("adaptation/current/session.json");
+        write_json(&session, &json!({"lastStatus":"Incomplete"})).unwrap();
+        assert!(matches!(
+            app.recognize(&project.id).await.unwrap(),
+            RecognitionResult::Extracted(4)
+        ));
+        assert_eq!(
+            read_json::<Value>(&session).unwrap()["lastStatus"],
+            "Incomplete"
+        );
+        let history = app.consumption_history().await.unwrap();
+        assert_eq!(history.records.len(), 2);
+        assert!(history.records.iter().all(|record| record.api.requests == 0
+            && record.mode == "reused"
+            && record.model.is_none()));
+        let other = root.path().join("other-game");
+        fs::create_dir(&other).unwrap();
+        fs::write(other.join("text.json"), original).unwrap();
+        let other_project = app.add_project(&other).await.unwrap();
+        assert!(!other_project.extra.contains_key("analysis"));
+        assert!(app.task_state(&other_project.id).await.is_none());
+        assert_eq!(fs::read(game.join("text.json")).unwrap(), original);
+    }
+
+    #[tokio::test]
+    async fn known_game_recovery_checks_latest_history_before_generic_recognition_scores() {
+        let tools = crate::ToolPaths::development();
+        if !tools.python().is_file() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let game = root.path().join("game");
+        fs::create_dir(&game).unwrap();
+        fs::write(game.join("text.json"), br#"["one","two","three","four"]"#).unwrap();
+        let app = Application::open(root.path().join("data"), &tools)
+            .await
+            .unwrap();
+        let project = app.add_project(&game).await.unwrap();
+        let catalog = EngineCatalog::open(app.data_directory()).unwrap();
+        for key in ["older", "newer"] {
+            let script = include_str!("../../engines/tests/fixtures/json_adapter.py")
+                .replace("engine.fixture", &format!("engine.{key}"));
+            let script = if key == "older" {
+                script.replace(
+                    "enumerate(data)], warnings",
+                    "enumerate(data[:2])], warnings",
+                )
+            } else {
+                script
+            };
+            let package = register_json_adapter(&app, key, &script);
+            if key == "older" {
+                let mut manifest: Value = read_json(&package.join("package.json")).unwrap();
+                manifest["recognition"] = json!({"schemaVersion":1,"required":[{"patterns":["text.json"],"minimumSize":1}],"hints":[]});
+                write_json(&package.join("package.json"), &manifest).unwrap();
+            }
+            catalog
+                .register_trial_package(
+                    &package,
+                    GameCompatibility {
+                        game_id: project.id.clone(),
+                        title: project.name.clone(),
+                        variant: "fixture".into(),
+                        adapter_version: "1".into(),
+                        structure_status: "passed".into(),
+                        runtime_status: "not-tested".into(),
+                        updated_at: None,
+                    },
+                    None,
+                )
+                .unwrap();
+        }
+        let restored = app.add_project(&game).await.unwrap();
+        assert_eq!(restored.extra["analysis"]["adapterId"], "engine.newer");
+        assert_eq!(restored.extra["analysis"]["unitCount"], 4);
+        assert!(
+            app.consumption_history()
+                .await
+                .unwrap()
+                .records
+                .iter()
+                .all(|record| record.api.requests == 0)
+        );
+    }
+
+    #[tokio::test]
+    async fn adding_known_game_with_a_damaged_package_keeps_the_project_and_local_failure() {
+        let tools = crate::ToolPaths::development();
+        if !tools.python().is_file() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let game = root.path().join("game");
+        fs::create_dir(&game).unwrap();
+        fs::write(game.join("text.json"), br#"["one","two"]"#).unwrap();
+        let app = Application::open(root.path().join("data"), &tools)
+            .await
+            .unwrap();
+        let project = app.add_project(&game).await.unwrap();
+        let package = register_json_adapter(
+            &app,
+            "fixture",
+            include_str!("../../engines/tests/fixtures/json_adapter.py"),
+        );
+        EngineCatalog::open(app.data_directory())
+            .unwrap()
+            .register_trial_package(
+                &package,
+                GameCompatibility {
+                    game_id: project.id.clone(),
+                    title: project.name,
+                    variant: "fixture".into(),
+                    adapter_version: "1".into(),
+                    structure_status: "passed".into(),
+                    runtime_status: "not-tested".into(),
+                    updated_at: None,
+                },
+                None,
+            )
+            .unwrap();
+        fs::write(package.join("src/adapter.py"), b"damaged payload").unwrap();
+        app.remove_projects(std::slice::from_ref(&project.id), true)
+            .await
+            .unwrap();
+        let restored = app.add_project(&game).await.unwrap();
+        assert_eq!(restored.id, project.id);
+        assert!(!restored.extra.contains_key("analysis"));
+        let task = app.task_state(&project.id).await.unwrap();
+        assert_eq!(task.succeeded, Some(false));
+        assert!(
+            task.message.contains("适配器文件已变化"),
+            "{}",
+            task.message
+        );
+        assert!(
+            !restored.extra["discovery"]["diagnostics"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            !app.project_directory(&project.id)
+                .unwrap()
+                .join("adaptation")
+                .exists()
+        );
+        assert!(
+            app.consumption_history()
+                .await
+                .unwrap()
+                .records
+                .iter()
+                .all(|record| record.api.requests == 0)
         );
     }
 

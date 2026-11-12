@@ -200,6 +200,7 @@ pub struct EngineDiscoveryCandidate {
     pub published_at: Option<String>,
     pub descriptor: Option<EngineDiscoveryDescriptor>,
     pub is_pinned: bool,
+    pub is_known_game: bool,
 }
 
 impl EngineDiscoveryCandidate {
@@ -715,6 +716,7 @@ impl EngineCatalog {
                     published_at: entry.published_at.clone(),
                     descriptor,
                     is_pinned,
+                    is_known_game: false,
                 });
             }
         }
@@ -728,6 +730,7 @@ impl EngineCatalog {
                 published_at: None,
                 descriptor: None,
                 is_pinned: true,
+                is_known_game: false,
             });
         }
         candidates.sort_by(|left, right| {
@@ -1996,6 +1999,176 @@ mod tests {
             root.path()
                 .join("catalog/engine.fixture/games.json")
                 .is_file()
+        );
+    }
+
+    #[test]
+    fn trial_history_is_reusable_only_for_its_game_and_keeps_exclusions_and_feedback() {
+        let root = tempfile::tempdir().unwrap();
+        let package = root.path().join("packages/engine.fixture/v1");
+        fs::create_dir_all(package.join("src")).unwrap();
+        fs::write(package.join("src/adapter.py"), b"print('fixture')").unwrap();
+        write_json(&package.join("package.json"), &json!({
+            "id":"engine.fixture", "version":"v1", "manifestVersion":4,
+            "family":{"kind":"engine","key":"fixture","name":"Fixture"}, "resourcePatterns":["*.dat"]
+        })).unwrap();
+        let catalog = EngineCatalog::from_extensions_root(root.path()).unwrap();
+        catalog
+            .register_trial_package(
+                &package,
+                GameCompatibility {
+                    game_id: "game-a".into(),
+                    title: "Game A".into(),
+                    variant: "fixture".into(),
+                    adapter_version: "v1".into(),
+                    structure_status: "passed".into(),
+                    runtime_status: "not-tested".into(),
+                    updated_at: None,
+                },
+                None,
+            )
+            .unwrap();
+        assert!(catalog.discovery_candidates(None).unwrap().is_empty());
+        assert!(
+            catalog
+                .discovery_candidates_for_game("game-b", None)
+                .unwrap()
+                .is_empty()
+        );
+        let known = catalog
+            .discovery_candidates_for_game("game-a", None)
+            .unwrap();
+        assert_eq!(known.len(), 1);
+        assert!(known[0].is_known_game && !known[0].is_pinned);
+        catalog.forget_game("game-a").unwrap();
+        fs::remove_file(root.path().join("library-index.json")).unwrap();
+        let catalog = EngineCatalog::from_extensions_root(root.path()).unwrap();
+        assert_eq!(
+            catalog
+                .discovery_candidates_for_game("game-a", None)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(catalog.discovery_candidates(None).unwrap().is_empty());
+        catalog
+            .set_family_enabled(&["engine.fixture".into()], false)
+            .unwrap();
+        assert!(
+            catalog
+                .discovery_candidates_for_game("game-a", None)
+                .unwrap()
+                .is_empty()
+        );
+        catalog
+            .set_family_enabled(&["engine.fixture".into()], true)
+            .unwrap();
+        let mut state = load_state(root.path()).unwrap();
+        state["families"]["engine.fixture"]["excludedVersions"] = json!(["v1"]);
+        write_json(&root.path().join("library-state.json"), &state).unwrap();
+        assert!(
+            catalog
+                .discovery_candidates_for_game("game-a", None)
+                .unwrap()
+                .is_empty()
+        );
+        state["families"]["engine.fixture"]["excludedVersions"] = json!([]);
+        write_json(&root.path().join("library-state.json"), &state).unwrap();
+        catalog
+            .record_version_feedback(
+                &AdapterVersion {
+                    adapter_id: "engine.fixture".into(),
+                    version: "v1".into(),
+                },
+                "game-a",
+                VersionFeedback {
+                    status: "failed".into(),
+                    notes: "Unsupported layout".into(),
+                    patch_id: "fixture-patch".into(),
+                    updated_at: "2026-11-12T00:00:00Z".into(),
+                },
+            )
+            .unwrap();
+        assert!(
+            catalog
+                .discovery_candidates_for_game("game-a", None)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            catalog
+                .discovery_candidates_for_game("game-a", Some(("engine.fixture", "v1")))
+                .unwrap()
+                .is_empty()
+        );
+        catalog
+            .record_version_feedback(
+                &AdapterVersion {
+                    adapter_id: "engine.fixture".into(),
+                    version: "v1".into(),
+                },
+                "game-a",
+                VersionFeedback {
+                    status: "passed".into(),
+                    notes: "Runtime verified".into(),
+                    patch_id: "verified-patch".into(),
+                    updated_at: "2026-11-12T01:00:00Z".into(),
+                },
+            )
+            .unwrap();
+        let newer = root.path().join("packages/engine.fixture/v2");
+        fs::create_dir_all(newer.join("src")).unwrap();
+        fs::copy(package.join("src/adapter.py"), newer.join("src/adapter.py")).unwrap();
+        let mut manifest: Value = read_json(&package.join("package.json")).unwrap();
+        manifest["version"] = json!("v2");
+        write_json(&newer.join("package.json"), &manifest).unwrap();
+        catalog
+            .register_trial_package(
+                &newer,
+                GameCompatibility {
+                    game_id: "game-a".into(),
+                    title: "Game A".into(),
+                    variant: "fixture".into(),
+                    adapter_version: "v2".into(),
+                    structure_status: "passed".into(),
+                    runtime_status: "not-tested".into(),
+                    updated_at: None,
+                },
+                None,
+            )
+            .unwrap();
+        catalog
+            .record_version_feedback(
+                &AdapterVersion {
+                    adapter_id: "engine.fixture".into(),
+                    version: "v2".into(),
+                },
+                "game-a",
+                VersionFeedback {
+                    status: "failed".into(),
+                    notes: "Layout regression".into(),
+                    patch_id: "new-patch".into(),
+                    updated_at: "2026-11-12T02:00:00Z".into(),
+                },
+            )
+            .unwrap();
+        let fallback = catalog
+            .discovery_candidates_for_game("game-a", None)
+            .unwrap();
+        assert_eq!(fallback.len(), 1);
+        assert_eq!(fallback[0].version, "v1");
+        assert!(fallback[0].is_known_game);
+        assert!(
+            catalog
+                .delete_version("engine.fixture", "v1", &[])
+                .unwrap()
+                .deleted
+        );
+        assert!(
+            catalog
+                .discovery_candidates_for_game("game-a", None)
+                .unwrap()
+                .is_empty()
         );
     }
 

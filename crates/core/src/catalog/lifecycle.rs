@@ -121,15 +121,119 @@ impl EngineCatalog {
     ) -> Result<Vec<EngineDiscoveryCandidate>, CoreError> {
         let mut candidates = self.discovery_candidates(pinned)?;
         let cached = self.lock()?;
-        candidates.retain(|candidate| {
-            !cached
-                .index
-                .families
-                .get(&candidate.adapter_id)
-                .and_then(|family| family.versions.get(&candidate.version))
-                .and_then(|version| version.extra.get("lifecycle"))
-                .and_then(|value| serde_json::from_value::<VersionLifecycle>(value.clone()).ok())
-                .is_some_and(|lifecycle| lifecycle.failed_for(game_id))
+        let state = load_state(&self.root)?;
+        let mut known_updates = BTreeMap::new();
+        for (id, family) in &cached.index.families {
+            for game in family.games.iter().filter(|game| {
+                game.game_id == game_id
+                    && game.structure_status == "passed"
+                    && game.runtime_status != "failed"
+            }) {
+                let Some(entry) = family.versions.get(&game.adapter_version) else {
+                    continue;
+                };
+                if entry.source != 1 || !entry.exists {
+                    continue;
+                }
+                let version_lifecycle = entry
+                    .extra
+                    .get("lifecycle")
+                    .map(|value| serde_json::from_value::<VersionLifecycle>(value.clone()))
+                    .transpose()
+                    .map_err(|error| invalid(format!("版本验证记录无效：{error}")))?
+                    .unwrap_or_default();
+                if version_lifecycle.failed_for(game_id) {
+                    continue;
+                }
+                let existing = candidates.iter_mut().find(|candidate| {
+                    candidate.adapter_id == *id && candidate.version == game.adapter_version
+                });
+                let excluded = state["families"][id]["excludedVersions"]
+                    .as_array()
+                    .is_some_and(|versions| {
+                        versions
+                            .iter()
+                            .any(|version| version.as_str() == Some(game.adapter_version.as_str()))
+                    });
+                if let Some(candidate) = existing {
+                    if !excluded || candidate.is_pinned {
+                        candidate.is_known_game = true;
+                    }
+                } else if family.enabled && !excluded {
+                    candidates.push(EngineDiscoveryCandidate {
+                        adapter_id: id.clone(),
+                        version: game.adapter_version.clone(),
+                        directory: self
+                            .root
+                            .join("packages")
+                            .join(id)
+                            .join(&game.adapter_version),
+                        published_at: entry.published_at.clone(),
+                        descriptor: entry
+                            .extra
+                            .get("discovery")
+                            .filter(|value| !value.is_null())
+                            .and_then(|value| serde_json::from_value(value.clone()).ok()),
+                        is_pinned: false,
+                        is_known_game: true,
+                    });
+                }
+                known_updates.insert(
+                    (id.as_str(), game.adapter_version.as_str()),
+                    game.updated_at.as_deref(),
+                );
+            }
+        }
+        candidates.retain_mut(|candidate| {
+            let family_entry = cached.index.families.get_key_value(&candidate.adapter_id);
+            let family = family_entry.map(|(_, family)| family);
+            let version =
+                family.and_then(|family| family.versions.get_key_value(&candidate.version));
+            let lifecycle_value = version.and_then(|(_, version)| version.extra.get("lifecycle"));
+            let lifecycle = lifecycle_value
+                .and_then(|value| serde_json::from_value::<VersionLifecycle>(value.clone()).ok());
+            if !candidate.is_known_game
+                && version.is_some_and(|(_, version)| version.exists)
+                && lifecycle
+                    .as_ref()
+                    .is_some_and(|lifecycle| lifecycle.passed_for(game_id))
+                && let (Some((id, _)), Some((version, _)), Some(value)) =
+                    (family_entry, version, lifecycle_value)
+            {
+                candidate.is_known_game = true;
+                known_updates.insert(
+                    (id.as_str(), version.as_str()),
+                    value["feedback"][game_id]["updatedAt"].as_str(),
+                );
+            }
+            let failed = lifecycle.is_some_and(|lifecycle| lifecycle.failed_for(game_id));
+            !failed
+                && (candidate.is_pinned
+                    || !state["families"][&candidate.adapter_id]["excludedVersions"]
+                        .as_array()
+                        .is_some_and(|versions| {
+                            versions
+                                .iter()
+                                .any(|version| version.as_str() == Some(candidate.version.as_str()))
+                        }))
+                && !family.is_some_and(|family| {
+                    family.games.iter().any(|game| {
+                        game.game_id == game_id
+                            && game.adapter_version == candidate.version
+                            && game.runtime_status == "failed"
+                    })
+                })
+        });
+        candidates.sort_by(|left, right| {
+            right
+                .is_pinned
+                .cmp(&left.is_pinned)
+                .then_with(|| right.is_known_game.cmp(&left.is_known_game))
+                .then_with(|| {
+                    known_updates
+                        .get(&(right.adapter_id.as_str(), right.version.as_str()))
+                        .cmp(&known_updates.get(&(left.adapter_id.as_str(), left.version.as_str())))
+                })
         });
         Ok(candidates)
     }
