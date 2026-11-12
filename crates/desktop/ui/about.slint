@@ -1,0 +1,43 @@
+import { Button, LineEdit } from "std-widgets.slint";
+import { App, Heading, SectionHeading, Label, Caption, Divider } from "state.slint";
+
+export component About inherits VerticalLayout {
+    spacing: 16px;
+    Heading { text: "关于 GameL10n"; font-size: 26px; }
+    Label { text: "面向游戏文本汉化的 Windows 桌面工具，提供资源识别、文本提取、AI 翻译、译文校对和汉化补丁生成。"; }
+    Divider {}
+    GridLayout { spacing: 12px;
+        Row {
+            Label { text: "版本号"; vertical-alignment: center; }
+            LineEdit { text: App.software-version; read-only: true; }
+        }
+        Row {
+            Label { text: "构建 Git hash"; vertical-alignment: center; }
+            LineEdit { text: App.build-git-hash == "unknown" ? "未知" : App.build-git-hash; read-only: true; }
+        }
+    }
+    Divider {}
+    SectionHeading { text: "项目与支持"; }
+    HorizontalLayout { spacing: 12px;
+        Label { text: "GitHub 仓库"; vertical-alignment: center; }
+        LineEdit { text: App.repository-url; read-only: true; }
+        Button { text: "打开仓库"; clicked => { App.action("project-link", "repository"); } }
+    }
+    HorizontalLayout { spacing: 8px;
+        Button { text: "发布与更新"; clicked => { App.action("project-link", "releases"); } }
+        Button { text: "问题反馈"; clicked => { App.action("project-link", "issues"); } }
+        Button { text: "使用文档"; clicked => { App.action("project-link", "documentation"); } }
+        Button { text: "更新日志"; clicked => { App.action("project-link", "changelog"); } }
+        Rectangle { horizontal-stretch: 1; }
+    }
+    Divider {}
+    SectionHeading { text: "开源许可"; }
+    Label { text: "主程序采用 " + App.software-license + " 许可证。"; }
+    Caption { text: "独立组件和第三方材料保留各自的许可与版权声明。"; }
+    HorizontalLayout { spacing: 8px;
+        Button { text: "查看许可证"; clicked => { App.action("project-link", "license"); } }
+        Button { text: "第三方声明"; clicked => { App.action("project-link", "third-party"); } }
+        Rectangle { horizontal-stretch: 1; }
+    }
+    Rectangle { vertical-stretch: 1; }
+}

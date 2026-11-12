@@ -51,6 +51,24 @@ async fn confirm_game_directory(directory: PathBuf) -> Result<bool, CoreError> {
 
 pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool, CoreError> {
     match action {
+        "project-link" => {
+            let path = match input.argument.as_str() {
+                "repository" => "",
+                "releases" => "/releases",
+                "issues" => "/issues",
+                "documentation" => "/blob/main/docs/README.md",
+                "changelog" => "/blob/main/CHANGELOG.md",
+                "license" => "/blob/main/LICENSE",
+                "third-party" => "/blob/main/THIRD-PARTY-NOTICES.md",
+                _ => return Err(CoreError::InvalidData("未知的项目链接。".into())),
+            };
+            let url = format!("{}{path}", env!("CARGO_PKG_REPOSITORY"));
+            #[cfg(windows)]
+            let command = "explorer.exe";
+            #[cfg(not(windows))]
+            let command = "xdg-open";
+            std::process::Command::new(command).arg(url).spawn()?;
+        }
         "projects" => refresh_projects(ctx, &input.project_query).await?,
         "project-reference" => {
             let host = ctx.app().await;

@@ -399,6 +399,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     ui.global::<App>()
         .set_build_git_hash(gamel10n_core::metrics::BUILD_GIT_HASH.into());
     ui.global::<App>()
+        .set_repository_url(env!("CARGO_PKG_REPOSITORY").into());
+    ui.global::<App>()
+        .set_software_license(env!("CARGO_PKG_LICENSE").into());
+    ui.global::<App>()
         .on_format_token_budget(|input| token_ui::budget(&input));
     ui.global::<App>()
         .on_concise_text(|input| recognition_ui::concise_text(&input).into());

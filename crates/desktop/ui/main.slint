@@ -6,6 +6,7 @@ import { Recognition, PatchPage, TaskFeedback } from "project.slint";
 import { EngineLibrary } from "catalog.slint";
 import { DialogLayer } from "dialogs.slint";
 import { ConsumptionMetrics } from "metrics.slint";
+import { About } from "about.slint";
 export { App, ProjectRow, TextRow, NamedRow, EngineRow, TermRow, TokenDisplay, CleanupRow, MetricGroupRow, ConsumptionRow, TokenPoint, TokenSegment, MetricTick } from "state.slint";
 
 export component MainWindow inherits Window {
@@ -72,14 +73,7 @@ export component MainWindow inherits Window {
                 HorizontalLayout { Button { text: "保存程序设置"; primary: true; clicked => { App.action("save-application", ""); } } Rectangle { horizontal-stretch: 1; } }
                 Rectangle { vertical-stretch: 1; }
             }
-            if App.page == 4: VerticalLayout { spacing: 18px;
-                Heading { text: "关于 GameL10n"; font-size: 26px; }
-                Label { text: "版本号"; font-weight: 600; }
-                LineEdit { text: App.software-version; read-only: true; }
-                Label { text: "构建 Git hash"; font-weight: 600; }
-                LineEdit { text: App.build-git-hash == "unknown" ? "未知" : App.build-git-hash; read-only: true; }
-                Rectangle { vertical-stretch: 1; }
-            }
+            if App.page == 4: About {}
             if (App.page == 0 && App.project-id != "" && !(App.tab == 0 && App.recognition-running) && (App.tab != 0 || !App.recognition-ready || App.busy)) || App.activity != "" || App.error != "": TaskFeedback {}
             if App.page == 0: VerticalLayout { spacing: 8px; vertical-stretch: 0;
                 HorizontalLayout { spacing: 8px;
