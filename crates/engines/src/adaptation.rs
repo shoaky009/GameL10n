@@ -959,6 +959,9 @@ impl EngineService {
                 if name == "inspect_pe_imports" {
                     crate::adaptation_context::annotate_font_imports(&mut result);
                 }
+                if name == "inspect_unity_schema" {
+                    result["components"] = json!(components::related(Some("unity"))?);
+                }
                 Ok(result)
             }
             "adapter_protocol" => {

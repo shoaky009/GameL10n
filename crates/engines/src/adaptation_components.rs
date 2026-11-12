@@ -6,7 +6,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{collections::BTreeSet, fs, io::Write, path::Path};
 
-const VERSION: &str = "2.6.0";
+const VERSION: &str = "2.7.0";
 const USAGE: &str = "copy_adapter_components 按需复制 Python 辅助文件或预编译运行组件。work/ 中的诊断工具仅用于分析，不进入发布清单；src/ 中的组件供适配器复用。支持的 JSON CLI 可用 run_engine_python 直接运行。组件本身不保证当前游戏兼容，仍需资源回填及运行显示验证。";
 
 #[derive(Deserialize)]
@@ -104,6 +104,9 @@ fn describe(component: &Component, service: &EngineService) -> Value {
 
 fn source(name: &str) -> Result<&'static [u8], EngineError> {
     match name {
+        "unity_serialized_file.py" => {
+            Ok(include_bytes!("../../../adapters/unity/serialized_file.py"))
+        }
         "windows_font_metrics.py" => Ok(include_bytes!(
             "../../../adapters/components/windows_font_metrics.py"
         )),
@@ -365,7 +368,7 @@ mod tests {
         let root = tempfile::tempdir().expect("fixture");
         let service = service(root.path());
         let components = list("").expect("catalog");
-        assert_eq!(components.len(), 13);
+        assert_eq!(components.len(), 14);
         assert!(components.iter().all(|component| {
             component.as_object().expect("metadata").len() == 4
                 && component["version"] == VERSION
@@ -427,6 +430,48 @@ mod tests {
         assert_eq!(
             related[1]["inspectCall"],
             json!({"tool":"inspect_adapter_component","arguments":{"id":"xp3-adler"}})
+        );
+    }
+
+    #[test]
+    fn unity_component_is_discoverable_and_copies_the_existing_container_reader() {
+        let root = tempfile::tempdir().expect("fixture");
+        let service = service(root.path());
+        assert!(
+            list("Unity")
+                .expect("search")
+                .iter()
+                .any(|item| item["id"] == "unity-serialized-file")
+        );
+        assert!(
+            related(Some("unity"))
+                .expect("related")
+                .iter()
+                .any(|item| item["id"] == "unity-serialized-file")
+        );
+        let workspace = root.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace");
+        let mut state = Session::default();
+        copy(
+            &service,
+            &workspace,
+            &mut state,
+            &json!({"ids":["unity-serialized-file"]}),
+        )
+        .expect("copy");
+        let path = "src/tools/unity_serialized_file.py";
+        let content = fs::read(workspace.join(path)).expect("copied component");
+        assert_eq!(
+            content,
+            include_bytes!("../../../adapters/unity/serialized_file.py")
+        );
+        assert!(
+            matches_shipped_dependency(&service, path, &hash_bytes(&content))
+                .expect("fixed dependency")
+        );
+        assert_eq!(
+            state.release_files[0].path,
+            "tools/unity_serialized_file.py"
         );
     }
 

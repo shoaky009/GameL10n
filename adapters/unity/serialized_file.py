@@ -4,8 +4,11 @@ This handles ordinary serialized assets, not UnityFS bundles. Object payloads
 are opaque unless an adapter supplies a verified replacement.
 """
 from dataclasses import dataclass
+from collections import Counter
 from pathlib import Path
+import json
 import struct
+import sys
 
 
 class Reader:
@@ -79,6 +82,24 @@ class Object:
     offset_field: int
 
 
+@dataclass(frozen=True)
+class TextAsset:
+    object: Object
+    name: str
+    script: bytes
+    raw: bytes
+    script_offset: int
+    tail_offset: int
+
+    def replace_script(self, script):
+        if not isinstance(script, bytes):
+            raise TypeError('TextAsset 内容必须为 bytes，编码由适配器确认')
+        if script == self.script:
+            return self.raw
+        return (self.raw[:self.script_offset] + struct.pack('<i', len(script))
+                + script + bytes((-len(script)) % 4) + self.raw[self.tail_offset:])
+
+
 class SerializedFile:
     def __init__(self, path):
         self.path = Path(path)
@@ -89,7 +110,7 @@ class SerializedFile:
         metadata_size, file_size, self.data_offset = struct.unpack_from('>IQQ', raw, 20)
         if file_size != len(raw) or not 48 + metadata_size <= self.data_offset <= len(raw):
             raise ValueError('Unity 文件头边界不匹配')
-        r = Reader(raw, 48)
+        r = Reader(raw[:48 + metadata_size], 48)
         self.unity_version = r.cstring()
         if not self.unity_version.startswith('2022.'):
             raise ValueError('仅支持已验证的 Unity 2022 序列化布局')
@@ -154,6 +175,28 @@ class SerializedFile:
             obj = self.objects[obj]
         return self.data[obj.start:obj.start + obj.size]
 
+    def text_asset(self, obj):
+        if isinstance(obj, int):
+            obj = self.objects[obj]
+        if obj.class_id != 49:
+            raise ValueError('指定对象不是 TextAsset')
+        raw = self.raw(obj)
+        reader = Reader(raw)
+        name = reader.string()
+        script_offset = reader.pos
+        script = reader.take(reader.i32())
+        reader.align()
+        return TextAsset(obj, name, script, raw, script_offset, reader.pos)
+
+    def text_assets(self):
+        for obj in self.objects.values():
+            if obj.class_id == 49:
+                yield self.text_asset(obj)
+
+    def rebuild_text_assets(self, replacements):
+        return self.rebuild({pid: self.text_asset(pid).replace_script(script)
+                             for pid, script in replacements.items()})
+
     def rebuild(self, replacements):
         changed = {pid: value for pid, value in replacements.items() if value != self.raw(pid)}
         if not changed:
@@ -209,3 +252,51 @@ class UnitySet:
             return ''
         file_id, pid = struct.unpack_from('<iq', raw, 16)
         return self.scripts[self.resolve(path, file_id)].get(pid, '')
+
+
+def probe(path, *, query='', offset=0, limit=8):
+    """Inspect a container and a bounded page of names without returning scripts."""
+    if not isinstance(query, str) or len(query) > 256:
+        raise ValueError('query 必须为至多 256 字符的名称查询')
+    if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 32:
+        raise ValueError('offset 必须为非负整数，limit 必须为 1..32')
+    if Path(path).stat().st_size > 512 * 1024 * 1024:
+        raise ValueError('探测单个资源不得超过 512 MiB')
+    asset = SerializedFile(path)
+    selected = []
+    count = matches = 0
+    for text in asset.text_assets():
+        count += 1
+        if query.casefold() in text.name.casefold():
+            if offset <= matches < offset + limit:
+                selected.append(dict(pathId=text.object.path_id, name=text.name,
+                                     scriptBytes=len(text.script)))
+            matches += 1
+    return dict(status='matched', matched=True, format='unity-serialized-file',
+                serializedVersion=22, unityVersion=asset.unity_version,
+                objectCount=len(asset.objects),
+                classCounts=dict(Counter(obj.class_id for obj in asset.objects.values())),
+                textAssetCount=count, totalMatches=matches, offset=offset,
+                nextOffset=min(matches, offset + len(selected)),
+                more=offset + len(selected) < matches, textAssets=selected,
+                scope='仅确认容器与 TextAsset 字节布局，不确认文本语义、MonoBehaviour 或游戏运行。')
+
+
+def main():
+    try:
+        request = json.load(sys.stdin)
+        if not isinstance(request, dict) or request.get('operation', 'probe') != 'probe':
+            raise ValueError('仅支持 probe 操作')
+        result = probe(request['input'], query=request.get('query', ''),
+                       offset=request.get('offset', 0), limit=request.get('limit', 8))
+    except (ValueError, KeyError, TypeError) as error:
+        result = dict(status='rejected', matched=False, error=str(error))
+    except OSError as error:
+        print(json.dumps(dict(status='error', matched=False, error=str(error)), ensure_ascii=False))
+        return 1
+    print(json.dumps(result, ensure_ascii=False))
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

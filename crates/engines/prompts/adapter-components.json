@@ -1,5 +1,17 @@
 [
   {
+    "id": "unity-serialized-file",
+    "name": "Unity SerializedFile 与 TextAsset 读写",
+    "scope": "Unity 2022 小端 SerializedFile v22；保留类型表、path ID、引用和未修改对象，支持 TextAsset 原始字节读取及变长回填。不支持 UnityFS 封包，不解释脚本语法或 MonoBehaviour 字段，也不确认字体与运行显示。",
+    "origin": "复用 adapters/unity/serialized_file.py 的已验证容器读写器；Python 标准库，不依赖游戏名称或固定资源文件名。",
+    "api": "复制后 from tools.unity_serialized_file import SerializedFile。asset=SerializedFile(path)；asset.text_assets() 返回 object.path_id、name、script（bytes）；asset.rebuild_text_assets({path_id:new_bytes}) 返回新文件 bytes，未修改保持原字节。脚本编码与显示字段由适配器按当前资源确认。Reader、unity_string、UnitySet 可供已确认的字段与引用布局复用。probe JSON CLI 仅返回容器与名称分页，默认 8 项、最多 32 项，单文件至多 512 MiB，不返回脚本正文。",
+    "example": "copy_adapter_components(ids=[\"unity-serialized-file\"])\nrun_engine_python(script=\"src/tools/unity_serialized_file.py\", stdin='{\"operation\":\"probe\",\"input\":\"resources/data.assets\",\"limit\":8}')\n# In an adapter: from tools.unity_serialized_file import SerializedFile\n# Use object.path_id as object identity. Confirm each script format and encoding before selecting display text.\n# Never translate every TextAsset, localization column, lookup key or metadata string by default.",
+    "files": [
+      {"name": "unity_serialized_file.py", "path": "src/tools/unity_serialized_file.py", "binary": false}
+    ],
+    "engineFamilies": ["unity"]
+  },
+  {
     "id": "windows-font-metrics",
     "name": "Windows 字体覆盖与尺寸对比",
     "scope": "仅用于分析：检查 GDI 字体缺字、实际名称、尺寸和基线；可选 GDI+ 创建路径对比，区分 GDI 注册与私有字体集合。临时加载工作副本 TTF/TTC/OTF，不安装字体、不运行游戏、不修改资源。",

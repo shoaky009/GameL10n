@@ -7,6 +7,7 @@
 | `windows-font-metrics` | 缺字、字体尺寸及 GDI+ 字体创建路径对比 | Windows，仅分析时使用 |
 | `inspect_font_coverage` 宿主工具 | 全部译文字符与 SFNT/TTC cmap 的批量比对 | 跨平台，仅检查覆盖，完整报告在工作区 |
 | `kaguya-tblstr` | ARC/ARI 检测、解析和变长重建 | XOR-FF、四字节最小对齐、类型 0/2/3 |
+| `unity-serialized-file` | SerializedFile 容器、TextAsset 字节读取与变长回填 | Unity 2022、小端 v22；脚本语义另行确认 |
 | `xp3-adler` | 索引、成员与 Adler 派生过滤器检查 | 至少两个受保护成员通过；不提供回包器 |
 | `xp3-smil` | SMIL 名称映射、参数化 SmileCrypt 与保留式重建 | 明确参数并校验明文；替换按原始成员别名 |
 | `sjis-tunnel` | VNTextProxy 映射、容量与往返检查 | v0.0.41，最多 3422 个扩展 BMP 字符 |
@@ -36,6 +37,8 @@ run_engine_python(script="src/tools/sjis_tunnel.py", stdin='{"operation":"check"
 ```
 
 探针返回 `matched`、`rejected` 或 `needs-evidence`。TBLSTR 结构与中文编码分别报告，保留未修改记录填充，不接受超出最小对齐的未知尾部。
+
+Unity 的容器探针按名称分页返回 TextAsset 的对象 ID 和大小，不输出脚本正文。适配器可直接复用其字节读写能力，具体文本格式、编码和显示字段仍需确认；入口与边界见 [Unity SerializedFile](engines/unity-serialized-text.md)。
 
 XP3 检测只确认已验证的派生过滤器。未知索引块返回 `rebuildRequiresPreservation=true`，重建须保留；分段解码使用 `apply_key_in_place(..., member_offset=...)` 指定成员内相位。
 
