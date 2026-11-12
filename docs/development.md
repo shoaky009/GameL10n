@@ -47,6 +47,7 @@ rustup target add i686-pc-windows-msvc
 ./scripts/build-vntextpatch.ps1
 ./target/runtime/python/python.exe -I -X utf8 ./scripts/build_qlie_launcher.py
 ./scripts/build-fontbridge.ps1
+./scripts/build-game-check.ps1
 ```
 
 | 工具 | 位置与维护方式 |
@@ -55,8 +56,11 @@ rustup target add i686-pc-windows-msvc
 | VNTextPatch NativeAOT | `target/runtime/vntextpatch`；由仓库内源码构建，附带源码参考包 |
 | 共享引擎工具库 | `third_party/engine-tools` 保存版本与固定归档，准备后位于 `target/runtime/engine-tools` |
 | 预编译运行组件 | `target/runtime/adapter-components`；[QLIE 启动器](adapters/engines/qlie-filepack3-systemfont.md#启动组件接入与构建)、[GDI+ 字体桥接](adapters/components/gdiplus-font-bridge.md) |
+| 游戏运行检查 | `target/runtime/game-check/GameL10n.GameCheck.exe`；独立 Rust 工具，依赖 Windows 捕获与 OCR 能力 |
 
 `prepare-python.ps1` 和 `publish.ps1` 自动准备固定归档及宿主脚本；开发时可单独运行 `scripts/prepare-runtime.ps1` 刷新这些文件。`publish.ps1` 将已准备的运行依赖打包到发行目录的 `tools/`。版本固定与恢复规则见[固定工具依赖](adapters/adaptation-internals.md#固定工具依赖)。
+
+`publish.ps1` 自动构建运行检查组件。其原生窗口与 OCR 测试需要交互式 Windows 桌面及英语 OCR 语言包：先构建 `game_fixture` 示例，将示例 EXE 路径设为 `GAMEL10N_GAME_CHECK_FIXTURE`，再运行该工具的 `runtime` 集成测试并指定 `--ignored --test-threads=1`。测试窗口会自动清理。Core 的进程协议测试使用 `check_driver` 示例，由 `GAMEL10N_GAME_CHECK_DRIVER` 指定其路径。
 
 ## GitHub 发布
 

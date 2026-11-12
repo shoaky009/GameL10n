@@ -191,6 +191,7 @@ export component Recognition inherits VerticalLayout {
         Button { text: "项目文件"; clicked => { App.action("open", "project"); } }
         Button { text: "游戏目录"; clicked => { App.action("open", "game"); } }
         Button { text: "启动游戏"; enabled: !App.busy && App.launch-can-run; clicked => { App.action("launch-game", ""); } }
+        Button { text: "运行检查…"; enabled: !App.busy; clicked => { App.action("game-check-dialog", ""); } }
         Button { text: "启动设置"; enabled: !App.busy; clicked => { App.action("launch-settings", ""); } }
     }
     HorizontalLayout { spacing: 8px;
@@ -237,7 +238,7 @@ export component PatchPage inherits ScrollView {
         LineEdit { text: App.patch-path; read-only: true; }
         Label { text: App.patch-launch; }
         Caption { text: "当前启动：" + App.launch-summary; }
-        HorizontalLayout { Button { text: "启动游戏"; enabled: !App.busy && App.launch-can-run; clicked => { App.action("launch-game", ""); } } Button { text: "启动设置…"; enabled: !App.busy; clicked => { App.action("launch-settings", ""); } } Rectangle { horizontal-stretch: 1; } }
+        HorizontalLayout { Button { text: "启动游戏"; enabled: !App.busy && App.launch-can-run; clicked => { App.action("launch-game", ""); } } Button { text: "运行检查…"; enabled: !App.busy; clicked => { App.action("game-check-dialog", ""); } } Button { text: "启动设置…"; enabled: !App.busy; clicked => { App.action("launch-settings", ""); } } Rectangle { horizontal-stretch: 1; } }
         if App.warnings != "": VerticalLayout { spacing: 8px;
             SectionHeading { text: "补丁注意事项"; }
             ReportText { text: App.warnings; }

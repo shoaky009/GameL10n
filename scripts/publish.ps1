@@ -27,6 +27,7 @@ for ($ancestor = $OutputDirectory; $ancestor; $ancestor = [IO.Path]::GetDirector
     }
 }
 & (Join-Path $PSScriptRoot 'prepare-runtime.ps1')
+& (Join-Path $PSScriptRoot 'build-game-check.ps1') -Configuration $Configuration
 $runtime = Join-Path $repo 'target/runtime'
 $native = Join-Path $runtime 'vntextpatch/GameL10n.VnTextPatch.exe'
 $python = Join-Path $runtime 'python/python.exe'
@@ -41,6 +42,7 @@ $runtimeFiles = @(
         Get-Item -LiteralPath (Join-Path $runtime "python/$name")
     }
     Get-Item -LiteralPath (Join-Path $runtime 'host/credentials.py')
+    Get-Item -LiteralPath (Join-Path $runtime 'game-check/GameL10n.GameCheck.exe')
     Get-Item -LiteralPath (Join-Path $runtime 'adapter-components/QlieLauncher.exe')
     Get-Item -LiteralPath (Join-Path $runtime 'adapter-components/GameL10n.FontBridge.dll')
     Get-Item -LiteralPath (Join-Path $runtime 'adapter-components/GameL10n.FontBridge.LICENSE')

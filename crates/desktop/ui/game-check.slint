@@ -1,0 +1,57 @@
+import { Button, ComboBox, SpinBox, TextEdit, ScrollView, ProgressIndicator } from "std-widgets.slint";
+import { App, Theme, Caption, Label, ReportText, Divider } from "state.slint";
+
+export component GameCheckControls inherits VerticalLayout {
+    in property <length> settings-height: 300px;
+    spacing: 12px;
+    Caption { text: App.launch-summary; }
+    HorizontalLayout { spacing: 12px;
+        Caption { text: "启动检查"; width: 64px; }
+        ReportText { text: App.check-launch-result; color: App.check-launch-failed ? Theme.error : Theme.ink; horizontal-stretch: 1; min-width: 0px; }
+    }
+    HorizontalLayout { spacing: 12px;
+        Caption { text: "译文检查"; width: 64px; }
+        ReportText { text: App.check-text-result; color: App.check-text-failed ? Theme.error : Theme.ink; horizontal-stretch: 1; min-width: 0px; }
+    }
+    HorizontalLayout { spacing: 8px;
+        Button { text: "检查启动"; enabled: !App.check-running && !App.busy && App.launch-can-run; clicked => { App.action("game-check-run", "launch"); } }
+        Button { text: "检查当前译文"; enabled: !App.check-running && !App.busy && App.launch-can-run && App.check-unit-ids.length > 0; clicked => { App.action("game-check-run", "text"); } }
+        Button { text: "启动并检查"; enabled: !App.check-running && !App.busy && App.launch-can-run && App.check-unit-ids.length > 0; clicked => { App.action("game-check-run", "both"); } }
+        Rectangle { horizontal-stretch: 1; }
+        if App.check-running: Button { text: "停止"; clicked => { App.action("game-check-cancel", ""); } }
+    }
+    if App.check-running: ProgressIndicator { height: 3px; indeterminate: true; }
+    if App.check-message != "": ReportText { text: App.check-message; color: Theme.error; }
+    Divider {}
+    ScrollView { height: root.settings-height; horizontal-scrollbar-policy: always-off; content-width: self.visible-width;
+        VerticalLayout { padding-right: 12px; spacing: 10px; alignment: start;
+            Caption { text: "待检查译文 · " + App.check-unit-ids.length + " 条"; }
+            ReportText { text: App.check-expected; }
+            HorizontalLayout { spacing: 8px;
+                Button { text: "使用文本页选区"; enabled: !App.check-running && !App.busy; clicked => { App.action("game-check-selection", ""); } }
+                Button { text: "选择文本…"; enabled: !App.check-running; clicked => { App.modal = ""; App.action("tab", "1"); } }
+                Rectangle { horizontal-stretch: 1; }
+            }
+            Caption { text: "任意一条所选译文稳定出现即通过。手动进入对白后，可直接检查当前译文。"; }
+            Divider {}
+            HorizontalLayout { spacing: 10px;
+                Label { text: "识别语言"; vertical-alignment: center; }
+                ComboBox { model: ["简体中文", "繁体中文", "日语", "英语"]; current-index <=> App.check-language; enabled: !App.check-running; horizontal-stretch: 1; }
+                Label { text: "启动等待（秒）"; vertical-alignment: center; }
+                SpinBox { minimum: 5; maximum: 120; value <=> App.check-timeout; enabled: !App.check-running; width: 90px; }
+            }
+            Caption { text: "文本区域（游戏客户区的百分比）"; }
+            HorizontalLayout { spacing: 8px;
+                Label { text: "左"; vertical-alignment: center; } SpinBox { minimum: 0; maximum: 99; value <=> App.check-left; enabled: !App.check-running; horizontal-stretch: 1; }
+                Label { text: "上"; vertical-alignment: center; } SpinBox { minimum: 0; maximum: 99; value <=> App.check-top; enabled: !App.check-running; horizontal-stretch: 1; }
+                Label { text: "宽"; vertical-alignment: center; } SpinBox { minimum: 1; maximum: 100; value <=> App.check-width; enabled: !App.check-running; horizontal-stretch: 1; }
+                Label { text: "高"; vertical-alignment: center; } SpinBox { minimum: 1; maximum: 100; value <=> App.check-height; enabled: !App.check-running; horizontal-stretch: 1; }
+            }
+            Caption { text: "进入场景的操作（可留空，仅“启动并检查”时执行）"; }
+            TextEdit { text <=> App.check-steps; height: 90px; enabled: !App.check-running; }
+            Caption { text: "每行一个操作：等待 1000、按键 Enter、点击 50 50。等待单位为毫秒，点击坐标为百分比。"; }
+            HorizontalLayout { Button { text: "保存检查设置"; enabled: !App.check-running && !App.busy; clicked => { App.action("game-check-save", ""); } } Rectangle { horizontal-stretch: 1; } }
+        }
+    }
+    Caption { text: "游戏会保持打开。检查结果仅供本次查看，具体问题请在游戏中确认。"; }
+}

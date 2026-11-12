@@ -192,6 +192,7 @@ pub struct Application {
     pub(crate) tools: ToolPaths,
     pub(crate) workbenches: Arc<Mutex<HashMap<String, Arc<Mutex<crate::workbench::Workbench>>>>>,
     pub(crate) translation_scheduler: Arc<crate::translation_tasks::TranslationScheduler>,
+    pub(crate) game_check_errors: Arc<Mutex<Vec<crate::game_check::protocol::ErrorWindow>>>,
 }
 
 impl Application {
@@ -215,6 +216,7 @@ impl Application {
             translation_scheduler: Arc::new(
                 crate::translation_tasks::TranslationScheduler::default(),
             ),
+            game_check_errors: Arc::new(Mutex::new(Vec::new())),
         })
     }
 

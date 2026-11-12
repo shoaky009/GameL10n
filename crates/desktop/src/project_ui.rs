@@ -572,6 +572,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                 a.set_activity("正在暂停任务并保存进度…".into());
             });
             let host = ctx.app().await;
+            crate::game_check_ui::cancel(ctx);
             tokio::time::timeout(std::time::Duration::from_secs(60), async {
                 loop {
                     for task in host.task_states().await.into_values().filter(|s| s.running) {
@@ -587,6 +588,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
             .map_err(|_| {
                 CoreError::InvalidData("任务仍在退出，保存位置尚未切换。请稍后重试。".into())
             })?;
+            host.close_game_check_errors().await?;
             ctx.update(|ui| {
                 ui.global::<App>()
                     .set_activity("正在迁移并校验项目数据…".into())

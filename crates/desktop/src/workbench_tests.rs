@@ -549,6 +549,40 @@ fn project_actions_keep_settings_selection_and_saved_edits_in_sync_across_tabs()
         assert_eq!(app.get_launch_executable(), "game.exe");
         assert!(app.get_error().is_empty());
 
+        host.save_translation_edit(&project.id, "line-000", "运行检查测试译文".into(), false).await.unwrap();
+        ctx.set_selection(&project.id, vec!["line-000".into()]);
+        invoke_action(&ui, &ctx, "game-check-dialog", "").await;
+        assert_eq!(app.get_modal(), "game-check");
+        assert_eq!(app.get_check_project_id(), project.id.as_str());
+        invoke_action(&ui, &ctx, "game-check-selection", "").await;
+        assert_eq!(app.get_check_unit_ids().row_count(), 1);
+        assert!(app.get_check_expected().contains("运行检查测试译文"));
+        app.set_check_steps("等待 1000\n按键 Enter".into());
+        app.set_check_timeout(7);
+        invoke_action(&ui, &ctx, "game-check-save", "").await;
+        assert_eq!(host.game_check_settings(&project.id).await.unwrap().steps.len(), 2);
+        app.set_check_steps("运行 anything.exe".into());
+        invoke_action(&ui, &ctx, "game-check-save", "").await;
+        assert!(app.get_check_message().contains("第 1 行操作无效"));
+        assert_eq!(host.game_check_settings(&project.id).await.unwrap().steps.len(), 2);
+        invoke_action(&ui, &ctx, "game-check-run", "launch").await;
+        assert!(!app.get_check_running());
+        assert!(app.get_check_launch_result().starts_with("无法确认"));
+        assert_eq!(app.get_check_text_result(), "未检查");
+        let pending = crate::game_check_ui::PendingGameCheck::start(&ctx, &ui).unwrap();
+        for _ in 0..8 { app.invoke_action("game-check-run".into(), "launch".into()); }
+        assert_eq!(ctx.active_actions.load(Ordering::Acquire), 0);
+        crate::game_check_ui::cancel(&ctx);
+        assert!(ctx.session.lock().unwrap().game_check.as_ref().unwrap().is_cancelled());
+        drop(pending);
+        wait_for_actions(&ui, &ctx, "game check released").await;
+        assert!(!app.get_check_running());
+        app.set_modal("".into());
+        invoke_action(&ui, &ctx, "project", &other_project.id).await;
+        invoke_action(&ui, &ctx, "game-check-dialog", "").await;
+        assert_eq!(app.get_check_launch_result(), "未检查");
+        assert_eq!(app.get_check_unit_ids().row_count(), 0);
+
         slint::quit_event_loop().unwrap();
     })
     .unwrap();
