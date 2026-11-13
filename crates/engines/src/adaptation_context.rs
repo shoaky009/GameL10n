@@ -15,7 +15,7 @@ use crate::{
     discovery::{is_link, resolve_relative},
 };
 
-pub(crate) const DISCOVERY_REVISION: u64 = 6;
+pub(crate) const DISCOVERY_REVISION: u64 = 7;
 const CONTAINERS: &[&str] = &[
     "xp3", "rpa", "rpyc", "pack", "pak", "arc", "ypf", "int", "pfs",
 ];
@@ -342,7 +342,7 @@ impl Candidate {
             );
         }
         if self.container && self.format.key == "KirikiriKs" {
-            missing.push("待确认：XP3 内是否为 KS／SOC／TJS；SCN 格式未内置。");
+            missing.push("待确认包内脚本：KS／SOC／TJS 使用对应内置解析器；PSB SCN 使用 kirikiri-scn-text 组件。封包或过滤器失败不代表脚本解析器不可用。");
         }
         if self.compiled || self.container && self.format.key == "Renpy" {
             missing.push("待确认：源码／编译脚本与加载顺序；RPYC2 可走固定模板，未知槽、对象结构或混用资源仍需调查。");
@@ -536,6 +536,27 @@ pub(crate) fn inspect_builtin_discovery(
     root: &Path,
     cancellation: &CancellationToken,
 ) -> Result<Value, EngineError> {
+    inspect_builtin_files(root, None, cancellation)
+}
+
+pub(crate) fn inspect_builtin_samples(
+    root: &Path,
+    files: &[String],
+    cancellation: &CancellationToken,
+) -> Result<Value, EngineError> {
+    if files.len() > 128 {
+        return Err(EngineError::Protocol(
+            "单次最多检查 128 个候选文件头。".into(),
+        ));
+    }
+    inspect_builtin_files(root, Some(files), cancellation)
+}
+
+fn inspect_builtin_files(
+    root: &Path,
+    selected: Option<&[String]>,
+    cancellation: &CancellationToken,
+) -> Result<Value, EngineError> {
     if cancellation.is_cancelled() {
         return Err(EngineError::Cancelled);
     }
@@ -559,7 +580,18 @@ pub(crate) fn inspect_builtin_discovery(
             json!({"revision":DISCOVERY_REVISION,"filesScanned":0,"partial":partial,"candidates":[],"warnings":warnings}),
         );
     }
-    let mut pending = vec![(root.to_path_buf(), 0)];
+    let mut pending = Vec::new();
+    if let Some(selected) = selected {
+        for file in selected {
+            if !resolve_relative(root, file)?.is_file() {
+                return Err(EngineError::Rejected(format!("样本文件不存在：{file}")));
+            }
+            files.push(file.replace('\\', "/"));
+        }
+        scanned = files.len();
+    } else {
+        pending.push((root.to_path_buf(), 0));
+    }
     while let Some((directory, depth)) = pending.pop() {
         if cancellation.is_cancelled() {
             return Err(EngineError::Cancelled);
@@ -640,7 +672,8 @@ pub(crate) fn inspect_builtin_discovery(
             } else {
                 scanned += 1;
                 let ext = extension(&name);
-                if CONTAINERS.contains(&ext.as_str())
+                if matches!(ext.as_str(), "scn" | "psb")
+                    || CONTAINERS.contains(&ext.as_str())
                     || BUILTIN_FORMATS
                         .iter()
                         .any(|format| format.extensions.contains(&ext.as_str()))
@@ -696,6 +729,7 @@ pub(crate) fn inspect_builtin_discovery(
     let mut identified = BTreeSet::new();
     let mut neko = Vec::new();
     let mut bsscript = Vec::new();
+    let mut scn = Vec::new();
     for (_, path) in samples {
         if cancellation.is_cancelled() {
             return Err(EngineError::Cancelled);
@@ -721,6 +755,11 @@ pub(crate) fn inspect_builtin_discovery(
                 continue;
             }
         };
+        if head.starts_with(b"PSB\0") {
+            scn.push(path.clone());
+            identified.insert(path.to_lowercase());
+            continue;
+        }
         if head.starts_with(b"BSScript Rev.6\0") {
             bsscript.push(path.clone());
             identified.insert(path.to_lowercase());
@@ -835,7 +874,8 @@ pub(crate) fn inspect_builtin_discovery(
         result.insert(0,json!({"format":"BSScriptRev6","adapterId":"reference.bsscript-rev6","name":"BSScript Rev.6","evidenceKind":"script-signature",
             "evidence":["文件头匹配 BSScript Rev.6；这是格式线索，尚未内置完整适配器。",BSSCRIPT_GUIDANCE],"sampleFiles":bsscript,"missingCapabilities":["指令引用分类、变长回填和中文运行支持仍需验证。"]}));
     }
-    if root.join("Scene.pck").is_file() && root.join("Gameexe.dat").is_file() {
+    if selected.is_none() && root.join("Scene.pck").is_file() && root.join("Gameexe.dat").is_file()
+    {
         let read = || -> Result<bool, EngineError> {
             let mut input = File::open(resolve_relative(root, "Scene.pck")?)?;
             let mut header = [0; 92];
@@ -854,8 +894,18 @@ pub(crate) fn inspect_builtin_discovery(
             "候选只来自文件名或局部字节特征，尚未运行解析器、解包资源或确认游戏兼容。".into(),
         );
     }
+    let components = if scn.is_empty() {
+        vec![]
+    } else {
+        vec![
+            json!({"id":"kirikiri-scn-text","sampleFiles":scn.into_iter().take(2).collect::<Vec<_>>(),
+            "evidence":"文件头匹配 PSB；仅是格式线索，不能证明全文已解密或 SCN 布局受支持。",
+            "inspectCall":{"tool":"inspect_adapter_component","arguments":{"id":"kirikiri-scn-text"}},
+            "nextAction":"先复用组件检查已解密、无资源的 PSB v2/v3 SCN，再定位过滤器或布局缺口；不要重新实现 PSB 字符串池和偏移表。"}),
+        ]
+    };
     Ok(
-        json!({"revision":DISCOVERY_REVISION,"filesScanned":scanned,"partial":partial,"candidates":result,"warnings":warnings}),
+        json!({"revision":DISCOVERY_REVISION,"filesScanned":scanned,"partial":partial,"candidates":result,"components":components,"warnings":warnings}),
     )
 }
 
@@ -1172,7 +1222,7 @@ pub(crate) fn builtin_context(
         })
         .collect();
     let detail = json!({"observedAt":state.extra.get("builtinDiscoveryObservedAt"),"report":report,"regularProbes":state.extra.get("builtinProbes").filter(|value|value.is_array()).cloned().unwrap_or(json!([])),
-        "automaticTrials":state.extra.get("automaticTrials"),"automaticTemplate":state.extra.get("automaticTemplate"),"recentTrials":recent});
+        "automaticTrials":state.extra.get("automaticTrials"),"automaticTemplate":state.extra.get("automaticTemplate"),"workspaceSamples":state.extra.get("workspaceSamples"),"recentTrials":recent});
     let mut context="\n内置解析能力线索（程序采样，不是已验证的引擎结论；以下为记录时间的证据，资源变化后可用 list_adapters 的 refreshCandidates 刷新）：\n".to_owned()+&serde_json::to_string(&detail)?;
     context += if trials.iter().any(|trial| trial["status"] == "passed") {
         "\n记录中有解析器样本通过，仅适用于条目列出的文件及哈希。自动试用样本已暂存到 resources，可复用证据组合模板或补齐缺口；已有源码则沿用。仍需完整 test_adapter 验证中文写入，不要重复起步调查。"

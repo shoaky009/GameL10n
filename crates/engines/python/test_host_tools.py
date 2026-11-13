@@ -91,6 +91,47 @@ class HostToolsTest(unittest.TestCase):
         self.assertIn('1 MiB', large['error'])
         self.assertLessEqual(len(large['stdout'].encode()) + len(large['stderr'].encode()), 1 << 20)
 
+    def test_probe_discovers_written_samples_without_explicit_selection(self):
+        (self.root / 'work/nested/read.scn').write_bytes(b'read only')
+        result = self.execute('run', script='work/decode.py', workingDirectory='work/nested',
+                              sampleExtensions=['.ks', '.scn'], content='''
+from pathlib import Path
+Path('read.scn').read_bytes()
+Path('台詞.ks').write_bytes(b'sample')
+Path('report.json').write_text('{}')
+Path('../../src').mkdir(exist_ok=True)
+Path('../../src/ignored.ks').write_bytes(b'not a working sample')
+Path('removed.ks').write_bytes(b'deleted')
+Path('removed.ks').unlink()
+print('unchanged stdout')
+''')
+        self.assertTrue(result['success'], result)
+        self.assertEqual(result['writtenFiles'], ['work/nested/台詞.ks'])
+        self.assertFalse(result['writtenFilesPartial'])
+        self.assertEqual(result['stdout'].strip(), 'unchanged stdout')
+        self.assertEqual(list((self.root / 'work').glob('.sample-files-*')), [])
+
+    def test_atomic_sample_replacement_and_failed_probe_keep_written_paths(self):
+        result = self.execute('run', script='work/decode.py', sampleExtensions=['.scn'], content='''
+from pathlib import Path
+Path('work/scene.tmp').write_bytes(b'PSB sample')
+Path('work/scene.tmp').replace('work/scene.scn')
+raise ValueError('later experiment failed')
+''')
+        self.assertFalse(result['success'])
+        self.assertEqual(result['writtenFiles'], ['work/scene.scn'])
+        self.assertIn('later experiment failed', result['stderr'])
+
+    def test_written_sample_tracking_is_bounded(self):
+        result = self.execute('run', script='work/many.py', sampleExtensions=['.ks'], content='''
+from pathlib import Path
+for index in range(140):
+    Path(f'work/{index}.ks').write_bytes(b'sample')
+''')
+        self.assertTrue(result['success'])
+        self.assertEqual(len(result['writtenFiles']), 128)
+        self.assertTrue(result['writtenFilesPartial'])
+
     def test_experiment_report_returns_bounded_observations_and_retains_full_local_details(self):
         result = self.execute('run', script='work/report.py', questionId='archive-filter',
                               reportFile='work/reports/report.json', workingDirectory='work/nested', content='''

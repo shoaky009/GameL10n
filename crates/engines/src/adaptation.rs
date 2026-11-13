@@ -622,6 +622,8 @@ impl EngineService {
                 state.verified_fingerprint = None;
             }
             state.extra.insert("launchInspection".into(), launch);
+            Self::report(progress, "检查已有工作样本", "正在复用解析器检查已暂存或解密的脚本样本。");
+            automatic::inspect_workspace(self, &workspace, &mut state, cancellation).await?;
             if continuing {
                 automatic::run_trials(
                     self,
@@ -649,7 +651,7 @@ impl EngineService {
         }
         .await;
         trace_run(
-            json!({"operation":"local-preparation","elapsedMs":preparation_started.elapsed().as_millis(),"automaticTrials":state.extra.get("automaticTrials"),"automaticTemplate":state.extra.get("automaticTemplate")}),
+            json!({"operation":"local-preparation","elapsedMs":preparation_started.elapsed().as_millis(),"automaticTrials":state.extra.get("automaticTrials"),"automaticTemplate":state.extra.get("automaticTemplate"),"workspaceSamples":state.extra.get("workspaceSamples")}),
         )?;
         match prepared {
             Ok(Some(adapter)) => {
@@ -1260,14 +1262,19 @@ impl EngineService {
                     .await
             }
             "run_engine_python" => {
+                let mut samples = automatic::sample_files(workspace, args)?;
                 if let Some(id) = args.get("questionId") {
                     decision::validate_question_id(id.as_str().ok_or_else(|| {
                         EngineError::Protocol("questionId 必须是字符串。".into())
                     })?)?;
                 }
                 let mut params = args.clone();
+                if let Some(params) = params.as_object_mut() {
+                    params.remove("sampleFiles");
+                }
                 params["operation"] = json!("run");
                 params["workspace"] = json!(workspace);
+                params["sampleExtensions"] = json!(automatic::sample_extensions());
                 if params.get("questionId").is_none()
                     && let Some(problem) = &state.decision.current_problem
                 {
@@ -1293,6 +1300,29 @@ impl EngineService {
                     .insert("engineReference".into(), reference.clone());
                 let mut result = self.helper(&params, cancellation).await?;
                 result["revision"] = reference["revision"].clone();
+                if samples.is_empty() {
+                    samples.extend(
+                        result["writtenFiles"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(Value::as_str)
+                            .take(128)
+                            .map(str::to_owned),
+                    );
+                }
+                if let Some(result) = result.as_object_mut() {
+                    result.remove("writtenFiles");
+                    if result.get("writtenFilesPartial") == Some(&json!(false)) {
+                        result.remove("writtenFilesPartial");
+                    }
+                }
+                if !samples.is_empty() {
+                    result["builtinSamples"] = automatic::sample_result(
+                        automatic::inspect_samples(self, workspace, state, &samples, cancellation)
+                            .await,
+                    );
+                }
                 Ok(result)
             }
             "run_tool" => {
@@ -1304,8 +1334,22 @@ impl EngineService {
             "inspect_engine_component" => describe_engine_components(args),
             "inspect_font_coverage" => font::run(workspace, args, cancellation),
             "run_engine_component" => {
-                self.run_component(workspace, state, args, cancellation)
-                    .await
+                let mut result = self
+                    .run_component(workspace, state, args, cancellation)
+                    .await?;
+                if result["success"] == true && args["operation"] == "extract" {
+                    result["builtinSamples"] = automatic::sample_result(
+                        automatic::inspect_directory(
+                            self,
+                            workspace,
+                            state,
+                            text(&result, "extractedDirectory")?,
+                            cancellation,
+                        )
+                        .await,
+                    );
+                }
+                Ok(result)
             }
             "compose_adapter_template" => {
                 self.compose_template(workspace, state, args, cancellation)
@@ -1741,7 +1785,11 @@ impl EngineService {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
-        trials.retain(|trial| trial["format"].as_str() != Some(format));
+        trials.retain(|trial| {
+            !(trial["format"] == format
+                && trial["directory"] == directory
+                && trial["files"] == json!(files))
+        });
         let mut observation = result.clone();
         observation["directory"] = json!(directory);
         observation["files"] = json!(files);

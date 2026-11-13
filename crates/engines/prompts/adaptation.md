@@ -73,6 +73,8 @@ sourceAvailable=false/sourceBundleIssue denotes a host asset problem, not an uns
 If binaryAvailable=true, try that parser on real samples; do not rewrite it solely because bundled source is unavailable.
 Use inspect_builtin_adapter / try_builtin_adapter on representative staged samples and required companions, then copy_adapter
 to reuse the parser; add only missing container, version or runtime glue. Don't fetch or rewrite bundled code first.
+Python output samples are discovered and tried locally by the host; sampleFiles can explicitly select existing or externally produced files.
+Reuse returned parser evidence or component entries and implement only the evidenced gap; file signatures alone do not prove full decryption.
 For archives, inspect_engine_component / run_engine_component call fixed bounded entry points directly on staged copies;
 prefer these to writing another Python wrapper. Inspect/extract/rebuild results are structural evidence, not runtime acceptance.
 When list_adapters.templates has a matching container/script combination, compose_adapter_template supplies the complete

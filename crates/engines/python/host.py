@@ -596,6 +596,48 @@ from pathlib import Path
 
 sys.dont_write_bytecode = True
 
+sample_root = os.environ.get('GAMEL10N_SAMPLE_ROOT')
+sample_output = os.environ.get('GAMEL10N_SAMPLE_FILES')
+sample_extensions = set(json.loads(os.environ.get('GAMEL10N_SAMPLE_EXTENSIONS', '[]')))
+written_files = {}
+written_bytes = 0
+written_partial = False
+
+def record_sample(event, args):
+    global written_bytes, written_partial
+    if not sample_root or not sample_extensions:
+        return
+    if event == 'open' and len(args) == 3:
+        path, mode, flags = args
+        if not isinstance(flags, int) or not flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND):
+            return
+    elif event == 'os.rename' and len(args) == 4 and args[3] in (None, -1):
+        path = args[1]
+    else:
+        return
+    if not isinstance(path, (str, bytes)):
+        return
+    try:
+        path = os.fsdecode(path)
+        if Path(path).suffix.lower() not in sample_extensions:
+            return
+        relative = os.path.relpath(os.path.abspath(path), sample_root).replace(os.sep, '/')
+        if relative.split('/')[0] not in ('work', 'resources'):
+            return
+        key = relative.casefold()
+        if key in written_files:
+            return
+        size = len(json.dumps(relative, ensure_ascii=True).encode('ascii')) + 2
+        if len(written_files) >= 128 or len(relative.encode('utf-8')) > 512 or written_bytes + size > (60 << 10):
+            written_partial = True
+            return
+        written_files[key] = relative
+        written_bytes += size
+    except (OSError, ValueError, UnicodeError):
+        return
+
+sys.addaudithook(record_sample)
+
 def write_report(*, status, **fields):
     path = os.environ.get('GAMEL10N_REPORT_FILE')
     if not path:
@@ -606,15 +648,24 @@ def write_report(*, status, **fields):
 args = sys.argv[1:]
 sys.argv = args[1:] if args[0] == '-m' else args
 globals_ = dict(write_report=write_report)
-if args[0] == '-m':
-    runpy.run_module(args[1], run_name='__main__', init_globals=globals_)
-else:
-    runpy.run_path(args[0], run_name='__main__', init_globals=globals_)
+try:
+    if args[0] == '-m':
+        runpy.run_module(args[1], run_name='__main__', init_globals=globals_)
+    else:
+        runpy.run_path(args[0], run_name='__main__', init_globals=globals_)
+finally:
+    if sample_output:
+        Path(sample_output).write_text(json.dumps(dict(files=list(written_files.values()), partial=written_partial),
+                                                ensure_ascii=True), encoding='utf-8')
 '''
 
 
 def run(request):
     workspace = Path(request['workspace']).resolve()
+    sample_extensions = request.get('sampleExtensions', [])
+    if (not isinstance(sample_extensions, list) or len(sample_extensions) > 64
+            or any(not isinstance(ext, str) or len(ext) > 16 for ext in sample_extensions)):
+        raise ValueError('样本扩展名列表无效。')
     report = request.get('reportFile')
     previous_report = None
     if report is not None:
@@ -657,6 +708,8 @@ def run(request):
     environment = os.environ.copy()
     environment.pop('GAMEL10N_REPORT_FILE', None)
     environment.pop('GAMEL10N_QUESTION_ID', None)
+    for name in ('GAMEL10N_SAMPLE_ROOT', 'GAMEL10N_SAMPLE_FILES', 'GAMEL10N_SAMPLE_EXTENSIONS'):
+        environment.pop(name, None)
     paths = request.get('toolPaths') or {}
     if paths.get('hostCommand'): environment['GAMEL10N_ADAPTER_HOST'] = json.dumps(paths['hostCommand'])
     if paths.get('vnTextPatchCommand'): environment['GAMEL10N_VNTEXTPATCH_COMMAND'] = json.dumps(paths['vnTextPatchCommand'])
@@ -667,7 +720,27 @@ def run(request):
     if question is not None:
         environment['GAMEL10N_QUESTION_ID'] = question
     script_hash = hashlib.sha256(path.read_bytes()).hexdigest() if script else None
-    result = run_process([sys.executable, '-I', '-X', 'utf8', '-c', code, *target, *arguments], workspace, request, environment)
+    sample_directory = safe(workspace, 'work')
+    sample_directory.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='.sample-files-', dir=sample_directory) as tracking:
+        sample_path = Path(tracking) / 'written.json'
+        if sample_extensions:
+            environment.update(GAMEL10N_SAMPLE_ROOT=str(workspace), GAMEL10N_SAMPLE_FILES=str(sample_path),
+                               GAMEL10N_SAMPLE_EXTENSIONS=json.dumps(sample_extensions))
+        result = run_process([sys.executable, '-I', '-X', 'utf8', '-c', code, *target, *arguments], workspace, request, environment)
+        if sample_extensions and sample_path.is_file():
+            try:
+                sample_path = safe(workspace, sample_path.relative_to(workspace).as_posix())
+                with sample_path.open('rb') as stream:
+                    tracked = json.loads(stream.read((64 << 10) + 1))
+                if not isinstance(tracked.get('files'), list) or len(tracked['files']) > 128:
+                    raise ValueError('输出样本列表超限。')
+                result['writtenFiles'] = [file for file in tracked['files']
+                                          if isinstance(file, str) and file.startswith(('work/', 'resources/'))
+                                          and safe(workspace, file).is_file()]
+                result['writtenFilesPartial'] = tracked.get('partial') is True
+            except (OSError, ValueError, TypeError) as error:
+                result['writtenFilesError'] = str(error)
     result['executionSucceeded'] = result['success']
     if question is not None:
         result['questionId'] = question

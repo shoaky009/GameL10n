@@ -1,4 +1,4 @@
-//! Bounded first-turn reuse of built-in parsers and complete, known resource templates.
+//! Bounded parser trials and first-turn composition of complete resource templates.
 use super::*;
 use crate::discovery::{glob_match, is_link};
 use sha2::{Digest, Sha256};
@@ -253,6 +253,9 @@ fn parser_fingerprint(
     token: &CancellationToken,
 ) -> Result<String, EngineError> {
     let executable = service.tools.vntextpatch();
+    if !executable.is_file() {
+        return Err(EngineError::ToolMissing(executable));
+    }
     let assembly = executable.with_extension("dll");
     let runtime = executable.with_extension("runtimeconfig.json");
     let mut files = vec![executable];
@@ -261,6 +264,10 @@ fn parser_fingerprint(
     }
     if runtime.is_file() {
         files.push(runtime);
+    }
+    let capstone = service.tools.vntextpatch().with_file_name("capstone.dll");
+    if capstone.is_file() {
+        files.push(capstone);
     }
     let hashes: Vec<_> = files
         .iter()
@@ -321,9 +328,6 @@ pub(super) async fn run(
     cancellation: &CancellationToken,
     progress: ProgressCallback<'_>,
 ) -> Result<Option<AdapterHandle>, EngineError> {
-    if !fresh(request, workspace, state)? {
-        return Ok(None);
-    }
     run_trials(
         service,
         request,
@@ -346,6 +350,359 @@ pub(super) async fn run(
     .await
 }
 
+pub(super) fn sample_files(workspace: &Path, args: &Value) -> Result<Vec<String>, EngineError> {
+    if args.get("sampleFiles").is_none() {
+        return Ok(Vec::new());
+    }
+    let files: Vec<_> = strings(args, "sampleFiles")?
+        .into_iter()
+        .map(|file| file.replace('\\', "/"))
+        .collect();
+    if files.len() > 12 {
+        return Err(EngineError::Protocol("单次最多提交 12 个样本文件。".into()));
+    }
+    let mut known = BTreeSet::new();
+    for file in &files {
+        if !matches!(file.split('/').next(), Some("work" | "resources"))
+            || !known.insert(file.to_lowercase())
+        {
+            return Err(EngineError::Protocol(
+                "样本须为不重复的 work/ 或 resources/ 相对文件路径。".into(),
+            ));
+        }
+        resolve_relative(workspace, file)?;
+    }
+    Ok(files)
+}
+
+pub(super) fn sample_extensions() -> Vec<String> {
+    let mut extensions: BTreeSet<_> = crate::adaptation_context::builtin_catalog()
+        .into_iter()
+        .filter(|format| {
+            crate::vntextpatch::FORMATS.contains(&format["format"].as_str().unwrap_or(""))
+        })
+        .flat_map(|format| format["extensions"].as_array().cloned().unwrap_or_default())
+        .filter_map(|extension| extension.as_str().map(str::to_owned))
+        .collect();
+    extensions.extend([".scn".into(), ".psb".into()]);
+    extensions.into_iter().collect()
+}
+
+// Supplementary checks must not discard a completed extraction or experiment.
+pub(super) fn sample_result(outcome: Result<Value, EngineError>) -> Value {
+    outcome.unwrap_or_else(|error| {
+        json!({
+            "status":if matches!(error, EngineError::Cancelled) {"cancelled"} else {"incomplete"},
+            "error":limit(&error.to_string(),500),"runtimeStatus":"not-tested"
+        })
+    })
+}
+
+fn parser_reuse(workspace: &Path, format: &str, result: &mut Value) {
+    if result["status"] != "passed" {
+        return;
+    }
+    if workspace.join("src/adapter.py").exists() {
+        if let Some(result) = result.as_object_mut() {
+            result.remove("reuseCall");
+        }
+        result["nextAction"] = json!(
+            "保留当前适配器入口与固定依赖，通过 tools.gamel10n_host.parser 接入已验证的小样格式；先检查固定工具版本是否提供所需接口，不用 copy_adapter 覆盖已有代码。仍须完整 test_adapter。"
+        );
+    } else {
+        result["reuseCall"] = json!({"tool":"copy_adapter","arguments":{"id":format!("engine.vntextpatch-{}",format.to_ascii_lowercase()),"version":"1.0.1"}});
+    }
+}
+
+async fn try_cached_sample(
+    service: &EngineService,
+    workspace: &Path,
+    state: &mut Session,
+    format: &str,
+    directory: &str,
+    files: &[String],
+    token: &CancellationToken,
+) -> Result<Value, EngineError> {
+    let root = resolve_relative(workspace, directory)?;
+    let lengths: BTreeMap<_, _> = files
+        .iter()
+        .map(|file| {
+            Ok((
+                file.clone(),
+                resolve_relative(&root, file)?.metadata()?.len(),
+            ))
+        })
+        .collect::<Result<_, EngineError>>()?;
+    if files.is_empty()
+        || files.len() > 12
+        || lengths
+            .values()
+            .try_fold(0_u64, |sum, length| sum.checked_add(*length))
+            .is_none_or(|bytes| bytes > TRIAL_BYTES)
+    {
+        return Err(reject("试用样本超过 12 文件／64 MiB 预算。"));
+    }
+    let hashes = sample_hashes(&root, &lengths, token)?;
+    let parser = parser_fingerprint(service, token)?;
+    let fingerprint = hash_text(&json!({"trialRevision":2,"format":format,"directory":directory,"parser":parser,"files":hashes}).to_string());
+    if let Some(trial) = state
+        .extra
+        .get("builtinTrials")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|trial| trial["fingerprint"] == fingerprint)
+    {
+        let mut result = trial.clone();
+        result["cached"] = json!(true);
+        parser_reuse(workspace, format, &mut result);
+        return Ok(result);
+    }
+    let result = service
+        .try_builtin_sample(
+            workspace,
+            state,
+            &json!({"format":format,"directory":directory,"files":files,"checkRoundtrip":true}),
+            token,
+        )
+        .await?;
+    if sample_hashes(&root, &lengths, token)? != hashes
+        || result["sourceHashes"] != json!(hashes)
+        || parser_fingerprint(service, token)? != parser
+    {
+        return Err(reject("试用期间样本或解析工具发生变化，结果未缓存。"));
+    }
+    let mut result = result;
+    if let Some(samples) = result["samples"].as_array_mut() {
+        samples.truncate(2);
+        for sample in samples {
+            if let Some(text) = sample["text"].as_str() {
+                sample["text"] = json!(limit(text, 120));
+            }
+        }
+    }
+    if let Some(trial) = state
+        .extra
+        .get_mut("builtinTrials")
+        .and_then(Value::as_array_mut)
+        .and_then(|trials| {
+            trials.iter_mut().rev().find(|trial| {
+                trial["format"] == format
+                    && trial["directory"] == directory
+                    && trial["files"] == json!(files)
+            })
+        })
+    {
+        let observed_at = trial["observedAt"].clone();
+        *trial = result.clone();
+        trial["directory"] = json!(directory);
+        trial["files"] = json!(files);
+        trial["observedAt"] = observed_at;
+        trial["fingerprint"] = if matches!(result["status"].as_str(), Some("passed" | "no-text"))
+            || deterministic(&result["diagnostic"])
+        {
+            json!(fingerprint)
+        } else {
+            Value::Null
+        };
+    }
+    result["cached"] = json!(false);
+    parser_reuse(workspace, format, &mut result);
+    Ok(result)
+}
+
+pub(super) async fn inspect_samples(
+    service: &EngineService,
+    workspace: &Path,
+    state: &mut Session,
+    files: &[String],
+    cancellation: &CancellationToken,
+) -> Result<Value, EngineError> {
+    let budget = Budget::new(cancellation, Duration::from_secs(60));
+    let token = &budget.token;
+    let mut result = json!({"status":"incomplete","trials":[],"runtimeStatus":"not-tested"});
+    let outcome = async {
+        let report = crate::adaptation_context::inspect_builtin_samples(workspace, files, token)?;
+        result["candidates"] = report["candidates"].clone();
+        result["components"] = report["components"].clone();
+        let catalog = crate::adaptation_context::builtin_catalog();
+        let mut selected_bytes = 0_u64;
+        for candidate in report["candidates"].as_array().into_iter().flatten() {
+            let Some(definition) = catalog.iter().find(|definition| {
+                definition["format"] == candidate["format"]
+                    && crate::vntextpatch::FORMATS
+                        .contains(&definition["format"].as_str().unwrap_or(""))
+            }) else {
+                continue;
+            };
+            if service.disabled_families.contains(text(definition, "id")?) {
+                continue;
+            }
+            let Some(first) = candidate["sampleFiles"]
+                .as_array()
+                .and_then(|files| files.first())
+                .and_then(Value::as_str)
+            else {
+                continue;
+            };
+            let Some((directory, _)) = first.split_once('/') else {
+                continue;
+            };
+            if !matches!(directory, "work" | "resources") {
+                continue;
+            }
+            let root = resolve_relative(workspace, directory)?;
+            let mut selected = BTreeSet::new();
+            for file in candidate["sampleFiles"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .filter_map(|file| file.strip_prefix(&format!("{directory}/")))
+            {
+                if definition["extensions"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|ext| {
+                        ext.as_str().is_some_and(|ext| {
+                            ext.trim_start_matches('.')
+                                .eq_ignore_ascii_case(&extension(file))
+                        })
+                    })
+                {
+                    selected.extend(sample_group(definition, &root, file)?);
+                }
+            }
+            if selected.is_empty() {
+                continue;
+            }
+            let lengths = selected
+                .iter()
+                .map(|file| Ok(resolve_relative(&root, file)?.metadata()?.len()))
+                .collect::<Result<Vec<_>, EngineError>>()?;
+            let bytes = lengths
+                .iter()
+                .try_fold(selected_bytes, |sum, bytes| sum.checked_add(*bytes));
+            if selected.len() > 12 || bytes.is_none_or(|bytes| bytes > TRIAL_BYTES) {
+                continue;
+            }
+            selected_bytes = bytes.unwrap_or(0);
+            let trial_budget = Budget::new(token, Duration::from_secs(20));
+            let trial = try_cached_sample(
+                service,
+                workspace,
+                state,
+                text(definition, "format")?,
+                directory,
+                &selected.into_iter().collect::<Vec<_>>(),
+                &trial_budget.token,
+            )
+            .await?;
+            result["trials"]
+                .as_array_mut()
+                .ok_or_else(|| reject("试用结果列表无效。"))?
+                .push(trial);
+            if result["trials"]
+                .as_array()
+                .is_some_and(|trials| trials.len() >= 3)
+            {
+                break;
+            }
+        }
+        Ok::<_, EngineError>(())
+    }
+    .await;
+    match outcome {
+        Ok(()) => result["status"] = json!("completed"),
+        Err(EngineError::Cancelled) if cancellation.is_cancelled() => {
+            return Err(EngineError::Cancelled);
+        }
+        Err(error) => {
+            if matches!(error, EngineError::ToolMissing(_)) {
+                result["status"] = json!("unavailable");
+            }
+            result["error"] = json!(limit(&error.to_string(), 500));
+            result["nextAction"] = json!(
+                "检查所选样本、伴随文件和本地解析工具；超时或工具故障不代表脚本格式不兼容。已有实验输出仍可复用。"
+            );
+        }
+    }
+    Ok(result)
+}
+
+pub(super) async fn inspect_directory(
+    service: &EngineService,
+    workspace: &Path,
+    state: &mut Session,
+    directory: &str,
+    cancellation: &CancellationToken,
+) -> Result<Value, EngineError> {
+    let outcome = (|| {
+        let root = resolve_relative(workspace, directory)?;
+        let report = crate::adaptation_context::inspect_builtin_discovery(&root, cancellation)?;
+        let files: Vec<_> = ["candidates", "components"]
+            .into_iter()
+            .flat_map(|key| report[key].as_array().into_iter().flatten())
+            .flat_map(|candidate| candidate["sampleFiles"].as_array().into_iter().flatten())
+            .filter_map(Value::as_str)
+            .map(|file| format!("{directory}/{file}"))
+            .take(12)
+            .collect();
+        sample_files(workspace, &json!({"sampleFiles":files}))
+    })();
+    match outcome {
+        Ok(files) => inspect_samples(service, workspace, state, &files, cancellation).await,
+        Err(EngineError::Cancelled) => Err(EngineError::Cancelled),
+        Err(error) => Ok(
+            json!({"status":"incomplete","error":limit(&error.to_string(),500),"runtimeStatus":"not-tested"}),
+        ),
+    }
+}
+
+pub(super) async fn inspect_workspace(
+    service: &EngineService,
+    workspace: &Path,
+    state: &mut Session,
+    cancellation: &CancellationToken,
+) -> Result<(), EngineError> {
+    let mut components = Vec::new();
+    let mut issues = Vec::new();
+    let mut trials = 0;
+    let budget = Budget::new(cancellation, Duration::from_secs(60));
+    for directory in ["work", "resources"] {
+        if !workspace.join(directory).is_dir() {
+            continue;
+        }
+        let result =
+            match inspect_directory(service, workspace, state, directory, &budget.token).await {
+                Ok(result) => result,
+                Err(EngineError::Cancelled) if !cancellation.is_cancelled() => {
+                    issues.push("已有样本检查达到 60 秒预算，未完成部分仍需确认。".into());
+                    break;
+                }
+                Err(error) => return Err(error),
+            };
+        trials += result["trials"].as_array().map_or(0, Vec::len);
+        components.extend(
+            result["components"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .cloned(),
+        );
+        if let Some(error) = result["error"].as_str() {
+            issues.push(format!("{directory}：{}", limit(error, 500)));
+        }
+    }
+    if trials > 0 || !components.is_empty() || !issues.is_empty() {
+        state.extra.insert("workspaceSamples".into(), json!({"trialCount":trials,"components":components,"issues":issues,"runtimeStatus":"not-tested"}));
+    } else {
+        state.extra.remove("workspaceSamples");
+    }
+    Ok(())
+}
+
 pub(super) async fn run_trials(
     service: &EngineService,
     request: &AdaptationRequest<'_>,
@@ -355,7 +712,9 @@ pub(super) async fn run_trials(
     cancellation: &CancellationToken,
     progress: ProgressCallback<'_>,
 ) -> Result<(), EngineError> {
-    if !fresh(request, workspace, state)? {
+    // Bound originals may differ from installed files. Explicit workspace samples
+    // remain available for these tasks without replacing their production inputs.
+    if !request.inputs.files.is_empty() || !request.inputs.excluded.is_empty() {
         return Ok(());
     }
     let mut candidates = candidates(state);
@@ -370,7 +729,6 @@ pub(super) async fn run_trials(
     let mut reused = 0_u32;
     let mut attempted = 0;
     let mut selected_bytes = 0_u64;
-    let mut parser = None::<String>;
     record(
         state,
         path,
@@ -397,31 +755,24 @@ pub(super) async fn run_trials(
                 selected_bytes+=bytes.unwrap_or(0);lengths.extend(extra);scripts+=1;
             }
             if scripts==0{if skipped.len()<6{skipped.push(format!("{format}：没有可直接试用的裸脚本样本；封包、编译脚本和私有过滤器需要另行确认。"));}continue;}
-            if parser.is_none(){match parser_fingerprint(service,token){Ok(fingerprint)=>parser=Some(fingerprint),Err(EngineError::Cancelled)=>return Err(EngineError::Cancelled),Err(error)=>{record(state,path,"automaticTrials",json!({"revision":1,"status":"unavailable","reused":reused,"skipped":skipped,"error":format!("本地内置解析工具不可用，未执行自动试用；这是工具资产问题，不是格式不兼容：{}",limit(&error.to_string(),300))})).await?;return Ok(false);}}}
             attempted+=1;EngineService::report(progress,"自动试用内置解析器",format!("正在用 {} 个工作副本检查 {format} 的提取与原文回填。",lengths.len()));
             let candidate_budget=Budget::new(token,Duration::from_secs(20));let token=&candidate_budget.token;
             let hashes=sample_hashes(&request.game_directory,&lengths,token)?;
-            let file_hashes:Vec<_>=hashes.iter().map(|(key,value)|json!({"key":key,"value":value})).collect();
-            let fingerprint=hash_text(&json!({"revision":1,"trialRevision":1,"format":format,"parserFingerprint":parser,"files":file_hashes}).to_string());
-            let cached=state.extra.get("builtinTrials").and_then(Value::as_array).into_iter().flatten().any(|trial|trial["format"]==format&&trial["fingerprint"]==fingerprint);
-            if !cached&&let Some(trials)=state.extra.get_mut("builtinTrials").and_then(Value::as_array_mut){trials.retain(|trial|trial["format"]!=format);}
+            let conflict=lengths.iter().find(|(file,length)|{
+                resolve_relative(&workspace.join("resources"),file).is_ok_and(|copy|copy.exists()&&!checked_hash(&copy,**length,token).is_ok_and(|hash|hash==hashes[*file]))
+            });
+            if let Some((file,_))=conflict {if skipped.len()<6{skipped.push(format!("{format}：已有工作副本与游戏文件不同，未替换 {file}；可直接提交工作区样本试用。"));}continue;}
             stage(&request.game_directory,workspace,state,&lengths,&hashes,token)?;
-            if parser.as_deref()!=Some(&parser_fingerprint(service,token)?){return Err(reject("自动试用期间解析工具发生变化，结果未复用。"));}
-            if cached{reused+=1;continue;}
             let files:Vec<_>=lengths.keys().cloned().collect();
-            let result=service.try_builtin_sample(workspace,state,&json!({"format":format,"directory":"resources","files":files,"checkRoundtrip":true}),token).await?;
+            let result=try_cached_sample(service,workspace,state,format,"resources",&files,token).await?;
+            reused+=u32::from(result["cached"]==true);
             let after=sample_hashes(&request.game_directory,&lengths,token)?;
             if hashes!=after||result["sourceHashes"].as_object().into_iter().flatten().any(|(file,hash)|hashes.get(file).is_none_or(|expected|hash.as_str()!=Some(expected))){return Err(reject("自动试用期间原始资源或样本发生变化，结果未缓存，请重新确认资源。"));}
-            if parser.as_deref()!=Some(&parser_fingerprint(service,token)?){return Err(reject("自动试用期间解析工具发生变化，结果未缓存。"));}
-            if let Some(trial)=state.extra.get_mut("builtinTrials").and_then(Value::as_array_mut).and_then(|trials|trials.iter_mut().find(|trial|trial["format"]==format)){
-                trial["fingerprint"]=if matches!(result["status"].as_str(),Some("passed"|"no-text"))||deterministic(&result["diagnostic"]){json!(fingerprint)}else{Value::Null};
-                if let Some(samples)=trial["samples"].as_array_mut(){samples.truncate(2);for sample in samples{if let Some(text)=sample["text"].as_str(){sample["text"]=json!(limit(text,120));}}}
-            }save_session(path,state).await?;
-        }Ok::<_,EngineError>(true)
+            save_session(path,state).await?;
+        }Ok::<_,EngineError>(())
     }.await;
     match outcome {
-        Ok(false) => Ok(()),
-        Ok(true) => record(
+        Ok(()) => record(
             state,
             path,
             "automaticTrials",
@@ -701,7 +1052,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn existing_implementation_skips_automatic_work() {
+    async fn existing_implementation_preserves_source_during_local_trials() {
         let root = tempfile::tempdir().unwrap();
         let (service, request, workspace, mut state) = fixture(root.path(), "Renpy", "script.rpy");
         fs::create_dir_all(workspace.join("src")).unwrap();
@@ -720,7 +1071,7 @@ mod tests {
             .unwrap()
             .is_none()
         );
-        assert!(!state.extra.contains_key("automaticTrials"));
+        assert_eq!(state.extra["automaticTrials"]["status"], "completed");
         assert!(!state.extra.contains_key("automaticTemplate"));
         assert_eq!(
             fs::read_to_string(workspace.join("src/adapter.py")).unwrap(),
@@ -775,7 +1126,7 @@ mod tests {
             .is_none()
         );
         assert!(!state.extra.contains_key("automaticTemplate"));
-        assert!(!state.extra.contains_key("automaticTrials"));
+        assert_eq!(state.extra["automaticTrials"]["status"], "completed");
         assert!(!workspace.join("src").exists());
     }
 
@@ -826,6 +1177,11 @@ mod tests {
         if !service.tools.vntextpatch().is_file() {
             return;
         }
+        state.total_turns = 42;
+        state.extra.insert(
+            "reuseFailures".into(),
+            json!([{"id":"engine.old","failedStage":"extraction"}]),
+        );
         fs::write(
             request.game_directory.join("bad.mjo"),
             b"invalid format bytes",
@@ -856,6 +1212,341 @@ mod tests {
             fs::read(request.game_directory.join("bad.mjo")).unwrap(),
             b"invalid format bytes"
         );
+    }
+
+    #[tokio::test]
+    async fn resumed_trials_do_not_replace_existing_working_resources() {
+        let root = tempfile::tempdir().unwrap();
+        let (service, request, workspace, mut state) =
+            fixture(root.path(), "KirikiriKs", "scene.ks");
+        state.total_turns = 118;
+        fs::write(request.game_directory.join("scene.ks"), b"installed patch").unwrap();
+        fs::create_dir_all(workspace.join("resources")).unwrap();
+        fs::write(workspace.join("resources/scene.ks"), b"original snapshot").unwrap();
+        run_trials(
+            &service,
+            &request,
+            &workspace,
+            &mut state,
+            &workspace.join("session.json"),
+            &CancellationToken::new(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            fs::read(workspace.join("resources/scene.ks")).unwrap(),
+            b"original snapshot"
+        );
+        assert!(
+            state.extra["automaticTrials"]["skipped"][0]
+                .as_str()
+                .unwrap()
+                .contains("未替换")
+        );
+        assert!(!state.extra.contains_key("builtinTrials"));
+    }
+
+    #[tokio::test]
+    async fn explicit_psb_samples_return_component_entry_without_claiming_compatibility() {
+        let root = tempfile::tempdir().unwrap();
+        let (service, _, workspace, mut state) = fixture(root.path(), "KirikiriKs", "archive.xp3");
+        fs::write(
+            workspace.join("work/scene.ks"),
+            b"PSB\0\x03\0\0\0partial header",
+        )
+        .unwrap();
+        fs::write(
+            workspace.join("work/unrelated.rpy"),
+            "label start:\n    \"無関係\"\n",
+        )
+        .unwrap();
+        let result = inspect_samples(
+            &service,
+            &workspace,
+            &mut state,
+            &["work/scene.ks".into()],
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["components"][0]["id"], "kirikiri-scn-text");
+        assert_eq!(
+            result["components"][0]["sampleFiles"],
+            json!(["work/scene.ks"])
+        );
+        assert_eq!(result["candidates"], json!([]));
+        assert_eq!(result["trials"], json!([]));
+        assert!(state.verified_package.is_none());
+        assert!(!workspace.join("src").exists());
+    }
+
+    #[test]
+    fn sample_paths_are_optional_bounded_and_confined_to_working_copies() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(sample_files(root.path(), &json!({})).unwrap().is_empty());
+        for files in [
+            json!(["src/adapter.py"]),
+            json!(["work/../../outside.ks"]),
+            json!(["work/a.ks", "work/A.ks"]),
+            json!(vec!["work/a.ks"; 13]),
+        ] {
+            assert!(sample_files(root.path(), &json!({"sampleFiles":files})).is_err());
+        }
+        assert_eq!(
+            sample_files(
+                root.path(),
+                &json!({"sampleFiles":["work/unpacked/scene.ks"]})
+            )
+            .unwrap(),
+            ["work/unpacked/scene.ks"]
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_trials_reuse_content_hashes_and_preserve_existing_adapter() {
+        let root = tempfile::tempdir().unwrap();
+        let (service, _, workspace, mut state) = fixture(root.path(), "KirikiriKs", "archive.xp3");
+        if !service.tools.vntextpatch().is_file() {
+            return;
+        }
+        fs::write(
+            workspace.join("work/scene.ks"),
+            "\u{feff}[cm]\nこんにちは[p]\n",
+        )
+        .unwrap();
+        state.total_turns = 118;
+        state.resource_patterns = vec!["**/*.xp3".into()];
+        let verified = json!({"id":"engine.existing","version":"1.0.0"});
+        state.verified_package = Some(verified.clone());
+        let files = ["work/scene.ks".into()];
+        let token = CancellationToken::new();
+        let requests_before = state.api_requests();
+        let first = inspect_samples(&service, &workspace, &mut state, &files, &token)
+            .await
+            .unwrap();
+        assert_eq!(first["trials"][0]["status"], "passed", "{first}");
+        assert_eq!(first["trials"][0]["roundtripStatus"], "passed");
+        assert_eq!(first["trials"][0]["cached"], false);
+        assert_eq!(first["trials"][0]["reuseCall"]["tool"], "copy_adapter");
+        fs::create_dir_all(workspace.join("src")).unwrap();
+        fs::write(workspace.join("src/adapter.py"), "existing adapter").unwrap();
+        let second = inspect_samples(&service, &workspace, &mut state, &files, &token)
+            .await
+            .unwrap();
+        assert_eq!(second["trials"][0]["cached"], true);
+        assert!(second["trials"][0]["reuseCall"].is_null());
+        assert!(
+            second["trials"][0]["nextAction"]
+                .as_str()
+                .unwrap()
+                .contains("保留当前适配器入口")
+        );
+        fs::write(
+            workspace.join("work/scene.ks"),
+            "\u{feff}[cm]\nこんにちは[p]\n[cm]\n次の台詞[p]\n",
+        )
+        .unwrap();
+        let changed = inspect_samples(&service, &workspace, &mut state, &files, &token)
+            .await
+            .unwrap();
+        assert_eq!(changed["trials"][0]["cached"], false);
+        assert!(
+            changed["trials"][0]["unitCount"].as_u64().unwrap()
+                > first["trials"][0]["unitCount"].as_u64().unwrap()
+        );
+        assert_eq!(
+            fs::read_to_string(workspace.join("src/adapter.py")).unwrap(),
+            "existing adapter"
+        );
+        assert_eq!(state.resource_patterns, ["**/*.xp3"]);
+        assert_eq!(state.verified_package, Some(verified));
+        assert_eq!(state.api_requests(), requests_before);
+    }
+
+    #[tokio::test]
+    async fn python_output_samples_are_tried_in_the_same_tool_call() {
+        let root = tempfile::tempdir().unwrap();
+        let (service, request, workspace, mut state) =
+            fixture(root.path(), "KirikiriKs", "archive.xp3");
+        if !service.tools.vntextpatch().is_file() || !service.tools.python().is_file() {
+            return;
+        }
+        let args = json!({"script":"work/decode.py","content":"from pathlib import Path\nPath('work/scene.ks').write_text('[cm]\\nこんにちは[p]\\n', encoding='utf-8-sig')\n"});
+        let result = service
+            .adaptation_tool(
+                &request,
+                &workspace,
+                &mut state,
+                "run_engine_python",
+                &args,
+                &CancellationToken::new(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result["builtinSamples"]["trials"][0]["status"], "passed",
+            "{result}"
+        );
+        assert_eq!(state.api_requests(), 0);
+        assert!(!workspace.join("src").exists());
+    }
+
+    #[tokio::test]
+    async fn continuation_discovers_existing_samples_without_a_declared_file_list() {
+        let root = tempfile::tempdir().unwrap();
+        let (service, _, workspace, mut state) = fixture(root.path(), "Renpy", "game.rpa");
+        if !service.tools.vntextpatch().is_file() {
+            return;
+        }
+        fs::create_dir_all(workspace.join("work/decoded")).unwrap();
+        for (file, text) in [
+            ("a.rpy", "label a:\n    return\n"),
+            ("b.rpy", "label b:\n    return\n"),
+            ("c.rpy", "label c:\n    \"こんにちは\"\n"),
+        ] {
+            fs::write(workspace.join("work/decoded").join(file), text).unwrap();
+        }
+        fs::write(
+            workspace.join("work/decoded/scene.scn"),
+            b"PSB\0\x03\0\0\0partial header",
+        )
+        .unwrap();
+        state.total_turns = 118;
+        let requests = state.api_requests();
+        inspect_workspace(&service, &workspace, &mut state, &CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(state.extra["workspaceSamples"]["trialCount"], 1);
+        assert_eq!(state.extra["builtinTrials"][0]["status"], "passed");
+        assert_eq!(state.extra["builtinTrials"][0]["unitCount"], 1);
+        assert_eq!(state.api_requests(), requests);
+        assert!(!workspace.join("src").exists());
+        assert!(state.verified_package.is_none());
+        let context = decision::build(&mut state, &workspace, &BTreeSet::new()).unwrap();
+        let visible = context
+            .replay
+            .messages
+            .iter()
+            .filter_map(|message| message["content"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(visible.contains("workspaceSamples"));
+        assert!(visible.contains("kirikiri-scn-text"));
+        assert!(visible.contains("builtinTrials"));
+    }
+
+    #[tokio::test]
+    async fn failed_experiment_retains_automatic_sample_checks_without_becoming_successful() {
+        let root = tempfile::tempdir().unwrap();
+        let (service, request, workspace, mut state) =
+            fixture(root.path(), "KirikiriKs", "game.xp3");
+        if !service.tools.vntextpatch().is_file() || !service.tools.python().is_file() {
+            return;
+        }
+        let result = service.adaptation_tool(&request, &workspace, &mut state, "run_engine_python",
+            &json!({"script":"work/decode.py","content":"from pathlib import Path\nPath('work/scene.ks').write_text('[cm]\\nこんにちは[p]\\n', encoding='utf-8-sig')\nraise ValueError('later probe failed')\n"}),
+            &CancellationToken::new(), None).await.unwrap();
+        assert_eq!(result["success"], false, "{result}");
+        assert_eq!(result["executionSucceeded"], false);
+        assert_eq!(result["builtinSamples"]["trials"][0]["status"], "passed");
+        assert!(!result.as_object().unwrap().contains_key("writtenFiles"));
+        assert!(state.verified_package.is_none());
+    }
+
+    #[tokio::test]
+    #[ignore = "Requires GAMEL10N_PARSER_SAMPLE_DIRECTORY with existing script samples and native runtime tools."]
+    async fn stored_scripts_are_discovered_and_parsed_with_pinned_native_tools() {
+        let samples = PathBuf::from(
+            std::env::var_os("GAMEL10N_PARSER_SAMPLE_DIRECTORY").expect("sample directory"),
+        );
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let root = tempfile::Builder::new()
+            .prefix("parser-samples-")
+            .tempdir_in(repo.join("target"))
+            .unwrap();
+        let (service, _, workspace, mut state) = fixture(root.path(), "KirikiriKs", "game.xp3");
+        assert!(service.tools.vntextpatch().is_file());
+        let inventory = Inventory::scan(&samples).unwrap();
+        let mut hashes = BTreeMap::new();
+        let mut bytes = 0;
+        for file in inventory
+            .files
+            .iter()
+            .filter(|file| extension(&file.path) == "ks")
+            .take(12)
+        {
+            bytes += file.length;
+            assert!(bytes <= 8 * 1024 * 1024);
+            let source = resolve_relative(&samples, &file.path).unwrap();
+            hashes.insert(file.path.clone(), hash_file(&source).unwrap());
+            let destination =
+                resolve_relative(&workspace.join("work/samples"), &file.path).unwrap();
+            fs::create_dir_all(destination.parent().unwrap()).unwrap();
+            fs::copy(source, destination).unwrap();
+        }
+        assert!(!hashes.is_empty());
+        state.total_turns = 118;
+        let requests = state.api_requests();
+        inspect_workspace(&service, &workspace, &mut state, &CancellationToken::new())
+            .await
+            .unwrap();
+        let trials = state.extra["builtinTrials"]
+            .as_array()
+            .expect("local parser trials");
+        assert!(
+            trials.iter().any(|trial| trial["status"] == "passed"
+                && trial["unitCount"].as_u64().is_some_and(|count| count > 0)),
+            "{trials:?}"
+        );
+        for (file, hash) in &hashes {
+            assert_eq!(
+                hash_file(&resolve_relative(&samples, file).unwrap()).unwrap(),
+                *hash
+            );
+        }
+        assert_eq!(state.api_requests(), requests);
+        assert!(state.verified_package.is_none());
+        println!(
+            "{} source files preserved; local trial units: {:?}",
+            hashes.len(),
+            trials
+                .iter()
+                .map(|trial| &trial["unitCount"])
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn unavailable_parser_assets_do_not_reject_the_sample_format() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut service, _, workspace, mut state) =
+            fixture(root.path(), "KirikiriKs", "archive.xp3");
+        service.tools.root = root.path().join("missing-runtime");
+        fs::write(
+            workspace.join("work/scene.ks"),
+            "\u{feff}[cm]\nこんにちは[p]\n",
+        )
+        .unwrap();
+        let files = ["work/scene.ks".into()];
+        let result = inspect_samples(
+            &service,
+            &workspace,
+            &mut state,
+            &files,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["status"], "unavailable", "{result}");
+        assert!(!state.extra.contains_key("builtinTrials"));
+        let stopped = CancellationToken::new();
+        stopped.cancel();
+        assert!(matches!(
+            inspect_samples(&service, &workspace, &mut state, &files, &stopped).await,
+            Err(EngineError::Cancelled)
+        ));
     }
 
     #[tokio::test]
@@ -921,6 +1612,16 @@ pathlib.Path(sys.argv[1]).write_bytes(body)
                 .success()
         );
         let original = fs::read(&archive).unwrap();
+        fs::create_dir_all(workspace.join("resources")).unwrap();
+        fs::copy(&archive, workspace.join("resources/game.rpa")).unwrap();
+        let extracted = service.adaptation_tool(&request, &workspace, &mut state, "run_engine_component",
+            &json!({"id":"archive.rpa3","operation":"extract","archive":"resources/game.rpa","output":"work/unpacked","extensions":[".rpy"]}),
+            &CancellationToken::new(), None).await.unwrap();
+        assert_eq!(
+            extracted["builtinSamples"]["trials"][0]["status"], "passed",
+            "{extracted}"
+        );
+        assert!(state.verified_package.is_none());
         let adapter = run(
             &service,
             &request,

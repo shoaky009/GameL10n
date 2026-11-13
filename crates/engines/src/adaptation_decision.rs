@@ -440,6 +440,7 @@ fn snapshot(
             "builtinDiscovery":discovery,
             "builtinProbes":state.extra.get("builtinProbes").map(|v| bounded(v,3000)),
             "builtinTrials":state.extra.get("builtinTrials").and_then(Value::as_array).map(|trials| trials.iter().rev().take(3).map(|v|bounded(v,2048)).collect::<Vec<_>>()),
+            "workspaceSamples":state.extra.get("workspaceSamples").map(|v|bounded(v,3000)),
             "automaticTrials":state.extra.get("automaticTrials").map(|v| bounded(v,3000)),
             "automaticTemplate":state.extra.get("automaticTemplate").map(|v| bounded(v,3000)),
             "successfulProbes":probes,

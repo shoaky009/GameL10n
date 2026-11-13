@@ -60,6 +60,8 @@ GDI+ 私有集合成功而原字体创建失败时，先检查[字体桥接组�
 
 `src/tools/kirikiri_scn_text.py` 的 `{"operation":"verify","input":"work/sample.scn"}` 检查原字节往返与一条中文修改。正式适配器用 `use_engine_reference` 固定依赖；外层过滤器、加载优先级和字体单独验证。
 
+PSB 魔数和头部校验通过不代表全文解密正确。先用现有组件检查实际结构，再根据具体错误确认过滤器或布局缺口，避免重新开发 PSB 读写器。
+
 默认采用严格 SCN 布局。显式选择 `SceneText(..., allow_partial=True)` 时，按共享库已确认的类型定位其他可写字段；无法确认控制符、可见长度或派生数据的正文字段列入 `skipped_fields` 并保留原文，不阻止同文件中独立字段的回填。构建只重写实际修改的记录及其已确认派生值。
 
 ## TFT 预渲染字库
