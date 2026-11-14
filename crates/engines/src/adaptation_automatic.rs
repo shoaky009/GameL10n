@@ -1905,11 +1905,20 @@ mod tests {
         assert_eq!(result["roundtripStatus"], "passed");
         assert_eq!(result["translationStatus"], "failed");
         assert_eq!(result["diagnostic"]["errorType"], "UnicodeEncodeError");
+        assert_eq!(result["profile"]["version"], 2);
+        assert_eq!(result["profile"]["text_offset"], 3600);
         let repeated = service
             .try_builtin_sample(&workspace, &mut state, &args, &token)
             .await
             .unwrap();
         assert_eq!(repeated["cached"], true);
+        fs::write(workspace.join("work/sample.dat"), b"changed sample").unwrap();
+        let changed = service
+            .try_builtin_sample(&workspace, &mut state, &args, &token)
+            .await
+            .unwrap();
+        assert_eq!(changed["cached"], false);
+        assert_ne!(changed["sourceHashes"], repeated["sourceHashes"]);
         assert_eq!(state.api_requests(), 0);
         assert!(state.verified_package.is_none());
         assert!(!workspace.join("src").exists());

@@ -1193,18 +1193,104 @@ pub(crate) fn builtin_guidance(state: &Session, disabled: &BTreeSet<String>) -> 
     }
 }
 
+const TRIAL_SUMMARY_CHARACTERS: usize = 6144;
+
+/// Recorded sample observations share one bounded representation across replay and compaction.
+pub(crate) fn builtin_trial_summaries(state: &Session) -> Vec<Value> {
+    let trials = state
+        .extra
+        .get("builtinTrials")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let mut summaries = Vec::new();
+    for (index, trial) in trials.iter().enumerate().rev().take(3) {
+        let mut summary = json!({
+            "readBack":{"tool":"search_text","arguments":{"root":"workspace","path":"session.json","query":"\"builtinTrials\""},
+                "jsonPointer":format!("/builtinTrials/{index}"),"continuation":"Use search_text byteOffsets/nextOffset, then read_file encoding=utf8. Match sample identity/fingerprint; array positions may change."},
+            "truncated":false
+        });
+        // Parser settings and sample identity precede verbose observations and diagnostics.
+        for (field, limit) in [
+            ("format", 128),
+            ("status", 64),
+            ("stage", 128),
+            ("parseStatus", 64),
+            ("roundtripStatus", 64),
+            ("translationStatus", 64),
+            ("runtimeStatus", 64),
+            ("directory", 512),
+            ("files", 1024),
+            ("sourceHashes", 1536),
+            ("profile", 1536),
+            ("fingerprint", 128),
+            ("reuseCall", 768),
+            ("nextAction", 384),
+            ("observedAt", 64),
+            ("unitCount", 32),
+            ("fieldCount", 32),
+            ("error", 384),
+            ("diagnostic", 512),
+            ("issues", 768),
+            ("samples", 512),
+        ] {
+            let Some(value) = trial.get(field).filter(|value| !value.is_null()) else {
+                continue;
+            };
+            let value = if field == "diagnostic" {
+                Value::Object(
+                    ["errorType", "code", "message", "detail"]
+                        .into_iter()
+                        .filter_map(|key| {
+                            value
+                                .get(key)
+                                .filter(|value| value.to_string().chars().count() <= 128)
+                                .map(|value| (key.into(), value.clone()))
+                        })
+                        .collect(),
+                )
+            } else if field == "error" && value.as_str().is_some() {
+                json!(
+                    value
+                        .as_str()
+                        .unwrap_or_default()
+                        .chars()
+                        .take(320)
+                        .collect::<String>()
+                )
+            } else {
+                value.clone()
+            };
+            let length = value.to_string().chars().count();
+            if trial[field] != value {
+                summary["truncated"] = json!(true);
+            }
+            let available = TRIAL_SUMMARY_CHARACTERS
+                .saturating_sub(summary.to_string().chars().count() + field.len() + 8);
+            if length <= limit.min(available) {
+                summary[field] = value;
+            } else {
+                summary["truncated"] = json!(true);
+            }
+        }
+        summaries.push(summary);
+    }
+    summaries
+}
+
 pub(crate) fn builtin_context(
     state: &Session,
     disabled: &BTreeSet<String>,
 ) -> Result<String, EngineError> {
-    let Some(report) = state
+    let report = state
         .extra
         .get("builtinDiscovery")
-        .filter(|report| report.is_object())
-    else {
+        .filter(|report| report.is_object());
+    let recent = builtin_trial_summaries(state);
+    if report.is_none() && recent.is_empty() {
         return Ok(String::new());
-    };
-    let mut report = report.clone();
+    }
+    let mut report = report.cloned().unwrap_or(json!({}));
     let candidates: Vec<_> = report["candidates"]
         .as_array()
         .into_iter()
@@ -1223,35 +1309,6 @@ pub(crate) fn builtin_context(
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let fields = [
-        "format",
-        "directory",
-        "files",
-        "status",
-        "stage",
-        "parseStatus",
-        "roundtripStatus",
-        "translationStatus",
-        "issues",
-        "unitCount",
-        "error",
-        "diagnostic",
-        "sourceHashes",
-        "observedAt",
-        "samples",
-    ];
-    let recent: Vec<_> = trials
-        .iter()
-        .skip(trials.len().saturating_sub(3))
-        .map(|trial| {
-            Value::Object(
-                fields
-                    .iter()
-                    .map(|field| ((*field).into(), trial[*field].clone()))
-                    .collect(),
-            )
-        })
-        .collect();
     let detail = json!({"observedAt":state.extra.get("builtinDiscoveryObservedAt"),"report":report,"regularProbes":state.extra.get("builtinProbes").filter(|value|value.is_array()).cloned().unwrap_or(json!([])),
         "automaticTrials":state.extra.get("automaticTrials"),"automaticTemplate":state.extra.get("automaticTemplate"),"workspaceSamples":state.extra.get("workspaceSamples"),"recentTrials":recent});
     let mut context="\n内置解析能力线索（程序采样，不是已验证的引擎结论；以下为记录时间的证据，资源变化后可用 list_adapters 的 refreshCandidates 刷新）：\n".to_owned()+&serde_json::to_string(&detail)?;
@@ -1275,6 +1332,78 @@ pub(crate) fn builtin_context(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sample_summary_preserves_parser_identity_and_failure_before_large_diagnostics() {
+        let trial = json!({"diagnostic":{"details":"trace".repeat(20_000),"errorType":"UnicodeEncodeError"},
+            "format":"eagls-script","status":"failed","stage":"translation-readback",
+            "parseStatus":"passed","roundtripStatus":"passed","translationStatus":"failed","runtimeStatus":"not-tested",
+            "directory":"work","files":["sample.dat"],"sourceHashes":{"sample.dat":"a".repeat(64)},
+            "profile":{"version":2,"text_offset":3600,"key":"EAGLS_SYSTEM"},
+            "fingerprint":"b".repeat(64),"unitCount":2,"nextAction":"Reuse the component parser; repair encoding.",
+            "reuseCall":{"tool":"run_engine_component","arguments":{"component":"eagls-script"}},
+            "error":"UnicodeEncodeError: cp932 cannot encode the translation","samples":[{"path":"text/1","kind":"dialogue","text":"本文"}]});
+        let mut state = Session::default();
+        state.extra.insert("builtinTrials".into(), json!([trial]));
+        let summary = builtin_trial_summaries(&state).remove(0);
+        for field in [
+            "format",
+            "status",
+            "stage",
+            "parseStatus",
+            "roundtripStatus",
+            "translationStatus",
+            "runtimeStatus",
+            "directory",
+            "files",
+            "sourceHashes",
+            "profile",
+            "fingerprint",
+            "unitCount",
+            "nextAction",
+            "reuseCall",
+            "error",
+            "samples",
+        ] {
+            assert_eq!(summary[field], trial[field], "{field}");
+        }
+        assert_eq!(summary["diagnostic"]["errorType"], "UnicodeEncodeError");
+        assert_eq!(summary["truncated"], true);
+        assert_eq!(summary["readBack"]["jsonPointer"], "/builtinTrials/0");
+        assert!(summary.to_string().chars().count() < 2000);
+        let context = builtin_context(&state, &BTreeSet::new()).unwrap();
+        assert!(context.contains("text_offset"));
+        assert!(context.contains("仅适用于列出的样本及哈希"));
+        assert!(!context.contains("tracetrace"));
+    }
+
+    #[test]
+    fn sample_summary_has_a_fixed_bound_and_omits_incomplete_parameters() {
+        let oversized = "x".repeat(20_000);
+        let trial = json!({"format":"eagls-script","status":"failed","stage":"translation-readback",
+            "parseStatus":"passed","roundtripStatus":"passed","translationStatus":"failed",
+            "profile":{"key":oversized},"directory":oversized,"files":[oversized],"sourceHashes":{"sample":oversized},
+            "diagnostic":{"details":oversized,"errorType":"UnicodeEncodeError"},"issues":[oversized],"error":oversized,
+            "reuseCall":{"tool":"copy_adapter","arguments":{"id":oversized}},"nextAction":oversized,"samples":[oversized]});
+        let mut state = Session::default();
+        state
+            .extra
+            .insert("builtinTrials".into(), json!(vec![trial; 6]));
+        let summaries = builtin_trial_summaries(&state);
+        assert_eq!(summaries.len(), 3);
+        for (index, summary) in summaries.iter().enumerate() {
+            assert!(summary.to_string().chars().count() <= TRIAL_SUMMARY_CHARACTERS);
+            assert_eq!(summary["truncated"], true);
+            assert!(summary.get("profile").is_none());
+            assert!(summary.get("sourceHashes").is_none());
+            assert_eq!(
+                summary["readBack"]["jsonPointer"],
+                format!("/builtinTrials/{}", 5 - index)
+            );
+            assert_eq!(summary["diagnostic"]["errorType"], "UnicodeEncodeError");
+        }
+        assert_eq!(summaries, builtin_trial_summaries(&state));
+    }
 
     #[test]
     fn gdiplus_guidance_requires_rendering_imports_and_keeps_observed_evidence() {

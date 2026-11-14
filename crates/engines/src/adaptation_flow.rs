@@ -1635,6 +1635,68 @@ mod tests {
         assert!(!state.extra.contains_key("lastBreakthrough"));
     }
 
+    #[tokio::test]
+    async fn automatic_sample_evidence_survives_compaction_restart_and_changed_inputs() {
+        let root = tempfile::tempdir().unwrap();
+        let (_, _, workspace, mut state) = fixture(root.path());
+        fs::create_dir_all(&workspace).unwrap();
+        let trial = json!({"diagnostic":{"details":"trace".repeat(20_000),"errorType":"UnicodeEncodeError"},
+            "format":"eagls-script","status":"failed","stage":"translation-readback",
+            "parseStatus":"passed","roundtripStatus":"passed","translationStatus":"failed","runtimeStatus":"not-tested",
+            "directory":"work","files":["sample.dat"],"sourceHashes":{"sample.dat":"old-sample-hash"},
+            "profile":{"version":2,"text_offset":3600,"key":"EAGLS_SYSTEM"},
+            "nextAction":"Reuse component parsing; repair encoding.","fingerprint":"recorded-input-fingerprint"});
+        state.extra.insert("builtinTrials".into(), json!([trial]));
+        state.extra.insert(
+            "resourceHashes".into(),
+            json!({"sample.dat":"changed-input-hash"}),
+        );
+        state
+            .extra
+            .insert("resourceChanges".into(), json!({"changed":["sample.dat"]}));
+        compact_history(&mut state, &BTreeSet::new()).unwrap();
+        let path = workspace.join("session.json");
+        save_session(&path, &mut state).await.unwrap();
+        let mut restored = load_session(&path).unwrap();
+        assert!(restored.verified_package.is_none());
+        assert!(restored.verification.is_none());
+        assert_eq!(restored.extra["builtinTrials"][0], trial);
+        let context = decision::build(&mut restored, &workspace, &BTreeSet::new()).unwrap();
+        let visible = context
+            .replay
+            .messages
+            .iter()
+            .filter_map(|message| message["content"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        for fact in [
+            "text_offset",
+            "3600",
+            "old-sample-hash",
+            "UnicodeEncodeError",
+            "recorded-input-fingerprint",
+            "/builtinTrials/0",
+            "translation-readback",
+        ] {
+            assert!(visible.contains(fact), "{fact}");
+        }
+        assert!(visible.contains(
+            "Only the existing verifier can reuse them after checking current fingerprints"
+        ));
+        assert_eq!(
+            restored.extra["resourceHashes"]["sample.dat"],
+            "changed-input-hash"
+        );
+        assert!(visible.contains(decision::input_fingerprint(&restored).unwrap().as_str()));
+        assert!(!visible.contains("tracetrace"));
+        let summaries = crate::adaptation_context::builtin_trial_summaries(&restored);
+        let stored: Value = read_json(&path).unwrap();
+        assert_eq!(
+            stored.pointer(summaries[0]["readBack"]["jsonPointer"].as_str().unwrap()),
+            Some(&trial)
+        );
+    }
+
     #[test]
     fn recovery_sends_notes_and_protocol_once_with_current_failure_fields() {
         let root = tempfile::tempdir().expect("fixture");
