@@ -1875,6 +1875,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn eagls_component_reuses_parse_and_roundtrip_when_encoding_is_not_ready() {
+        let root = tempfile::tempdir().unwrap();
+        let (service, request, workspace, mut state) = fixture(root.path(), "Eagls", "game.pak");
+        if !service.tools.python().is_file() || service.current_reference().is_err() {
+            return;
+        }
+        let script = "from python.engines.eagls import crypt_script\nheader=b'START'.ljust(32,b'\\0')+bytes(3600-32)\nplain=header+'$START\\r\\n#太郎&1\"本文\"\\r\\n'.encode('cp932')+b'\\x83\\x83'\nsave_sample('work/sample.dat',crypt_script(plain,text_offset=3600,key=b'EAGLS_SYSTEM',version=2))\n";
+        let token = CancellationToken::new();
+        let result = service
+            .adaptation_tool(
+                &request,
+                &workspace,
+                &mut state,
+                "run_engine_python",
+                &json!({"script":"work/sample.py","content":script}),
+                &token,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["success"], true, "{result}");
+        let args = json!({"format":"eagls-script","directory":"work","files":["sample.dat"]});
+        let result = service
+            .try_builtin_sample(&workspace, &mut state, &args, &token)
+            .await
+            .unwrap();
+        assert_eq!(result["parseStatus"], "passed", "{result}");
+        assert_eq!(result["roundtripStatus"], "passed");
+        assert_eq!(result["translationStatus"], "failed");
+        assert_eq!(result["diagnostic"]["errorType"], "UnicodeEncodeError");
+        let repeated = service
+            .try_builtin_sample(&workspace, &mut state, &args, &token)
+            .await
+            .unwrap();
+        assert_eq!(repeated["cached"], true);
+        assert_eq!(state.api_requests(), 0);
+        assert!(state.verified_package.is_none());
+        assert!(!workspace.join("src").exists());
+    }
+
+    #[tokio::test]
     async fn continuation_discovers_existing_samples_without_a_declared_file_list() {
         let root = tempfile::tempdir().unwrap();
         let (service, _, workspace, mut state) = fixture(root.path(), "Renpy", "game.rpa");

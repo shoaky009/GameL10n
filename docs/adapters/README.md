@@ -33,6 +33,7 @@
 
 | 引擎／模板 | 标识 | 支持条件 |
 | --- | --- | --- |
+| [EAGLS / ALIS SCPACK](engines/eagls-scpack.md) | `eagls-script` 组件 | 完整源文本成员的解析与回填，界面和中文运行另行确认 |
 | [LiLiM SFA16 / AOS v2 / SCR](engines/sfa16-aos-v2.md) | `engine.sfa16.aos-v2` | AOS v2 剧情脚本，运行补丁须匹配已登记 EXE |
 | [System4 AIN v14 MSG1 + FNL](engines/system4-ain14-msg1-fnl.md) | `engine.system4-ain14-msg1-fnl` | MSG1 消息、FNL 补字及匹配运行时代码的修补 |
 | [QLIE FilePackVer3.0 + system_fix](engines/qlie-filepack3-systemfont.md) | `engine.qlie-filepack3-systemfont` | 匹配主封包、密钥及字体布局 |

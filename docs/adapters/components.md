@@ -4,6 +4,7 @@
 
 | 组件 ID | 能力 | 适用条件 |
 | --- | --- | --- |
+| `eagls-script` | 固定库脚本解析、稳定字段定位与回填 | 完整 EAGLS 成员，其他布局显式提供 Profile；[范围与用法](engines/eagls-scpack.md) |
 | `windows-font-metrics` | 缺字、字体尺寸及 GDI+ 字体创建路径对比 | Windows，仅分析时使用 |
 | `inspect_font_coverage` 宿主工具 | 全部译文字符与 SFNT/TTC cmap 的批量比对 | 跨平台，仅检查覆盖，完整报告在工作区 |
 | `kaguya-tblstr` | ARC/ARI 检测、解析和变长重建 | XOR-FF、四字节最小对齐、类型 0/2/3 |
@@ -26,7 +27,7 @@ Python 适配器通过 `tools/gamel10n_host.py` 调用预编译宿主。运行�
 
 复制前检查全部目标，相同文件复用，不同内容保留并报告冲突。辅助模块按哈希入包，共用文件只保留一份；解析器版本单独固定。
 
-声明 `sampleCheck` 的文本组件提供固定 `main(request)` 小样检查入口，分别返回解析、原文往返和中文复提状态。宿主使用内置源码与固定共享依赖自动执行，结果按样本内容和组件版本复用，无需先复制组件或开发完整适配器。当前支持 `kirikiri-scn-text`；登记与预算见[本地小样试用](adaptation-internals.md#本地小样试用)。
+声明 `sampleCheck` 的文本组件提供固定 `main(request)` 小样检查入口，分别返回解析、原文往返和中文复提状态。宿主使用内置源码与固定共享依赖自动执行，结果按样本内容和组件版本复用，无需先复制组件或开发完整适配器。当前支持 `kirikiri-scn-text` 和 `eagls-script`；登记与预算见[本地小样试用](adaptation-internals.md#本地小样试用)。
 
 ## 结构与编码检测
 

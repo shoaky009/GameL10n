@@ -15,7 +15,7 @@ use crate::{
     discovery::{is_link, resolve_relative},
 };
 
-pub(crate) const DISCOVERY_REVISION: u64 = 7;
+pub(crate) const DISCOVERY_REVISION: u64 = 8;
 const CONTAINERS: &[&str] = &[
     "xp3", "rpa", "rpyc", "pack", "pak", "arc", "ypf", "int", "pfs",
 ];
@@ -673,6 +673,7 @@ fn inspect_builtin_files(
                 scanned += 1;
                 let ext = extension(&name);
                 if matches!(ext.as_str(), "scn" | "psb")
+                    || name == "scpack.idx"
                     || CONTAINERS.contains(&ext.as_str())
                     || BUILTIN_FORMATS
                         .iter()
@@ -862,6 +863,32 @@ fn inspect_builtin_files(
         )
     });
     let mut result: Vec<_> = ordered.into_iter().take(6).map(Candidate::value).collect();
+    let eagls_pairs: Vec<_> = files
+        .iter()
+        .filter(|path| {
+            Path::new(path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.eq_ignore_ascii_case("SCPACK.idx"))
+        })
+        .filter_map(|index| {
+            let pak = Path::new(index)
+                .with_file_name("SCPACK.pak")
+                .to_string_lossy()
+                .replace('\\', "/");
+            files
+                .iter()
+                .find(|file| file.eq_ignore_ascii_case(&pak))
+                .map(|pak| json!({"index":index,"archive":pak}))
+        })
+        .take(2)
+        .collect();
+    if !eagls_pairs.is_empty() {
+        result.insert(0,json!({"format":"Eagls","adapterId":"reference.eagls","name":"EAGLS / ALIS SCPACK",
+            "evidenceKind":"container-pair","evidence":["同目录存在 SCPACK.idx 与 SCPACK.pak；仅为配对线索，须校验索引、成员边界及脚本参数。"],
+            "archivePairs":eagls_pairs,"scriptComponent":"eagls-script",
+            "missingCapabilities":["用固定 python.archives.eagls 读取索引并选取少量完整脚本，try_builtin_adapter(format=eagls-script) 分别验证解析、原文往返与中文回填。","resourcePath 指外层 PAK，成员身份放入 locator/context；界面文字、姓名引用与运行编码须单独确认。"]}));
+    }
     if !neko.is_empty() {
         neko.sort_by_key(|path| (priority(path), path.to_lowercase()));
         neko.truncate(4);
@@ -1315,6 +1342,35 @@ mod tests {
                 .unwrap()
                 .contains("不是 System4 AIN")
         );
+    }
+
+    #[test]
+    fn eagls_pairs_are_scoped_to_one_directory_and_remain_unverified_candidates() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("Script")).unwrap();
+        fs::create_dir_all(root.path().join("Other")).unwrap();
+        fs::write(root.path().join("Script/SCPACK.IDX"), b"unverified index").unwrap();
+        fs::write(root.path().join("Other/SCPACK.PAK"), b"unrelated archive").unwrap();
+        let token = CancellationToken::new();
+        let report = inspect_builtin_discovery(root.path(), &token).unwrap();
+        assert!(
+            !report["candidates"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|candidate| candidate["format"] == "Eagls")
+        );
+        fs::write(root.path().join("Script/SCPACK.PAK"), b"unverified archive").unwrap();
+        let report = inspect_builtin_discovery(root.path(), &token).unwrap();
+        let candidate = &report["candidates"][0];
+        assert_eq!(candidate["format"], "Eagls");
+        assert_eq!(candidate["evidenceKind"], "container-pair");
+        assert_eq!(candidate["scriptComponent"], "eagls-script");
+        assert_eq!(
+            candidate["archivePairs"],
+            json!([{"index":"Script/SCPACK.IDX","archive":"Script/SCPACK.PAK"}])
+        );
+        assert!(candidate["sampleFiles"].is_null());
     }
 
     #[test]

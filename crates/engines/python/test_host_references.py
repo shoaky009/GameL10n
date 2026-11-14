@@ -103,6 +103,12 @@ class ReferenceToolsTest(unittest.TestCase):
                 self.assertEqual(result['capability']['id'], 'engine.siglus')
                 self.assertIn('siglus_ssu/GEI.py', result['capability']['sources'])
 
+    def test_eagls_reference_points_to_the_callable_script_component(self):
+        archive = self.fixture([self.engine('eagls')], {'engines/eagls.md': 'EAGLS script support'})
+        result = EXECUTE(dict(operation='inspect_engine_reference', library=archive, engine='eagls'))
+        self.assertEqual(result['readySupport']['component'], 'eagls-script')
+        self.assertEqual(result['readySupport']['verifyCall']['arguments']['format'], 'eagls-script')
+
     def test_ranking_exact_alias_title_terms_weights_and_top_six(self):
         items = [self.engine(name) for name in ['only', 'x', 'alicesoft', 'alice', 'ain', 'y', 'z', 'alice-ain']]
         changes = dict(only=dict(aliases=['ain']), x=dict(title='alice ain module'),

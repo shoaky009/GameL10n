@@ -1,5 +1,16 @@
 [
   {
+    "id": "eagls-script",
+    "name": "EAGLS / ALIS 脚本文本",
+    "scope": "完整、已解包的源文本脚本成员；复用固定库解析对白、选项和字面姓名，保留变量引用、标签表与尾标。默认按标签区线索有界核对 EAGLS v1/v2 与文本起点，其他密钥或标签布局须显式提供 Profile。界面赋值、封包连接和中文运行支持另行确认。",
+    "origin": "连接固定共享库 python.engines.eagls_text 的解析、manifest 和回填；不复制解密、标签修复或封包算法。",
+    "api": "from tools.eagls_script import ScriptText。ScriptText(encrypted_bytes, profile=None).fields 为 (locator,text,kind)，build({locator:translation}) 返回完整加密成员。locator 使用指令 ID 和同类序号，不能使用可变字节偏移；speaker_refs 为字面姓名字段的 locator 或冒号变量引用，不能把翻译后的姓名直接当作稳定 speaker 身份。已有项目须保留原 ID 并执行基线兼容验收。",
+    "example": "# IDX/PAK: use python.archives.eagls.read_index/pack_archive; replacements are complete encrypted members. Read only selected members by offset.\n# Save one complete encrypted member under work/, then:\ntry_builtin_adapter(format=\"eagls-script\", directory=\"work\", files=[\"sample.dat\"])\n# Or copy_adapter_components(ids=[\"eagls-script\"]), then:\nrun_engine_python(script=\"src/tools/eagls_script.py\", stdin='{\"operation\":\"verify\",\"input\":\"work/sample.dat\"}')\n# Optional profile uses shared Profile fields: text_offset, version, label_size, key, encoding, source_characters, target_characters.\n# resourcePath remains the outer PAK; locator/context identify the member. Strict CP932 rejection does not disprove script parsing; reuse an independently confirmed encoding/runtime route.",
+    "sampleCheck": "eagls_script.py",
+    "files": [{"name": "eagls_script.py", "path": "src/tools/eagls_script.py", "binary": false}],
+    "engineFamilies": ["eagls", "alis"]
+  },
+  {
     "id": "unity-serialized-file",
     "name": "Unity SerializedFile 与 TextAsset 读写",
     "scope": "Unity 2022 小端 SerializedFile v22；保留类型表、path ID、引用和未修改对象，支持 TextAsset 原始字节读取及变长回填。不支持 UnityFS 封包，不解释脚本语法或 MonoBehaviour 字段，也不确认字体与运行显示。",

@@ -454,6 +454,16 @@ def reference_patch_delivery(engine):
     return None
 
 
+def eagls_support():
+    return dict(component='eagls-script',
+                verifyCall=dict(tool='try_builtin_adapter', arguments=dict(format='eagls-script', directory='work', files=['sample.dat'])),
+                archiveModule='python.archives.eagls',
+                runtimeReference='https://github.com/vagmr/Eagls_engine_tool/blob/b7e4c68c71e8796c0e215c9559ef375fbfdde863/src/codec/exe_patch.cpp',
+                runtimeCondition='GBK 显示补丁是已知程序特征的参考实现；先确认实际解码、字符集与匹配条件，不按引擎名称直接套用。',
+                usage='先按索引 offset/size 取完整加密脚本成员，复用组件的 ScriptText.fields/build；只补未支持的界面字段和当前编码/运行路径。',
+                identity='resourcePath 指外层 PAK，成员放入 locator/context。speaker_refs 表示姓名字段或变量引用；译后姓名不能直接充当稳定 speaker 身份。')
+
+
 def inspect_engine_reference(request):
     engine = reference_argument(request, 'engine')
     with zipfile.ZipFile(request['library']) as source:
@@ -472,6 +482,8 @@ def inspect_engine_reference(request):
                       usage=REFERENCE_INSPECT_USAGE)
         if engine == 'valkyria':
             result['runtimeGuidance'] = VALKYRIA_GUIDANCE
+        if engine == 'eagls':
+            result['readySupport'] = eagls_support()
         delivery = reference_patch_delivery(reference_argument(selected, 'id').lower())
         if delivery:
             result['patchDelivery'] = dict(delivery,

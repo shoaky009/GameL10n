@@ -6,7 +6,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{collections::BTreeSet, ffi::OsString, fs, io::Write, path::Path};
 
-const VERSION: &str = "2.8.0";
+const VERSION: &str = "2.9.0";
 const USAGE: &str = "copy_adapter_components 按需复制 Python 辅助文件或预编译运行组件。work/ 中的诊断工具仅用于分析，不进入发布清单；src/ 中的组件供适配器复用。支持的 JSON CLI 可用 run_engine_python 直接运行。组件本身不保证当前游戏兼容，仍需资源回填及运行显示验证。";
 
 #[derive(Deserialize)]
@@ -156,6 +156,9 @@ fn describe(component: &Component, service: &EngineService) -> Value {
 
 fn source(name: &str) -> Result<&'static [u8], EngineError> {
     match name {
+        "eagls_script.py" => Ok(include_bytes!(
+            "../../../adapters/components/eagls_script.py"
+        )),
         "unity_serialized_file.py" => {
             Ok(include_bytes!("../../../adapters/unity/serialized_file.py"))
         }
@@ -420,7 +423,7 @@ mod tests {
         let root = tempfile::tempdir().expect("fixture");
         let service = service(root.path());
         let components = list("").expect("catalog");
-        assert_eq!(components.len(), 14);
+        assert_eq!(components.len(), 15);
         assert!(components.iter().all(|component| {
             component.as_object().expect("metadata").len() == 4
                 && component["version"] == VERSION
