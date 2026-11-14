@@ -7,6 +7,7 @@ decrypt XP3, choose archive precedence, or establish runtime/font support.
 import json
 from pathlib import Path
 import re
+import struct
 import sys
 
 from python.engines.kirikiri_psb import Psb
@@ -137,9 +138,9 @@ class SceneText:
         return rebuilt
 
 
-def main():
-    """Bounded JSON CLI for run_engine_python; importing the class has no I/O."""
-    request = json.load(sys.stdin)
+def main(request=None):
+    """Bounded JSON CLI; sample checks report each completed stage independently."""
+    request = json.load(sys.stdin) if request is None else request
     operation = request.get('operation', 'inspect')
     if operation not in ('inspect', 'verify', 'build'):
         raise ValueError('operation must be inspect, verify or build')
@@ -147,22 +148,44 @@ def main():
     if path.stat().st_size > 32 << 20:
         raise ValueError('SCN input exceeds 32 MiB')
     data = path.read_bytes()
+    if operation == 'verify':
+        result = dict(success=False, stage='parse', parseStatus='failed', roundtripStatus='not-run',
+                      translationStatus='not-run', fieldCount=0, changedTextVerified=False,
+                      samples=[], runtimeStatus='not-tested')
+        try:
+            scene = SceneText(data, request.get('languageIndex', 0), speaker_name=request.get('speakerName', False))
+            result.update(parseStatus='passed', fieldCount=len(scene.fields),
+                          derivedCacheCount=len(scene.derived_paths),
+                          kinds={kind: sum(field[2] == kind for field in scene.fields)
+                                 for kind in sorted({field[2] for field in scene.fields})},
+                          samples=[dict(path=p, text=t[:120], kind=k) for p, t, k, _ in scene.fields[:2]])
+            if request.get('checkRoundtrip', True):
+                result.update(stage='original-roundtrip', roundtripStatus='failed')
+                same, _ = scn.patch(scene.p, scene.records, [dict(record['row']) for record in scene.records])
+                if same != data:
+                    raise ValueError('SCN original-byte roundtrip failed')
+                result.update(roundtripStatus='passed', originalByteIdentical=True)
+            else:
+                result['roundtripStatus'] = 'skipped'
+            if request.get('checkTranslation', True):
+                result.update(stage='translation-readback', translationStatus='inconclusive')
+                trial = next(((p, t) for p, t, k, _ in scene.fields if k in ('dialogue', 'choice', 'title')), None)
+                if trial is not None:
+                    result['translationStatus'] = 'failed'
+                    scene.build({trial[0]: trial[1] + '汉化验证'})
+                    result.update(translationStatus='passed', changedTextVerified=True, trialPath=trial[0])
+            else:
+                result['translationStatus'] = 'skipped'
+            result.update(success=True, stage='complete')
+        except (ValueError, IndexError, KeyError, UnicodeError, struct.error) as error:
+            result.update(error=type(error).__name__ + ': ' + str(error),
+                          diagnostic=dict(errorType='struct.error' if isinstance(error, struct.error) else type(error).__name__))
+        return result
     scene = SceneText(data, request.get('languageIndex', 0), speaker_name=request.get('speakerName', False))
     result = dict(success=True, fieldCount=len(scene.fields), derivedCacheCount=len(scene.derived_paths),
                   kinds={kind: sum(field[2] == kind for field in scene.fields)
                          for kind in sorted({field[2] for field in scene.fields})}, runtimeStatus='not-tested')
     result['samples'] = [dict(path=p, text=t[:160], kind=k) for p, t, k, _ in scene.fields[:4]]
-    if operation == 'verify':
-        same, _ = scn.patch(scene.p, scene.records, [dict(record['row']) for record in scene.records])
-        if same != data:
-            raise ValueError('SCN original-byte roundtrip failed')
-        result['originalByteIdentical'] = True
-        trial = next(((p, t) for p, t, k, _ in scene.fields if k in ('dialogue', 'choice')), None)
-        result['changedTextVerified'] = False
-        if trial is not None:
-            trial_text = trial[1] + '汉化验证'
-            scene.build({trial[0]: trial_text})
-            result.update(changedTextVerified=True, trialPath=trial[0])
     if operation == 'build':
         output = Path(request['outputFile'])
         if output.resolve() == path.resolve():
@@ -177,7 +200,10 @@ def main():
 
 if __name__ == '__main__':
     try:
-        print(json.dumps(main(), ensure_ascii=True))
+        result = main()
+        print(json.dumps(result, ensure_ascii=True))
+        if not result.get('success', False):
+            raise SystemExit(1)
     except Exception as error:
         print(json.dumps(dict(success=False, error=type(error).__name__ + ': ' + str(error)), ensure_ascii=True))
         raise SystemExit(1)

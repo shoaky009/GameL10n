@@ -85,4 +85,35 @@ for bad_message, bad_cache in [('Unmatched]', 'Unmatched]'), ('Original', 'diffe
     assert named.p.text(named.locate(first['message'])[0]) == bad_message
     assert named.p.text(named.locate(first['message'][:-1] + (3,))[0]) == bad_cache
     rejects(lambda: partial.build({'scenes/0/texts/0/1/0/1': 'uncertain body'}))
+import tempfile
+from pathlib import Path
+
+with tempfile.TemporaryDirectory() as directory:
+    path = Path(directory) / 'sample.scn'
+    path.write_bytes(psb(dict(scenes=[dict(title='Opening', texts=[
+        ['id', [[None, 'Original', 8, 'Original', 'Original']], None, None, None]])])))
+    request = dict(operation='verify', input=str(path))
+    result = component.main(request)
+    assert result['success'] and all(result[key] == 'passed' for key in (
+        'parseStatus', 'roundtripStatus', 'translationStatus'))
+    patch = component.scn.patch
+    component.scn.patch = lambda *args: (b'changed original', {})
+    try:
+        result = component.main(request)
+        assert not result['success'] and result['parseStatus'] == 'passed'
+        assert result['roundtripStatus'] == 'failed' and result['translationStatus'] == 'not-run'
+    finally:
+        component.scn.patch = patch
+    build = component.SceneText.build
+    def fail_build(*args):
+        raise ValueError('sample writer rejected the translation')
+    component.SceneText.build = fail_build
+    try:
+        result = component.main(request)
+        assert not result['success'] and result['parseStatus'] == 'passed'
+        assert result['roundtripStatus'] == 'passed' and result['translationStatus'] == 'failed'
+    finally:
+        component.SceneText.build = build
+    assert path.read_bytes() == psb(dict(scenes=[dict(title='Opening', texts=[
+        ['id', [[None, 'Original', 8, 'Original', 'Original']], None, None, None]])]))
 print('scn-component-ok')

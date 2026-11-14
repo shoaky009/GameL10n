@@ -277,7 +277,7 @@ fn result_trace(value: &Value) -> Value {
     let mut result = serde_json::Map::new();
     if let Some(samples) = value.get("builtinSamples") {
         let trials: Vec<_> = samples["trials"].as_array().into_iter().flatten().map(|trial|
-            json!({"format":trial["format"],"status":trial["status"],"cached":trial["cached"],"unitCount":trial["unitCount"]})).collect();
+            json!({"format":trial["format"],"status":trial["status"],"stage":trial["stage"],"parseStatus":trial["parseStatus"],"roundtripStatus":trial["roundtripStatus"],"translationStatus":trial["translationStatus"],"cached":trial["cached"],"unitCount":trial["unitCount"]})).collect();
         result.insert("builtinSamples".into(), json!({"status":samples["status"],"trials":trials,
             "components":samples["components"].as_array().into_iter().flatten().map(|component|&component["id"]).collect::<Vec<_>>()}));
     }

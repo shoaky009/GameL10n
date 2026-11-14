@@ -1201,7 +1201,11 @@ pub(crate) fn builtin_context(
         "directory",
         "files",
         "status",
+        "stage",
+        "parseStatus",
         "roundtripStatus",
+        "translationStatus",
+        "issues",
         "unitCount",
         "error",
         "diagnostic",
@@ -1224,8 +1228,11 @@ pub(crate) fn builtin_context(
     let detail = json!({"observedAt":state.extra.get("builtinDiscoveryObservedAt"),"report":report,"regularProbes":state.extra.get("builtinProbes").filter(|value|value.is_array()).cloned().unwrap_or(json!([])),
         "automaticTrials":state.extra.get("automaticTrials"),"automaticTemplate":state.extra.get("automaticTemplate"),"workspaceSamples":state.extra.get("workspaceSamples"),"recentTrials":recent});
     let mut context="\n内置解析能力线索（程序采样，不是已验证的引擎结论；以下为记录时间的证据，资源变化后可用 list_adapters 的 refreshCandidates 刷新）：\n".to_owned()+&serde_json::to_string(&detail)?;
-    context += if trials.iter().any(|trial| trial["status"] == "passed") {
-        "\n记录中有解析器样本通过，仅适用于条目列出的文件及哈希。自动试用样本已暂存到 resources，可复用证据组合模板或补齐缺口；已有源码则沿用。仍需完整 test_adapter 验证中文写入，不要重复起步调查。"
+    context += if trials
+        .iter()
+        .any(|trial| trial["status"] == "passed" || trial["parseStatus"] == "passed")
+    {
+        "\n记录中有解析步骤通过，仅适用于列出的样本及哈希。按 parseStatus、roundtripStatus、translationStatus 分别复用解析或回填能力，仅修复未通过的阶段；已有源码则沿用，仍须完整 test_adapter。"
     } else {
         "\n尚无通过的解析样本时，用 inspect_builtin_adapter 查看相关能力，stage_resources 准备样本，try_builtin_adapter 验证；已有调查按当前进度继续。解析可用时 copy_adapter 复用解析库，只补缺失环节。"
     };
@@ -1398,7 +1405,7 @@ mod tests {
         assert!(!context.contains("engine.vntextpatch-age"));
         assert!(!context.contains("resources/0"));
         assert!(context.contains("resources/3"));
-        assert!(context.contains("不要重复起步调查"));
+        assert!(context.contains("仅修复未通过的阶段"));
         assert!(context.contains(KIRIKIRI_SUMMARY));
         assert!(!context.contains("privateDetail"));
         assert!(

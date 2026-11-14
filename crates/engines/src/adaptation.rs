@@ -1305,6 +1305,15 @@ impl EngineService {
                     .insert("engineReference".into(), reference.clone());
                 let mut result = self.helper(&params, cancellation).await?;
                 result["revision"] = reference["revision"].clone();
+                samples.extend(
+                    result["registeredSamples"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .take(12)
+                        .map(str::to_owned),
+                );
                 if samples.is_empty() {
                     samples.extend(
                         result["writtenFiles"]
@@ -1317,11 +1326,14 @@ impl EngineService {
                     );
                 }
                 if let Some(result) = result.as_object_mut() {
+                    result.remove("registeredSamples");
                     result.remove("writtenFiles");
                     if result.get("writtenFilesPartial") == Some(&json!(false)) {
                         result.remove("writtenFilesPartial");
                     }
                 }
+                let mut seen = BTreeSet::new();
+                samples.retain(|file| seen.insert(file.to_lowercase()));
                 if !samples.is_empty() {
                     result["builtinSamples"] = automatic::sample_result(
                         automatic::inspect_samples(self, workspace, state, &samples, cancellation)
@@ -1699,6 +1711,9 @@ impl EngineService {
         cancellation: &CancellationToken,
     ) -> Result<Value, EngineError> {
         let requested = text(args, "format")?;
+        if components::sample_source(requested)?.is_some() {
+            return automatic::component_trials(self, workspace, state, args, cancellation).await;
+        }
         let format = crate::vntextpatch::FORMATS
             .iter()
             .copied()
@@ -1716,7 +1731,8 @@ impl EngineService {
             .map(|file| file.replace('\\', "/"))
             .collect();
         let check_roundtrip = boolean(args, "checkRoundtrip", true)?;
-        let mut result = json!({"format":format,"status":"rejected","roundtripStatus":if check_roundtrip{"not-run"}else{"skipped"},"unitCount":0,"samples":[],"warnings":[],"sourceHashes":{},"error":null,"diagnostic":null,"runtimeStatus":"not-tested"});
+        let check_translation = boolean(args, "checkTranslation", true)?;
+        let mut result = json!({"format":format,"status":"rejected","stage":"inputs","parseStatus":"not-run","roundtripStatus":if check_roundtrip{"not-run"}else{"skipped"},"translationStatus":if check_translation{"not-run"}else{"skipped"},"unitCount":0,"samples":[],"warnings":[],"sourceHashes":{},"error":null,"diagnostic":null,"runtimeStatus":"not-tested"});
         let mut source_hashes = BTreeMap::new();
         let outcome=async {
             if files.is_empty() { return Err(EngineError::Rejected("请明确选择要试提取的样本文件。".into())); }
@@ -1734,6 +1750,8 @@ impl EngineService {
             }
             result["sourceHashes"]=json!(source_hashes);
             result["status"]=json!("failed");
+            result["stage"]=json!("parse");
+            result["parseStatus"]=json!("failed");
             let mut extract=AdapterRequest::new("extract",&source);
             extract.resource_files=Some(files.clone());
             let extraction=automatic::trial_response(self,&extract,format,&mut result,cancellation).await?.extraction
@@ -1744,12 +1762,14 @@ impl EngineService {
                     return Err(EngineError::Protocol("内置解析器返回重复文本 ID 或样本范围之外的文本。".into()));
                 }
             }
+            result["parseStatus"]=json!("passed");
             result["unitCount"]=json!(extraction.units.len());
             result["samples"]=json!(extraction.units.iter().take(5).map(|unit|json!({"resourcePath":unit.resource_path,"locator":unit.locator,"text":unit.source_text.chars().take(300).collect::<String>(),"kind":unit.kind})).collect::<Vec<_>>());
             let mut warnings=extraction.warnings;
-            warnings.push("本次仅检查所选样本；原文回填通过不代表中文写入或游戏运行已验证。".into());
+            warnings.push("本次仅检查所选样本；各阶段独立记录，仍须完整资源验收与游戏运行验证。".into());
             result["warnings"]=json!(warnings.into_iter().take(12).map(|warning|warning.chars().take(500).collect::<String>()).collect::<Vec<_>>());
             if check_roundtrip {
+                result["stage"]=json!("original-roundtrip");
                 result["roundtripStatus"]=json!("failed");
                 let temporary=tempfile::tempdir()?;
                 let mut build=AdapterRequest::new("build",&source);
@@ -1766,7 +1786,11 @@ impl EngineService {
                 if hashes(temporary.path(),&files)?!=source_hashes { return Err(EngineError::Rejected("原文回填改变了样本字节。".into())); }
                 result["roundtripStatus"]=json!("passed");
             }
+            if check_translation && !extraction.units.is_empty() {
+                automatic::check_translation(self,&source,format,&files,&extraction.units,&mut result,cancellation).await?;
+            }
             result["status"]=json!(if extraction.units.is_empty(){"no-text"}else{"passed"});
+            result["stage"]=json!("complete");
             Ok::<_,EngineError>(())
         }.await;
         if matches!(outcome, Err(EngineError::Cancelled)) {
@@ -1782,28 +1806,13 @@ impl EngineService {
                 != Some(&source_hashes)
         {
             result["status"] = json!("failed");
+            result["stage"] = json!("input-integrity");
+            result["parseStatus"] = json!("inconclusive");
+            result["roundtripStatus"] = json!("inconclusive");
+            result["translationStatus"] = json!("inconclusive");
             result["error"] = json!("试提取期间源样本发生变化，结果不能作为验证依据。");
         }
-        let mut trials = state
-            .extra
-            .get("builtinTrials")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        trials.retain(|trial| {
-            !(trial["format"] == format
-                && trial["directory"] == directory
-                && trial["files"] == json!(files))
-        });
-        let mut observation = result.clone();
-        observation["directory"] = json!(directory);
-        observation["files"] = json!(files);
-        observation["observedAt"] = json!(chrono::Utc::now().to_rfc3339());
-        trials.push(observation);
-        if trials.len() > 6 {
-            trials.remove(0);
-        }
-        state.extra.insert("builtinTrials".into(), json!(trials));
+        automatic::remember_trial(state, &directory, &files, &result);
         Ok(result)
     }
 

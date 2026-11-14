@@ -4,9 +4,9 @@ use crate::{CancellationToken, EngineError, EngineService, discovery::resolve_re
 use gamel10n_translation::files::hash_bytes;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{collections::BTreeSet, fs, io::Write, path::Path};
+use std::{collections::BTreeSet, ffi::OsString, fs, io::Write, path::Path};
 
-const VERSION: &str = "2.7.0";
+const VERSION: &str = "2.8.0";
 const USAGE: &str = "copy_adapter_components 按需复制 Python 辅助文件或预编译运行组件。work/ 中的诊断工具仅用于分析，不进入发布清单；src/ 中的组件供适配器复用。支持的 JSON CLI 可用 run_engine_python 直接运行。组件本身不保证当前游戏兼容，仍需资源回填及运行显示验证。";
 
 #[derive(Deserialize)]
@@ -20,6 +20,7 @@ struct Component {
     example: String,
     files: Vec<ComponentFile>,
     engine_families: Vec<String>,
+    sample_check: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -93,10 +94,61 @@ pub(super) fn related(root: Option<&str>) -> Result<Vec<Value>, EngineError> {
     Ok(catalog()?.into_iter().filter(|component| root.is_some_and(|root|component.engine_families.iter().any(|family|family.eq_ignore_ascii_case(root)))).map(|component|json!({"id":component.id,"version":VERSION,"scope":component.scope,"inspectCall":{"tool":"inspect_adapter_component","arguments":{"id":component.id}}})).collect())
 }
 
+pub(super) fn sample_source(id: &str) -> Result<Option<&'static [u8]>, EngineError> {
+    let components = catalog()?;
+    let Some(component) = components.iter().find(|component| component.id == id) else {
+        return Ok(None);
+    };
+    let Some(entry) = &component.sample_check else {
+        return Ok(None);
+    };
+    if !component
+        .files
+        .iter()
+        .any(|file| file.name == *entry && !file.binary)
+    {
+        return Err(EngineError::Protocol(
+            "组件的小样检查入口未登记为内置源码。".into(),
+        ));
+    }
+    source(entry).map(Some)
+}
+
+pub(super) async fn check_sample(
+    service: &EngineService,
+    library: &Path,
+    source: &[u8],
+    request: &Value,
+    cancellation: &CancellationToken,
+) -> Result<Value, EngineError> {
+    fs::create_dir_all(&service.shared_directory)?;
+    let directory = tempfile::Builder::new()
+        .prefix("sample-check-")
+        .tempdir_in(&service.shared_directory)?;
+    let entry = directory.path().join("component.py");
+    fs::write(&entry, source)?;
+    let driver = "import json,runpy,sys;sys.dont_write_bytecode=True;sys.path.insert(0,sys.argv[1]);component=runpy.run_path(sys.argv[2]);print(json.dumps(component['main'](json.load(sys.stdin)),ensure_ascii=True))";
+    crate::ToolProcess::new(service.tools.python())
+        .with_arguments([
+            OsString::from("-I"),
+            OsString::from("-X"),
+            OsString::from("utf8"),
+            OsString::from("-c"),
+            OsString::from(driver),
+            library.as_os_str().to_owned(),
+            entry.into_os_string(),
+        ])
+        .with_timeout(std::time::Duration::from_secs(20))
+        .with_maximum_output_bytes(64 * 1024)
+        .execute(request, cancellation)
+        .await
+}
+
 fn describe(component: &Component, service: &EngineService) -> Value {
     json!({
         "id":component.id,"version":VERSION,"name":component.name,"scope":component.scope,
         "origin":component.origin,"api":component.api,"example":component.example,
+        "sampleCheck":component.sample_check,
         "files":component.files.iter().map(|file|json!({"path":file.path,"binary":file.binary,"available":!file.binary||service.tools.root.join("adapter-components").join(&file.name).is_file()})).collect::<Vec<_>>(),
         "usage":USAGE
     })

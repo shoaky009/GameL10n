@@ -109,6 +109,23 @@ fn bounded(value: &Value, limit: usize) -> Value {
     }
 }
 
+fn trial_summary(value: &Value) -> Value {
+    let mut summary = bounded(value, 2048);
+    for field in [
+        "format",
+        "status",
+        "stage",
+        "parseStatus",
+        "roundtripStatus",
+        "translationStatus",
+    ] {
+        if let Some(status) = value.get(field) {
+            summary[field] = status.clone();
+        }
+    }
+    summary
+}
+
 pub(super) fn input_fingerprint(state: &Session) -> Option<String> {
     state
         .extra
@@ -439,7 +456,7 @@ fn snapshot(
             "engineReference":state.extra.get("engineReference"),
             "builtinDiscovery":discovery,
             "builtinProbes":state.extra.get("builtinProbes").map(|v| bounded(v,3000)),
-            "builtinTrials":state.extra.get("builtinTrials").and_then(Value::as_array).map(|trials| trials.iter().rev().take(3).map(|v|bounded(v,2048)).collect::<Vec<_>>()),
+            "builtinTrials":state.extra.get("builtinTrials").and_then(Value::as_array).map(|trials| trials.iter().rev().take(3).map(trial_summary).collect::<Vec<_>>()),
             "workspaceSamples":state.extra.get("workspaceSamples").map(|v|bounded(v,3000)),
             "automaticTrials":state.extra.get("automaticTrials").map(|v| bounded(v,3000)),
             "automaticTemplate":state.extra.get("automaticTemplate").map(|v| bounded(v,3000)),
@@ -647,6 +664,25 @@ pub(super) fn build(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn long_sample_diagnostics_keep_independent_stage_results_in_context() {
+        let value = json!({"format":"fixture","status":"failed","stage":"translation-readback",
+            "parseStatus":"passed","roundtripStatus":"passed","translationStatus":"failed",
+            "diagnostic":{"details":"trace".repeat(2000)}});
+        let summary = trial_summary(&value);
+        assert_eq!(summary["truncated"], true);
+        for field in [
+            "format",
+            "status",
+            "stage",
+            "parseStatus",
+            "roundtripStatus",
+            "translationStatus",
+        ] {
+            assert_eq!(summary[field], value[field]);
+        }
+    }
 
     fn experiment(state: &mut Session, id: &str, content: Value) {
         let call = ToolCall {

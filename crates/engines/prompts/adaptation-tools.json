@@ -782,7 +782,7 @@
       "type": "function",
       "function": {
         "name": "try_builtin_adapter",
-        "description": "Try a built-in parser on 1-12 explicit files under workspace resources/ or work/. Total input at most 64 MiB. Returns count, bounded samples, concrete parse diagnostics and optionally host-checked original-byte roundtrip (default true). Include required companions. Does not translate, test rendering, publish or activate. Stage original samples first; unpack archives locally into work/.",
+        "description": "Check 1-12 complete samples under resources/ or work/, total <=64 MiB. format is a bundled parser key or component id with sampleCheck (e.g. kirikiri-scn-text). Returns independent parseStatus, roundtripStatus and translationStatus, the failing stage and bounded diagnostics. Original-byte roundtrip and one local Chinese edit/readback default true; untouched text and identity are checked. Include required companions. Sample evidence never publishes an adapter or verifies game runtime.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -799,6 +799,9 @@
               }
             },
             "checkRoundtrip": {
+              "type": "boolean"
+            },
+            "checkTranslation": {
               "type": "boolean"
             }
           },
@@ -934,7 +937,7 @@
       "type": "function",
       "function": {
         "name": "run_engine_python",
-        "description": "Run one script OR pinned library module. Supply script + content to write/run a work/*.py probe in ONE call. The host discovers candidate samples written under work/resources and tries existing parsers locally. Use staged samples, shared Python, UTF-8, no pip/downloads. With reportFile, call injected write_report(status='completed', summary='...', tested=1, matched=1, details=...) with actual findings; no import needed. It writes UTF-8 JSON to GAMEL10N_REPORT_FILE (absolute). Reports are observations, not verification. executionSucceeded describes the process separately from report errors. Long stdout is previewed; read_tool_result retains original output. Can follow edits in one ordered batch; split independent reads into a separate batch.",
+        "description": "Run one script OR pinned library module. Supply script + content to write/run a work/*.py probe in ONE call. Injected save_sample('work/sample.ext', decoded_bytes) saves/registers complete memory samples (<=12 files/64 MiB), independent of workingDirectory. The host checks registered samples with existing parsers/components in this call and reuses unchanged results. It also discovers normal Python output files. Use staged inputs, shared Python, UTF-8, no pip/downloads. With reportFile, call injected write_report(status='completed'|'partial'|'failed', summary=..., tested=..., matched=..., details=...) with actual findings; reports remain observations. executionSucceeded describes the process separately from report errors. Long stdout is previewed; read_tool_result retains original output. Can follow edits in an ordered batch; independent reads require a separate batch.",
         "parameters": {
           "type": "object",
           "properties": {

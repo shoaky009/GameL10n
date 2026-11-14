@@ -602,6 +602,34 @@ sample_extensions = set(json.loads(os.environ.get('GAMEL10N_SAMPLE_EXTENSIONS', 
 written_files = {}
 written_bytes = 0
 written_partial = False
+registered_samples = {}
+
+def save_sample(path, data):
+    """Save complete experimental bytes under workspace work/ for host parser checks."""
+    if not sample_root:
+        raise ValueError('save_sample requires a workspace sample root')
+    if not isinstance(path, str):
+        raise TypeError('sample path must be a work/ relative string')
+    relative = path.replace('\\\\', '/')
+    parts = relative.split('/')
+    if (parts[0] != 'work' or any(part in ('', '.', '..') for part in parts)
+            or ':' in relative or len(relative.encode('utf-8')) > 512):
+        raise ValueError('sample path must be a normalized work/ relative file')
+    if not isinstance(data, (bytes, bytearray, memoryview)):
+        raise TypeError('sample data must be bytes, bytearray or memoryview')
+    size = memoryview(data).nbytes
+    key = relative.casefold()
+    if ((key not in registered_samples and len(registered_samples) >= 12)
+            or sum(item[1] for old, item in registered_samples.items() if old != key) + size > (64 << 20)):
+        raise ValueError('samples exceed the 12 file / 64 MiB budget')
+    root = Path(sample_root).resolve()
+    target = (root / relative).resolve()
+    if not target.is_relative_to(root / 'work'):
+        raise ValueError('sample path resolves outside workspace work/')
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(data)
+    registered_samples[key] = (relative, size)
+    return relative
 
 def record_sample(event, args):
     global written_bytes, written_partial
@@ -647,7 +675,7 @@ def write_report(*, status, **fields):
 
 args = sys.argv[1:]
 sys.argv = args[1:] if args[0] == '-m' else args
-globals_ = dict(write_report=write_report)
+globals_ = dict(write_report=write_report, save_sample=save_sample)
 try:
     if args[0] == '-m':
         runpy.run_module(args[1], run_name='__main__', init_globals=globals_)
@@ -655,7 +683,8 @@ try:
         runpy.run_path(args[0], run_name='__main__', init_globals=globals_)
 finally:
     if sample_output:
-        Path(sample_output).write_text(json.dumps(dict(files=list(written_files.values()), partial=written_partial),
+        Path(sample_output).write_text(json.dumps(dict(files=list(written_files.values()),
+                                                samples=[item[0] for item in registered_samples.values()], partial=written_partial),
                                                 ensure_ascii=True), encoding='utf-8')
 '''
 
@@ -724,21 +753,26 @@ def run(request):
     sample_directory.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='.sample-files-', dir=sample_directory) as tracking:
         sample_path = Path(tracking) / 'written.json'
-        if sample_extensions:
-            environment.update(GAMEL10N_SAMPLE_ROOT=str(workspace), GAMEL10N_SAMPLE_FILES=str(sample_path),
-                               GAMEL10N_SAMPLE_EXTENSIONS=json.dumps(sample_extensions))
+        environment.update(GAMEL10N_SAMPLE_ROOT=str(workspace), GAMEL10N_SAMPLE_FILES=str(sample_path),
+                           GAMEL10N_SAMPLE_EXTENSIONS=json.dumps(sample_extensions))
         result = run_process([sys.executable, '-I', '-X', 'utf8', '-c', code, *target, *arguments], workspace, request, environment)
-        if sample_extensions and sample_path.is_file():
+        if sample_path.is_file():
             try:
                 sample_path = safe(workspace, sample_path.relative_to(workspace).as_posix())
                 with sample_path.open('rb') as stream:
-                    tracked = json.loads(stream.read((64 << 10) + 1))
+                    tracked = json.loads(stream.read((128 << 10) + 1))
                 if not isinstance(tracked.get('files'), list) or len(tracked['files']) > 128:
                     raise ValueError('输出样本列表超限。')
                 result['writtenFiles'] = [file for file in tracked['files']
                                           if isinstance(file, str) and file.startswith(('work/', 'resources/'))
                                           and safe(workspace, file).is_file()]
                 result['writtenFilesPartial'] = tracked.get('partial') is True
+                samples = tracked.get('samples', [])
+                if not isinstance(samples, list) or len(samples) > 12:
+                    raise ValueError('registered sample list exceeds its budget')
+                result['registeredSamples'] = [file for file in samples
+                                               if isinstance(file, str) and file.startswith('work/')
+                                               and safe(workspace, file).is_file()]
             except (OSError, ValueError, TypeError) as error:
                 result['writtenFilesError'] = str(error)
     result['executionSucceeded'] = result['success']

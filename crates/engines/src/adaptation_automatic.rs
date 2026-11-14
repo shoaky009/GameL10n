@@ -319,6 +319,124 @@ pub(super) async fn trial_response(
     serde_json::from_value::<crate::protocol::AdapterResponse>(response)?.checked()
 }
 
+pub(super) async fn check_translation(
+    service: &EngineService,
+    source: &Path,
+    format: &str,
+    files: &[String],
+    units: &[TranslationUnit],
+    result: &mut Value,
+    cancellation: &CancellationToken,
+) -> Result<(), EngineError> {
+    let trial = units.iter().enumerate().find_map(|(index, unit)| {
+        let text = gamel10n_translation::text::verification_text(unit, index, true);
+        (text != unit.source_text).then_some((unit, text))
+    });
+    let Some((unit, text)) = trial else {
+        result["translationStatus"] = json!("inconclusive");
+        return Ok(());
+    };
+    let output = tempfile::tempdir()?;
+    result["stage"] = json!("translation-build");
+    result["translationStatus"] = json!("failed");
+    let mut build = AdapterRequest::new("build", source);
+    build.resource_files = Some(files.to_vec());
+    build.output_directory = Some(output.path().into());
+    build.translations = Some(BTreeMap::from([(unit.id.clone(), text.clone())]));
+    let built = trial_response(service, &build, format, result, cancellation)
+        .await?
+        .build
+        .ok_or_else(|| reject("内置解析器未返回小样中文回填结果。"))?;
+    let selected: BTreeSet<_> = files.iter().map(|file| file.to_lowercase()).collect();
+    let inventory = Inventory::scan(output.path())?;
+    if !inventory.complete
+        || inventory
+            .files
+            .iter()
+            .map(|file| file.path.to_lowercase())
+            .collect::<BTreeSet<_>>()
+            != selected
+        || built
+            .files
+            .iter()
+            .map(|file| file.to_lowercase())
+            .collect::<BTreeSet<_>>()
+            != selected
+        || built.files.len() != files.len()
+        || built.launch_executable.is_some()
+        || built.launch.is_some()
+    {
+        return Err(reject("小样中文回填的文件集合与所选样本不一致。"));
+    }
+    result["stage"] = json!("translation-readback");
+    let mut extract = AdapterRequest::new("extract", output.path());
+    extract.resource_files = Some(files.to_vec());
+    let extracted = trial_response(service, &extract, format, result, cancellation)
+        .await?
+        .extraction
+        .ok_or_else(|| reject("内置解析器未返回小样中文复提结果。"))?;
+    let after: BTreeMap<_, _> = extracted
+        .units
+        .iter()
+        .map(|unit| (unit.id.as_str(), unit))
+        .collect();
+    if after.len() != units.len() || after.len() != extracted.units.len() {
+        result["issues"] = json!([crate::VerificationIssue::new(
+            crate::VerificationIssueCode::TextCount,
+            "translation-readback"
+        )
+        .difference(&units.len().to_string(), &extracted.units.len().to_string())]);
+        return Err(reject("小样中文复提改变了文本数量或产生重复 ID。"));
+    }
+    for original in units {
+        let expected = if original.id == unit.id {
+            &text
+        } else {
+            &original.source_text
+        };
+        let mut issue = crate::VerificationIssue::new(
+            crate::VerificationIssueCode::TextMismatch,
+            "translation-readback",
+        )
+        .at(&original.resource_path, Some(&original.id))
+        .unit_difference(
+            original,
+            after.get(original.id.as_str()).copied(),
+            expected,
+            false,
+            true,
+        );
+        if !after.contains_key(original.id.as_str()) || !issue.field_differences.is_empty() {
+            issue.code = if !after.contains_key(original.id.as_str()) {
+                crate::VerificationIssueCode::MissingUnit
+            } else if issue
+                .field_differences
+                .iter()
+                .any(|difference| difference.field == "sourceText")
+            {
+                crate::VerificationIssueCode::TextMismatch
+            } else if issue
+                .field_differences
+                .iter()
+                .any(|difference| difference.field == "protectedTokens")
+            {
+                crate::VerificationIssueCode::ProtectedTokens
+            } else {
+                crate::VerificationIssueCode::IdentityMismatch
+            };
+            let fields = issue.field_names();
+            result["issues"] = json!([issue]);
+            return Err(reject(format!(
+                "小样中文复提不一致：{}（变化字段：{fields}）。",
+                original.id
+            )));
+        }
+    }
+    result["translationStatus"] = json!("passed");
+    result["translatedUnitId"] = json!(unit.id);
+    Ok(())
+}
+
 pub(super) async fn run(
     service: &EngineService,
     request: &AdaptationRequest<'_>,
@@ -399,7 +517,15 @@ pub(super) fn sample_result(outcome: Result<Value, EngineError>) -> Value {
 }
 
 fn parser_reuse(workspace: &Path, format: &str, result: &mut Value) {
-    if result["status"] != "passed" {
+    if (result["parseStatus"] != "passed" && result["status"] != "passed")
+        || result["unitCount"].as_u64().is_none_or(|count| count == 0)
+    {
+        return;
+    }
+    if !crate::vntextpatch::FORMATS.contains(&format) {
+        result["nextAction"] = json!(
+            "复用此组件中已通过的步骤，仅修复失败阶段；封包、过滤器、编码与完整适配器仍须单独验收。"
+        );
         return;
     }
     if workspace.join("src/adapter.py").exists() {
@@ -407,11 +533,187 @@ fn parser_reuse(workspace: &Path, format: &str, result: &mut Value) {
             result.remove("reuseCall");
         }
         result["nextAction"] = json!(
-            "保留当前适配器入口与固定依赖，通过 tools.gamel10n_host.parser 接入已验证的小样格式；先检查固定工具版本是否提供所需接口，不用 copy_adapter 覆盖已有代码。仍须完整 test_adapter。"
+            "保留当前适配器入口与固定依赖，通过 tools.gamel10n_host.parser 复用已通过的解析步骤；按各阶段结果补齐回填、编码等缺口，仍须完整 test_adapter。"
         );
     } else {
         result["reuseCall"] = json!({"tool":"copy_adapter","arguments":{"id":format!("engine.vntextpatch-{}",format.to_ascii_lowercase()),"version":"1.0.1"}});
     }
+}
+
+pub(super) fn remember_trial(
+    state: &mut Session,
+    directory: &str,
+    files: &[String],
+    result: &Value,
+) {
+    let mut trials = state
+        .extra
+        .get("builtinTrials")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    trials.retain(|trial| {
+        !(trial["format"] == result["format"]
+            && trial["directory"] == directory
+            && trial["files"] == json!(files))
+    });
+    let mut observation = result.clone();
+    observation["directory"] = json!(directory);
+    observation["files"] = json!(files);
+    observation["observedAt"] = json!(chrono::Utc::now().to_rfc3339());
+    trials.push(observation);
+    if trials.len() > 6 {
+        trials.remove(0);
+    }
+    state.extra.insert("builtinTrials".into(), json!(trials));
+}
+
+async fn try_component_sample(
+    service: &EngineService,
+    workspace: &Path,
+    state: &mut Session,
+    format: &str,
+    file: &str,
+    checks: (bool, bool),
+    token: &CancellationToken,
+) -> Result<Value, EngineError> {
+    let source =
+        components::sample_source(format)?.ok_or_else(|| reject("该组件未提供小样检查入口。"))?;
+    let input = resolve_relative(workspace, file)?;
+    let size = input.metadata()?.len();
+    if size > TRIAL_BYTES {
+        return Err(reject("小样超过 64 MiB 预算。"));
+    }
+    let digest = checked_hash(&input, size, token)?;
+    let reference = service.adaptation_reference(workspace, state)?;
+    let library = service.reference_library(&reference)?;
+    let fingerprint = hash_text(&json!({"revision":1,"format":format,"file":file,"hash":digest,"component":gamel10n_translation::files::hash_bytes(source),"reference":reference,"checks":checks}).to_string());
+    if let Some(trial) = state
+        .extra
+        .get("builtinTrials")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|trial| trial["fingerprint"] == fingerprint)
+    {
+        let mut result = trial.clone();
+        result["cached"] = json!(true);
+        parser_reuse(workspace, format, &mut result);
+        return Ok(result);
+    }
+    let mut result = components::check_sample(service, &library, source,
+        &json!({"operation":"verify","input":input,"checkRoundtrip":checks.0,"checkTranslation":checks.1}), token).await?;
+    if checked_hash(&input, size, token)? != digest {
+        return Err(reject("小样检查期间输入发生变化，结果未保存。"));
+    }
+    let (directory, relative) = file
+        .split_once('/')
+        .ok_or_else(|| reject("小样路径无效。"))?;
+    result["format"] = json!(format);
+    result["status"] = json!(if result["success"] == true {
+        if result["fieldCount"] == 0 {
+            "no-text"
+        } else {
+            "passed"
+        }
+    } else {
+        "failed"
+    });
+    result["unitCount"] = result["fieldCount"].clone();
+    result["sourceHashes"] = json!({relative:digest});
+    result["runtimeStatus"] = json!("not-tested");
+    result["cached"] = json!(false);
+    if result["success"] == true
+        || matches!(
+            result["diagnostic"]["errorType"].as_str(),
+            Some(
+                "ValueError"
+                    | "IndexError"
+                    | "KeyError"
+                    | "UnicodeDecodeError"
+                    | "UnicodeEncodeError"
+                    | "struct.error"
+            )
+        )
+    {
+        result["fingerprint"] = json!(fingerprint);
+    }
+    parser_reuse(workspace, format, &mut result);
+    remember_trial(state, directory, &[relative.into()], &result);
+    Ok(result)
+}
+
+pub(super) async fn component_trials(
+    service: &EngineService,
+    workspace: &Path,
+    state: &mut Session,
+    args: &Value,
+    cancellation: &CancellationToken,
+) -> Result<Value, EngineError> {
+    let directory = text(args, "directory")?.replace('\\', "/");
+    let files: Vec<_> = strings(args, "files")?
+        .iter()
+        .map(|file| format!("{directory}/{}", file.replace('\\', "/")))
+        .collect();
+    let files = sample_files(workspace, &json!({"sampleFiles":files}))?;
+    if files.is_empty() {
+        return Err(reject("请明确选择要检查的完整样本。"));
+    }
+    let total = files.iter().try_fold(0_u64, |sum, file| {
+        Ok::<_, EngineError>(
+            sum.saturating_add(resolve_relative(workspace, file)?.metadata()?.len()),
+        )
+    })?;
+    if total > TRIAL_BYTES {
+        return Err(reject("小样合计超过 64 MiB 预算。"));
+    }
+    let checks = (
+        boolean(args, "checkRoundtrip", true)?,
+        boolean(args, "checkTranslation", true)?,
+    );
+    let budget = Budget::new(cancellation, Duration::from_secs(60));
+    let mut trials = Vec::new();
+    for file in files {
+        trials.push(
+            try_component_sample(
+                service,
+                workspace,
+                state,
+                text(args, "format")?,
+                &file,
+                checks,
+                &budget.token,
+            )
+            .await?,
+        );
+    }
+    if trials.len() == 1 {
+        return Ok(trials.remove(0));
+    }
+    let mut result = json!({"format":args["format"],"runtimeStatus":"not-tested","unitCount":trials.iter().filter_map(|trial|trial["unitCount"].as_u64()).sum::<u64>()});
+    result["status"] = json!(if trials.iter().any(|trial| trial["status"] == "failed") {
+        "failed"
+    } else if result["unitCount"].as_u64().unwrap_or(0) > 0 {
+        "passed"
+    } else {
+        "no-text"
+    });
+    for field in ["parseStatus", "roundtripStatus", "translationStatus"] {
+        result[field] = trials
+            .iter()
+            .map(|trial| &trial[field])
+            .find(|value| value.as_str() == Some("failed"))
+            .or_else(|| {
+                trials
+                    .iter()
+                    .map(|trial| &trial[field])
+                    .find(|value| value.as_str() == Some("inconclusive"))
+            })
+            .unwrap_or(&trials[0][field])
+            .clone();
+    }
+    result["trials"] = json!(trials);
+    Ok(result)
 }
 
 async fn try_cached_sample(
@@ -444,7 +746,7 @@ async fn try_cached_sample(
     }
     let hashes = sample_hashes(&root, &lengths, token)?;
     let parser = parser_fingerprint(service, token)?;
-    let fingerprint = hash_text(&json!({"trialRevision":2,"format":format,"directory":directory,"parser":parser,"files":hashes}).to_string());
+    let fingerprint = hash_text(&json!({"trialRevision":3,"format":format,"directory":directory,"parser":parser,"files":hashes}).to_string());
     if let Some(trial) = state
         .extra
         .get("builtinTrials")
@@ -608,6 +910,38 @@ pub(super) async fn inspect_samples(
                 .is_some_and(|trials| trials.len() >= 3)
             {
                 break;
+            }
+        }
+        for component in report["components"].as_array().into_iter().flatten() {
+            let id = text(component, "id")?;
+            if components::sample_source(id)?.is_none() {
+                continue;
+            }
+            for file in component["sampleFiles"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .take(2)
+            {
+                if result["trials"]
+                    .as_array()
+                    .is_some_and(|trials| trials.len() >= 3)
+                {
+                    break;
+                }
+                let size = resolve_relative(workspace, file)?.metadata()?.len();
+                if selected_bytes.saturating_add(size) > TRIAL_BYTES {
+                    continue;
+                }
+                selected_bytes += size;
+                let trial =
+                    try_component_sample(service, workspace, state, id, file, (true, true), token)
+                        .await?;
+                result["trials"]
+                    .as_array_mut()
+                    .ok_or_else(|| reject("试用结果列表无效。"))?
+                    .push(trial);
             }
         }
         Ok::<_, EngineError>(())
@@ -1248,7 +1582,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn explicit_psb_samples_return_component_entry_without_claiming_compatibility() {
+    async fn psb_samples_keep_component_failures_without_accepting_adapters() {
         let root = tempfile::tempdir().unwrap();
         let (service, _, workspace, mut state) = fixture(root.path(), "KirikiriKs", "archive.xp3");
         fs::write(
@@ -1276,7 +1610,21 @@ mod tests {
             json!(["work/scene.ks"])
         );
         assert_eq!(result["candidates"], json!([]));
-        assert_eq!(result["trials"], json!([]));
+        assert_eq!(result["status"], "completed", "{result}");
+        assert_eq!(result["trials"][0]["parseStatus"], "failed", "{result}");
+        assert_eq!(result["trials"][0]["roundtripStatus"], "not-run");
+        assert_eq!(result["trials"][0]["translationStatus"], "not-run");
+        let repeated = inspect_samples(
+            &service,
+            &workspace,
+            &mut state,
+            &["work/scene.ks".into()],
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(repeated["trials"][0]["cached"], true, "{repeated}");
+        assert_eq!(repeated["trials"][0]["parseStatus"], "failed");
         assert!(state.verified_package.is_none());
         assert!(!workspace.join("src").exists());
     }
@@ -1394,6 +1742,139 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn memory_samples_receive_native_stage_checks_without_model_requests() {
+        let root = tempfile::tempdir().unwrap();
+        let (service, request, workspace, mut state) =
+            fixture(root.path(), "KirikiriKs", "game.xp3");
+        if !service.tools.vntextpatch().is_file() || !service.tools.python().is_file() {
+            return;
+        }
+        let result = service.adaptation_tool(&request, &workspace, &mut state, "run_engine_python",
+            &json!({"script":"work/decode.py","workingDirectory":"work","content":"save_sample('work/scene.ks', '[cm]\\nこんにちは[p]\\n[cm]\\n保持原文[p]\\n'.encode('utf-8-sig'))"}),
+            &CancellationToken::new(), None).await.unwrap();
+        let trial = &result["builtinSamples"]["trials"][0];
+        assert_eq!(result["success"], true, "{result}");
+        assert_eq!(trial["parseStatus"], "passed", "{result}");
+        assert_eq!(trial["roundtripStatus"], "passed");
+        assert_eq!(trial["translationStatus"], "passed");
+        assert_eq!(trial["runtimeStatus"], "not-tested");
+        assert_eq!(state.api_requests(), 0);
+        assert!(state.verified_package.is_none());
+        assert!(!workspace.join("src").exists());
+    }
+
+    #[tokio::test]
+    async fn component_samples_preserve_checks_across_recovery_and_invalidate_changed_bytes() {
+        let root = tempfile::tempdir().unwrap();
+        let (service, request, workspace, mut state) =
+            fixture(root.path(), "KirikiriKs", "game.xp3");
+        if !service.tools.python().is_file() || service.current_reference().is_err() {
+            return;
+        }
+        fs::write(
+            workspace.join("work/scn_fixture.py"),
+            include_str!("../tests/fixtures/kirikiri_scn_fixture.py"),
+        )
+        .unwrap();
+        let script = "import runpy\npsb=runpy.run_path('work/scn_fixture.py')['psb']\ntree={'scenes':[{'title':'Opening','texts':[['actor',[[None,'Original',8,'Original','Original']],None,None,None]]}]}\nsave_sample('work/scene.scn', psb(tree))\n";
+        let token = CancellationToken::new();
+        let result = service
+            .adaptation_tool(
+                &request,
+                &workspace,
+                &mut state,
+                "run_engine_python",
+                &json!({"script":"work/decode.py","content":script}),
+                &token,
+                None,
+            )
+            .await
+            .unwrap();
+        let trial = &result["builtinSamples"]["trials"][0];
+        assert_eq!(trial["format"], "kirikiri-scn-text", "{result}");
+        for field in ["parseStatus", "roundtripStatus", "translationStatus"] {
+            assert_eq!(trial[field], "passed", "{field}: {result}");
+        }
+        let path = workspace.join("session.json");
+        save_session(&path, &mut state).await.unwrap();
+        let mut restored: Session = read_json(&path).unwrap();
+        let result = inspect_samples(
+            &service,
+            &workspace,
+            &mut restored,
+            &["work/scene.scn".into()],
+            &token,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["trials"][0]["cached"], true, "{result}");
+        let result = service
+            .adaptation_tool(
+                &request,
+                &workspace,
+                &mut restored,
+                "run_engine_python",
+                &json!({"script":"work/decode.py","content":script.replace("Opening", "Changed")}),
+                &token,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result["builtinSamples"]["trials"][0]["cached"], false,
+            "{result}"
+        );
+        assert!(restored.verified_package.is_none());
+        assert!(restored.workflow.verification_args.is_none());
+        assert_eq!(restored.api_requests(), 0);
+        assert!(!workspace.join("src").exists());
+    }
+
+    #[tokio::test]
+    async fn translated_sample_readback_rejects_changes_to_untouched_metadata() {
+        let root = tempfile::tempdir().unwrap();
+        let (service, _, workspace, _) = fixture(root.path(), "KirikiriKs", "game.xp3");
+        if !service.tools.vntextpatch().is_file() {
+            return;
+        }
+        let source = workspace.join("work");
+        fs::write(
+            source.join("scene.ks"),
+            "\u{feff}[cm]\nこんにちは[p]\n[cm]\n保持原文[p]\n",
+        )
+        .unwrap();
+        let token = CancellationToken::new();
+        let mut response = json!({});
+        let mut request = AdapterRequest::new("extract", &source);
+        request.resource_files = Some(vec!["scene.ks".into()]);
+        let mut units = trial_response(&service, &request, "KirikiriKs", &mut response, &token)
+            .await
+            .unwrap()
+            .extraction
+            .unwrap()
+            .units;
+        assert!(units.len() >= 2);
+        units[1].speaker = Some("unexpected speaker".into());
+        let result = check_translation(
+            &service,
+            &source,
+            "KirikiriKs",
+            &["scene.ks".into()],
+            &units,
+            &mut response,
+            &token,
+        )
+        .await;
+        assert!(result.is_err(), "{response}");
+        assert_eq!(response["stage"], "translation-readback");
+        assert_eq!(response["translationStatus"], "failed");
+        assert_eq!(
+            response["issues"][0]["fieldDifferences"][0]["field"],
+            "speaker"
+        );
+    }
+
+    #[tokio::test]
     async fn continuation_discovers_existing_samples_without_a_declared_file_list() {
         let root = tempfile::tempdir().unwrap();
         let (service, _, workspace, mut state) = fixture(root.path(), "Renpy", "game.rpa");
@@ -1418,7 +1899,7 @@ mod tests {
         inspect_workspace(&service, &workspace, &mut state, &CancellationToken::new())
             .await
             .unwrap();
-        assert_eq!(state.extra["workspaceSamples"]["trialCount"], 1);
+        assert_eq!(state.extra["workspaceSamples"]["trialCount"], 2);
         assert_eq!(state.extra["builtinTrials"][0]["status"], "passed");
         assert_eq!(state.extra["builtinTrials"][0]["unitCount"], 1);
         assert_eq!(state.api_requests(), requests);

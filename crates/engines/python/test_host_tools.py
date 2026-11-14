@@ -122,6 +122,36 @@ raise ValueError('later experiment failed')
         self.assertEqual(result['writtenFiles'], ['work/scene.scn'])
         self.assertIn('later experiment failed', result['stderr'])
 
+    def test_memory_samples_are_registered_from_nested_working_directories(self):
+        result = self.execute('run', script='work/decode.py', workingDirectory='work/nested', content='''
+assert save_sample('work/samples/scene.bin', memoryview(b'PSB sample')) == 'work/samples/scene.bin'
+save_sample('work/samples/scene.bin', bytearray(b'new sample'))
+raise ValueError('later experiment failed')
+''')
+        self.assertFalse(result['success'])
+        self.assertEqual(result['registeredSamples'], ['work/samples/scene.bin'])
+        self.assertEqual((self.root / 'work/samples/scene.bin').read_bytes(), b'new sample')
+        self.assertEqual(list((self.root / 'work').glob('.sample-files-*')), [])
+
+    def test_memory_samples_reject_invalid_scope_and_excessive_inputs_before_writing(self):
+        for expression in ("save_sample('../outside.ks', b'x')",
+                           "save_sample('resources/scene.ks', b'x')",
+                           "save_sample('work/../scene.ks', b'x')",
+                           "save_sample('work/sample.ks', 'text')",
+                           "save_sample('work/sample.ks', b'x' * ((64 << 20) + 1))"):
+            with self.subTest(expression=expression):
+                result = self.execute('run', script='work/invalid.py', content=expression)
+                self.assertFalse(result['success'])
+                self.assertEqual(result['registeredSamples'], [])
+        self.assertFalse((self.root / 'work/sample.ks').exists())
+        result = self.execute('run', script='work/many.py', content='''
+for i in range(13):
+    save_sample(f'work/sample-{i}.ks', b'x')
+''')
+        self.assertFalse(result['success'])
+        self.assertEqual(len(result['registeredSamples']), 12)
+        self.assertFalse((self.root / 'work/sample-12.ks').exists())
+
     def test_written_sample_tracking_is_bounded(self):
         result = self.execute('run', script='work/many.py', sampleExtensions=['.ks'], content='''
 from pathlib import Path

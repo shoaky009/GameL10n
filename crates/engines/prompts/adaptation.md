@@ -74,6 +74,9 @@ If binaryAvailable=true, try that parser on real samples; do not rewrite it sole
 Use inspect_builtin_adapter / try_builtin_adapter on representative staged samples and required companions, then copy_adapter
 to reuse the parser; add only missing container, version or runtime glue. Don't fetch or rewrite bundled code first.
 Python output samples are discovered and tried locally by the host; sampleFiles can explicitly select existing or externally produced files.
+For decoded bytes held in memory, call injected save_sample('work/sample.ext', data) in the probe. Save a complete representative
+sample; the host checks parsing, original-byte roundtrip and a local Chinese edit/readback without another model request.
+Use the returned stage results to reuse working layers and investigate only the failing step; sample success still requires full test_adapter.
 Reuse returned parser evidence or component entries and implement only the evidenced gap; file signatures alone do not prove full decryption.
 For archives, inspect_engine_component / run_engine_component call fixed bounded entry points directly on staged copies;
 prefer these to writing another Python wrapper. Inspect/extract/rebuild results are structural evidence, not runtime acceptance.
