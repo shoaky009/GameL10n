@@ -16,6 +16,16 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
+const ANALYSIS_REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
+
+#[derive(Clone, Copy)]
+enum CompletionMode {
+    Standard,
+    Analysis,
+    ConnectionTest,
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub enum ApiProtocol {
     #[default]
@@ -197,6 +207,7 @@ pub struct OpenAiProvider {
     display_name: String,
     request_count: Arc<AtomicU64>,
     metrics: Arc<Mutex<RequestMetrics>>,
+    analysis_request_timeout: Duration,
 }
 
 /// Observed usage belongs to HTTP attempts, including responses rejected by the caller.
@@ -295,7 +306,7 @@ impl OpenAiProvider {
             ))
         );
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(180))
+            .timeout(DEFAULT_REQUEST_TIMEOUT)
             .build()
             .map_err(|_| ProviderError::new("http-client", "无法初始化 HTTP 客户端。"))?;
         let account_key = hash_text(&format!(
@@ -326,6 +337,7 @@ impl OpenAiProvider {
             display_name,
             request_count: Arc::new(AtomicU64::new(0)),
             metrics: Arc::new(Mutex::new(RequestMetrics::default())),
+            analysis_request_timeout: ANALYSIS_REQUEST_TIMEOUT,
         })
     }
     pub fn identity(&self) -> &str {
@@ -349,6 +361,10 @@ impl OpenAiProvider {
     }
     pub fn analysis_reasoning_effort(&self) -> Option<&str> {
         self.settings.analysis_reasoning_effort.as_deref()
+    }
+    /// HTTP deadline for an adaptation attempt, excluding account queue and retry waits.
+    pub fn analysis_request_timeout(&self) -> Duration {
+        self.analysis_request_timeout
     }
     pub fn display_name(&self) -> &str {
         &self.display_name
@@ -385,7 +401,7 @@ impl OpenAiProvider {
             known.as_ref(),
             maximum_output_tokens,
             cancellation,
-            true,
+            CompletionMode::Standard,
         )
         .await
     }
@@ -413,7 +429,7 @@ impl OpenAiProvider {
             Some(&known),
             maximum_output_tokens,
             cancellation,
-            true,
+            CompletionMode::Analysis,
         )
         .await
     }
@@ -425,7 +441,7 @@ impl OpenAiProvider {
         known_tool_names: Option<&HashSet<String>>,
         maximum_output_tokens: u32,
         cancellation: &CancellationToken,
-        retry_throttled: bool,
+        mode: CompletionMode,
     ) -> Result<Completion, ProviderError> {
         let waiting = std::time::Instant::now();
         let permit = tokio::select! {
@@ -447,11 +463,12 @@ impl OpenAiProvider {
                     known_tool_names,
                     maximum_output_tokens,
                     cancellation,
+                    mode,
                 )
                 .await;
             if let Err(error) = &result
                 && tools.is_some()
-                && retry_throttled
+                && !matches!(mode, CompletionMode::ConnectionTest)
                 && error.status_code == Some(429)
                 && retries < 2
             {
@@ -482,6 +499,7 @@ impl OpenAiProvider {
         known_tool_names: Option<&HashSet<String>>,
         maximum_output_tokens: u32,
         cancellation: &CancellationToken,
+        mode: CompletionMode,
     ) -> Result<Completion, ProviderError> {
         let mut body = match self.settings.protocol {
             ApiProtocol::ChatCompletions => {
@@ -569,6 +587,9 @@ impl OpenAiProvider {
             .post(self.endpoint.clone())
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(payload.clone());
+        if matches!(mode, CompletionMode::Analysis) {
+            request = request.timeout(self.analysis_request_timeout);
+        }
         if !self.settings.api_key.is_empty() {
             request = request.bearer_auth(&self.settings.api_key);
         }
@@ -642,7 +663,7 @@ impl OpenAiProvider {
             let chunk = tokio::select! {
                 biased;
                 _=cancellation.cancelled()=>return Err(ProviderError::new("cancelled","任务已取消。")),
-                result=response.chunk()=>result.map_err(|_| {let mut error=ProviderError::new("network-interrupted","API 响应中断，结果未知。");error.outcome_unknown=true;error})?,
+                result=response.chunk()=>result.map_err(|failure| {let mut error=ProviderError::new(if failure.is_timeout(){"request-timeout"}else{"network-interrupted"},"API 响应中断，结果未知。");error.outcome_unknown=true;error})?,
             };
             let Some(chunk) = chunk else {
                 break;
@@ -858,7 +879,7 @@ impl OpenAiProvider {
         let known = agent_tool_names(&tools, &[])?;
         let completion = self.complete_with_known_tools(
             &[json!({"role":"user","content":"Call connection_check exactly once with value set to ok. Do not answer with text."})],
-            Some(&tools), Some(&known), 1024, cancellation, false,
+            Some(&tools), Some(&known), 1024, cancellation, CompletionMode::ConnectionTest,
         ).await?;
         if completion.tool_calls.len() != 1
             || completion.tool_calls[0].name != "connection_check"
@@ -1660,6 +1681,37 @@ mod tests {
         mock_agent_status(responses.into_iter().map(|body| (200, body)).collect())
     }
 
+    fn read_mock_request(stream: &mut std::net::TcpStream) -> Value {
+        use std::io::Read;
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        let mut expected = None;
+        loop {
+            let size = stream.read(&mut buffer).unwrap();
+            assert!(size > 0);
+            request.extend_from_slice(&buffer[..size]);
+            if expected.is_none()
+                && let Some(start) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n")
+            {
+                let headers = String::from_utf8_lossy(&request[..start]);
+                let size = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .map(|value| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap();
+                expected = Some((start + 4, size));
+            }
+            if let Some((start, size)) = expected
+                && request.len() >= start + size
+            {
+                return serde_json::from_slice(&request[start..start + size]).unwrap();
+            }
+        }
+    }
+
     fn mock_agent_status(
         responses: Vec<(u16, Value)>,
     ) -> (
@@ -1667,7 +1719,7 @@ mod tests {
         std::sync::mpsc::Receiver<Value>,
         std::thread::JoinHandle<()>,
     ) {
-        use std::io::{Read, Write};
+        use std::io::Write;
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let (sender, receiver) = std::sync::mpsc::channel();
@@ -1677,42 +1729,197 @@ mod tests {
                 stream
                     .set_read_timeout(Some(Duration::from_secs(5)))
                     .unwrap();
-                let mut request = Vec::new();
-                let mut buffer = [0_u8; 4096];
-                let mut expected = None;
-                loop {
-                    let size = stream.read(&mut buffer).unwrap();
-                    assert!(size > 0);
-                    request.extend_from_slice(&buffer[..size]);
-                    if expected.is_none()
-                        && let Some(start) =
-                            request.windows(4).position(|bytes| bytes == b"\r\n\r\n")
-                    {
-                        let headers = String::from_utf8_lossy(&request[..start]);
-                        let size = headers
-                            .lines()
-                            .find_map(|line| {
-                                line.to_ascii_lowercase()
-                                    .strip_prefix("content-length:")
-                                    .map(|value| value.trim().parse::<usize>().unwrap())
-                            })
-                            .unwrap();
-                        expected = Some((start + 4, size));
-                    }
-                    if let Some((start, size)) = expected
-                        && request.len() >= start + size
-                    {
-                        sender
-                            .send(serde_json::from_slice(&request[start..start + size]).unwrap())
-                            .unwrap();
-                        break;
-                    }
-                }
+                sender.send(read_mock_request(&mut stream)).unwrap();
                 let body = body.to_string();
                 write!(stream, "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nRetry-After: 0\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
             }
         });
         (format!("http://{address}/v1"), receiver, handle)
+    }
+
+    fn slow_agent(
+        protocol: ApiProtocol,
+        delay: Duration,
+        delay_body: bool,
+    ) -> (
+        String,
+        tokio::sync::oneshot::Receiver<()>,
+        std::thread::JoinHandle<()>,
+    ) {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (ready, received) = tokio::sync::oneshot::channel();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            read_mock_request(&mut stream);
+            let body = match protocol {
+                ApiProtocol::ChatCompletions => json!({"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}]}),
+                ApiProtocol::Responses => json!({"status":"completed","output":[{"type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}),
+            }.to_string();
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            if delay_body {
+                let _ = stream.write_all(headers.as_bytes());
+            }
+            let _ = ready.send(());
+            std::thread::sleep(delay);
+            if !delay_body {
+                let _ = stream.write_all(headers.as_bytes());
+            }
+            let _ = stream.write_all(body.as_bytes());
+        });
+        (format!("http://{address}/v1"), received, handle)
+    }
+
+    #[tokio::test]
+    async fn adaptation_deadline_overrides_only_the_actual_analysis_request() {
+        for protocol in [ApiProtocol::ChatCompletions, ApiProtocol::Responses] {
+            for mode in [
+                CompletionMode::Analysis,
+                CompletionMode::Standard,
+                CompletionMode::ConnectionTest,
+            ] {
+                let (endpoint, _ready, server) =
+                    slow_agent(protocol, Duration::from_millis(400), false);
+                let mut provider = local_agent(endpoint, protocol);
+                provider.client = reqwest::Client::builder()
+                    .timeout(Duration::from_millis(100))
+                    .build()
+                    .unwrap();
+                provider.analysis_request_timeout = Duration::from_secs(5);
+                let cancellation = CancellationToken::new();
+                let mut messages = agent_messages();
+                messages[1]["content"] = json!("Inspect resources ".repeat(1024));
+                let result = match mode {
+                    CompletionMode::Analysis => provider
+                        .complete_agent(&messages, &agent_tools(), &[], 128, &cancellation)
+                        .await
+                        .map(|_| ()),
+                    CompletionMode::Standard => provider
+                        .complete(&messages, None, 128, &cancellation)
+                        .await
+                        .map(|_| ()),
+                    CompletionMode::ConnectionTest => {
+                        provider
+                            .test_connection(ConnectionTestKind::Analysis, &cancellation)
+                            .await
+                    }
+                };
+                if matches!(mode, CompletionMode::Analysis) {
+                    result.unwrap();
+                } else {
+                    let error = result.unwrap_err();
+                    assert_eq!(error.diagnostic.code, "request-timeout");
+                    assert!(error.outcome_unknown);
+                }
+                assert_eq!(provider.request_count(), 1);
+                server.join().unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn analysis_deadline_covers_headers_and_body_without_replaying_unknown_results() {
+        for delay_body in [false, true] {
+            let (endpoint, _ready, server) = slow_agent(
+                ApiProtocol::ChatCompletions,
+                Duration::from_millis(400),
+                delay_body,
+            );
+            let mut provider = local_agent(endpoint, ApiProtocol::ChatCompletions);
+            provider.analysis_request_timeout = Duration::from_millis(100);
+            let error = provider
+                .complete_agent(
+                    &agent_messages(),
+                    &agent_tools(),
+                    &[],
+                    128,
+                    &CancellationToken::new(),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(error.diagnostic.code, "request-timeout");
+            assert!(error.outcome_unknown);
+            assert_eq!(provider.request_count(), 1);
+            assert_eq!(provider.request_metrics().failed_requests, 1);
+            server.join().unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn analysis_queue_wait_is_outside_the_request_deadline_and_api_metrics() {
+        let (endpoint, _ready, server) = slow_agent(
+            ApiProtocol::ChatCompletions,
+            Duration::from_millis(30),
+            false,
+        );
+        let mut provider = local_agent(endpoint, ApiProtocol::ChatCompletions);
+        provider.analysis_request_timeout = Duration::from_millis(500);
+        let permit = provider.account_slot.clone().acquire_owned().await.unwrap();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(800)).await;
+            drop(permit);
+        });
+        provider
+            .complete_agent(
+                &agent_messages(),
+                &agent_tools(),
+                &[],
+                128,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let metrics = provider.request_metrics();
+        assert!(metrics.waiting_ms >= 700);
+        assert!(metrics.api_ms < 500);
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn analysis_cancellation_interrupts_queue_headers_and_body() {
+        for delay_body in [false, true] {
+            let (endpoint, ready, server) = slow_agent(
+                ApiProtocol::ChatCompletions,
+                Duration::from_secs(1),
+                delay_body,
+            );
+            let provider = local_agent(endpoint, ApiProtocol::ChatCompletions);
+            let cancellation = CancellationToken::new();
+            let stop = cancellation.clone();
+            tokio::spawn(async move {
+                ready.await.unwrap();
+                stop.cancel();
+            });
+            let error = tokio::time::timeout(
+                Duration::from_secs(3),
+                provider.complete_agent(&agent_messages(), &agent_tools(), &[], 128, &cancellation),
+            )
+            .await
+            .unwrap()
+            .unwrap_err();
+            assert!(error.is_cancelled());
+            assert_eq!(provider.request_count(), 1);
+            server.join().unwrap();
+        }
+        let provider = local_agent("http://127.0.0.1:1/v1".into(), ApiProtocol::ChatCompletions);
+        let _permit = provider.account_slot.acquire().await.unwrap();
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        assert!(
+            provider
+                .complete_agent(&agent_messages(), &agent_tools(), &[], 128, &cancellation)
+                .await
+                .unwrap_err()
+                .is_cancelled()
+        );
+        assert_eq!(provider.request_count(), 0);
     }
 
     #[tokio::test]
