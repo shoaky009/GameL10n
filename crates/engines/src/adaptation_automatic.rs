@@ -2024,6 +2024,7 @@ mod tests {
             return;
         }
         fs::create_dir_all(workspace.join("work/decoded")).unwrap();
+        fs::write(workspace.join("work/decoded/ReAdMe.TxT"), b"YSTBpayload").unwrap();
         for (file, text) in [
             ("a.rpy", "label a:\n    return\n"),
             ("b.rpy", "label b:\n    return\n"),
@@ -2075,6 +2076,49 @@ mod tests {
         assert!(visible.contains("workspaceSamples"));
         assert!(visible.contains("kirikiri-scn-text"));
         assert!(visible.contains("builtinTrials"));
+    }
+
+    #[tokio::test]
+    async fn python_automatic_samples_skip_documents_but_explicit_samples_remain_available() {
+        for registered in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let (service, request, workspace, mut state) =
+                fixture(root.path(), "Yuris", "game.ypf");
+            if !service.tools.python().is_file() || service.current_reference().is_err() {
+                return;
+            }
+            let script = if registered {
+                "save_sample('work/ReAdMe.TxT', b'YSTBpayload')"
+            } else {
+                "from pathlib import Path\nPath('work/ReAdMe.TxT').write_bytes(b'YSTBpayload')"
+            };
+            let token = CancellationToken::new();
+            let result = service
+                .adaptation_tool(
+                    &request,
+                    &workspace,
+                    &mut state,
+                    "run_engine_python",
+                    &json!({"script":"work/docs.py","content":script}),
+                    &token,
+                    None,
+                )
+                .await
+                .unwrap();
+            assert_eq!(result["success"], true, "{result}");
+            assert!(result.get("builtinSamples").is_none(), "{result}");
+            assert_eq!(
+                fs::read(workspace.join("work/ReAdMe.TxT")).unwrap(),
+                b"YSTBpayload"
+            );
+            let result = service.adaptation_tool(&request,&workspace,&mut state,"run_engine_python",
+                &json!({"script":"work/inspect.py","content":"print('sample selected')","sampleFiles":["work/ReAdMe.TxT"]}),&token,None).await.unwrap();
+            assert_eq!(
+                result["builtinSamples"]["candidates"][0]["sampleFiles"],
+                json!(["work/ReAdMe.TxT"]),
+                "{result}"
+            );
+        }
     }
 
     #[tokio::test]

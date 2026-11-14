@@ -12,10 +12,10 @@ use serde_json::{Value, json};
 use crate::{
     AdaptationRequest, CancellationToken, EngineError, EngineService, ProgressCallback,
     adaptation::Session,
-    discovery::{is_link, resolve_relative},
+    discovery::{is_documentation_file, is_link, resolve_relative},
 };
 
-pub(crate) const DISCOVERY_REVISION: u64 = 8;
+pub(crate) const DISCOVERY_REVISION: u64 = 9;
 const CONTAINERS: &[&str] = &[
     "xp3", "rpa", "rpyc", "pack", "pak", "arc", "ypf", "int", "pfs",
 ];
@@ -671,6 +671,9 @@ fn inspect_builtin_files(
                 }
             } else {
                 scanned += 1;
+                if is_documentation_file(&name) {
+                    continue;
+                }
                 let ext = extension(&name);
                 if matches!(ext.as_str(), "scn" | "psb")
                     || name == "scpack.idx"
@@ -1441,6 +1444,31 @@ mod tests {
         assert_eq!(report["candidates"], json!([]));
         assert_eq!(report["filesScanned"], 3);
         assert_eq!(report["partial"], false);
+    }
+
+    #[test]
+    fn automatic_samples_ignore_documentation_and_refresh_older_candidate_reports() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("ReAdMe.TxT"), b"YSTBpayload").unwrap();
+        fs::write(directory.path().join("LICENSE"), b"YSTBpayload").unwrap();
+        let token = CancellationToken::new();
+        let mut state = Session::default();
+        state.extra.insert(
+            "builtinDiscovery".into(),
+            json!({"revision":8,"candidates":[{"format":"Yuris","sampleFiles":["ReAdMe.TxT"]}]}),
+        );
+        assert!(ensure_builtin_discovery(directory.path(), &mut state, &token).unwrap());
+        assert_eq!(state.extra["builtinDiscovery"]["candidates"], json!([]));
+        assert_eq!(state.extra["builtinDiscovery"]["filesScanned"], 2);
+        fs::write(directory.path().join("story.txt"), b"YSTBpayload").unwrap();
+        let report = inspect_builtin_discovery(directory.path(), &token).unwrap();
+        assert_eq!(report["candidates"][0]["sampleFiles"], json!(["story.txt"]));
+        let explicit =
+            inspect_builtin_samples(directory.path(), &["ReAdMe.TxT".into()], &token).unwrap();
+        assert_eq!(
+            explicit["candidates"][0]["sampleFiles"],
+            json!(["ReAdMe.TxT"])
+        );
     }
 
     #[test]

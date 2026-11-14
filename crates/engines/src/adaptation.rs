@@ -1316,6 +1316,7 @@ impl EngineService {
                         .into_iter()
                         .flatten()
                         .filter_map(Value::as_str)
+                        .filter(|file| !crate::discovery::is_documentation_file(file))
                         .take(12)
                         .map(str::to_owned),
                 );
@@ -1326,6 +1327,7 @@ impl EngineService {
                             .into_iter()
                             .flatten()
                             .filter_map(Value::as_str)
+                            .filter(|file| !crate::discovery::is_documentation_file(file))
                             .take(128)
                             .map(str::to_owned),
                     );

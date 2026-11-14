@@ -2,6 +2,7 @@ use std::path::Path;
 
 use crate::{
     CancellationToken, EngineError, ToolPaths, ToolProcess,
+    discovery::Inventory,
     protocol::{AdapterRequest, AdapterResponse},
 };
 
@@ -68,6 +69,18 @@ impl VnTextPatch {
         if !FORMATS.contains(&format) {
             return Err(EngineError::Protocol(format!("不支持的脚本格式：{format}")));
         }
+        if cancellation.is_cancelled() {
+            return Err(EngineError::Cancelled);
+        }
+        let implicit = if request.resource_files.is_none() {
+            let mut request = request.clone();
+            request.resource_files =
+                Some(Inventory::scan(&request.source_directory)?.candidate_resources()?);
+            Some(request)
+        } else {
+            None
+        };
+        let request = implicit.as_ref().unwrap_or(request);
         self.process
             .execute::<_, AdapterResponse>(request, cancellation)
             .await?
@@ -83,5 +96,66 @@ impl VnTextPatch {
         let mut request = AdapterRequest::new("probe", source);
         request.format = Some(format.into());
         self.execute(&request, cancellation).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[tokio::test]
+    async fn implicit_probe_and_extraction_exclude_documents_while_explicit_resources_remain_valid()
+    {
+        let paths = ToolPaths::development();
+        if !paths.vntextpatch().is_file() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let script = "\u{feff}*start\nこれは物語の台詞です。[p]\n";
+        fs::write(root.path().join("story.txt"), script).unwrap();
+        fs::write(root.path().join("ReAdMe.TxT"), script).unwrap();
+        let worker = VnTextPatch::new(&paths);
+        let token = CancellationToken::new();
+        let probe = worker
+            .probe(root.path(), "KirikiriKs", &token)
+            .await
+            .unwrap()
+            .probe
+            .unwrap();
+        assert_eq!(probe.required_files, ["story.txt"]);
+        let mut request = AdapterRequest::new("extract", root.path());
+        request.format = Some("KirikiriKs".into());
+        let extraction = worker
+            .execute(&request, &token)
+            .await
+            .unwrap()
+            .extraction
+            .unwrap();
+        assert!(!extraction.units.is_empty());
+        assert!(
+            extraction
+                .units
+                .iter()
+                .all(|unit| unit.resource_path == "story.txt")
+        );
+        request.resource_files = Some(vec!["ReAdMe.TxT".into()]);
+        let explicit = worker
+            .execute(&request, &token)
+            .await
+            .unwrap()
+            .extraction
+            .unwrap();
+        assert!(!explicit.units.is_empty());
+        assert!(
+            explicit
+                .units
+                .iter()
+                .all(|unit| unit.resource_path == "ReAdMe.TxT")
+        );
+        assert_eq!(
+            fs::read_to_string(root.path().join("ReAdMe.TxT")).unwrap(),
+            script
+        );
     }
 }

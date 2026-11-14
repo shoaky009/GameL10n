@@ -187,9 +187,15 @@ impl PackageManifest {
                 .files
                 .iter()
                 .filter(|file| {
-                    self.resource_patterns
-                        .iter()
-                        .any(|pattern| glob_match(pattern, &file.path))
+                    (!is_documentation_file(&file.path)
+                        || self
+                            .resource_files
+                            .iter()
+                            .any(|path| path.eq_ignore_ascii_case(&file.path)))
+                        && self
+                            .resource_patterns
+                            .iter()
+                            .any(|pattern| glob_match(pattern, &file.path))
                 })
                 .map(|file| file.path.clone())
                 .collect()
@@ -314,6 +320,21 @@ struct SignatureCache {
 }
 
 impl Inventory {
+    /// Complete implicit resource selection; explicit adapter resources use their own contract.
+    pub(crate) fn candidate_resources(&self) -> Result<Vec<String>, EngineError> {
+        if !self.complete {
+            return Err(EngineError::Rejected(
+                "资源目录扫描不完整，无法自动选择原生解析器资源；请明确指定资源范围。".into(),
+            ));
+        }
+        Ok(self
+            .files
+            .iter()
+            .filter(|file| !is_documentation_file(&file.path))
+            .map(|file| file.path.clone())
+            .collect())
+    }
+
     pub fn scan(root: &Path) -> Result<Self, EngineError> {
         if !root.is_dir() {
             return Err(EngineError::Protocol("游戏目录不存在。".into()));
@@ -696,23 +717,124 @@ pub fn native_formats_for(inventory: &Inventory) -> Vec<&'static str> {
     FORMATS
         .iter()
         .filter(|(_, patterns)| {
-            inventory.files.iter().any(|file| {
-                patterns.iter().any(|pattern| {
-                    if *pattern == "<extensionless>" {
-                        Path::new(&file.path).extension().is_none()
-                    } else {
-                        glob_match(pattern, file.path.rsplit('/').next().unwrap_or(&file.path))
-                    }
+            inventory
+                .files
+                .iter()
+                .filter(|file| !is_documentation_file(&file.path))
+                .any(|file| {
+                    patterns.iter().any(|pattern| {
+                        if *pattern == "<extensionless>" {
+                            Path::new(&file.path).extension().is_none()
+                        } else {
+                            glob_match(pattern, file.path.rsplit('/').next().unwrap_or(&file.path))
+                        }
+                    })
                 })
-            })
         })
         .map(|(format, _)| *format)
         .collect()
 }
 
+/// Exact documentation names are excluded from automatic resource candidates only.
+pub(crate) fn is_documentation_file(path: &str) -> bool {
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    let (stem, extension) = name.rsplit_once('.').unwrap_or((name, ""));
+    ["", "txt", "md", "markdown", "rst"]
+        .iter()
+        .any(|value| extension.eq_ignore_ascii_case(value))
+        && [
+            "readme",
+            "read me",
+            "read_me",
+            "read-me",
+            "license",
+            "licence",
+            "changelog",
+            "changes",
+            "authors",
+            "contributors",
+            "copying",
+        ]
+        .iter()
+        .any(|value| stem.eq_ignore_ascii_case(value))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn documentation_names_match_exact_basenames_and_document_extensions() {
+        for stem in [
+            "README",
+            "Read Me",
+            "Read_Me",
+            "Read-Me",
+            "LICENSE",
+            "LICENCE",
+            "CHANGELOG",
+            "CHANGES",
+            "AUTHORS",
+            "CONTRIBUTORS",
+            "COPYING",
+        ] {
+            for suffix in ["", ".txt", ".MD", ".Markdown", ".RST"] {
+                assert!(is_documentation_file(&format!("nested/{stem}{suffix}")));
+                assert!(is_documentation_file(&format!("nested\\{stem}{suffix}")));
+            }
+        }
+        for path in [
+            "story.txt",
+            "Readme.ks",
+            "license.dat",
+            "README.en.txt",
+            "myreadme.txt",
+            "readme_extra.txt",
+            "README/story.txt",
+            "readme.txt.ks",
+        ] {
+            assert!(!is_documentation_file(path), "{path}");
+        }
+    }
+
+    #[test]
+    fn documentation_stays_in_inventory_without_triggering_native_formats() {
+        let root = tempfile::tempdir().unwrap();
+        for name in ["ReAdMe.TxT", "LICENSE", "ChAnGeS.MD"] {
+            fs::write(root.path().join(name), b"documentation").unwrap();
+        }
+        let inventory = Inventory::scan(root.path()).unwrap();
+        assert_eq!(inventory.files.len(), 3);
+        assert!(native_formats_for(&inventory).is_empty());
+        assert!(inventory.candidate_resources().unwrap().is_empty());
+        fs::write(root.path().join("story.txt"), b"scenario").unwrap();
+        let mut inventory = Inventory::scan(root.path()).unwrap();
+        assert!(native_formats_for(&inventory).contains(&"KirikiriKs"));
+        assert_eq!(inventory.candidate_resources().unwrap(), ["story.txt"]);
+        inventory.complete = false;
+        assert!(matches!(
+            inventory.candidate_resources(),
+            Err(EngineError::Rejected(_))
+        ));
+    }
+
+    #[test]
+    fn resource_patterns_exclude_documents_but_keep_explicit_resource_contracts() {
+        let root = tempfile::tempdir().unwrap();
+        for name in ["ReAdMe.TxT", "LICENSE.md", "story.txt"] {
+            fs::write(root.path().join(name), b"resource").unwrap();
+        }
+        let inventory = Inventory::scan(root.path()).unwrap();
+        let mut manifest: PackageManifest = serde_json::from_value(serde_json::json!({
+            "id":"fixture","version":"1","resourcePatterns":["*.txt"]
+        }))
+        .unwrap();
+        assert_eq!(manifest.resources(&inventory), ["story.txt"]);
+        manifest.resource_files = vec!["README.TXT".into(), "LICENSE.md".into()];
+        assert_eq!(manifest.resources(&inventory), ["ReAdMe.TxT", "story.txt"]);
+        manifest.resource_patterns.clear();
+        assert_eq!(manifest.resources(&inventory), ["README.TXT", "LICENSE.md"]);
+    }
 
     #[test]
     fn verified_runtime_mapping_preserves_manifest_and_checks_both_packages() {

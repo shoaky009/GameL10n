@@ -1345,7 +1345,10 @@ impl EngineService {
                 "检查内置解析器",
                 format!("正在检查 {}。", adapter.id()),
             );
-            let request = AdapterRequest::new("probe", source);
+            let mut request = AdapterRequest::new("probe", source);
+            if matches!(adapter, AdapterHandle::Native { .. }) {
+                request.resource_files = Some(inventory.candidate_resources()?);
+            }
             match self.execute(&adapter, &request, cancellation).await {
                 Ok(response) => {
                     if let Some(probe) = response.probe {
@@ -2776,6 +2779,54 @@ mod tests {
                 .iter()
                 .any(|text| text.contains("适配器文件已变化"))
         );
+    }
+
+    #[tokio::test]
+    async fn documentation_alone_does_not_start_a_native_parser() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("rEaDmE.tXt"), b"documentation").unwrap();
+        fs::write(root.path().join("LICENSE"), b"documentation").unwrap();
+        let service = EngineService::new(
+            root.path(),
+            ToolPaths::new(root.path().join("missing-tools")),
+        );
+        let result = service
+            .discover(root.path(), &[], &CancellationToken::new(), None)
+            .await
+            .unwrap();
+        assert!(result.adapter.is_none());
+        assert_eq!(result.file_count, 2);
+    }
+
+    #[tokio::test]
+    async fn regular_native_discovery_passes_only_automatic_resource_candidates() {
+        let root = tempfile::tempdir().unwrap();
+        let tools = ToolPaths::development();
+        if !tools.vntextpatch().is_file() {
+            return;
+        }
+        let service =
+            EngineService::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."), tools);
+        let script = "\u{feff}*start\nこれは物語の台詞です。[p]\n";
+        fs::write(root.path().join("story.txt"), script).unwrap();
+        fs::write(root.path().join("ReAdMe.TxT"), script).unwrap();
+        let token = CancellationToken::new();
+        let result = service
+            .discover(root.path(), &[], &token, None)
+            .await
+            .unwrap();
+        assert_eq!(result.probe.as_ref().unwrap().required_files, ["story.txt"]);
+        let mut extract = AdapterRequest::new("extract", root.path());
+        extract.resource_files = Some(result.probe.unwrap().required_files);
+        let units = service
+            .execute(&result.adapter.unwrap(), &extract, &token)
+            .await
+            .unwrap()
+            .extraction
+            .unwrap()
+            .units;
+        assert!(!units.is_empty());
+        assert!(units.iter().all(|unit| unit.resource_path == "story.txt"));
     }
 
     #[tokio::test]
