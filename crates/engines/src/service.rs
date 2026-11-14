@@ -187,6 +187,7 @@ pub struct EngineService {
     excluded_adapters: BTreeSet<(String, String)>,
     preferred_adapter: Option<String>,
     ordered_packages_only: bool,
+    pub(crate) build_identity: Option<(String, String)>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -206,11 +207,18 @@ impl EngineService {
             excluded_adapters: BTreeSet::new(),
             preferred_adapter: None,
             ordered_packages_only: false,
+            build_identity: None,
         }
     }
 
     pub fn with_shared_directory(mut self, directory: impl Into<PathBuf>) -> Self {
         self.shared_directory = directory.into();
+        self
+    }
+
+    /// Identifies the host binary in diagnostic logs without changing model context.
+    pub fn with_build_identity(mut self, version: &str, git_hash: &str) -> Self {
+        self.build_identity = Some((version.into(), git_hash.into()));
         self
     }
 

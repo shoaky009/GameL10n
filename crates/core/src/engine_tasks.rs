@@ -245,6 +245,10 @@ fn adaptation_task_outcome(result: &AdaptationResult) -> Result<String, String> 
 impl Application {
     pub fn engine_service(&self) -> EngineService {
         EngineService::new(self.tools.asset_root(), self.tools.clone())
+            .with_build_identity(
+                crate::metrics::SOFTWARE_VERSION,
+                crate::metrics::BUILD_GIT_HASH,
+            )
             .with_shared_directory(self.data_directory().join("extensions/engine-tools"))
     }
     pub async fn package_directories(&self) -> Result<Vec<PathBuf>, CoreError> {

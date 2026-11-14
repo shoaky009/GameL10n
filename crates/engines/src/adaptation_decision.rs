@@ -666,6 +666,28 @@ mod tests {
             .push(json!({"role":"tool","tool_call_id":id,"content":content.to_string()}));
     }
 
+    #[test]
+    fn diagnostic_metrics_do_not_change_snapshots_or_append_replayed_context() {
+        let root = tempfile::tempdir().unwrap();
+        let mut state = Session::default();
+        state.extra.insert(
+            "builtinTrials".into(),
+            json!([{"format":"eagls-script","status":"failed",
+            "parseStatus":"passed","roundtripStatus":"passed","translationStatus":"failed",
+            "directory":"work","files":["sample.dat"],"sourceHashes":{"sample.dat":"source-hash"},
+            "profile":{"version":2,"text_offset":3600}}]),
+        );
+        let first = build(&mut state, root.path(), &BTreeSet::new()).unwrap();
+        let serialized = serde_json::to_value(&state).unwrap();
+        state.sample_checks.record(Instant::now(), 1, 4096, true);
+        assert_eq!(serde_json::to_value(&state).unwrap(), serialized);
+        let second = build(&mut state, root.path(), &BTreeSet::new()).unwrap();
+        assert_eq!(second.replay.messages, first.replay.messages);
+        assert_eq!(second.components["snapshotBytes"], 0);
+        assert_eq!(second.components["evidenceBytes"], 0);
+        assert_eq!(second.components["decisionMessageBytes"], 0);
+    }
+
     #[tokio::test]
     async fn switching_problems_appends_context_and_keeps_pinned_archived_evidence() {
         let root = tempfile::tempdir().unwrap();

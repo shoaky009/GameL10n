@@ -202,6 +202,8 @@ pub(crate) struct Session {
     pub verified_fingerprint: Option<String>,
     pub verification: Option<VerificationResult>,
     #[serde(skip)]
+    sample_checks: automatic::SampleCheckMetrics,
+    #[serde(skip)]
     reported_knowledge: BTreeSet<(String, String)>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
@@ -533,7 +535,9 @@ impl EngineService {
             Ok(())
         };
         trace_run(
-            json!({"operation":"run-start","continuing":continuing,"model":provider.model(),"modelIdentity":provider.identity(),"maximumTurns":request.limits.maximum_turns,"maximumTokens":request.limits.maximum_tokens}),
+            json!({"operation":"run-start","continuing":continuing,"model":provider.model(),"modelIdentity":provider.identity(),"maximumTurns":request.limits.maximum_turns,"maximumTokens":request.limits.maximum_tokens,
+                "softwareVersion":self.build_identity.as_ref().map(|identity| &identity.0),"buildGitHash":self.build_identity.as_ref().map(|identity| &identity.1),
+                "maximumOutputTokens":request.limits.maximum_output_tokens,"analysisRequestTimeoutMs":provider.analysis_request_timeout().as_millis()}),
         )?;
         if !continuing
             && !request.require_model_analysis
@@ -596,6 +600,7 @@ impl EngineService {
             }
         }
         let preparation_started = Instant::now();
+        let sample_checks_before = state.sample_checks.clone();
         let prepared = async {
             let changes = resources::reconcile(request, &workspace, &mut state, cancellation, progress)?;
             if !changes.is_empty() {
@@ -656,7 +661,7 @@ impl EngineService {
         }
         .await;
         trace_run(
-            json!({"operation":"local-preparation","elapsedMs":preparation_started.elapsed().as_millis(),"automaticTrials":state.extra.get("automaticTrials"),"automaticTemplate":state.extra.get("automaticTemplate"),"workspaceSamples":state.extra.get("workspaceSamples")}),
+            json!({"operation":"local-preparation","elapsedMs":preparation_started.elapsed().as_millis(),"automaticTrials":state.extra.get("automaticTrials"),"automaticTemplate":state.extra.get("automaticTemplate"),"workspaceSamples":state.extra.get("workspaceSamples"),"sampleChecks":state.sample_checks.since(&sample_checks_before)}),
         )?;
         match prepared {
             Ok(Some(adapter)) => {
@@ -1734,18 +1739,19 @@ impl EngineService {
         let check_translation = boolean(args, "checkTranslation", true)?;
         let mut result = json!({"format":format,"status":"rejected","stage":"inputs","parseStatus":"not-run","roundtripStatus":if check_roundtrip{"not-run"}else{"skipped"},"translationStatus":if check_translation{"not-run"}else{"skipped"},"unitCount":0,"samples":[],"warnings":[],"sourceHashes":{},"error":null,"diagnostic":null,"runtimeStatus":"not-tested"});
         let mut source_hashes = BTreeMap::new();
+        let sample_started = Instant::now();
+        let mut sample_bytes = 0_u64;
         let outcome=async {
             if files.is_empty() { return Err(EngineError::Rejected("请明确选择要试提取的样本文件。".into())); }
             if files.len()>12 { result["status"]=json!("limit-exceeded"); return Err(EngineError::Rejected("单次试提取最多 12 个完整资源；这不是引擎不受支持的结论。".into())); }
             let selected:BTreeSet<_>=files.iter().map(|file|file.to_lowercase()).collect();
             if selected.len()!=files.len() { return Err(EngineError::Rejected("样本文件列表包含重复路径。".into())); }
             require_builtin_companions(format,&source,&files)?;
-            let mut bytes=0_u64;
             for file in &files {
                 if cancellation.is_cancelled(){return Err(EngineError::Cancelled);}
                 let path=resolve_relative(&source,file)?;
-                bytes=bytes.saturating_add(path.metadata()?.len());
-                if bytes>64*1024*1024 { result["status"]=json!("limit-exceeded"); return Err(EngineError::Rejected("所选样本合计超过单次 64 MiB；这不是引擎不受支持的结论。".into())); }
+                sample_bytes=sample_bytes.saturating_add(path.metadata()?.len());
+                if sample_bytes>64*1024*1024 { result["status"]=json!("limit-exceeded"); return Err(EngineError::Rejected("所选样本合计超过单次 64 MiB；这不是引擎不受支持的结论。".into())); }
                 source_hashes.insert(file.clone(),hash_file(&path).map_err(file_error)?);
             }
             result["sourceHashes"]=json!(source_hashes);
@@ -1794,6 +1800,9 @@ impl EngineService {
             Ok::<_,EngineError>(())
         }.await;
         if matches!(outcome, Err(EngineError::Cancelled)) {
+            state
+                .sample_checks
+                .record(sample_started, files.len(), sample_bytes, false);
             return Err(EngineError::Cancelled);
         }
         if let Err(error) = outcome {
@@ -1813,6 +1822,9 @@ impl EngineService {
             result["error"] = json!("试提取期间源样本发生变化，结果不能作为验证依据。");
         }
         automatic::remember_trial(state, &directory, &files, &result);
+        state
+            .sample_checks
+            .record(sample_started, files.len(), sample_bytes, false);
         Ok(result)
     }
 

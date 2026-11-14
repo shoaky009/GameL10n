@@ -12,6 +12,42 @@ const TEMPLATE_BYTES: u64 = 256 * 1024 * 1024;
 const RPA_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const RUNTIME_CHECK: &str = "游戏启动、中文显示、字体及排版尚未实机验证。";
 
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct SampleCheckMetrics {
+    pub checks: u64,
+    pub sample_count: u64,
+    pub sample_bytes: u64,
+    pub cache_hits: u64,
+    pub elapsed_ms: u64,
+}
+
+impl SampleCheckMetrics {
+    pub fn since(&self, before: &Self) -> Self {
+        Self {
+            checks: self.checks.saturating_sub(before.checks),
+            sample_count: self.sample_count.saturating_sub(before.sample_count),
+            sample_bytes: self.sample_bytes.saturating_sub(before.sample_bytes),
+            cache_hits: self.cache_hits.saturating_sub(before.cache_hits),
+            elapsed_ms: self.elapsed_ms.saturating_sub(before.elapsed_ms),
+        }
+    }
+
+    pub fn record(&mut self, started: Instant, count: usize, bytes: u64, cached: bool) {
+        self.checks += 1;
+        self.sample_count += count as u64;
+        self.sample_bytes += bytes;
+        self.cache_hits += u64::from(cached);
+        self.elapsed_ms += started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+    }
+
+    pub fn include_elapsed(&mut self, started: Instant, before: &Self) {
+        let elapsed = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+        self.elapsed_ms +=
+            elapsed.saturating_sub(self.elapsed_ms.saturating_sub(before.elapsed_ms));
+    }
+}
+
 struct Budget {
     token: CancellationToken,
     timer: tokio::task::JoinHandle<()>,
@@ -584,6 +620,8 @@ async fn try_component_sample(
     if size > TRIAL_BYTES {
         return Err(reject("小样超过 64 MiB 预算。"));
     }
+    let started = Instant::now();
+    let outcome = async {
     let digest = checked_hash(&input, size, token)?;
     let reference = service.adaptation_reference(workspace, state)?;
     let library = service.reference_library(&reference)?;
@@ -641,6 +679,16 @@ async fn try_component_sample(
     parser_reuse(workspace, format, &mut result);
     remember_trial(state, directory, &[relative.into()], &result);
     Ok(result)
+    }.await;
+    state.sample_checks.record(
+        started,
+        1,
+        size,
+        outcome
+            .as_ref()
+            .is_ok_and(|result| result["cached"] == true),
+    );
+    outcome
 }
 
 pub(super) async fn component_trials(
@@ -744,6 +792,9 @@ async fn try_cached_sample(
     {
         return Err(reject("试用样本超过 12 文件／64 MiB 预算。"));
     }
+    let started = Instant::now();
+    let before = state.sample_checks.clone();
+    let outcome = async {
     let hashes = sample_hashes(&root, &lengths, token)?;
     let parser = parser_fingerprint(service, token)?;
     let fingerprint = hash_text(&json!({"trialRevision":3,"format":format,"directory":directory,"parser":parser,"files":hashes}).to_string());
@@ -811,6 +862,22 @@ async fn try_cached_sample(
     result["cached"] = json!(false);
     parser_reuse(workspace, format, &mut result);
     Ok(result)
+    }.await;
+    let nested = state.sample_checks.since(&before);
+    if nested.checks == 0 {
+        state.sample_checks.record(
+            started,
+            files.len(),
+            lengths.values().sum(),
+            outcome
+                .as_ref()
+                .is_ok_and(|result| result["cached"] == true),
+        );
+    } else {
+        // A cache miss executes the native trial, whose samples are already counted.
+        state.sample_checks.include_elapsed(started, &before);
+    }
+    outcome
 }
 
 pub(super) async fn inspect_samples(
@@ -820,6 +887,8 @@ pub(super) async fn inspect_samples(
     files: &[String],
     cancellation: &CancellationToken,
 ) -> Result<Value, EngineError> {
+    let started = Instant::now();
+    let before = state.sample_checks.clone();
     let budget = Budget::new(cancellation, Duration::from_secs(60));
     let token = &budget.token;
     let mut result = json!({"status":"incomplete","trials":[],"runtimeStatus":"not-tested"});
@@ -947,6 +1016,7 @@ pub(super) async fn inspect_samples(
         Ok::<_, EngineError>(())
     }
     .await;
+    state.sample_checks.include_elapsed(started, &before);
     match outcome {
         Ok(()) => result["status"] = json!("completed"),
         Err(EngineError::Cancelled) if cancellation.is_cancelled() => {
@@ -972,6 +1042,8 @@ pub(super) async fn inspect_directory(
     directory: &str,
     cancellation: &CancellationToken,
 ) -> Result<Value, EngineError> {
+    let started = Instant::now();
+    let before = state.sample_checks.clone();
     let outcome = (|| {
         let root = resolve_relative(workspace, directory)?;
         let report = crate::adaptation_context::inspect_builtin_discovery(&root, cancellation)?;
@@ -985,13 +1057,15 @@ pub(super) async fn inspect_directory(
             .collect();
         sample_files(workspace, &json!({"sampleFiles":files}))
     })();
-    match outcome {
+    let outcome = match outcome {
         Ok(files) => inspect_samples(service, workspace, state, &files, cancellation).await,
         Err(EngineError::Cancelled) => Err(EngineError::Cancelled),
         Err(error) => Ok(
             json!({"status":"incomplete","error":limit(&error.to_string(),500),"runtimeStatus":"not-tested"}),
         ),
-    }
+    };
+    state.sample_checks.include_elapsed(started, &before);
+    outcome
 }
 
 pub(super) async fn inspect_workspace(
@@ -1534,12 +1608,19 @@ mod tests {
         assert!(deterministic(&first["diagnostic"]));
         assert!(first["fingerprint"].as_str().is_some());
         let fingerprint = first["fingerprint"].clone();
+        assert_eq!(state.sample_checks.checks, 1);
+        assert_eq!(state.sample_checks.sample_count, 1);
+        assert_eq!(state.sample_checks.sample_bytes, 20);
+        assert_eq!(state.sample_checks.cache_hits, 0);
         run_trials(
             &service, &request, &workspace, &mut state, &path, &token, None,
         )
         .await
         .unwrap();
         assert_eq!(state.extra["automaticTrials"]["reused"], 1);
+        assert_eq!(state.sample_checks.checks, 2);
+        assert_eq!(state.sample_checks.sample_bytes, 40);
+        assert_eq!(state.sample_checks.cache_hits, 1);
         assert_eq!(state.extra["builtinTrials"].as_array().unwrap().len(), 1);
         assert_eq!(state.extra["builtinTrials"][0]["fingerprint"], fingerprint);
         assert_eq!(
@@ -1907,11 +1988,22 @@ mod tests {
         assert_eq!(result["diagnostic"]["errorType"], "UnicodeEncodeError");
         assert_eq!(result["profile"]["version"], 2);
         assert_eq!(result["profile"]["text_offset"], 3600);
+        let before = state.sample_checks.clone();
         let repeated = service
             .try_builtin_sample(&workspace, &mut state, &args, &token)
             .await
             .unwrap();
         assert_eq!(repeated["cached"], true);
+        let cached_metrics = state.sample_checks.since(&before);
+        assert_eq!(cached_metrics.checks, 1);
+        assert_eq!(cached_metrics.sample_count, 1);
+        assert_eq!(
+            cached_metrics.sample_bytes,
+            fs::metadata(workspace.join("work/sample.dat"))
+                .unwrap()
+                .len()
+        );
+        assert_eq!(cached_metrics.cache_hits, 1);
         fs::write(workspace.join("work/sample.dat"), b"changed sample").unwrap();
         let changed = service
             .try_builtin_sample(&workspace, &mut state, &args, &token)
@@ -1950,6 +2042,23 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(state.extra["workspaceSamples"]["trialCount"], 2);
+        assert_eq!(state.sample_checks.checks, 2);
+        let expected_samples = state.extra["builtinTrials"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|trial| trial["files"].as_array().unwrap().len() as u64)
+            .sum::<u64>();
+        assert_eq!(state.sample_checks.sample_count, expected_samples);
+        let before = state.sample_checks.clone();
+        inspect_workspace(&service, &workspace, &mut state, &CancellationToken::new())
+            .await
+            .unwrap();
+        let cached_metrics = state.sample_checks.since(&before);
+        assert_eq!(cached_metrics.checks, 2);
+        assert_eq!(cached_metrics.cache_hits, 2);
+        assert_eq!(cached_metrics.sample_count, before.sample_count);
+        assert_eq!(cached_metrics.sample_bytes, before.sample_bytes);
         assert_eq!(state.extra["builtinTrials"][0]["status"], "passed");
         assert_eq!(state.extra["builtinTrials"][0]["unitCount"], 1);
         assert_eq!(state.api_requests(), requests);
@@ -1982,6 +2091,12 @@ mod tests {
         assert_eq!(result["success"], false, "{result}");
         assert_eq!(result["executionSucceeded"], false);
         assert_eq!(result["builtinSamples"]["trials"][0]["status"], "passed");
+        assert_eq!(state.sample_checks.checks, 1);
+        assert_eq!(state.sample_checks.sample_count, 1);
+        assert_eq!(
+            state.sample_checks.sample_bytes,
+            fs::metadata(workspace.join("work/scene.ks")).unwrap().len()
+        );
         assert!(!result.as_object().unwrap().contains_key("writtenFiles"));
         assert!(state.verified_package.is_none());
     }

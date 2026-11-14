@@ -582,6 +582,7 @@ pub(super) async fn run(
                 });
             }
             let started = Instant::now();
+            let sample_checks_before = state.sample_checks.clone();
             let metadata = json!({"id":call.id,"name":call.name,"selectors":args.as_ref().map(selectors).unwrap_or(Value::Null),"argumentFingerprint":hash_text(&call.arguments)});
             trace_run(json!({"operation":"tool-start","turn":state.total_turns,"call":metadata}))?;
             let outcome = match &args {
@@ -604,7 +605,7 @@ pub(super) async fn run(
                 Ok(value) => value,
                 Err(EngineError::Cancelled) => {
                     trace_run(
-                        json!({"operation":"tool-end","turn":state.total_turns,"call":metadata,"status":"cancelled","elapsedMs":started.elapsed().as_millis()}),
+                        json!({"operation":"tool-end","turn":state.total_turns,"call":metadata,"status":"cancelled","elapsedMs":started.elapsed().as_millis(),"sampleChecks":state.sample_checks.since(&sample_checks_before)}),
                     )?;
                     return Ok((
                         AdaptationStatus::Cancelled,
@@ -641,7 +642,7 @@ pub(super) async fn run(
             let content = value.to_string();
             let trace_result = result_trace(&value);
             trace_run(
-                json!({"operation":"tool-end","turn":state.total_turns,"call":metadata,"elapsedMs":started.elapsed().as_millis(),"success":success,"outputBytes":content.len(),"resultFingerprint":hash_text(&content),"result":trace_result}),
+                json!({"operation":"tool-end","turn":state.total_turns,"call":metadata,"elapsedMs":started.elapsed().as_millis(),"success":success,"outputBytes":content.len(),"resultFingerprint":hash_text(&content),"result":trace_result,"sampleChecks":state.sample_checks.since(&sample_checks_before)}),
             )?;
             state
                 .messages
@@ -841,15 +842,26 @@ pub(super) async fn run(
         state.workflow.last_decision = decision_key;
         repair::analyzing(state);
         let requests_before = provider.request_count();
+        let metrics_before = provider.request_metrics();
         let response = provider
             .complete_agent(&messages, &all, &known_tools, requested, cancellation)
             .await;
         state.record_api_requests(provider.request_count().saturating_sub(requests_before));
+        let metrics_after = provider.request_metrics();
+        let trace_model = |mut entry: Value| {
+            entry["apiMs"] = json!(metrics_after.api_ms.saturating_sub(metrics_before.api_ms));
+            entry["waitingMs"] = json!(
+                metrics_after
+                    .waiting_ms
+                    .saturating_sub(metrics_before.waiting_ms)
+            );
+            trace_run(entry)
+        };
         let response = match response {
             Ok(response) => response,
             Err(error) => {
                 add_usage(&mut state.usage, &error.usage);
-                trace_run(
+                trace_model(
                     json!({"operation":"model","status":"failed","turn":state.total_turns+1,"elapsedMs":started.elapsed().as_millis(),"error":error.message,"diagnostic":error.diagnostic,"failureCode":error.diagnostic.code,"httpStatus":error.status_code,"outcomeUnknown":error.outcome_unknown,"usage":error.usage,"maximumOutputTokens":requested,"visibleHistoryBytes":visible,"retainedHistoryBytes":retained,"contextComponents":decision_context.components,"instructionBytes":instructions.len(),"instructionFingerprint":instruction_fingerprint,"toolDefinitionBytes":tools_bytes,"toolDefinitionFingerprint":tool_fingerprint,"verificationConfigured":state.workflow.verification_args.is_some()}),
                 )?;
                 save_session(path, state).await?;
@@ -896,7 +908,7 @@ pub(super) async fn run(
             usage.estimated = true;
         }
         add_usage(&mut state.usage, &usage);
-        trace_run(
+        trace_model(
             json!({"operation":"model","status":"completed","turn":state.total_turns,"elapsedMs":started.elapsed().as_millis(),"usage":usage,"requestId":response.request_id,"tools":response.tool_calls.iter().map(|c|&c.name).collect::<Vec<_>>(),"visibleHistoryBytes":visible,"retainedHistoryBytes":retained,"omittedToolResults":decision_context.replay.omitted,"decisionHistoryStart":decision_context.selected_start,"decisionEvidenceCount":decision_context.evidence_count,"problemId":state.decision.current_problem.as_ref().map(|p|&p.id),"toolDefinitionBytes":tools_bytes,"toolDefinitionFingerprint":tool_fingerprint,"instructionBytes":instructions.len(),"instructionFingerprint":instruction_fingerprint,"availableToolCount":all.len(),"maximumOutputTokens":requested,"contextComponents":decision_context.components,"verificationConfigured":state.workflow.verification_args.is_some()}),
         )?;
         if let Some(data) = response.provider_data {
@@ -1085,6 +1097,48 @@ mod tests {
 
     fn summary_response(reason: &str) -> Value {
         json!({"id":"fixture","choices":[{"finish_reason":reason,"message":{"role":"assistant","content":"仍在探索：正在核对资源结构。"}}],"usage":{"prompt_tokens":100,"completion_tokens":20,"prompt_tokens_details":{"cached_tokens":50}}})
+    }
+
+    #[tokio::test]
+    async fn run_start_records_host_build_and_effective_analysis_policy_before_cancellation() {
+        let root = tempfile::tempdir().unwrap();
+        let (service, mut request, _, _) = fixture(root.path());
+        let service = service.with_build_identity("0.1.0", "fixture-build");
+        request.require_model_analysis = true;
+        request.limits.maximum_output_tokens = 2048;
+        let (provider, server) = model(vec![]);
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        service
+            .adapt(&request, &provider, &cancellation, None)
+            .await
+            .unwrap();
+        server.join().unwrap();
+        assert_eq!(provider.request_count(), 0);
+        let log = fs::read_dir(request.project_directory.join("logs"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let rows = fs::read_to_string(log)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        let start = &rows
+            .iter()
+            .find(|row| row["entry"]["operation"] == "run-start")
+            .unwrap()["entry"];
+        assert_eq!(start["softwareVersion"], "0.1.0");
+        assert_eq!(start["buildGitHash"], "fixture-build");
+        assert_eq!(start["maximumOutputTokens"], 2048);
+        assert_eq!(start["analysisRequestTimeoutMs"], 600000);
+        let preparation = &rows
+            .iter()
+            .find(|row| row["entry"]["operation"] == "local-preparation")
+            .unwrap()["entry"];
+        assert_eq!(preparation["sampleChecks"]["checks"], 0);
     }
 
     #[tokio::test]

@@ -60,6 +60,27 @@ function Limit-Text($value, [int]$length = 240) {
 function Event-Reference($row) {
     [ordered]@{ at = $row.at; runId = $row.runId; turn = $row.turn; callId = $row.entry.call.id }
 }
+function Sample-Summary($items) {
+    $scopes = @($items | Where-Object { $_.entry.operation -in @('local-preparation', 'tool', 'tool-end') })
+    $measured = @($scopes | Where-Object { $null -ne $_.entry.sampleChecks })
+    $metrics = @($measured | ForEach-Object { $_.entry.sampleChecks })
+    $localMetrics = @($measured | Where-Object { $_.entry.operation -eq 'local-preparation' } | ForEach-Object { $_.entry.sampleChecks })
+    $toolMetrics = @($measured | Where-Object { $_.entry.operation -in @('tool', 'tool-end') } | ForEach-Object { $_.entry.sampleChecks })
+    $checks = if ($metrics.Count) { Sum-Field $metrics 'checks' } else { $null }
+    $hits = if ($metrics.Count) { Sum-Field $metrics 'cacheHits' } else { $null }
+    [ordered]@{
+        measuredScopes = $measured.Count; unmeasuredScopes = $scopes.Count - $measured.Count
+        seconds = if ($metrics.Count) { Seconds (Sum-Field $metrics 'elapsedMs') } else { $null }
+        checks = $checks
+        sampleCount = if ($metrics.Count) { Sum-Field $metrics 'sampleCount' } else { $null }
+        sampleBytes = if ($metrics.Count) { Sum-Field $metrics 'sampleBytes' } else { $null }
+        cacheHits = $hits
+        cacheHitRate = if ($checks -gt 0) { [Math]::Round($hits / $checks, 4) } else { $null }
+        localPreparationSeconds = if ($localMetrics.Count) { Seconds (Sum-Field $localMetrics 'elapsedMs') } else { $null }
+        toolSeconds = if ($toolMetrics.Count) { Seconds (Sum-Field $toolMetrics 'elapsedMs') } else { $null }
+        note = 'Measured sample-check time includes candidate scans, input hashes, cache checks and parser trials; it is already part of local preparation or tool time. Counts and bytes sum checked sample sets, including repeated/cache-hit checks, not unique files. Missing scopes remain unknown.'
+    }
+}
 
 # Host steps use the same verifier but have no model tool-call ID.
 $hostStarts = @{}
@@ -174,6 +195,7 @@ function Tool-Reference($row) {
     $item.caller = if ($row.entry.caller -eq 'host') { 'host' } else { 'model' }
     $item.seconds = Seconds $row.entry.elapsedMs
     $item.status = $row.entry.status
+    if ($null -ne $row.entry.sampleChecks) { $item.sampleChecks = $row.entry.sampleChecks }
     if ($null -ne $row.entry.outputBytes) { $item.outputBytes = $row.entry.outputBytes }
     if ($row.entry.call.selectors.path) { $item.path = $row.entry.call.selectors.path }
     if ($row.entry.result.stage) { $item.stage = $row.entry.result.stage }
@@ -229,7 +251,11 @@ $runs = @($rows | Where-Object { $_.runId } | Group-Object runId | ForEach-Objec
         $item.maximumTurns = $start.entry.maximumTurns
         $item.fixedInstructionBytes = $start.entry.fixedInstructionBytes
         $item.registeredToolCount = $start.entry.registeredToolCount
+        foreach ($field in @('softwareVersion', 'buildGitHash', 'maximumOutputTokens', 'analysisRequestTimeoutMs')) {
+            $item[$field] = $start.entry.$field
+        }
     }
+    $item.sampleChecks = Sample-Summary $group
     if ($end) {
         $hostUsage = Get-Usage $end.entry
         $item.hostRunTokens = if ($null -ne $end.entry.tokens) { $end.entry.tokens }
@@ -267,12 +293,15 @@ $result = [ordered]@{
     }
     timing = [ordered]@{
         modelSeconds = Seconds (Sum-Field @($modelRows | ForEach-Object { $_.entry }) 'elapsedMs')
+        apiSeconds = Seconds (Sum-Field @($modelRows | ForEach-Object { $_.entry }) 'apiMs')
+        waitingSeconds = Seconds (Sum-Field @($modelRows | ForEach-Object { $_.entry }) 'waitingMs')
         toolSeconds = Seconds (Sum-Field @($toolRows | ForEach-Object { $_.entry }) 'elapsedMs')
         toolCalls = $toolRows.Count
         modelToolCalls = @($toolRows | Where-Object { $_.entry.caller -ne 'host' }).Count
         hostSteps = @($toolRows | Where-Object { $_.entry.caller -eq 'host' }).Count
         rejectedToolBatches = @($rows | Where-Object { $_.entry.operation -eq 'tool-batch-rejected' }).Count
     }
+    sampleChecks = Sample-Summary $rows
     coverage = [ordered]@{
         skippedInvalidLines = $invalidLines
         legacyRows = @($rows | Where-Object { -not $_.schemaVersion -or $_.schemaVersion -lt 2 }).Count
@@ -282,11 +311,15 @@ $result = [ordered]@{
         missingToolSelectors = @($toolRows | Where-Object { $null -eq $_.entry.call.selectors }).Count
         missingModelHistory = @($modelRows | Where-Object { $null -eq $_.entry.visibleHistoryBytes }).Count
         missingContextComponents = @($modelRows | Where-Object { $null -eq $_.entry.contextComponents }).Count
+        missingBuildIdentity = @($runs | Where-Object { -not $_.softwareVersion -or -not $_.buildGitHash -or $_.buildGitHash -eq 'unknown' }).Count
         note = 'Tokens are recorded counters, including associated failed-attempt recovery usage once; absent/zero usage is not estimated. Host run totals may be cumulative across resumed runs and include estimates. Tool starts are not counted again as calls. Missing selectors/stage leave verification scope unknown. Missing run-end does not establish activity. Invalid lines include an incomplete tail; metadata does not prove semantic progress.'
     }
     runCount = $runs.Count
     runs = @($runs | Select-Object -Last 6 | ForEach-Object {
-        [ordered]@{ runId = $_.runId; status = $_.status; model = $_.model; usage = $_.usage }
+        [ordered]@{ runId = $_.runId; status = $_.status; model = $_.model; usage = $_.usage
+            softwareVersion = $_.softwareVersion; buildGitHash = $_.buildGitHash
+            maximumOutputTokens = $_.maximumOutputTokens; analysisRequestTimeoutMs = $_.analysisRequestTimeoutMs
+            sampleChecks = $_.sampleChecks }
     })
     milestones = [ordered]@{
         sourceEdits = $sourceWrites.Count
@@ -320,6 +353,12 @@ $result = [ordered]@{
 if ($Detail) {
     $result.runs = $runs
     $result.tools = $tools
+    $result.sampleCheckEvents = @($rows | Where-Object { $null -ne $_.entry.sampleChecks } | ForEach-Object {
+        $item = Event-Reference $_
+        $item.operation = $_.entry.operation; $item.tool = $_.entry.tool
+        $item.parentSeconds = Seconds $_.entry.elapsedMs; $item.metrics = $_.entry.sampleChecks
+        $item
+    })
     $result.repeatedArguments = @($toolRows | Where-Object { $_.entry.call.argumentFingerprint } |
         Group-Object { $_.entry.tool + ':' + $_.entry.call.argumentFingerprint } | Where-Object Count -gt 1 |
         Sort-Object Count -Descending | Select-Object -First 20 | ForEach-Object {
@@ -350,6 +389,7 @@ if ($Detail) {
         $item.cachedTokens = $_.usage.cachedTokens
         $item.uncachedTokens = if ($null -ne $_.usage.cachedTokens -and $_.usage.estimated -ne $true) { $_.usage.inputTokens - $_.usage.cachedTokens } else { $null }
         $item.seconds = Seconds $_.row.entry.elapsedMs
+        $item.apiSeconds = Seconds $_.row.entry.apiMs; $item.waitingSeconds = Seconds $_.row.entry.waitingMs
         $item.visibleHistoryBytes = $_.row.entry.visibleHistoryBytes
         $item.instructionBytes = $_.row.entry.instructionBytes; $item.toolDefinitionBytes = $_.row.entry.toolDefinitionBytes
         $item.instructionFingerprint = $_.row.entry.instructionFingerprint
