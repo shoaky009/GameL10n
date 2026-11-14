@@ -57,7 +57,19 @@ pub fn cancel_api_test(ctx: &Context) {
 
 const REASONING_PRESETS: [&str; 6] = ["", "low", "medium", "high", "xhigh", "max"];
 
-fn update_api_profile(profile: &mut ApiProfile, input: &UiInput) {
+fn update_api_profile(profile: &mut ApiProfile, input: &UiInput) -> Result<(), CoreError> {
+    profile.analysis_max_output_tokens = if input.api_output_tokens.trim().is_empty() {
+        None
+    } else {
+        Some(
+            input
+                .api_output_tokens
+                .trim()
+                .parse()
+                .map_err(|_| CoreError::InvalidData("分析输出上限应为整数。".into()))?,
+        )
+    };
+    profile.analysis_output_limit()?;
     profile.id = input.api_id.clone();
     profile.name = input.api_name.trim().into();
     profile.endpoint = input.api_endpoint.trim().trim_end_matches('/').into();
@@ -80,6 +92,7 @@ fn update_api_profile(profile: &mut ApiProfile, input: &UiInput) {
         .unwrap_or(&input.api_reasoning_custom)
         .trim();
     profile.analysis_reasoning_effort = (!effort.is_empty()).then(|| effort.to_owned());
+    Ok(())
 }
 
 fn draft_matches(ui: &crate::view::MainWindow, input: &UiInput) -> bool {
@@ -93,6 +106,7 @@ fn draft_matches(ui: &crate::view::MainWindow, input: &UiInput) -> bool {
         && app.get_api_format() == input.api_format
         && app.get_api_reasoning() == input.api_reasoning
         && app.get_api_reasoning_custom().as_str() == input.api_reasoning_custom
+        && app.get_api_output_tokens().as_str() == input.api_output_tokens
 }
 
 pub async fn refresh(ctx: &Context, project_id: Option<&str>) -> Result<(), CoreError> {
@@ -306,7 +320,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
             };
             let (profile, key) = if input.api_test_draft {
                 let mut profile = ApiProfile::default();
-                update_api_profile(&mut profile, input);
+                update_api_profile(&mut profile, input)?;
                 (profile, Some(input.api_key.trim().to_owned()))
             } else {
                 let profile = host
@@ -395,6 +409,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                 a.set_api_format(0);
                 a.set_api_reasoning(0);
                 a.set_api_reasoning_custom("".into());
+                a.set_api_output_tokens("".into());
                 a.set_api_remember_key(true);
                 a.set_error("".into());
                 a.set_modal("api".into());
@@ -437,6 +452,12 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                         .unwrap_or(REASONING_PRESETS.len()) as i32,
                 );
                 a.set_api_reasoning_custom(effort.into());
+                a.set_api_output_tokens(
+                    p.analysis_max_output_tokens
+                        .map(|value| value.to_string())
+                        .unwrap_or_default()
+                        .into(),
+                );
                 a.set_modal("api".into());
             });
         }
@@ -449,7 +470,10 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                 .into_iter()
                 .find(|p| p.id == input.api_id);
             let mut p = old.unwrap_or_else(ApiProfile::default);
-            update_api_profile(&mut p, input);
+            if let Err(error) = update_api_profile(&mut p, input) {
+                ctx.update(|ui| ui.global::<App>().set_modal("api".into()));
+                return Err(error);
+            }
             if let Err(error) = host
                 .save_api_profile(p, Some(input.api_key.trim().into()), input.api_remember_key)
                 .await
@@ -582,6 +606,22 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn analysis_output_limit_preserves_defaults_and_rejects_invalid_drafts() {
+        let mut profile = ApiProfile::default();
+        let mut input = UiInput::default();
+        update_api_profile(&mut profile, &input).unwrap();
+        assert_eq!(profile.analysis_max_output_tokens, None);
+        assert_eq!(profile.analysis_output_limit().unwrap(), 64_000);
+        input.api_output_tokens = " 128000 ".into();
+        update_api_profile(&mut profile, &input).unwrap();
+        assert_eq!(profile.analysis_output_limit().unwrap(), 128_000);
+        for value in ["not a number", "0", "128001"] {
+            input.api_output_tokens = value.into();
+            assert!(update_api_profile(&mut profile, &input).is_err());
+        }
+    }
 
     fn loaded_input() -> UiInput {
         UiInput {

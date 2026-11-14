@@ -53,10 +53,18 @@ pub enum EngineError {
         stage: &'static str,
         message: String,
     },
-    #[error("分析 API 请求失败：{}", .0.failure_summary())]
+    #[error("分析 API 请求失败：{}", analysis_api_summary(.0))]
     Api(Box<gamel10n_translation::provider::ProviderError>),
     #[error("资料获取失败：{0}")]
     Research(String),
+}
+
+fn analysis_api_summary(error: &gamel10n_translation::provider::ProviderError) -> String {
+    if error.diagnostic.code == "output-token-limit" {
+        "单次分析输出被截断，请拆分本轮生成内容或检查模型配置中的分析输出上限。".into()
+    } else {
+        error.failure_summary()
+    }
 }
 
 /// Application-owned shared tools, resolved independently of the current directory.

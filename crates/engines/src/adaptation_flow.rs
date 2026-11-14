@@ -97,6 +97,7 @@ pub(super) fn recover(state: &mut Session, request: &AdaptationRequest<'_>, iden
         state.verified_fingerprint = None;
     }
     state.extra.remove("contextBoundary");
+    state.extra.remove("preferredOutputTokens");
     if changed_objective || changed_instruction {
         state.extra.remove("contextVerificationPhases");
     }
@@ -116,7 +117,6 @@ pub(super) fn recover(state: &mut Session, request: &AdaptationRequest<'_>, iden
         }
         state.history_start = state.messages.len();
         decision::reset_context(state);
-        state.extra.remove("preferredOutputTokens");
     }
     state.extra.insert("modelIdentity".into(), json!(identity));
     if !request.objective.is_empty() {
@@ -483,11 +483,7 @@ pub(super) async fn run(
         .insert("matchedKnowledge".into(), json!(knowledge.entries));
     let mut continuation = Some(continuation);
     let mut turns = 0;
-    let mut output_limit = request
-        .limits
-        .maximum_output_tokens
-        .max(number(state, "preferredOutputTokens"))
-        .clamp(128, 32000);
+    let output_limit = request.limits.maximum_output_tokens;
     let mut recovering_output = false;
     let mut summaries = 0;
     for key in ["lastImplementationTurn", "lastVerificationProgressTurn"] {
@@ -864,20 +860,16 @@ pub(super) async fn run(
                         None,
                     ));
                 }
-                let increased = (output_limit * 2).min(32000);
                 if error.diagnostic.code == "output-token-limit"
                     && !recovering_output
                     && requested == output_limit
-                    && increased > output_limit
                     && remaining.saturating_sub(tokens(&error.usage))
-                        > estimated + u64::from(increased)
+                        > estimated + u64::from(output_limit)
                 {
                     recovering_output = true;
-                    output_limit = increased;
-                    set_number(state, "preferredOutputTokens", increased);
                     state.messages.push(json!({"role":"user","content":"上一次分析响应达到单次输出上限，整次响应未接受，其中的任何工具调用均未执行。已保存的源码和已完成工具结果仍有效，不要重新调查或读取整个工程。请缩小本轮操作：一次实现一个小文件，已有代码用 replace_text 局部修改，不要一次生成完整适配器。沿用已确认结论继续下一项具体操作。"}));
                     trace_run(
-                        json!({"operation":"output-limit-recovery","previousLimit":requested,"maximumOutputTokens":increased}),
+                        json!({"operation":"output-limit-recovery","previousLimit":requested,"maximumOutputTokens":output_limit}),
                     )?;
                     continue;
                 }
@@ -1861,6 +1853,9 @@ mod tests {
     async fn truncated_output_recovers_once_and_summary_only_responses_stop() {
         let root = tempfile::tempdir().unwrap();
         let (service, request, workspace, mut state) = fixture(root.path());
+        state
+            .extra
+            .insert("preferredOutputTokens".into(), json!(20_000));
         let (provider, server) = model(vec![
             summary_response("length"),
             summary_response("stop"),
@@ -1889,12 +1884,86 @@ mod tests {
         assert!(!state.api_requests_estimated());
         assert_eq!(state.progress_note["kind"], "exploring");
         let requests = server.join().unwrap();
-        assert_eq!(requests[0]["max_completion_tokens"], 10000);
-        assert_eq!(requests[1]["max_completion_tokens"], 20000);
+        assert_eq!(requests[0]["max_completion_tokens"], 64000);
+        assert_eq!(requests[1]["max_completion_tokens"], 64000);
         assert_eq!(
             requests[2]["tools"].as_array().unwrap().len(),
             tool_definitions().unwrap().len()
         );
+    }
+
+    #[tokio::test]
+    async fn output_recovery_respects_profile_limits_for_both_protocols() {
+        for (protocol, limit) in [
+            (ApiProtocol::ChatCompletions, 16_000),
+            (ApiProtocol::Responses, 128_000),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let (service, mut request, workspace, mut state) = fixture(root.path());
+            request.limits.maximum_output_tokens = limit;
+            state
+                .extra
+                .insert("preferredOutputTokens".into(), json!(32_000));
+            let truncated = match protocol {
+                ApiProtocol::ChatCompletions => summary_response("length"),
+                ApiProtocol::Responses => {
+                    json!({"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[],"usage":{"input_tokens":100,"output_tokens":20}})
+                }
+            };
+            let (provider, server) =
+                model_with_protocol(vec![truncated.clone(), truncated], protocol);
+            let error = run(
+                &service,
+                &request,
+                &provider,
+                &workspace,
+                &workspace.join("session.json"),
+                &mut state,
+                String::new(),
+                &CancellationToken::new(),
+                None,
+                &|_| Ok(()),
+            )
+            .await
+            .unwrap_err();
+            assert!(error.to_string().contains("分析输出上限"));
+            assert!(!error.to_string().contains("每批文本数"));
+            let requests = server.join().unwrap();
+            assert_eq!(requests.len(), 2);
+            let field = if protocol == ApiProtocol::Responses {
+                "max_output_tokens"
+            } else {
+                "max_completion_tokens"
+            };
+            for request in requests {
+                assert_eq!(request[field], limit);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn output_allowance_is_clamped_by_the_remaining_total_budget() {
+        let root = tempfile::tempdir().unwrap();
+        let (service, mut request, workspace, mut state) = fixture(root.path());
+        request.limits.maximum_output_tokens = 128_000;
+        request.limits.maximum_tokens = 80_000;
+        let (provider, server) = model(vec![summary_response("stop"), summary_response("stop")]);
+        run(
+            &service,
+            &request,
+            &provider,
+            &workspace,
+            &workspace.join("session.json"),
+            &mut state,
+            String::new(),
+            &CancellationToken::new(),
+            None,
+            &|_| Ok(()),
+        )
+        .await
+        .unwrap();
+        let requests = server.join().unwrap();
+        assert!(requests[0]["max_completion_tokens"].as_u64().unwrap() < 80_000);
     }
 
     #[tokio::test]

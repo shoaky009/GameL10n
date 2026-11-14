@@ -26,9 +26,28 @@ pub struct ApiProfile {
     pub encrypted_api_key: Option<String>,
     pub requires_session_key: bool,
     pub analysis_reasoning_effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub analysis_max_output_tokens: Option<u32>,
     pub translation_format: String,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
+}
+
+impl ApiProfile {
+    /// Maximum output tokens for each intelligent adaptation request.
+    pub fn analysis_output_limit(&self) -> Result<u32, CoreError> {
+        use gamel10n_engines::adaptation::AdaptationLimits;
+        let limit = self
+            .analysis_max_output_tokens
+            .unwrap_or(AdaptationLimits::DEFAULT_OUTPUT_TOKENS);
+        if !(128..=AdaptationLimits::MAX_OUTPUT_TOKENS).contains(&limit) {
+            return Err(CoreError::InvalidData(format!(
+                "分析输出上限应为 128–{} Token。",
+                AdaptationLimits::MAX_OUTPUT_TOKENS
+            )));
+        }
+        Ok(limit)
+    }
 }
 
 #[derive(Clone, Default, Deserialize, Serialize)]
@@ -254,6 +273,7 @@ impl Application {
         if !matches!(profile.protocol.as_str(), "ChatCompletions" | "Responses") {
             return Err(CoreError::InvalidData("API 协议无效。".into()));
         }
+        profile.analysis_output_limit()?;
         use gamel10n_translation::provider::{
             ApiProtocol, OpenAiProvider, ProviderSettings, TranslationFormat,
         };
@@ -520,6 +540,68 @@ fn validate_profiles(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_profiles_use_the_larger_analysis_limit_and_preserve_custom_fields() {
+        let mut profile: ApiProfile =
+            serde_json::from_value(json!({"id":"legacy","customOption":true})).unwrap();
+        assert_eq!(profile.analysis_output_limit().unwrap(), 64_000);
+        assert_eq!(profile.extra["customOption"], true);
+        profile.analysis_max_output_tokens = Some(128_000);
+        let restored: ApiProfile =
+            serde_json::from_value(serde_json::to_value(profile).unwrap()).unwrap();
+        assert_eq!(restored.analysis_output_limit().unwrap(), 128_000);
+        assert_eq!(restored.extra["customOption"], true);
+    }
+
+    #[tokio::test]
+    async fn selected_profile_output_limit_reaches_analysis_requests() {
+        let root = tempfile::tempdir().unwrap();
+        let app = Application::open(root.path().join("data"), &crate::ToolPaths::new("missing"))
+            .await
+            .unwrap();
+        let game = root.path().join("game");
+        std::fs::create_dir_all(&game).unwrap();
+        let project = app.add_project(&game).await.unwrap();
+        for (configured, expected) in [
+            (Some(16_000), 16_000),
+            (Some(128_000), 128_000),
+            (None, 64_000),
+        ] {
+            app.save_api_profile(
+                ApiProfile {
+                    id: "analysis".into(),
+                    name: "Analysis".into(),
+                    endpoint: "http://127.0.0.1:9/v1".into(),
+                    model: "fixture".into(),
+                    protocol: "ChatCompletions".into(),
+                    analysis_max_output_tokens: configured,
+                    ..Default::default()
+                },
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+            let (_, limits) = app.analysis_provider(&project.id).await.unwrap();
+            assert_eq!(limits.maximum_output_tokens, expected);
+        }
+        let mut invalid = app
+            .settings()
+            .await
+            .unwrap()
+            .api_configuration
+            .profiles
+            .remove(0);
+        invalid.analysis_max_output_tokens = Some(128_001);
+        assert!(app.save_api_profile(invalid, None, false).await.is_err());
+        assert_eq!(
+            app.settings().await.unwrap().api_configuration.profiles[0]
+                .analysis_output_limit()
+                .unwrap(),
+            64_000
+        );
+    }
 
     #[tokio::test]
     async fn api_tests_keep_drafts_unsaved_and_use_saved_session_keys_without_changing_settings() {

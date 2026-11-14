@@ -287,6 +287,7 @@ impl Application {
         .map_err(|e| CoreError::InvalidData(e.to_string()))?
         .with_display_name(p.name.clone());
         let limits = AdaptationLimits {
+            maximum_output_tokens: p.analysis_output_limit()?,
             maximum_tokens: project
                 .settings
                 .get("adaptationTokenBudget")
@@ -298,7 +299,6 @@ impl Application {
                 .and_then(Value::as_u64)
                 .unwrap_or(settings.adaptation_maximum_turns.into())
                 as u32,
-            ..AdaptationLimits::default()
         };
         Ok((provider, limits))
     }

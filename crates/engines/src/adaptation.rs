@@ -70,15 +70,20 @@ impl Default for AdaptationLimits {
         Self {
             maximum_turns: 60,
             maximum_tokens: 1_000_000,
-            maximum_output_tokens: 10_000,
+            maximum_output_tokens: Self::DEFAULT_OUTPUT_TOKENS,
         }
     }
 }
 impl AdaptationLimits {
+    /// Default response budget for intelligent adaptation.
+    pub const DEFAULT_OUTPUT_TOKENS: u32 = 64_000;
+    /// Largest configurable response budget.
+    pub const MAX_OUTPUT_TOKENS: u32 = 128_000;
+
     pub(crate) fn validate(&self) -> Result<(), EngineError> {
         if !(1..=400).contains(&self.maximum_turns)
             || !(1000..=20_000_000).contains(&self.maximum_tokens)
-            || !(128..=32_000).contains(&self.maximum_output_tokens)
+            || !(128..=Self::MAX_OUTPUT_TOKENS).contains(&self.maximum_output_tokens)
         {
             return Err(EngineError::Protocol("智能适配预算无效。".into()));
         }
