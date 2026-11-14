@@ -857,6 +857,14 @@ pub(super) async fn run(
             );
             trace_run(entry)
         };
+        let stream_timing = match &response {
+            Ok(response) => response.stream_timing.clone(),
+            Err(error) => error.stream_timing.as_deref().cloned(),
+        };
+        let trace_model = |mut entry: Value| {
+            entry["streamAttempt"] = json!(stream_timing);
+            trace_model(entry)
+        };
         let response = match response {
             Ok(response) => response,
             Err(error) => {
@@ -1078,8 +1086,32 @@ mod tests {
                     bytes.extend_from_slice(&buffer[..count]);
                 }
                 requests.push(serde_json::from_slice(&bytes[start..start + length]).unwrap());
-                let content = response.to_string();
-                write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",content.len(),content).unwrap();
+                let mut response = response;
+                let content = if protocol == ApiProtocol::Responses {
+                    let kind = format!("response.{}", response["status"].as_str().unwrap());
+                    format!(
+                        "event: {kind}\ndata: {}\n\n",
+                        json!({"type":kind,"response":response})
+                    )
+                } else {
+                    for (index, choice) in response["choices"]
+                        .as_array_mut()
+                        .unwrap()
+                        .iter_mut()
+                        .enumerate()
+                    {
+                        choice["index"] = json!(index);
+                        let message = choice.as_object_mut().unwrap().remove("message").unwrap();
+                        choice["delta"] = message;
+                        if let Some(calls) = choice["delta"]["tool_calls"].as_array_mut() {
+                            for (index, call) in calls.iter_mut().enumerate() {
+                                call["index"] = json!(index);
+                            }
+                        }
+                    }
+                    format!("data: {response}\n\ndata: [DONE]\n\n")
+                };
+                write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",content.len(),content).unwrap();
             }
             requests
         });
@@ -1133,7 +1165,9 @@ mod tests {
         assert_eq!(start["softwareVersion"], "0.1.0");
         assert_eq!(start["buildGitHash"], "fixture-build");
         assert_eq!(start["maximumOutputTokens"], 2048);
-        assert_eq!(start["analysisRequestTimeoutMs"], 600000);
+        assert_eq!(start["analysisFirstResponseTimeoutMs"], 180000);
+        assert_eq!(start["analysisStreamIdleTimeoutMs"], 300000);
+        assert!(start.get("analysisRequestTimeoutMs").is_none());
         let preparation = &rows
             .iter()
             .find(|row| row["entry"]["operation"] == "local-preparation")

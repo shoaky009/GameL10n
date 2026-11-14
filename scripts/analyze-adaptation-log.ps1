@@ -46,6 +46,27 @@ function Sum-Field($items, [string]$field) {
     if ($values.Count -gt 0) { [double](($values | Measure-Object -Sum).Sum) }
     elseif (@($items).Count -eq 0) { 0 }
 }
+function Max-Field($items, [string]$field) {
+    $values = @($items | ForEach-Object { if ($null -ne $_.$field) { $_.$field } })
+    if ($values.Count -gt 0) { [double](($values | Measure-Object -Maximum).Maximum) }
+}
+function Stream-Summary($items) {
+    $measured = @($items | Where-Object { $null -ne $_.entry.streamAttempt })
+    $metrics = @($measured | ForEach-Object { $_.entry.streamAttempt })
+    $durations = @($metrics | Where-Object { $null -ne $_.streamDurationMs })
+    [ordered]@{
+        measuredAttempts = $measured.Count; unmeasuredAttempts = @($items).Count - $measured.Count
+        firstResponseMeasuredAttempts = @($metrics | Where-Object { $null -ne $_.firstResponseMs }).Count
+        idleMeasuredAttempts = @($metrics | Where-Object { $null -ne $_.maximumIdleMs }).Count
+        durationMeasuredAttempts = $durations.Count
+        maximumFirstResponseSeconds = Seconds (Max-Field $metrics 'firstResponseMs')
+        maximumIdleSeconds = Seconds (Max-Field $metrics 'maximumIdleMs')
+        streamSeconds = if ($durations.Count) { Seconds (Sum-Field $durations 'streamDurationMs') } else { $null }
+        firstResponseTimeouts = @($metrics | Where-Object { $_.timeoutStage -eq 'first-response' }).Count
+        idleTimeouts = @($metrics | Where-Object { $_.timeoutStage -eq 'stream-idle' }).Count
+        note = 'Each streamAttempt describes only the last HTTP attempt in its model operation; apiMs and waitingMs include all HTTP attempts and queue/backoff waits. Latency and idle gaps use maxima, duration sums only measured streams. Heartbeats count as network activity, not model progress. Missing measurements remain unknown.'
+    }
+}
 function Get-Usage($entry) {
     if ($null -ne $entry.usage.inputTokens -and $null -ne $entry.usage.outputTokens) { $entry.usage }
     elseif ($null -ne $entry.inputTokens -and $null -ne $entry.outputTokens) { $entry }
@@ -251,11 +272,12 @@ $runs = @($rows | Where-Object { $_.runId } | Group-Object runId | ForEach-Objec
         $item.maximumTurns = $start.entry.maximumTurns
         $item.fixedInstructionBytes = $start.entry.fixedInstructionBytes
         $item.registeredToolCount = $start.entry.registeredToolCount
-        foreach ($field in @('softwareVersion', 'buildGitHash', 'maximumOutputTokens', 'analysisRequestTimeoutMs')) {
+        foreach ($field in @('softwareVersion', 'buildGitHash', 'maximumOutputTokens', 'analysisRequestTimeoutMs', 'analysisStreaming', 'analysisFirstResponseTimeoutMs', 'analysisStreamIdleTimeoutMs')) {
             $item[$field] = $start.entry.$field
         }
     }
     $item.sampleChecks = Sample-Summary $group
+    $item.streams = Stream-Summary @($runAttempts | ForEach-Object { $_.row })
     if ($end) {
         $hostUsage = Get-Usage $end.entry
         $item.hostRunTokens = if ($null -ne $end.entry.tokens) { $end.entry.tokens }
@@ -302,6 +324,7 @@ $result = [ordered]@{
         rejectedToolBatches = @($rows | Where-Object { $_.entry.operation -eq 'tool-batch-rejected' }).Count
     }
     sampleChecks = Sample-Summary $rows
+    streams = Stream-Summary $modelRows
     coverage = [ordered]@{
         skippedInvalidLines = $invalidLines
         legacyRows = @($rows | Where-Object { -not $_.schemaVersion -or $_.schemaVersion -lt 2 }).Count
@@ -319,6 +342,8 @@ $result = [ordered]@{
         [ordered]@{ runId = $_.runId; status = $_.status; model = $_.model; usage = $_.usage
             softwareVersion = $_.softwareVersion; buildGitHash = $_.buildGitHash
             maximumOutputTokens = $_.maximumOutputTokens; analysisRequestTimeoutMs = $_.analysisRequestTimeoutMs
+            analysisStreaming = $_.analysisStreaming; analysisFirstResponseTimeoutMs = $_.analysisFirstResponseTimeoutMs
+            analysisStreamIdleTimeoutMs = $_.analysisStreamIdleTimeoutMs; streams = $_.streams
             sampleChecks = $_.sampleChecks }
     })
     milestones = [ordered]@{
@@ -346,6 +371,7 @@ $result = [ordered]@{
             $item = Event-Reference $_
             $item.operation = 'model'; $item.status = $_.entry.status; $item.failureCode = $_.entry.failureCode
             $item.seconds = Seconds $_.entry.elapsedMs
+            $item.streamAttempt = $_.entry.streamAttempt
             $item
         }
     })
@@ -390,6 +416,7 @@ if ($Detail) {
         $item.uncachedTokens = if ($null -ne $_.usage.cachedTokens -and $_.usage.estimated -ne $true) { $_.usage.inputTokens - $_.usage.cachedTokens } else { $null }
         $item.seconds = Seconds $_.row.entry.elapsedMs
         $item.apiSeconds = Seconds $_.row.entry.apiMs; $item.waitingSeconds = Seconds $_.row.entry.waitingMs
+        $item.streamAttempt = $_.row.entry.streamAttempt
         $item.visibleHistoryBytes = $_.row.entry.visibleHistoryBytes
         $item.instructionBytes = $_.row.entry.instructionBytes; $item.toolDefinitionBytes = $_.row.entry.toolDefinitionBytes
         $item.instructionFingerprint = $_.row.entry.instructionFingerprint

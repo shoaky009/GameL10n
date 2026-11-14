@@ -537,7 +537,7 @@ impl EngineService {
         trace_run(
             json!({"operation":"run-start","continuing":continuing,"model":provider.model(),"modelIdentity":provider.identity(),"maximumTurns":request.limits.maximum_turns,"maximumTokens":request.limits.maximum_tokens,
                 "softwareVersion":self.build_identity.as_ref().map(|identity| &identity.0),"buildGitHash":self.build_identity.as_ref().map(|identity| &identity.1),
-                "maximumOutputTokens":request.limits.maximum_output_tokens,"analysisRequestTimeoutMs":provider.analysis_request_timeout().as_millis()}),
+                "maximumOutputTokens":request.limits.maximum_output_tokens,"analysisFirstResponseTimeoutMs":provider.analysis_first_response_timeout().as_millis(),"analysisStreamIdleTimeoutMs":provider.analysis_stream_idle_timeout().as_millis(),"analysisStreaming":true}),
         )?;
         if !continuing
             && !request.require_model_analysis

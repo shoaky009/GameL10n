@@ -168,13 +168,14 @@ async fn unmatched_recognition_uses_the_configured_api_and_resumes_its_session()
             reader.read_exact(&mut body).unwrap();
             requests.push(serde_json::from_slice(&body).unwrap());
             let response = json!({
-                "choices": [{"finish_reason":"stop", "message":{
+                "choices": [{"index":0,"finish_reason":"stop", "delta":{
                     "role":"assistant", "content":"仍在探索：正在核对资源结构。"
                 }}],
                 "usage":{"prompt_tokens":100,"completion_tokens":20}
             })
             .to_string();
-            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", response.len(), response).unwrap();
+            let response = format!("data: {response}\n\ndata: [DONE]\n\n");
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", response.len(), response).unwrap();
         }
         requests
     });
@@ -245,6 +246,10 @@ async fn unmatched_recognition_uses_the_configured_api_and_resumes_its_session()
         assert_eq!(history.records[0].reasoning_effort.as_deref(), Some("high"));
     }
     let requests = server.join().unwrap();
+    assert!(
+        requests.iter().all(|request| request["stream"] == true
+            && request["stream_options"]["include_usage"] == true)
+    );
     assert!(
         requests[1]["messages"]
             .as_array()

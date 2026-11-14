@@ -16,8 +16,12 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
+#[path = "provider_stream.rs"]
+mod stream;
+
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
-const ANALYSIS_REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
+const ANALYSIS_FIRST_RESPONSE_TIMEOUT: Duration = Duration::from_secs(180);
+const ANALYSIS_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 
 #[derive(Clone, Copy)]
 enum CompletionMode {
@@ -90,6 +94,7 @@ pub struct ProviderError {
     pub usage: TokenUsage,
     pub diagnostic: Box<ProviderDiagnostic>,
     pub retry_after: Option<Duration>,
+    pub stream_timing: Option<Box<AnalysisStreamTiming>>,
 }
 impl ProviderError {
     fn new(code: &str, message: &str) -> Self {
@@ -99,6 +104,7 @@ impl ProviderError {
             status_code: None,
             usage: TokenUsage::default(),
             retry_after: None,
+            stream_timing: None,
             diagnostic: Box::new(ProviderDiagnostic {
                 code: code.into(),
                 detail: None,
@@ -139,6 +145,9 @@ impl ProviderError {
                 "network-error" => "网络连接异常",
                 "network-interrupted" => "接收响应时网络中断",
                 "request-timeout" => "请求超时",
+                "stream-incomplete" => "流式响应提前结束",
+                "stream-format" => "流式响应格式无效",
+                "stream-error" => "服务商返回流式错误",
                 "output-token-limit" => "模型输出达到长度上限，结果被截断，可减少每批文本数",
                 "translation-missing-ids" => "返回格式不正确：遗漏了部分文本",
                 "translation-unknown-id" => "返回格式不正确：文本 ID 与请求不符",
@@ -188,6 +197,17 @@ pub struct Completion {
     pub request_id: Option<String>,
     pub output_items: Vec<Value>,
     pub provider_data: Option<Value>,
+    pub stream_timing: Option<AnalysisStreamTiming>,
+}
+
+/// Observed network timing for the last HTTP attempt, independent of queue/retry waits.
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalysisStreamTiming {
+    pub first_response_ms: Option<u64>,
+    pub maximum_idle_ms: Option<u64>,
+    pub stream_duration_ms: Option<u64>,
+    pub timeout_stage: Option<&'static str>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -201,13 +221,15 @@ pub struct TranslationResponse {
 pub struct OpenAiProvider {
     settings: ProviderSettings,
     client: reqwest::Client,
+    request_timeout: Duration,
     endpoint: reqwest::Url,
     identity: String,
     account_slot: Arc<tokio::sync::Semaphore>,
     display_name: String,
     request_count: Arc<AtomicU64>,
     metrics: Arc<Mutex<RequestMetrics>>,
-    analysis_request_timeout: Duration,
+    analysis_first_response_timeout: Duration,
+    analysis_stream_idle_timeout: Duration,
 }
 
 /// Observed usage belongs to HTTP attempts, including responses rejected by the caller.
@@ -306,7 +328,6 @@ impl OpenAiProvider {
             ))
         );
         let client = reqwest::Client::builder()
-            .timeout(DEFAULT_REQUEST_TIMEOUT)
             .build()
             .map_err(|_| ProviderError::new("http-client", "无法初始化 HTTP 客户端。"))?;
         let account_key = hash_text(&format!(
@@ -331,13 +352,15 @@ impl OpenAiProvider {
         Ok(Self {
             settings,
             client,
+            request_timeout: DEFAULT_REQUEST_TIMEOUT,
             endpoint,
             identity,
             account_slot,
             display_name,
             request_count: Arc::new(AtomicU64::new(0)),
             metrics: Arc::new(Mutex::new(RequestMetrics::default())),
-            analysis_request_timeout: ANALYSIS_REQUEST_TIMEOUT,
+            analysis_first_response_timeout: ANALYSIS_FIRST_RESPONSE_TIMEOUT,
+            analysis_stream_idle_timeout: ANALYSIS_STREAM_IDLE_TIMEOUT,
         })
     }
     pub fn identity(&self) -> &str {
@@ -362,9 +385,13 @@ impl OpenAiProvider {
     pub fn analysis_reasoning_effort(&self) -> Option<&str> {
         self.settings.analysis_reasoning_effort.as_deref()
     }
-    /// HTTP deadline for an adaptation attempt, excluding account queue and retry waits.
-    pub fn analysis_request_timeout(&self) -> Duration {
-        self.analysis_request_timeout
+    /// Deadline until the first nonempty response body bytes, excluding queue/retry waits.
+    pub fn analysis_first_response_timeout(&self) -> Duration {
+        self.analysis_first_response_timeout
+    }
+    /// Maximum gap between response body bytes after the first bytes arrive.
+    pub fn analysis_stream_idle_timeout(&self) -> Duration {
+        self.analysis_stream_idle_timeout
     }
     pub fn display_name(&self) -> &str {
         &self.display_name
@@ -568,6 +595,12 @@ impl OpenAiProvider {
                 }
             }
         }
+        if matches!(mode, CompletionMode::Analysis) {
+            body["stream"] = json!(true);
+            if self.settings.protocol == ApiProtocol::ChatCompletions {
+                body["stream_options"] = json!({"include_usage":true});
+            }
+        }
         let payload = serde_json::to_vec(&body)
             .map_err(|_| ProviderError::new("request-json", "无法编码 API 请求。"))?;
         if payload.len()
@@ -587,23 +620,33 @@ impl OpenAiProvider {
             .post(self.endpoint.clone())
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(payload.clone());
-        if matches!(mode, CompletionMode::Analysis) {
-            request = request.timeout(self.analysis_request_timeout);
+        if !matches!(mode, CompletionMode::Analysis) {
+            request = request.timeout(self.request_timeout);
         }
         if !self.settings.api_key.is_empty() {
             request = request.bearer_auth(&self.settings.api_key);
         }
         let started = std::time::Instant::now();
         let mut attempted = false;
-        let result = self
-            .receive_completion(
+        let result = if matches!(mode, CompletionMode::Analysis) {
+            self.receive_agent_stream(
                 request,
                 payload.len(),
                 known_tool_names,
                 cancellation,
                 &mut attempted,
             )
-            .await;
+            .await
+        } else {
+            self.receive_completion(
+                request,
+                payload.len(),
+                known_tool_names,
+                cancellation,
+                &mut attempted,
+            )
+            .await
+        };
         if attempted {
             let mut metrics = self
                 .metrics
@@ -678,7 +721,10 @@ impl OpenAiProvider {
         }
         let root: Value = serde_json::from_slice(&bytes)
             .map_err(|_| ProviderError::new("api-json-syntax", "API 响应不是有效 JSON。"))?;
-        let usage = read_usage(&root, self.settings.protocol, payload_len, bytes.len());
+        self.completion_from_root(&root, payload_len, bytes.len(), known_tool_names)
+    }
+
+    fn record_usage(&self, usage: &TokenUsage) {
         if !usage.estimated {
             let mut metrics = self
                 .metrics
@@ -695,6 +741,17 @@ impl OpenAiProvider {
                     .saturating_add(usage.input_tokens);
             }
         }
+    }
+
+    fn completion_from_root(
+        &self,
+        root: &Value,
+        payload_len: usize,
+        output_len: usize,
+        known_tool_names: Option<&HashSet<String>>,
+    ) -> Result<Completion, ProviderError> {
+        let usage = read_usage(root, self.settings.protocol, payload_len, output_len);
+        self.record_usage(&usage);
         let request_id = root
             .get("id")
             .and_then(Value::as_str)
@@ -705,10 +762,10 @@ impl OpenAiProvider {
             })
             .map(str::to_owned);
         let mut completion = match (self.settings.protocol, known_tool_names) {
-            (ApiProtocol::ChatCompletions, Some(names)) => read_agent_chat(&root, &usage, names),
-            (ApiProtocol::Responses, Some(names)) => read_agent_responses(&root, &usage, names),
-            (ApiProtocol::ChatCompletions, None) => read_chat(&root, &usage),
-            (ApiProtocol::Responses, None) => read_responses(&root, &usage),
+            (ApiProtocol::ChatCompletions, Some(names)) => read_agent_chat(root, &usage, names),
+            (ApiProtocol::Responses, Some(names)) => read_agent_responses(root, &usage, names),
+            (ApiProtocol::ChatCompletions, None) => read_chat(root, &usage),
+            (ApiProtocol::Responses, None) => read_responses(root, &usage),
         }
         .map_err(|mut error| {
             error.diagnostic.request_id = request_id.clone();
@@ -1168,6 +1225,7 @@ fn complete_agent_turn(
         request_id: None,
         output_items: original.as_array().cloned().unwrap_or_default(),
         provider_data: Some(original.clone()),
+        stream_timing: None,
     })
 }
 
@@ -1564,6 +1622,7 @@ fn read_chat(root: &Value, usage: &TokenUsage) -> Result<Completion, ProviderErr
         request_id: None,
         output_items: Vec::new(),
         provider_data: None,
+        stream_timing: None,
     })
 }
 
@@ -1639,6 +1698,7 @@ fn read_responses(root: &Value, usage: &TokenUsage) -> Result<Completion, Provid
         request_id: None,
         output_items: output.clone(),
         provider_data: None,
+        stream_timing: None,
     })
 }
 
@@ -1646,20 +1706,20 @@ fn read_responses(root: &Value, usage: &TokenUsage) -> Result<Completion, Provid
 mod tests {
     use super::*;
 
-    fn agent_tools() -> Vec<Value> {
+    pub(super) fn agent_tools() -> Vec<Value> {
         vec![
             json!({"type":"function","function":{"name":"read","description":"read resources","parameters":{"type":"object","properties":{}}}}),
         ]
     }
 
-    fn agent_messages() -> Vec<Value> {
+    pub(super) fn agent_messages() -> Vec<Value> {
         vec![
             json!({"role":"system","content":"Agent instructions"}),
             json!({"role":"user","content":"Inspect resources"}),
         ]
     }
 
-    fn local_agent(endpoint: String, protocol: ApiProtocol) -> OpenAiProvider {
+    pub(super) fn local_agent(endpoint: String, protocol: ApiProtocol) -> OpenAiProvider {
         OpenAiProvider::new(ProviderSettings {
             endpoint,
             api_key: String::new(),
@@ -1681,7 +1741,7 @@ mod tests {
         mock_agent_status(responses.into_iter().map(|body| (200, body)).collect())
     }
 
-    fn read_mock_request(stream: &mut std::net::TcpStream) -> Value {
+    pub(super) fn read_mock_request(stream: &mut std::net::TcpStream) -> Value {
         use std::io::Read;
         let mut request = Vec::new();
         let mut buffer = [0_u8; 4096];
@@ -1729,12 +1789,55 @@ mod tests {
                 stream
                     .set_read_timeout(Some(Duration::from_secs(5)))
                     .unwrap();
-                sender.send(read_mock_request(&mut stream)).unwrap();
-                let body = body.to_string();
-                write!(stream, "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nRetry-After: 0\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+                let request = read_mock_request(&mut stream);
+                let streaming = request["stream"] == true && status == 200;
+                let protocol = if request.get("input").is_some() {
+                    ApiProtocol::Responses
+                } else {
+                    ApiProtocol::ChatCompletions
+                };
+                sender.send(request).unwrap();
+                let body = if streaming {
+                    stream_fixture(body, protocol)
+                } else {
+                    body.to_string()
+                };
+                let content_type = if streaming {
+                    "text/event-stream"
+                } else {
+                    "application/json"
+                };
+                write!(stream, "HTTP/1.1 {status} Test\r\nContent-Type: {content_type}\r\nRetry-After: 0\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
             }
         });
         (format!("http://{address}/v1"), receiver, handle)
+    }
+
+    pub(super) fn stream_fixture(mut response: Value, protocol: ApiProtocol) -> String {
+        if protocol == ApiProtocol::Responses {
+            return format!(
+                "event: response.{}\ndata: {}\n\n",
+                response["status"].as_str().unwrap_or("completed"),
+                json!({"type":format!("response.{}",response["status"].as_str().unwrap_or("completed")),"response":response})
+            );
+        }
+        if let Some(choices) = response["choices"].as_array_mut() {
+            for (index, choice) in choices.iter_mut().enumerate() {
+                choice["index"] = json!(index);
+                if let Some(message) = choice
+                    .as_object_mut()
+                    .and_then(|choice| choice.remove("message"))
+                {
+                    choice["delta"] = message;
+                }
+                if let Some(calls) = choice["delta"]["tool_calls"].as_array_mut() {
+                    for (index, call) in calls.iter_mut().enumerate() {
+                        call["index"] = json!(index);
+                    }
+                }
+            }
+        }
+        format!("data: {response}\n\ndata: [DONE]\n\n")
     }
 
     fn slow_agent(
@@ -1755,13 +1858,28 @@ mod tests {
             stream
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
-            read_mock_request(&mut stream);
+            let request = read_mock_request(&mut stream);
             let body = match protocol {
-                ApiProtocol::ChatCompletions => json!({"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}]}),
-                ApiProtocol::Responses => json!({"status":"completed","output":[{"type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}),
-            }.to_string();
+                ApiProtocol::ChatCompletions => {
+                    json!({"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}]})
+                }
+                ApiProtocol::Responses => {
+                    json!({"status":"completed","output":[{"type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]})
+                }
+            };
+            let streaming = request["stream"] == true;
+            let body = if streaming {
+                stream_fixture(body, protocol)
+            } else {
+                body.to_string()
+            };
+            let content_type = if streaming {
+                "text/event-stream"
+            } else {
+                "application/json"
+            };
             let headers = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 body.len()
             );
             if delay_body {
@@ -1788,11 +1906,8 @@ mod tests {
                 let (endpoint, _ready, server) =
                     slow_agent(protocol, Duration::from_millis(400), false);
                 let mut provider = local_agent(endpoint, protocol);
-                provider.client = reqwest::Client::builder()
-                    .timeout(Duration::from_millis(100))
-                    .build()
-                    .unwrap();
-                provider.analysis_request_timeout = Duration::from_secs(5);
+                provider.request_timeout = Duration::from_millis(100);
+                provider.analysis_first_response_timeout = Duration::from_secs(5);
                 let cancellation = CancellationToken::new();
                 let mut messages = agent_messages();
                 messages[1]["content"] = json!("Inspect resources ".repeat(1024));
@@ -1833,7 +1948,7 @@ mod tests {
                 delay_body,
             );
             let mut provider = local_agent(endpoint, ApiProtocol::ChatCompletions);
-            provider.analysis_request_timeout = Duration::from_millis(100);
+            provider.analysis_first_response_timeout = Duration::from_millis(100);
             let error = provider
                 .complete_agent(
                     &agent_messages(),
@@ -1860,7 +1975,7 @@ mod tests {
             false,
         );
         let mut provider = local_agent(endpoint, ApiProtocol::ChatCompletions);
-        provider.analysis_request_timeout = Duration::from_millis(500);
+        provider.analysis_first_response_timeout = Duration::from_millis(500);
         let permit = provider.account_slot.clone().acquire_owned().await.unwrap();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(800)).await;
@@ -2392,10 +2507,10 @@ mod tests {
     #[tokio::test]
     async fn agent_responses_rejects_incomplete_and_unsupported_output() {
         let invalid = vec![
-            (json!({"output":[]}), "responses-status", false),
+            (json!({"output":[]}), "stream-format", true),
             (
                 json!({"status":"in_progress","output":[]}),
-                "responses-incomplete",
+                "stream-incomplete",
                 true,
             ),
             (

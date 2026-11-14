@@ -88,6 +88,9 @@ fn legacy_and_mixed_logs_keep_unmeasured_categories_unknown() {
         assert!(result["runs"][0]["analysisRequestTimeoutMs"].is_null());
         assert!(result["timing"]["apiSeconds"].is_null());
         assert!(result["timing"]["waitingSeconds"].is_null());
+        assert_eq!(result["streams"]["unmeasuredAttempts"], 1);
+        assert!(result["streams"]["streamSeconds"].is_null());
+        assert!(result["streams"]["maximumIdleSeconds"].is_null());
         let summary = &result["sampleChecks"];
         if measured_scope.is_none() {
             for field in [
@@ -110,6 +113,47 @@ fn legacy_and_mixed_logs_keep_unmeasured_categories_unknown() {
             assert!(summary[missing].is_null(), "{summary}");
             assert_eq!(summary["unmeasuredScopes"], 1);
             assert_eq!(summary["cacheHits"], 0.0);
+        }
+    }
+}
+
+#[test]
+fn stream_metrics_keep_last_attempt_scope_and_aggregate_only_measured_values() {
+    let entries = [
+        json!({"operation":"run-start","analysisStreaming":true,"analysisFirstResponseTimeoutMs":180000,"analysisStreamIdleTimeoutMs":300000}),
+        json!({"operation":"model","status":"completed","apiMs":5000,"waitingMs":500,"streamAttempt":{"firstResponseMs":200,"maximumIdleMs":1000,"streamDurationMs":2500,"timeoutStage":null}}),
+        json!({"operation":"model","status":"failed","apiMs":2200,"streamAttempt":{"firstResponseMs":100,"maximumIdleMs":2000,"streamDurationMs":2100,"timeoutStage":"stream-idle"}}),
+        json!({"operation":"model","status":"failed","streamAttempt":{"firstResponseMs":null,"maximumIdleMs":null,"streamDurationMs":null,"timeoutStage":"first-response"}}),
+        json!({"operation":"model","status":"completed"}),
+    ];
+    for detail in [false, true] {
+        let result = analyze(&entries, detail);
+        let run = &result["runs"][0];
+        assert_eq!(run["analysisStreaming"], true);
+        assert_eq!(run["analysisFirstResponseTimeoutMs"], 180000);
+        assert_eq!(run["analysisStreamIdleTimeoutMs"], 300000);
+        assert!(run["analysisRequestTimeoutMs"].is_null());
+        let streams = &result["streams"];
+        assert_eq!(streams["measuredAttempts"], 3);
+        assert_eq!(streams["unmeasuredAttempts"], 1);
+        assert_eq!(streams["durationMeasuredAttempts"], 2);
+        assert_eq!(streams["maximumFirstResponseSeconds"], 0.2);
+        assert_eq!(streams["maximumIdleSeconds"], 2.0);
+        assert_eq!(streams["streamSeconds"], 4.6);
+        assert_eq!(streams["firstResponseTimeouts"], 1);
+        assert_eq!(streams["idleTimeouts"], 1);
+        assert_eq!(result["timing"]["apiSeconds"], 7.2);
+        assert_eq!(run["streams"], *streams);
+        if detail {
+            assert_eq!(
+                result["modelTurns"][0]["streamAttempt"]["maximumIdleMs"],
+                1000
+            );
+            assert_eq!(
+                result["modelTurns"][2]["streamAttempt"]["timeoutStage"],
+                "first-response"
+            );
+            assert!(result["modelTurns"][3]["streamAttempt"].is_null());
         }
     }
 }

@@ -42,9 +42,14 @@ impl AdaptationFailure {
                         "稍后点击“继续适配”；若持续限流，请检查 API 配额或调整分析 API。"
                     }
                     (Some(408 | 500..=599), _)
-                    | (_, "network-error" | "network-interrupted" | "request-timeout") => {
-                        "连接或服务恢复后点击“继续适配”，也可以更换分析 API。"
-                    }
+                    | (
+                        _,
+                        "network-error"
+                        | "network-interrupted"
+                        | "request-timeout"
+                        | "stream-incomplete"
+                        | "stream-error",
+                    ) => "连接或服务恢复后点击“继续适配”，也可以更换分析 API。",
                     (_, "model-refusal") => {
                         "更换能够处理当前分析任务的 API 或模型后，点击“继续适配”。"
                     }
@@ -135,6 +140,9 @@ mod tests {
             ("http-error", Some(429), "限流"),
             ("http-error", Some(401), "身份验证"),
             ("request-timeout", None, "请求超时"),
+            ("stream-incomplete", None, "流式响应提前结束"),
+            ("stream-format", None, "流式响应格式无效"),
+            ("stream-error", None, "服务商返回流式错误"),
             ("api-json-syntax", None, "返回格式不正确"),
             ("output-token-limit", None, "单次输出"),
             ("model-refusal", None, "拒绝处理本次分析"),
@@ -152,6 +160,7 @@ mod tests {
                     request_id: None,
                 }),
                 retry_after: None,
+                stream_timing: None,
             }));
             let mut session = Session {
                 verification: Some(VerificationResult {
