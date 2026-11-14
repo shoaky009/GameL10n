@@ -55,6 +55,7 @@ mod tests {
                 .join("extraction/native.json"),
             &crate::StoredAnalysis {
                 schema_version: 1,
+                coverage_pending: false,
                 format: "fixture".into(),
                 source_directory: game.clone(),
                 resource_files: vec!["story.txt".into()],

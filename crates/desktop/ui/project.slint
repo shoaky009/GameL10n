@@ -127,7 +127,7 @@ component RunningRecognition inherits ScrollView {
         }
         if App.recognition != "": VerticalLayout { spacing: 8px;
             Divider {}
-            HorizontalLayout { spacing: 12px; Caption { text: "已有结果"; width: 76px; } RecognitionSummary {} }
+            HorizontalLayout { spacing: 12px; Caption { text: App.recognition-ready ? "已有结果" : "保留文本"; width: 76px; } RecognitionSummary {} }
         }
     }
 }
@@ -198,9 +198,9 @@ export component Recognition inherits VerticalLayout {
         Button { text: "识别与适配"; enabled: !App.busy; clicked => { App.action("adapt-dialog", ""); } }
         Button { text: "总结同类引擎经验"; enabled: !App.busy; clicked => { App.action("review", ""); } }
         if App.review-summary != "": Button { text: "查看总结"; clicked => { App.modal = "engine-review"; } }
-        Link { text: "同类引擎经验"; clicked => { App.action("open", "knowledge"); } }
+        if App.recognition-engine != "" || App.review-summary != "": Link { text: "同类引擎经验"; clicked => { App.action("open", "knowledge"); } }
         Rectangle { horizontal-stretch: 1; }
-        Button { text: "查看文本并试译"; enabled: App.recognition-ready && !App.busy; clicked => { App.action("tab", "1"); } }
+        Button { text: App.recognition-ready ? "查看文本并试译" : "查看保留文本"; enabled: App.recognition != "" && !App.busy; clicked => { App.action("tab", "1"); } }
     }
     if App.recognition-ready && !App.recognition-running: CompletedRecognition {}
     if App.recognition-running: RunningRecognition {}
@@ -215,7 +215,7 @@ export component Recognition inherits VerticalLayout {
         VerticalLayout { padding: 12px; spacing: 16px; alignment: start;
             if App.recognition-failure-message != "": RecognitionFailure {}
             VerticalLayout { spacing: 8px;
-                Heading { text: App.adaptation-result-title != "" ? App.adaptation-result-title : App.recognition-ready ? "识别结果" : "等待识别"; }
+                Heading { text: App.adaptation-result-title != "" ? App.adaptation-result-title : App.recognition != "" ? "覆盖待确认" : "等待识别"; }
                 if App.recognition != "": RecognitionSummary {}
                 if App.recognition == "" && App.adaptation-summary == "" && !App.adaptation-running: Caption { text: "识别时先尝试已有适配器，未匹配时自动进入智能适配。智能适配使用项目或全局设置中的分析 API。"; }
                 if !App.adaptation-running && App.adaptation-usage.text != "": TokenCaption { value: App.adaptation-usage; }

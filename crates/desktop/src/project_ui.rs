@@ -641,6 +641,9 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                         return Ok(true);
                     }
                 }
+                if gamel10n_core::projects::extraction_coverage_pending(&project.extra) {
+                    return Ok(true);
+                }
                 let analysis = project.extra.get("analysis").unwrap_or(&Value::Null);
                 let adapter = analysis["adapterId"]
                     .as_str()

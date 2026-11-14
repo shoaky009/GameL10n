@@ -150,6 +150,7 @@ fn project_actions_keep_settings_selection_and_saved_edits_in_sync_across_tabs()
             .join("extraction/native.json"),
         &StoredAnalysis {
             schema_version: 1,
+            coverage_pending: false,
             format: "test".into(),
             source_directory: game,
             resource_files: vec!["story-a".into(), "story-b".into()],

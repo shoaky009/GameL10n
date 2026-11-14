@@ -417,6 +417,7 @@ mod tests {
             &project.id,
             StoredAnalysis {
                 schema_version: 1,
+                coverage_pending: false,
                 format: "fixture".into(),
                 source_directory: root.join("sources/original"),
                 resource_files: vec!["script.dat".into()],

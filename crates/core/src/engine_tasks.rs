@@ -72,6 +72,12 @@ pub enum RecognitionMode {
 
 const SMALL_EXTRACTION_THRESHOLD: usize = 1_000;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ExtractionCoverage {
+    Confirmed,
+    CheckIfSmall,
+}
+
 struct AdaptationStart {
     objective: AdaptationObjective,
     inventory: Option<Inventory>,
@@ -330,13 +336,14 @@ impl Application {
         let continuing = if forced {
             false
         } else {
-            self.open_project(id).await?;
+            let project = self.open_project(id).await?;
             let directory = self.project_directory(id)?;
             let task = self.task_state(id).await;
-            tokio::task::spawn_blocking(move || {
-                has_unfinished_adaptation(&directory, task.as_ref())
-            })
-            .await??
+            crate::projects::extraction_coverage_pending(&project.extra)
+                || tokio::task::spawn_blocking(move || {
+                    has_unfinished_adaptation(&directory, task.as_ref())
+                })
+                .await??
         };
         let recover_missing = if continuing
             && !self
@@ -625,13 +632,30 @@ impl Application {
                         None,
                     ),
                 };
+                let candidate_known =
+                    known_versions.contains(&(adapter_id.clone(), version.clone()));
+                let coverage = if candidate_known {
+                    ExtractionCoverage::Confirmed
+                } else {
+                    ExtractionCoverage::CheckIfSmall
+                };
                 match self
-                    .extract_adapter(id, adapter, probe, cancellation, false, None, None, None)
+                    .extract_adapter(
+                        id,
+                        adapter,
+                        probe,
+                        cancellation,
+                        coverage,
+                        false,
+                        None,
+                        None,
+                        None,
+                    )
                     .await
                 {
                     Ok(count) => {
                         extracted = Some(count);
-                        known_game = known_versions.contains(&(adapter_id, version));
+                        known_game = candidate_known;
                     }
                     Err(CoreError::Engine(gamel10n_engines::EngineError::Incompatible {
                         stage,
@@ -700,6 +724,7 @@ impl Application {
         adapter: AdapterHandle,
         probe: ProbeResult,
         cancellation: &CancellationToken,
+        coverage: ExtractionCoverage,
         trial: bool,
         replaces: Option<&AdapterVersion>,
         verified_extraction: Option<Arc<VerifiedExtraction>>,
@@ -856,8 +881,11 @@ impl Application {
             }
         }
         let count = extraction.units.len();
+        let coverage_pending =
+            coverage == ExtractionCoverage::CheckIfSmall && count < SMALL_EXTRACTION_THRESHOLD;
         let stored = StoredAnalysis {
             schema_version: 1,
+            coverage_pending,
             format: adapter.id().into(),
             source_directory: source,
             resource_files: files,
@@ -871,6 +899,7 @@ impl Application {
             package_directory: Some(package),
             ..
         } = &adapter
+            && !coverage_pending
         {
             let catalog = EngineCatalog::open(self.data_directory())?;
             let compatibility = GameCompatibility {
@@ -909,6 +938,9 @@ impl Application {
         instruction: &str,
     ) -> Result<AdaptationObjective, CoreError> {
         let project = self.store.get(id).await?;
+        if crate::projects::extraction_coverage_pending(&project.extra) {
+            return Ok(AdaptationObjective::ExpandCoverage);
+        }
         let saved = saved_adaptation_objective(&project, &self.project_directory(id)?)?;
         let has_error = self
             .task_state(id)
@@ -926,6 +958,9 @@ impl Application {
     /// Keep the last explicit goal when continuing; new projects start with regular recognition.
     pub async fn recognition_objective(&self, id: &str) -> Result<AdaptationObjective, CoreError> {
         let project = self.store.get(id).await?;
+        if crate::projects::extraction_coverage_pending(&project.extra) {
+            return Ok(AdaptationObjective::ExpandCoverage);
+        }
         Ok(
             saved_adaptation_objective(&project, &self.project_directory(id)?)?
                 .unwrap_or(AdaptationObjective::Develop),
@@ -980,6 +1015,8 @@ impl Application {
             return Err(gamel10n_engines::EngineError::Cancelled.into());
         }
         let mut project = self.store.get(id).await?;
+        let require_model_analysis = start.require_model_analysis
+            || crate::projects::extraction_coverage_pending(&project.extra);
         crate::game_directory::validate(&project.game_directory)?;
         // Validate configuration before creating an adaptation workspace or changing its state.
         let (provider, limits) = self.analysis_provider(id).await?;
@@ -1009,7 +1046,7 @@ impl Application {
                 instruction
             };
         let baseline = if objective == AdaptationObjective::Repair
-            || (start.require_model_analysis && objective == AdaptationObjective::ExpandCoverage)
+            || (require_model_analysis && objective == AdaptationObjective::ExpandCoverage)
         {
             self.cached_analysis(id).await?
         } else {
@@ -1088,7 +1125,7 @@ impl Application {
             user_instruction: instruction,
             objective: objective.as_str().into(),
             improve_existing,
-            require_model_analysis: start.require_model_analysis,
+            require_model_analysis,
             reuse_failures,
             builtin_probes,
             discovery_inventory: start.inventory,
@@ -1177,6 +1214,7 @@ impl Application {
                 adapter.clone(),
                 probe,
                 cancellation,
+                ExtractionCoverage::Confirmed,
                 trial,
                 previous.as_ref(),
                 result.verified_extraction.take(),
@@ -2041,6 +2079,7 @@ mod tests {
         fs::write(source.join("data.bin"), b"original").unwrap();
         StoredAnalysis {
             schema_version: 1,
+            coverage_pending: false,
             format: "fixture".into(),
             source_directory: source,
             resource_files: vec!["data.bin".into()],
@@ -2276,6 +2315,104 @@ mod tests {
         package
     }
 
+    fn local_analysis_responses(
+        responses: Vec<(u16, Value)>,
+    ) -> (String, std::thread::JoinHandle<Vec<Value>>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            for (status, response) in responses {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+                let mut connection = loop {
+                    match listener.accept() {
+                        Ok((connection, _)) => break connection,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(
+                                std::time::Instant::now() < deadline,
+                                "missing model request"
+                            );
+                            std::thread::sleep(std::time::Duration::from_millis(10));
+                        }
+                        Err(error) => panic!("{error}"),
+                    }
+                };
+                connection.set_nonblocking(false).unwrap();
+                connection
+                    .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .unwrap();
+                let mut bytes = Vec::new();
+                let mut buffer = [0; 4096];
+                loop {
+                    let count = connection.read(&mut buffer).unwrap();
+                    assert!(count > 0);
+                    bytes.extend_from_slice(&buffer[..count]);
+                    if let Some(end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&bytes[..end]);
+                        let length = headers
+                            .lines()
+                            .find_map(|line| {
+                                line.to_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .map(|length| length.trim().parse::<usize>().unwrap())
+                            })
+                            .unwrap();
+                        if bytes.len() >= end + 4 + length {
+                            requests.push(
+                                serde_json::from_slice(&bytes[end + 4..end + 4 + length]).unwrap(),
+                            );
+                            break;
+                        }
+                    }
+                }
+                let (content_type, body) = if status == 200 {
+                    (
+                        "text/event-stream",
+                        format!("data: {response}\n\ndata: [DONE]\n\n"),
+                    )
+                } else {
+                    ("application/json", response.to_string())
+                };
+                write!(connection, "HTTP/1.1 {status} Test\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+            requests
+        });
+        (endpoint, server)
+    }
+
+    fn analysis_tool(name: &str, args: Value) -> (u16, Value) {
+        (
+            200,
+            json!({
+                "id": name,
+                "choices": [{"index":0,"finish_reason":"tool_calls","delta":{
+                    "role":"assistant","tool_calls":[{"index":0,"id":name,"type":"function",
+                        "function":{"name":name,"arguments":args.to_string()}}]
+                }}],
+                "usage":{"prompt_tokens":100,"completion_tokens":20}
+            }),
+        )
+    }
+
+    async fn use_local_analysis(app: &Application, endpoint: String) {
+        app.save_api_profile(
+            crate::settings::ApiProfile {
+                id: "local".into(),
+                name: "Local fixture".into(),
+                endpoint,
+                model: "fixture".into(),
+                protocol: "ChatCompletions".into(),
+                ..Default::default()
+            },
+            Some(String::new()),
+            false,
+        )
+        .await
+        .unwrap();
+    }
+
     #[tokio::test]
     async fn saved_overlay_names_survive_build_install_update_and_restore() {
         let tools = crate::ToolPaths::development();
@@ -2328,9 +2465,19 @@ mod tests {
             .unwrap()
             .probe
             .unwrap();
-        app.extract_adapter(&project.id, adapter, probe, &token, false, None, None, None)
-            .await
-            .unwrap();
+        app.extract_adapter(
+            &project.id,
+            adapter,
+            probe,
+            &token,
+            ExtractionCoverage::Confirmed,
+            false,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
 
         // Reopen to exercise persisted probe hints, not an in-memory request.
         drop(app);
@@ -2686,9 +2833,19 @@ mod tests {
             .unwrap()
             .probe
             .unwrap();
-        app.extract_adapter(&project.id, adapter, probe, &token, true, None, None, None)
-            .await
-            .unwrap();
+        app.extract_adapter(
+            &project.id,
+            adapter,
+            probe,
+            &token,
+            ExtractionCoverage::Confirmed,
+            true,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         let original_ids = app
             .text_page(&project.id, "", 0, 100)
             .await
@@ -2727,6 +2884,9 @@ mod tests {
         ));
         let restored = app.open_project(&project.id).await.unwrap();
         assert_eq!(restored.extra["analysis"]["unitCount"], 4);
+        assert!(!crate::projects::extraction_coverage_pending(
+            &restored.extra
+        ));
         assert_eq!(restored.extra["analysis"]["adapterVersion"], "1");
         let restored_ids = app
             .text_page(&project.id, "", 0, 100)
@@ -2965,6 +3125,187 @@ mod tests {
         let state = app.task_state(&project.id).await.unwrap();
         assert_eq!(state.operation, "adapt");
         assert_eq!(state.succeeded, Some(false));
+        let saved = app.open_project(&project.id).await.unwrap();
+        assert!(crate::projects::extraction_coverage_pending(&saved.extra));
+        let summary = app.list_projects("").await.pop().unwrap();
+        assert!(crate::projects::extraction_coverage_pending(&summary.extra));
+        assert_eq!(summary.extracted_unit_count(), Some(2));
+        assert!(
+            EngineCatalog::open(app.data_directory())
+                .unwrap()
+                .discovery_candidates_for_game(&project.id, None)
+                .unwrap()
+                .iter()
+                .all(|candidate| !candidate.is_known_game)
+        );
+        let directory = app.project_directory(&project.id).unwrap();
+        let extraction = fs::read(directory.join("extraction/native.json")).unwrap();
+        let native: StoredAnalysis = serde_json::from_slice(&extraction).unwrap();
+        assert!(native.coverage_pending);
+        let original_units = serde_json::to_value(&native.extraction.units).unwrap();
+        app.save_translation_edit(&project.id, "0", "已校对译文".into(), true)
+            .await
+            .unwrap();
+        drop(app);
+
+        let reopened =
+            Application::open(root.path().join("data"), &crate::ToolPaths::new("missing"))
+                .await
+                .unwrap();
+        assert_eq!(
+            reopened.recognition_objective(&project.id).await.unwrap(),
+            AdaptationObjective::ExpandCoverage
+        );
+        let error = reopened.recognize(&project.id).await.unwrap_err();
+        assert!(error.to_string().contains("API"), "{error}");
+        let saved = reopened.open_project(&project.id).await.unwrap();
+        assert!(crate::projects::extraction_coverage_pending(&saved.extra));
+        assert_eq!(
+            fs::read(directory.join("extraction/native.json")).unwrap(),
+            extraction
+        );
+        assert_eq!(
+            serde_json::to_value(
+                reopened
+                    .text_page(&project.id, "", 0, 100)
+                    .await
+                    .unwrap()
+                    .units
+            )
+            .unwrap(),
+            original_units
+        );
+        let row = reopened.workbench_row(&project.id, "0").await.unwrap();
+        assert_eq!(row.text.as_deref(), Some("已校对译文"));
+        assert!(row.reviewed);
+        assert_eq!(
+            fs::read(native.source_directory.join("text.json")).unwrap(),
+            br#"["one","two"]"#
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_coverage_survives_api_failure_and_cancellation_then_small_game_confirmation() {
+        let tools = crate::ToolPaths::development();
+        if !tools.python().is_file() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let game = root.path().join("game");
+        fs::create_dir(&game).unwrap();
+        fs::write(game.join("text.json"), br#"["one","two"]"#).unwrap();
+        let app = Application::open(root.path().join("data"), &tools)
+            .await
+            .unwrap();
+        let project = app.add_project(&game).await.unwrap();
+        register_json_adapter(
+            &app,
+            "fixture",
+            include_str!("../../engines/tests/fixtures/json_adapter.py"),
+        );
+        assert!(app.recognize(&project.id).await.is_err());
+        app.save_translation_edit(&project.id, "0", "已校对译文".into(), true)
+            .await
+            .unwrap();
+        let directory = app.project_directory(&project.id).unwrap();
+        let extraction = fs::read(directory.join("extraction/native.json")).unwrap();
+        let (endpoint, server) = local_analysis_responses(vec![(
+            400,
+            json!({"error":{"message":"Fixture API failure"}}),
+        )]);
+        use_local_analysis(&app, endpoint).await;
+        let result = app.recognize(&project.id).await.unwrap();
+        let RecognitionResult::Adapted(result) = result else {
+            panic!("model analysis required")
+        };
+        assert_eq!(result.status, gamel10n_engines::AdaptationStatus::Failed);
+        assert_eq!(server.join().unwrap().len(), 1);
+        assert!(crate::projects::extraction_coverage_pending(
+            &app.open_project(&project.id).await.unwrap().extra
+        ));
+        assert_eq!(
+            fs::read(directory.join("extraction/native.json")).unwrap(),
+            extraction
+        );
+        let token = app
+            .begin(&project.id, "adapt", "正在检查覆盖")
+            .await
+            .unwrap();
+        token.cancel();
+        let error = app
+            .run_adaptation(
+                &project.id,
+                String::new(),
+                AdaptationStart {
+                    objective: AdaptationObjective::ExpandCoverage,
+                    inventory: None,
+                    require_model_analysis: false,
+                },
+                &token,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            CoreError::Engine(gamel10n_engines::EngineError::Cancelled)
+        ));
+        app.finish(&project.id, "adapt", Err(error.to_string()))
+            .await
+            .unwrap();
+        assert!(crate::projects::extraction_coverage_pending(
+            &app.open_project(&project.id).await.unwrap().extra
+        ));
+
+        let (endpoint, server) = local_analysis_responses(vec![
+            analysis_tool("stage_resources", json!({"files":["text.json"]})),
+            analysis_tool("copy_adapter", json!({"id":"engine.fixture","version":"1"})),
+            analysis_tool(
+                "test_adapter",
+                json!({"kind":"engine","key":"fixture","name":"Fixture","resourcePatterns":["*.json"],"coverageSamples":[{"resourcePath":"text.json","locator":"0","sourceText":"one"},{"resourcePath":"text.json","locator":"1","sourceText":"two"}]}),
+            ),
+            analysis_tool(
+                "finish",
+                json!({"summary":"Small fixture coverage verified"}),
+            ),
+        ]);
+        use_local_analysis(&app, endpoint).await;
+        let result = app.recognize(&project.id).await.unwrap();
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 4);
+        let RecognitionResult::Adapted(result) = result else {
+            panic!("coverage confirmation result")
+        };
+        assert_eq!(
+            result.status,
+            gamel10n_engines::AdaptationStatus::Activated,
+            "{result:?}\n{}",
+            requests.last().unwrap()["messages"]
+        );
+        assert!(result.adapter.is_some());
+        let saved = app.open_project(&project.id).await.unwrap();
+        assert!(!crate::projects::extraction_coverage_pending(&saved.extra));
+        assert_eq!(saved.extra["analysis"]["unitCount"], 2);
+        let native: StoredAnalysis = read_json(&directory.join("extraction/native.json")).unwrap();
+        assert!(!native.coverage_pending);
+        assert_eq!(
+            serde_json::to_value(&native.extraction.units).unwrap(),
+            serde_json::from_slice::<Value>(&extraction).unwrap()["extraction"]["units"]
+        );
+        let row = app.workbench_row(&project.id, "0").await.unwrap();
+        assert_eq!(row.text.as_deref(), Some("已校对译文"));
+        assert!(row.reviewed);
+        assert!(
+            EngineCatalog::open(app.data_directory())
+                .unwrap()
+                .discovery_candidates_for_game(&project.id, None)
+                .unwrap()
+                .iter()
+                .any(|candidate| candidate.is_known_game)
+        );
+        assert!(matches!(
+            app.recognize(&project.id).await.unwrap(),
+            RecognitionResult::Extracted(2)
+        ));
     }
 
     #[tokio::test]
@@ -3183,6 +3524,7 @@ mod tests {
             adapter.clone(),
             probe.clone(),
             &token,
+            ExtractionCoverage::Confirmed,
             false,
             None,
             Some(proof.clone()),
@@ -3217,6 +3559,7 @@ mod tests {
             adapter.clone(),
             probe.clone(),
             &token,
+            ExtractionCoverage::Confirmed,
             false,
             None,
             Some(proof.clone()),
@@ -3240,6 +3583,7 @@ mod tests {
             adapter,
             probe,
             &token,
+            ExtractionCoverage::Confirmed,
             false,
             None,
             Some(proof),

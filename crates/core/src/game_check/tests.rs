@@ -106,6 +106,7 @@ async fn expected_text_uses_saved_edits_and_excludes_unchanged_or_short_translat
         &directory.join("extraction/native.json"),
         &StoredAnalysis {
             schema_version: 1,
+            coverage_pending: false,
             format: "test".into(),
             source_directory: directory.join("sources"),
             resource_files: vec![],

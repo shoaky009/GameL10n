@@ -11,6 +11,13 @@ use tokio::sync::Mutex;
 
 use crate::CoreError;
 
+/// Retained extraction whose candidate adapter still needs coverage confirmation.
+pub fn extraction_coverage_pending(extra: &BTreeMap<String, Value>) -> bool {
+    extra
+        .get("analysis")
+        .is_some_and(|analysis| analysis["coveragePending"].as_bool() == Some(true))
+}
+
 /// Full project metadata; unrecognized fields are retained when saving.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]

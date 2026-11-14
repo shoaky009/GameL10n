@@ -69,6 +69,9 @@ pub enum AppEvent {
 #[serde(rename_all = "camelCase")]
 pub struct StoredAnalysis {
     pub schema_version: u32,
+    /// An ordinary candidate's extraction awaiting intelligent coverage confirmation.
+    #[serde(default)]
+    pub coverage_pending: bool,
     pub format: String,
     pub source_directory: PathBuf,
     pub resource_files: Vec<String>,
@@ -542,6 +545,7 @@ impl Application {
         let count = extraction.units.len();
         let stored = StoredAnalysis {
             schema_version: 1,
+            coverage_pending: false,
             format: format.into(),
             source_directory: snapshot,
             resource_files: files,
@@ -633,7 +637,21 @@ impl Application {
         let mut project = self.store.get(id).await?;
         let probe = stored.probe.as_ref();
         project.extra.remove("materialsCleanup");
-        project.extra.insert("analysis".into(),serde_json::json!({"adapterId":probe.map(|p|p.adapter_id.as_str()).unwrap_or(&stored.format),"adapterVersion":probe.map(|p|p.adapter_version.as_str()).unwrap_or("native-v1"),"sourceFingerprint":hash_text(&serde_json::to_string(&stored.source_hashes).map_err(|e|CoreError::InvalidData(e.to_string()))?),"unitCount":count,"resourceCount":stored.resource_files.len(),"engineId":probe.map(|p|p.engine_id.as_str()).unwrap_or(&stored.format),"completedAt":chrono::Utc::now().to_rfc3339(),"warnings":stored.extraction.warnings}));
+        project.extra.insert(
+            "analysis".into(),
+            serde_json::json!({
+                "adapterId": probe.map(|p| p.adapter_id.as_str()).unwrap_or(&stored.format),
+                "adapterVersion": probe.map(|p| p.adapter_version.as_str()).unwrap_or("native-v1"),
+                "sourceFingerprint": hash_text(&serde_json::to_string(&stored.source_hashes)
+                    .map_err(|e| CoreError::InvalidData(e.to_string()))?),
+                "unitCount": count,
+                "resourceCount": stored.resource_files.len(),
+                "engineId": probe.map(|p| p.engine_id.as_str()).unwrap_or(&stored.format),
+                "completedAt": chrono::Utc::now().to_rfc3339(),
+                "warnings": stored.extraction.warnings,
+                "coveragePending": stored.coverage_pending,
+            }),
+        );
         if let Some(probe) = probe {
             project
                 .extra

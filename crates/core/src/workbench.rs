@@ -1062,6 +1062,7 @@ mod tests {
             &directory.join("extraction/native.json"),
             &crate::StoredAnalysis {
                 schema_version: 1,
+                coverage_pending: false,
                 format: "test".into(),
                 source_directory: game,
                 resource_files: Vec::new(),
@@ -1319,6 +1320,7 @@ mod tests {
                     .join("extraction/native.json"),
                 &crate::StoredAnalysis {
                     schema_version: 1,
+                    coverage_pending: false,
                     format: "test".into(),
                     source_directory: game,
                     resource_files: Vec::new(),

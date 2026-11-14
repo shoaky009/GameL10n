@@ -16,6 +16,15 @@ pub fn concise_text(text: &str) -> String {
 }
 
 pub fn project_status(state: Option<&TaskState>, extra: &BTreeMap<String, Value>) -> String {
+    let status = saved_project_status(state, extra);
+    if gamel10n_core::projects::extraction_coverage_pending(extra) {
+        format!("{status} · 覆盖待确认")
+    } else {
+        status
+    }
+}
+
+fn saved_project_status(state: Option<&TaskState>, extra: &BTreeMap<String, Value>) -> String {
     let saved = extra.get("taskSummary").unwrap_or(&Value::Null);
     let count = extra.get("analysis").and_then(|a| a["unitCount"].as_u64());
     if let Some(state) = state {
@@ -47,7 +56,13 @@ pub fn project_status(state: Option<&TaskState>, extra: &BTreeMap<String, Value>
         return stage.into();
     }
     count
-        .map(|count| format!("已提取 {count} 条文本"))
+        .map(|count| {
+            if gamel10n_core::projects::extraction_coverage_pending(extra) {
+                format!("保留 {count} 条文本")
+            } else {
+                format!("已提取 {count} 条文本")
+            }
+        })
         .unwrap_or_else(|| "等待识别".into())
 }
 
@@ -300,7 +315,8 @@ impl RecognitionView {
     ) -> Self {
         let analysis = extra.get("analysis").unwrap_or(&Value::Null);
         let count = analysis["unitCount"].as_u64().unwrap_or(0);
-        let ready = count > 0;
+        let coverage_pending = gamel10n_core::projects::extraction_coverage_pending(extra);
+        let ready = count > 0 && !coverage_pending;
         let running = state.is_some_and(|s| s.running && s.operation == "adapt");
         let recognition_running =
             state.is_some_and(|s| s.running && recognition_task(&s.operation));
@@ -310,7 +326,9 @@ impl RecognitionView {
         let result_status = result.get("status").and_then(Value::as_str);
         let failure = RecognitionFailure::new(state, result);
         let mut status = project_status(state, extra);
-        if state.is_none_or(|s| !s.running && s.operation == "adapt" && s.succeeded == Some(true))
+        if !coverage_pending
+            && state
+                .is_none_or(|s| !s.running && s.operation == "adapt" && s.succeeded == Some(true))
             && result_status.is_some()
         {
             status = adaptation_stage(result_status, !coverage.is_empty()).into();
@@ -319,16 +337,23 @@ impl RecognitionView {
         let mut engine_reference = String::new();
         let mut adapter_reference = String::new();
         if !analysis.is_null() {
+            let extraction = if coverage_pending {
+                format!("保留 {count} 条文本，覆盖待确认")
+            } else {
+                format!("已提取 {count} 条文本")
+            };
             overview_details = format!(
-                "已提取 {count} 条文本  ·  {} 个脚本 / 资源",
+                "{extraction}  ·  {} 个脚本 / 资源",
                 analysis["resourceCount"].as_u64().unwrap_or(0),
             );
-            engine_reference = text(analysis, "engineId").into();
-            adapter_reference = format!(
-                "{}  ·  版本 {}",
-                text(analysis, "adapterId"),
-                text(analysis, "adapterVersion"),
-            );
+            if !coverage_pending {
+                engine_reference = text(analysis, "engineId").into();
+                adapter_reference = format!(
+                    "{}  ·  版本 {}",
+                    text(analysis, "adapterId"),
+                    text(analysis, "adapterVersion"),
+                );
+            }
         }
         let summary = result
             .get("summary")
@@ -342,10 +367,11 @@ impl RecognitionView {
             .unwrap_or_default();
         let result_title = if summary.is_empty() {
             String::new()
-        } else if state
-            .is_some_and(|s| s.operation == "adapt" && (s.running || s.succeeded != Some(true)))
-            && !failure.from_result
-            && !text(result, "summary").is_empty()
+        } else if (coverage_pending && matches!(result_status, Some("Activated" | "Reused")))
+            || (state.is_some_and(|s| {
+                s.operation == "adapt" && (s.running || s.succeeded != Some(true))
+            }) && !failure.from_result
+                && !text(result, "summary").is_empty())
         {
             "上次适配结果".into()
         } else if matches!(result_status, Some("Activated" | "Reused")) {
@@ -505,6 +531,89 @@ pub fn clear(app: &App) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn pending_candidate_keeps_text_and_failure_without_formal_recognition() {
+        let extra = BTreeMap::from([(
+            "analysis".into(),
+            json!({
+                "coveragePending":true,"unitCount":12,"resourceCount":1,
+                "engineId":"fixture","adapterId":"engine.fixture","adapterVersion":"1",
+                "warnings":["需要检查主要脚本"]
+            }),
+        )]);
+        for state in [
+            None,
+            Some(TaskState {
+                project_id: "one".into(),
+                operation: "adapt".into(),
+                running: false,
+                succeeded: Some(false),
+                message: "请先选择分析 API。".into(),
+            }),
+            Some(TaskState {
+                project_id: "one".into(),
+                operation: "adapt".into(),
+                running: true,
+                succeeded: None,
+                message: "正在检查覆盖".into(),
+            }),
+        ] {
+            let view = RecognitionView::new(&extra, state.as_ref(), &Value::Null, &Value::Null);
+            assert!(!view.ready);
+            assert!(view.engine_reference.is_empty());
+            assert!(view.adapter_reference.is_empty());
+            assert!(view.overview_details.contains("保留 12 条文本，覆盖待确认"));
+            assert!(view.status.contains("覆盖待确认"));
+            assert_eq!(view.warnings, "需要检查主要脚本");
+            if state
+                .as_ref()
+                .is_some_and(|state| state.succeeded == Some(false))
+            {
+                assert!(view.failure.message.contains("分析 API"));
+            }
+        }
+        let mut listed = extra.clone();
+        listed.insert(
+            "taskSummary".into(),
+            json!({"operation":"adapt","succeeded":false}),
+        );
+        assert_eq!(project_status(None, &listed), "智能适配失败 · 覆盖待确认");
+        for status in ["Activated", "Reused"] {
+            let view = RecognitionView::new(
+                &extra,
+                None,
+                &Value::Null,
+                &json!({"status":status,"summary":"此前适配结论"}),
+            );
+            assert_eq!(view.result_title, "上次适配结果");
+            assert!(view.status.contains("覆盖待确认"));
+            assert!(!view.ready);
+        }
+    }
+
+    #[test]
+    fn confirmed_small_projects_and_legacy_results_keep_formal_references() {
+        for coverage in [None, Some(false)] {
+            let mut analysis = json!({"unitCount":12,"engineId":"fixture","adapterId":"engine.fixture","adapterVersion":"1"});
+            if let Some(coverage) = coverage {
+                analysis["coveragePending"] = json!(coverage);
+            }
+            let extra = BTreeMap::from([("analysis".into(), analysis)]);
+            let state = TaskState {
+                project_id: "one".into(),
+                operation: "adapt".into(),
+                running: false,
+                succeeded: Some(false),
+                message: "修复失败".into(),
+            };
+            let view = RecognitionView::new(&extra, Some(&state), &Value::Null, &Value::Null);
+            assert!(view.ready);
+            assert_eq!(view.engine_reference, "fixture");
+            assert_eq!(view.adapter_reference, "engine.fixture  ·  版本 1");
+            assert!(!view.status.contains("覆盖待确认"));
+        }
+    }
 
     #[test]
     fn completed_partial_adaptation_keeps_full_result_and_discards_stale_finish_progress() {
