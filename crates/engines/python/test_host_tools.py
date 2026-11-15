@@ -38,6 +38,25 @@ class HostToolsTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.execute('read_file', path='data.bin', length=32769)
 
+    def test_python_probes_resolve_selected_resource_aliases_without_copies(self):
+        game = self.root / 'game'
+        game.mkdir()
+        backup = game / 'scene.bin.bak'
+        backup.write_text('original', encoding='utf8')
+        result = self.execute('run', script='work/inspect.py',
+            resourceDirectory=str(game), resourcePaths={'scene.bin': str(backup)},
+            arguments=['resources/scene.bin'], stdin=json.dumps({'input': 'resources/scene.bin'}),
+            content="""import json,sys
+from pathlib import Path
+assert Path(sys.argv[1]) == resource_paths['scene.bin']
+assert Path(json.load(sys.stdin)['input']).read_text(encoding='utf8') == 'original'
+print('original')
+""")
+        self.assertTrue(result['success'], result)
+        self.assertEqual(result['stdout'].strip(), 'original')
+        self.assertFalse((self.root / 'resources/scene.bin').exists())
+        self.assertEqual(backup.read_text(encoding='utf8'), 'original')
+
     def test_text_search_is_case_insensitive_and_lossy_byte_offsets_stay_unknown(self):
         (self.root / 'work/source.py').write_text('print("HELLO")', encoding='utf-8')
         result = self.execute('search_text', path='work', query='hello', workspaceRoot=True)

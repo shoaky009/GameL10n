@@ -687,7 +687,8 @@ def write_report(*, status, **fields):
 
 args = sys.argv[1:]
 sys.argv = args[1:] if args[0] == '-m' else args
-globals_ = dict(write_report=write_report, save_sample=save_sample)
+globals_ = dict(write_report=write_report, save_sample=save_sample,
+                resource_directory=resource_directory, resource_files=resource_files, resource_paths=resource_paths)
 try:
     if args[0] == '-m':
         runpy.run_module(args[1], run_name='__main__', init_globals=globals_)
@@ -701,7 +702,36 @@ finally:
 '''
 
 
+def resource_arguments(request):
+    """Resolve selected resources/ aliases in tool arguments and JSON input."""
+    paths = {('resources/' + relative.replace('\\', '/')).casefold(): str(path)
+             for relative, path in request.get('resourcePaths', {}).items()}
+    if not paths:
+        return request
+
+    def resolve(value):
+        if isinstance(value, str):
+            return paths.get(value.replace('\\', '/').casefold(), value)
+        if isinstance(value, list):
+            return [resolve(item) for item in value]
+        if isinstance(value, dict):
+            return {key: resolve(item) for key, item in value.items()}
+        return value
+
+    request = dict(request)
+    request['arguments'] = resolve(request.get('arguments', []))
+    if isinstance(request.get('stdin'), str):
+        try:
+            data = json.loads(request['stdin'])
+        except (ValueError, RecursionError):
+            pass
+        else:
+            request['stdin'] = json.dumps(resolve(data), ensure_ascii=False)
+    return request
+
+
 def run(request):
+    request = resource_arguments(request)
     workspace = Path(request['workspace']).resolve()
     sample_extensions = request.get('sampleExtensions', [])
     if (not isinstance(sample_extensions, list) or len(sample_extensions) > 64
@@ -742,7 +772,19 @@ def run(request):
             raise ValueError('只能调用已固定的引擎库模块。')
         target = ['-m', module]
     extra = [str(workspace / 'src'), str(workspace), request.get('library', '')]
-    code = 'import sys;sys.path[:0]=' + repr([p for p in extra if p]) + '\n' + PROBE_RUNNER
+    input_roots = [str(Path(request['resourceDirectory']).resolve())] if request.get('resourceDirectory') else []
+    for resource_path in request.get('resourcePaths', {}).values():
+        parent = Path(resource_path).resolve().parent
+        if not any(parent.is_relative_to(root) for root in input_roots):
+            input_roots.append(str(parent))
+    code = (Path(__file__).with_name('readonly_inputs.py').read_text(encoding='utf-8') + '\n'
+            + 'import json,os,sys;from pathlib import Path\n'
+            + 'inputs=json.loads(Path(os.environ["GAMEL10N_RESOURCE_INPUTS"]).read_text(encoding="utf8"))\n'
+            + 'protect_inputs(inputs["roots"])\n'
+            + 'sys.dont_write_bytecode=True;sys.path[:0]=' + repr([p for p in extra if p]) + '\n'
+            + 'resource_directory=Path(inputs["directory"])\n'
+            + 'resource_paths={k:Path(v) for k,v in inputs["paths"].items()}\n'
+            + 'resource_files=list(resource_paths)\n' + PROBE_RUNNER)
     arguments = request.get('arguments', [])
     if not isinstance(arguments, list) or len(arguments) > 128 or not all(isinstance(v, str) for v in arguments) or sum(len(v.encode('utf-16-le')) // 2 for v in arguments) > 65536:
         raise ValueError('参数无效。')
@@ -765,6 +807,11 @@ def run(request):
     sample_directory.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='.sample-files-', dir=sample_directory) as tracking:
         sample_path = Path(tracking) / 'written.json'
+        input_path = Path(tracking) / 'inputs.json'
+        input_path.write_text(json.dumps(dict(roots=input_roots,
+            directory=str(request.get('resourceDirectory') or workspace / 'resources'),
+            paths=request.get('resourcePaths', {}))), encoding='utf8')
+        environment['GAMEL10N_RESOURCE_INPUTS'] = str(input_path)
         environment.update(GAMEL10N_SAMPLE_ROOT=str(workspace), GAMEL10N_SAMPLE_FILES=str(sample_path),
                            GAMEL10N_SAMPLE_EXTENSIONS=json.dumps(sample_extensions))
         result = run_process([sys.executable, '-I', '-X', 'utf8', '-c', code, *target, *arguments], workspace, request, environment)
@@ -893,6 +940,7 @@ def run_process(command, workspace, request, environment=None):
 
 
 def run_tool(request):
+    request = resource_arguments(request)
     workspace = Path(request['workspace']).resolve()
     relative = request['executable']
     if relative == 'dotnet':

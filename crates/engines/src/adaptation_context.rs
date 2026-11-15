@@ -536,12 +536,18 @@ pub(crate) fn inspect_builtin_discovery(
     root: &Path,
     cancellation: &CancellationToken,
 ) -> Result<Value, EngineError> {
-    inspect_builtin_files(root, None, cancellation)
+    inspect_builtin_files(
+        root,
+        None,
+        &crate::adaptation::AdaptationInputs::default(),
+        cancellation,
+    )
 }
 
 pub(crate) fn inspect_builtin_samples(
     root: &Path,
     files: &[String],
+    inputs: &crate::adaptation::AdaptationInputs,
     cancellation: &CancellationToken,
 ) -> Result<Value, EngineError> {
     if files.len() > 128 {
@@ -549,12 +555,13 @@ pub(crate) fn inspect_builtin_samples(
             "单次最多检查 128 个候选文件头。".into(),
         ));
     }
-    inspect_builtin_files(root, Some(files), cancellation)
+    inspect_builtin_files(root, Some(files), inputs, cancellation)
 }
 
 fn inspect_builtin_files(
     root: &Path,
     selected: Option<&[String]>,
+    inputs: &crate::adaptation::AdaptationInputs,
     cancellation: &CancellationToken,
 ) -> Result<Value, EngineError> {
     if cancellation.is_cancelled() {
@@ -583,7 +590,7 @@ fn inspect_builtin_files(
     let mut pending = Vec::new();
     if let Some(selected) = selected {
         for file in selected {
-            if !resolve_relative(root, file)?.is_file() {
+            if !inputs.file(root, file)?.is_file() {
                 return Err(EngineError::Rejected(format!("样本文件不存在：{file}")));
             }
             files.push(file.replace('\\', "/"));
@@ -739,7 +746,7 @@ fn inspect_builtin_files(
             return Err(EngineError::Cancelled);
         }
         let read = || -> Result<(Vec<u8>, Vec<u8>), EngineError> {
-            let mut stream = File::open(resolve_relative(root, path)?)?;
+            let mut stream = File::open(inputs.file(root, path)?)?;
             let length = stream.metadata()?.len();
             let mut head = vec![0; length.min(256) as usize];
             stream.read_exact(&mut head)?;
@@ -1463,8 +1470,13 @@ mod tests {
         fs::write(directory.path().join("story.txt"), b"YSTBpayload").unwrap();
         let report = inspect_builtin_discovery(directory.path(), &token).unwrap();
         assert_eq!(report["candidates"][0]["sampleFiles"], json!(["story.txt"]));
-        let explicit =
-            inspect_builtin_samples(directory.path(), &["ReAdMe.TxT".into()], &token).unwrap();
+        let explicit = inspect_builtin_samples(
+            directory.path(),
+            &["ReAdMe.TxT".into()],
+            &crate::adaptation::AdaptationInputs::default(),
+            &token,
+        )
+        .unwrap();
         assert_eq!(
             explicit["candidates"][0]["sampleFiles"],
             json!(["ReAdMe.TxT"])

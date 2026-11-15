@@ -841,13 +841,22 @@ impl EngineService {
                 let mut params = args.clone();
                 params["operation"] = json!(name);
                 params["root"] = json!(tool_root(request, workspace, args)?);
-                params["workspaceRoot"] = json!(args["root"] == "workspace");
+                params["workspaceRoot"] =
+                    json!(args["root"].as_str().unwrap_or("workspace") == "workspace");
                 let inputs = args["root"] == "game";
                 params["inputFiles"] = if inputs && name == "read_file" {
                     let path = text(args, "path")?;
                     json!({path:request.inputs.file(&request.game_directory, path)?})
                 } else if inputs {
                     json!(request.inputs.files)
+                } else if args["root"].as_str().unwrap_or("workspace") == "workspace" {
+                    json!(
+                        resources::inputs(workspace, state)?
+                            .files
+                            .into_iter()
+                            .map(|(relative, path)| (format!("resources/{relative}"), path))
+                            .collect::<BTreeMap<_, _>>()
+                    )
                 } else {
                     json!({})
                 };
@@ -1284,6 +1293,12 @@ impl EngineService {
                 }
                 params["operation"] = json!("run");
                 params["workspace"] = json!(workspace);
+                let resource_inputs = resources::inputs(workspace, state)?;
+                let _input_handles =
+                    crate::source::lock_inputs(&resource_inputs.files, cancellation)?;
+                params["resourceDirectory"] = json!(request.game_directory);
+                params["resourcePaths"] = json!(resource_inputs.files);
+                params["resourceFiles"] = json!(resource_inputs.files.keys().collect::<Vec<_>>());
                 params["sampleExtensions"] = json!(automatic::sample_extensions());
                 if params.get("questionId").is_none()
                     && let Some(problem) = &state.decision.current_problem
@@ -1353,6 +1368,9 @@ impl EngineService {
                 let mut params = args.clone();
                 params["operation"] = json!("run_tool");
                 params["workspace"] = json!(workspace);
+                let inputs = resources::inputs(workspace, state)?;
+                let _input_handles = crate::source::lock_inputs(&inputs.files, cancellation)?;
+                params["resourcePaths"] = json!(inputs.files);
                 self.helper(&params, cancellation).await
             }
             "inspect_engine_component" => describe_engine_components(args),
@@ -1732,11 +1750,14 @@ impl EngineService {
                 "试提取目录只能是 resources、work 或它们的子目录。".into(),
             ));
         }
-        let source = resolve_relative(workspace, &directory)?;
+
         let files: Vec<_> = strings(args, "files")?
             .into_iter()
             .map(|file| file.replace('\\', "/"))
             .collect();
+        let source_input =
+            resources::source(workspace, state, &directory, Some(&files), cancellation)?;
+        let source = source_input.directory();
         let check_roundtrip = boolean(args, "checkRoundtrip", true)?;
         let check_translation = boolean(args, "checkTranslation", true)?;
         let mut result = json!({"format":format,"status":"rejected","stage":"inputs","parseStatus":"not-run","roundtripStatus":if check_roundtrip{"not-run"}else{"skipped"},"translationStatus":if check_translation{"not-run"}else{"skipped"},"unitCount":0,"samples":[],"warnings":[],"sourceHashes":{},"error":null,"diagnostic":null,"runtimeStatus":"not-tested"});
@@ -1748,10 +1769,10 @@ impl EngineService {
             if files.len()>12 { result["status"]=json!("limit-exceeded"); return Err(EngineError::Rejected("单次试提取最多 12 个完整资源；这不是引擎不受支持的结论。".into())); }
             let selected:BTreeSet<_>=files.iter().map(|file|file.to_lowercase()).collect();
             if selected.len()!=files.len() { return Err(EngineError::Rejected("样本文件列表包含重复路径。".into())); }
-            require_builtin_companions(format,&source,&files)?;
+            require_builtin_companions(format,source,&files)?;
             for file in &files {
                 if cancellation.is_cancelled(){return Err(EngineError::Cancelled);}
-                let path=resolve_relative(&source,file)?;
+                let path=resolve_relative(source,file)?;
                 sample_bytes=sample_bytes.saturating_add(path.metadata()?.len());
                 if sample_bytes>64*1024*1024 { result["status"]=json!("limit-exceeded"); return Err(EngineError::Rejected("所选样本合计超过单次 64 MiB；这不是引擎不受支持的结论。".into())); }
                 source_hashes.insert(file.clone(),hash_file(&path).map_err(file_error)?);
@@ -1760,7 +1781,7 @@ impl EngineService {
             result["status"]=json!("failed");
             result["stage"]=json!("parse");
             result["parseStatus"]=json!("failed");
-            let mut extract=AdapterRequest::new("extract",&source);
+            let mut extract=AdapterRequest::new("extract",source);
             extract.resource_files=Some(files.clone());
             let extraction=automatic::trial_response(self,&extract,format,&mut result,cancellation).await?.extraction
                 .ok_or_else(||EngineError::Protocol("内置解析器未返回提取结果。".into()))?;
@@ -1780,7 +1801,7 @@ impl EngineService {
                 result["stage"]=json!("original-roundtrip");
                 result["roundtripStatus"]=json!("failed");
                 let temporary=tempfile::tempdir()?;
-                let mut build=AdapterRequest::new("build",&source);
+                let mut build=AdapterRequest::new("build",source);
                 build.resource_files=Some(files.clone());
                 build.output_directory=Some(temporary.path().into());
                 build.translations=Some(BTreeMap::new());
@@ -1795,7 +1816,7 @@ impl EngineService {
                 result["roundtripStatus"]=json!("passed");
             }
             if check_translation && !extraction.units.is_empty() {
-                automatic::check_translation(self,&source,format,&files,&extraction.units,&mut result,cancellation).await?;
+                automatic::check_translation(self,source,format,&files,&extraction.units,&mut result,cancellation).await?;
             }
             result["status"]=json!(if extraction.units.is_empty(){"no-text"}else{"passed"});
             result["stage"]=json!("complete");
@@ -1811,7 +1832,7 @@ impl EngineService {
             result["error"] = json!(error.to_string());
         }
         if !source_hashes.is_empty()
-            && hashes(&source, &source_hashes.keys().cloned().collect::<Vec<_>>())
+            && hashes(source, &source_hashes.keys().cloned().collect::<Vec<_>>())
                 .ok()
                 .as_ref()
                 != Some(&source_hashes)
@@ -2378,7 +2399,15 @@ impl EngineService {
         if !archive.starts_with("resources/") && !archive.starts_with("work/") {
             return Err(EngineError::Protocol("组件输入必须是已暂存资源。".into()));
         }
-        let archive_path = resolve_relative(workspace, &archive)?;
+        let archive_path = if let Some(relative) = archive.strip_prefix("resources/") {
+            resources::file(workspace, state, relative)?
+        } else {
+            resolve_relative(workspace, &archive)?
+        };
+        let _input_handles = crate::source::lock_inputs(
+            &BTreeMap::from([(archive.clone(), archive_path.clone())]),
+            cancellation,
+        )?;
         let maximum = if component == "archive.rpa3" {
             2_u64 * 1024 * 1024 * 1024
         } else {
@@ -3143,7 +3172,15 @@ fn tool_file(
     if args["root"] == "game" {
         request.inputs.file(&root, relative)
     } else {
-        resolve_relative(&root, relative)
+        let local = resolve_relative(&root, relative)?;
+        if root == workspace
+            && !local.is_file()
+            && let Some(relative) = relative.strip_prefix("resources/")
+        {
+            request.inputs.file(&request.game_directory, relative)
+        } else {
+            Ok(local)
+        }
     }
 }
 fn write_path(root: &Path, relative: &str) -> Result<PathBuf, EngineError> {

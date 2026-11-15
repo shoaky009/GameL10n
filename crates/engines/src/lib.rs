@@ -12,6 +12,7 @@ pub mod python;
 mod research;
 pub mod review;
 pub mod service;
+mod source;
 mod tool_activity;
 mod verification_diagnostic;
 pub mod vntextpatch;
@@ -27,6 +28,7 @@ pub use service::{
     BuiltinAdapterProbeObservation, DiscoveryResult, EngineProgress, EngineService,
     GeneratedAdapterReuseFailure, ProgressCallback, VerificationResult, VerifiedExtraction,
 };
+pub use source::ReadOnlySource;
 pub use tokio_util::sync::CancellationToken;
 pub use verification_diagnostic::{
     VerificationFieldDifference, VerificationIssue, VerificationIssueCode,

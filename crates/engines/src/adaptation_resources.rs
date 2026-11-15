@@ -1,4 +1,4 @@
-//! Maintenance of the explicit resource copies used by adapter verification.
+//! Resource selections backed by original paths and hashes, with legacy workspace inputs.
 use super::*;
 use gamel10n_translation::files::FileError;
 use std::io;
@@ -269,9 +269,11 @@ pub(super) fn reconcile(
     cancelled(cancellation)?;
     let previous = approved(state)?;
     let root = resource_path(workspace, "resources")?;
+    fs::create_dir_all(&root)?;
     let mut next = previous.clone();
     let mut removed = BTreeMap::new();
     let mut rebound = Vec::new();
+    let referenced = state.extra.contains_key("resourcePaths");
     for relative in previous.keys() {
         cancelled(cancellation)?;
         resource_path(&root, relative)?;
@@ -287,7 +289,7 @@ pub(super) fn reconcile(
                     .inputs
                     .expected_hash(relative)
                     .is_some_and(|hash| !previous[relative].eq_ignore_ascii_case(hash))
-                    || !resource_path(&root, relative)?.is_file()
+                    || (!referenced && !resource_path(&root, relative)?.is_file())
                 {
                     rebound.push(relative.clone());
                 }
@@ -335,13 +337,14 @@ pub(super) fn reconcile(
         );
         invalidate(state);
     }
+    bind_paths(request, state)?;
     Ok(ResourceChanges {
         removed: removed.into_values().collect(),
         rebound,
     })
 }
 
-/// Stages selected whole files; replacement also removes every unselected copy.
+/// Records selected original paths and digests; replacement removes unselected legacy copies.
 pub(super) fn stage(
     request: &AdaptationRequest<'_>,
     workspace: &Path,
@@ -359,6 +362,7 @@ pub(super) fn stage(
     }
     let previous = approved(state)?;
     let root = resource_path(workspace, "resources")?;
+    fs::create_dir_all(&root)?;
     for relative in previous.keys() {
         resource_path(&request.game_directory, relative)?;
         resource_path(&root, relative)?;
@@ -400,45 +404,12 @@ pub(super) fn stage(
                 "已绑定的制作输入发生变化：{relative}；已有文本基线保留。"
             )));
         }
-        let reused = match fs::metadata(&output) {
-            Ok(metadata) if metadata.is_file() => resource_hash(&output, relative)? == digest,
-            Ok(_) => {
-                return Err(EngineError::Protocol(format!(
-                    "暂存资源路径被非文件占用：{relative}"
-                )));
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => false,
-            Err(error) => return Err(resource_error(relative, "检查暂存", error)),
-        };
-        if !reused {
-            let parent = output
-                .parent()
-                .ok_or_else(|| EngineError::Protocol(format!("资源路径没有父目录：{relative}")))?;
-            fs::create_dir_all(parent)
-                .map_err(|error| resource_error(relative, "创建暂存目录", error))?;
-            let temporary = tempfile::NamedTempFile::new_in(parent)
-                .map_err(|error| resource_error(relative, "创建暂存文件", error))?;
-            cancelled(cancellation)?;
-            EngineService::report(
-                progress,
-                "暂存验证资源",
-                format!("正在复制资源：{relative}（{} 字节）", metadata.len()),
-            );
-            fs::copy(&input, temporary.path())
-                .map_err(|error| resource_error(relative, "复制暂存", error))?;
-            make_staged_writable(temporary.path())
-                .map_err(|error| resource_error(relative, "设置暂存副本权限", error))?;
-            if resource_hash(temporary.path(), relative)? != digest {
-                return Err(EngineError::Rejected(format!(
-                    "原始资源复制校验失败：{relative}"
-                )));
-            }
-            cancelled(cancellation)?;
+        // Explicit selection resets a legacy staged input to its original reference.
+        if output.is_file() {
             make_staged_writable(&output)
-                .map_err(|error| resource_error(relative, "准备替换暂存", error))?;
-            temporary
-                .persist(&output)
-                .map_err(|error| resource_error(relative, "提交暂存", error.error))?;
+                .map_err(|error| resource_error(relative, "准备删除暂存", error))?;
+            fs::remove_file(&output)
+                .map_err(|error| resource_error(relative, "删除暂存", error))?;
             changed = true;
         }
         next.retain(|path, _| path_key(path) != path_key(relative));
@@ -459,12 +430,171 @@ pub(super) fn stage(
     cancelled(cancellation)?;
     changed |= next != previous || !removed.is_empty();
     state.extra.insert("resourceHashes".into(), json!(next));
+    bind_paths(request, state)?;
     if changed {
         invalidate(state);
     }
     Ok(
-        json!({"staged":files,"directory":"resources","removed":removed.into_values().collect::<Vec<_>>(),"replace":replace,"changed":changed}),
+        json!({"staged":files,"directory":"resources","inputAccess":"resource_paths[relative]","removed":removed.into_values().collect::<Vec<_>>(),"replace":replace,"changed":changed}),
     )
+}
+
+/// Refresh absolute input bindings from host-owned original resolution.
+fn bind_paths(request: &AdaptationRequest<'_>, state: &mut Session) -> Result<(), EngineError> {
+    let paths = approved(state)?
+        .keys()
+        .map(|relative| {
+            Ok((
+                relative.clone(),
+                request.inputs.file(&request.game_directory, relative)?,
+            ))
+        })
+        .collect::<Result<BTreeMap<_, _>, EngineError>>()?;
+    state
+        .extra
+        .insert("resourceRoot".into(), json!(request.game_directory));
+    state.extra.insert("resourcePaths".into(), json!(paths));
+    state
+        .extra
+        .insert("resourceExclusions".into(), json!(request.inputs.excluded));
+    Ok(())
+}
+
+pub(super) fn file(
+    workspace: &Path,
+    state: &Session,
+    relative: &str,
+) -> Result<PathBuf, EngineError> {
+    let staged = resource_path(&workspace.join("resources"), relative)?;
+    if staged.is_file() {
+        return Ok(staged);
+    }
+    let paths: BTreeMap<String, PathBuf> = serde_json::from_value(
+        state
+            .extra
+            .get("resourcePaths")
+            .cloned()
+            .unwrap_or_else(|| json!({})),
+    )?;
+    Ok(paths
+        .iter()
+        .find(|(path, _)| path_key(path) == path_key(relative))
+        .map(|(_, path)| path.clone())
+        .unwrap_or(staged))
+}
+
+pub(super) fn inputs(workspace: &Path, state: &Session) -> Result<AdaptationInputs, EngineError> {
+    let mut files = BTreeMap::new();
+    let root = resource_path(workspace, "resources")?;
+    fs::create_dir_all(&root)?;
+    let paths: BTreeMap<String, PathBuf> = serde_json::from_value(
+        state
+            .extra
+            .get("resourcePaths")
+            .cloned()
+            .unwrap_or_else(|| json!({})),
+    )?;
+    for relative in approved(state)?.keys() {
+        let staged = resource_path(&root, relative)?;
+        let path = if staged.is_file() {
+            staged
+        } else {
+            paths.get(relative).cloned().unwrap_or(staged)
+        };
+        files.insert(relative.clone(), path);
+    }
+    // Explicitly produced or legacy workspace samples remain available to discovery.
+    for item in Inventory::scan(&workspace.join("resources"))?.files {
+        files.insert(
+            item.path.clone(),
+            resource_path(&workspace.join("resources"), &item.path)?,
+        );
+    }
+    Ok(AdaptationInputs {
+        files,
+        ..Default::default()
+    })
+}
+
+pub(super) fn source(
+    workspace: &Path,
+    state: &Session,
+    directory: &str,
+    selected: Option<&[String]>,
+    token: &CancellationToken,
+) -> Result<crate::ReadOnlySource, EngineError> {
+    if directory != "resources" && !directory.starts_with("resources/") {
+        let root = resolve_relative(workspace, directory)?;
+        let files = match selected {
+            Some(files) => files.to_vec(),
+            None => Inventory::scan(&root)?
+                .files
+                .into_iter()
+                .map(|file| file.path)
+                .collect(),
+        };
+        return crate::ReadOnlySource::open(
+            &root,
+            &files
+                .iter()
+                .map(|relative| Ok((relative.clone(), resolve_relative(&root, relative)?)))
+                .collect::<Result<_, EngineError>>()?,
+            token,
+        );
+    }
+    let prefix = directory.strip_prefix("resources/").unwrap_or("");
+    let inputs = inputs(workspace, state)?;
+    let mut paths = BTreeMap::new();
+    if let Some(selected) = selected {
+        for relative in selected {
+            let logical = if prefix.is_empty() {
+                relative.clone()
+            } else {
+                format!("{prefix}/{relative}")
+            };
+            paths.insert(
+                relative.clone(),
+                inputs.file(&workspace.join("resources"), &logical)?,
+            );
+        }
+    } else {
+        for (logical, actual) in inputs.files {
+            if prefix.is_empty() {
+                paths.insert(logical, actual);
+            } else if let Some(relative) = logical.strip_prefix(&format!("{prefix}/")) {
+                paths.insert(relative.to_string(), actual);
+            }
+        }
+    }
+    let root = state
+        .extra
+        .get("resourceRoot")
+        .and_then(Value::as_str)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| workspace.join("resources"));
+    let root = if prefix.is_empty() {
+        root
+    } else {
+        resolve_relative(&root, prefix)?
+    };
+    let excluded: BTreeSet<String> = serde_json::from_value(
+        state
+            .extra
+            .get("resourceExclusions")
+            .cloned()
+            .unwrap_or_else(|| json!([])),
+    )?;
+    let excluded = excluded
+        .into_iter()
+        .filter_map(|path| {
+            if prefix.is_empty() {
+                Some(path)
+            } else {
+                path.strip_prefix(&format!("{prefix}/")).map(str::to_owned)
+            }
+        })
+        .collect();
+    crate::ReadOnlySource::open_excluding(&root, &paths, &excluded, token)
 }
 
 #[cfg(test)]
@@ -575,7 +705,7 @@ mod tests {
     }
 
     #[test]
-    fn replacing_staged_selection_shrinks_records_and_copies() {
+    fn replacing_selected_references_removes_old_records_without_copying() {
         let root = tempfile::tempdir().expect("fixture");
         let (request, workspace, mut state) = fixture(root.path());
         for name in ["keep.bin", "extra.bin"] {
@@ -612,10 +742,11 @@ mod tests {
         );
         assert!(!workspace.join("resources/extra.bin").exists());
         assert_eq!(
-            fs::read(workspace.join("resources/keep.bin")).expect("retained"),
+            fs::read(file(&workspace, &state, "keep.bin").unwrap()).expect("selected original"),
             b"keep.bin"
         );
         assert!(request.game_directory.join("extra.bin").is_file());
+        assert!(!workspace.join("resources/keep.bin").exists());
     }
 
     #[test]
@@ -646,12 +777,9 @@ mod tests {
         )
         .expect("stage read-only source");
         let staged = workspace.join("resources/script.bin");
-        assert!(
-            !fs::metadata(&staged)
-                .expect("copy permissions")
-                .permissions()
-                .readonly()
-        );
+        assert!(!staged.exists());
+        assert_eq!(file(&workspace, &state, "script.bin").unwrap(), original);
+        fs::write(&staged, b"legacy copy").expect("legacy copy");
         fs::set_permissions(&staged, read_only.clone()).expect("old read-only copy");
         request
             .inputs
@@ -664,8 +792,8 @@ mod tests {
         let changes =
             reconcile(&request, &workspace, &mut state, &token, None).expect("rebind copy");
         assert_eq!(changes.rebound, ["script.bin"]);
-        assert_eq!(fs::read(&staged).expect("rebound content"), b"revised");
-        fs::set_permissions(&staged, read_only).expect("read-only copy");
+        assert!(!staged.exists());
+        assert_eq!(file(&workspace, &state, "script.bin").unwrap(), revised);
         stage(&request, &workspace, &mut state, &[], true, &token, None).expect("remove old copy");
         assert!(!staged.exists());
         for path in [&original, &revised] {
@@ -722,7 +850,8 @@ mod tests {
             )
             .expect("clean residual copy")
             .removed,
-            ["new.bin"]
+            Vec::<String>::new()
         );
+        assert!(!workspace.join("resources/new.bin").exists());
     }
 }

@@ -50,7 +50,7 @@ impl CleanupCategory {
                 "适配会话、源码工作副本、解包资源和构建验收文件；清理后无法续接本次分析或重新总结。"
             }
             Self::SourceResources => {
-                "制作补丁使用的原始资源副本；清理后重新生成补丁需要重新识别，已提取文本和译文保留。"
+                "旧项目保存的原始资源副本；已提取文本和译文保留。再次构建需要可校验的原文件或原版备份。"
             }
             Self::HistoricalPatches => {
                 "清理旧补丁、试译补丁及其构建记录，保留当前补丁和对应的译文快照、验证记录。"
@@ -180,11 +180,15 @@ impl Application {
             }
         }
         let mut project = self.store.get(id).await?;
-        let source_resources_cleared = categories.contains(&CleanupCategory::SourceResources)
-            || project
-                .extra
-                .get("materialsCleanup")
-                .is_some_and(|value| value["sourceResourcesCleared"] == true);
+        let source_resources_cleared = project
+            .extra
+            .get("analysis")
+            .is_none_or(|analysis| analysis["sourceMode"] != "reference")
+            && (categories.contains(&CleanupCategory::SourceResources)
+                || project
+                    .extra
+                    .get("materialsCleanup")
+                    .is_some_and(|value| value["sourceResourcesCleared"] == true));
         project.extra.insert(
             "materialsCleanup".into(),
             json!({

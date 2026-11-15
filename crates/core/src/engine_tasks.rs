@@ -7,8 +7,8 @@ use crate::{
     patching::{PAYLOAD_DIRECTORY, PatchInstaller, build_manifest, remove_unchanged_files},
 };
 use gamel10n_engines::{
-    AdapterHandle, EngineProgress, EngineService, PackageManifest, VerificationResult,
-    VerifiedExtraction,
+    AdapterHandle, EngineProgress, EngineService, PackageManifest, ReadOnlySource,
+    VerificationResult, VerifiedExtraction,
     adaptation::{AdaptationInputs, AdaptationLimits, AdaptationRequest, AdaptationResult},
     discovery::Inventory,
     protocol::{AdapterRequest, BuildMode, ProbeResult},
@@ -741,8 +741,7 @@ impl Application {
             .await
             .map(|state| state.operation)
             .unwrap_or_else(|| "extract".into());
-        self.progress(id, &operation, "正在保存原始资源快照。")
-            .await;
+        self.progress(id, &operation, "正在核对原始资源。").await;
         let target = directory.clone();
         let game = project.game_directory.clone();
         let resources = files.clone();
@@ -750,13 +749,13 @@ impl Application {
         let inputs = inputs.cloned();
         let (source, hashes) = self
             .run_file_task(id, &operation, move |progress| {
-                snapshot(
+                prepare_source(
                     &target,
                     &game,
                     &resources,
                     inputs.as_ref(),
                     &token,
-                    progress,
+                    Some(progress),
                 )
             })
             .await?;
@@ -772,8 +771,7 @@ impl Application {
                 .await;
             extraction
         } else {
-            let source_guard = SourceReadOnlyGuard::new(&directory, &source, &hashes)?;
-            let mut request = AdapterRequest::new("extract", &source);
+            let mut request = AdapterRequest::new("extract", source.directory());
             request.resource_files = Some(files.clone());
             request.set_probe_context(&probe);
             self.progress(id, &operation, "正在提取并校验文本身份。")
@@ -810,7 +808,8 @@ impl Application {
                     message: "适配器未返回原文回填结果。".into(),
                 })?;
             if built.mode == BuildMode::Overlay && !built.files.is_empty() {
-                let mut readback = built.extraction_request(&source, roundtrip.path(), &files);
+                let mut readback =
+                    built.extraction_request(source.directory(), roundtrip.path(), &files);
                 readback.set_probe_context(&probe);
                 let actual = service
                     .execute(&adapter, &readback, cancellation)
@@ -866,13 +865,12 @@ impl Application {
                     }
                     .into());
                 }
-                if hash_file(&resolve_relative(&source, file)?)? != *expected {
+                if hash_file(&resolve_relative(source.directory(), file)?)? != *expected {
                     return Err(CoreError::InvalidData(format!(
-                        "适配器修改了原文快照：{file}"
+                        "适配器修改了原始资源：{file}"
                     )));
                 }
             }
-            source_guard.restore()?;
             extraction
         };
         for warning in &probe.warnings {
@@ -884,10 +882,10 @@ impl Application {
         let coverage_pending =
             coverage == ExtractionCoverage::CheckIfSmall && count < SMALL_EXTRACTION_THRESHOLD;
         let stored = StoredAnalysis {
-            schema_version: 1,
+            schema_version: 2,
             coverage_pending,
             format: adapter.id().into(),
-            source_directory: source,
+            source_directory: project.game_directory.clone(),
             resource_files: files,
             source_hashes: hashes,
             extraction,
@@ -1300,10 +1298,11 @@ impl Application {
     async fn build_source(
         &self,
         id: &str,
+        cancellation: &CancellationToken,
     ) -> Result<
         (
             AdapterHandle,
-            PathBuf,
+            ReadOnlySource,
             Vec<String>,
             BTreeMap<String, String>,
             Option<ProbeResult>,
@@ -1315,7 +1314,35 @@ impl Application {
             .await?
             .ok_or_else(|| CoreError::InvalidData("请先提取游戏文本。".into()))?;
         if let Ok(stored) = cached.native() {
-            crate::cleanup::require_source_materials(&stored.source_directory)?;
+            let project = self.store.get(id).await?;
+            let root = self.project_directory(id)?;
+            let baseline = std::sync::Arc::clone(&cached);
+            let token = cancellation.clone();
+            let operation = self
+                .task_state(id)
+                .await
+                .map(|task| task.operation)
+                .unwrap_or_else(|| "build".into());
+            let (source, _) = self
+                .run_file_task(id, &operation, move |progress| {
+                    let stored = baseline.native()?;
+                    let inputs = adaptation_inputs(
+                        &root,
+                        &project.game_directory,
+                        Some(stored),
+                        &token,
+                        Some(progress.clone()),
+                    )?;
+                    prepare_source(
+                        &root,
+                        &project.game_directory,
+                        &stored.resource_files,
+                        Some(&inputs),
+                        &token,
+                        Some(progress),
+                    )
+                })
+                .await?;
             return Ok((
                 stored
                     .adapter
@@ -1323,7 +1350,7 @@ impl Application {
                     .unwrap_or_else(|| AdapterHandle::Native {
                         format: stored.format.clone(),
                     }),
-                stored.source_directory.clone(),
+                source,
                 stored.resource_files.clone(),
                 stored.source_hashes.clone(),
                 stored.probe.clone(),
@@ -1396,7 +1423,14 @@ impl Application {
         }
         Ok((
             adapter,
-            directory,
+            ReadOnlySource::open(
+                &directory,
+                &hashes
+                    .keys()
+                    .map(|relative| Ok((relative.clone(), resolve_relative(&directory, relative)?)))
+                    .collect::<Result<_, CoreError>>()?,
+                cancellation,
+            )?,
             probe.required_files.clone(),
             hashes,
             Some(probe),
@@ -1442,7 +1476,9 @@ impl Application {
                 "所选范围没有可用于补丁的有效译文。".into(),
             ));
         }
-        let (adapter, source, files, hashes, probe) = self.build_source(id).await?;
+        let (adapter, source_input, files, hashes, probe) =
+            self.build_source(id, cancellation).await?;
+        let source = source_input.directory();
         let adapter_version = match &adapter {
             AdapterHandle::Python { id, version, .. } => Some(AdapterVersion {
                 adapter_id: id.clone(),
@@ -1457,8 +1493,8 @@ impl Application {
             if cancellation.is_cancelled() {
                 return Err(gamel10n_engines::EngineError::Cancelled.into());
             }
-            if hash_file(&resolve_relative(&source, path)?)? != *expected {
-                return Err(CoreError::InvalidData(format!("原文快照已变化：{path}")));
+            if hash_file(&resolve_relative(source, path)?)? != *expected {
+                return Err(CoreError::InvalidData(format!("原始资源已变化：{path}")));
             }
         }
         let root = self.project_directory(id)?;
@@ -1513,8 +1549,7 @@ impl Application {
             .tempdir_in(root.join("patches"))?;
         let payload = patch.path().join(PAYLOAD_DIRECTORY);
         fs::create_dir(&payload)?;
-        let source_guard = SourceReadOnlyGuard::new(&root, &source, &hashes)?;
-        let mut request = AdapterRequest::new("build", &source);
+        let mut request = AdapterRequest::new("build", source);
         request.resource_files = Some(files);
         request.translations = Some(translations.clone());
         request.output_directory = Some(payload);
@@ -1553,13 +1588,12 @@ impl Application {
             )));
         }
         for (path, expected) in &hashes {
-            if hash_file(&resolve_relative(&source, path)?)? != *expected {
+            if hash_file(&resolve_relative(source, path)?)? != *expected {
                 return Err(CoreError::InvalidData(format!(
-                    "构建修改了原文快照：{path}"
+                    "构建修改了原始资源：{path}"
                 )));
             }
         }
-        source_guard.restore()?;
         let mut manifest = build_manifest(patch.path(), &hashes)?;
         manifest.launch = built.launch_target()?;
         if built.mode == BuildMode::Overlay {
@@ -1741,29 +1775,31 @@ impl Application {
         id: &str,
         package: &Path,
     ) -> Result<VerificationResult, CoreError> {
-        let (_, source, files, hashes, probe) = self.build_source(id).await?;
-        let manifest = PackageManifest::load(package)?;
-        if probe
-            .as_ref()
-            .is_some_and(|probe| probe.adapter_id != manifest.id)
-        {
-            return Err(CoreError::InvalidData(
-                "所选项目的原文快照属于另一个引擎，不能用于验证此发布包。".into(),
-            ));
-        }
-        let adapter = manifest.handle(package)?;
-        let baseline = self
-            .cached_analysis(id)
-            .await?
-            .ok_or_else(|| CoreError::InvalidData("请先提取项目文本。".into()))?;
         let cancellation = self
             .begin(id, "verify", "正在验证所选适配器发布包。")
             .await?;
         let result = async {
+            let (_, source_input, files, hashes, probe) =
+                self.build_source(id, &cancellation).await?;
+            let source = source_input.directory();
+            let manifest = PackageManifest::load(package)?;
+            if probe
+                .as_ref()
+                .is_some_and(|probe| probe.adapter_id != manifest.id)
+            {
+                return Err(CoreError::InvalidData(
+                    "所选项目的原始资源属于另一个引擎，不能用于验证此发布包。".into(),
+                ));
+            }
+            let adapter = manifest.handle(package)?;
+            let baseline = self
+                .cached_analysis(id)
+                .await?
+                .ok_or_else(|| CoreError::InvalidData("请先提取项目文本。".into()))?;
             for (relative, expected) in &hashes {
-                if hash_file(&crate::patching::safe_path(&source, relative)?)? != *expected {
+                if hash_file(&crate::patching::safe_path(source, relative)?)? != *expected {
                     return Err(CoreError::InvalidData(format!(
-                        "原文快照已变化：{relative}"
+                        "原始资源已变化：{relative}"
                     )));
                 }
             }
@@ -1777,7 +1813,7 @@ impl Application {
                 service
                     .verify_probed(
                         &adapter,
-                        &source,
+                        source,
                         probe,
                         output.path(),
                         &baseline.extraction().units,
@@ -1789,7 +1825,7 @@ impl Application {
                 service
                     .verify(
                         &adapter,
-                        &source,
+                        source,
                         &files,
                         output.path(),
                         &baseline.extraction().units,
@@ -1815,7 +1851,7 @@ impl Application {
 }
 
 /// Binds baseline text identities to their recorded bytes without changing any source files.
-fn adaptation_inputs(
+pub(crate) fn adaptation_inputs(
     project: &Path,
     game: &Path,
     baseline: Option<&StoredAnalysis>,
@@ -1841,7 +1877,10 @@ fn adaptation_inputs(
         let sources = std::path::absolute(project.join("sources"))?;
         let source = std::path::absolute(&baseline.source_directory)?;
         crate::patching::check_path(&source)?;
-        if source == sources || !source.starts_with(&sources) {
+        let reference = baseline.schema_version == 2;
+        if (reference && source != std::path::absolute(game)?)
+            || (!reference && (source == sources || !source.starts_with(&sources)))
+        {
             return Err(CoreError::InvalidData(
                 "已有提取结果的资源快照不属于当前项目。".into(),
             ));
@@ -1877,7 +1916,11 @@ fn adaptation_inputs(
             if cancellation.is_cancelled() {
                 return Err(gamel10n_engines::EngineError::Cancelled.into());
             }
-            let path = crate::patching::safe_path(&source, &relative)?;
+            let path = if reference {
+                installer.resolve_original_file(game, &relative)?
+            } else {
+                crate::patching::safe_path(&source, &relative)?
+            };
             if let Some(progress) = &progress {
                 progress.file("正在校验已有提取资源", &path, &relative);
             }
@@ -1926,157 +1969,67 @@ fn adaptation_inputs(
     Ok(inputs)
 }
 
-/// The guard applies to committed project snapshots only, never installed game resources.
-struct SourceReadOnlyGuard {
-    originals: Vec<(PathBuf, fs::Permissions)>,
-}
-
-impl SourceReadOnlyGuard {
-    fn new(
-        project: &Path,
-        source: &Path,
-        hashes: &BTreeMap<String, String>,
-    ) -> Result<Self, CoreError> {
-        let source = std::path::absolute(source)?;
-        let sources = std::path::absolute(project.join("sources"))?;
-        crate::patching::check_path(&source)?;
-        if !source.starts_with(&sources) {
-            return Err(CoreError::InvalidData(
-                "适配器输入必须是当前项目保存的原文快照。".into(),
-            ));
-        }
-        let mut guard = Self {
-            originals: Vec::new(),
-        };
-        for relative in hashes.keys() {
-            let path = crate::patching::safe_path(&source, relative)?;
-            let permissions = fs::metadata(&path)?.permissions();
-            guard.originals.push((path.clone(), permissions.clone()));
-            let mut read_only = permissions;
-            read_only.set_readonly(true);
-            fs::set_permissions(&path, read_only)?;
-        }
-        Ok(guard)
-    }
-
-    fn restore(mut self) -> Result<(), CoreError> {
-        for (path, permissions) in &self.originals {
-            fs::set_permissions(path, permissions.clone())?;
-        }
-        self.originals.clear();
-        Ok(())
-    }
-}
-
-impl Drop for SourceReadOnlyGuard {
-    fn drop(&mut self) {
-        for (path, permissions) in &self.originals {
-            let _ = fs::set_permissions(path, permissions.clone());
-        }
-    }
-}
-
-fn snapshot(
+/// Resolves original inputs and holds them for one operation without retaining copies.
+pub(crate) fn prepare_source(
     project: &Path,
     game: &Path,
     files: &[String],
     inputs: Option<&AdaptationInputs>,
     cancellation: &CancellationToken,
-    progress: FileProgress,
-) -> Result<(PathBuf, BTreeMap<String, String>), CoreError> {
-    let installer = PatchInstaller::new(project).with_progress(progress.clone());
+    progress: Option<FileProgress>,
+) -> Result<(ReadOnlySource, BTreeMap<String, String>), CoreError> {
     let bound_hashes: BTreeMap<_, _> = inputs
         .into_iter()
         .flat_map(|inputs| &inputs.hashes)
         .map(|(relative, hash)| (relative.replace('\\', "/").to_lowercase(), hash))
         .collect();
-    let mut hashes = BTreeMap::new();
-    let mut originals = Vec::new();
-    for file in files {
+    let installer = PatchInstaller::new(project);
+    let mut originals = BTreeMap::new();
+    for relative in files {
         if cancellation.is_cancelled() {
             return Err(gamel10n_engines::EngineError::Cancelled.into());
         }
         let source = match inputs {
-            Some(inputs) => inputs.file(game, file)?,
-            None => installer.resolve_original_file(game, file)?,
+            Some(inputs) => inputs.file(game, relative)?,
+            None => installer.resolve_original_file(game, relative)?,
         };
-        let hash = hash_file(&source)?;
-        if let Some(expected) = bound_hashes.get(&file.replace('\\', "/").to_lowercase())
-            && !hash.eq_ignore_ascii_case(expected)
-        {
-            return Err(CoreError::InvalidData(format!(
-                "适配期间已绑定的资源发生变化：{file}"
-            )));
-        }
-        hashes.insert(file.clone(), hash);
-        originals.push((file, source));
+        originals.insert(relative.clone(), source);
     }
-    let fingerprint = hash_text(
-        &serde_json::to_string(&hashes).map_err(|e| CoreError::InvalidData(e.to_string()))?,
-    );
-    let target = project.join("sources").join(fingerprint);
-    crate::patching::check_path(&target)?;
-    if target.is_dir() {
-        let mut missing = Vec::new();
-        for (file, hash) in &hashes {
-            let path = crate::patching::safe_path(&target, file)?;
-            progress.file("正在校验已有原文快照", &path, file);
-            match fs::metadata(&path) {
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound && inputs.is_some() => {
-                    missing.push((file, path));
-                    continue;
-                }
-                Err(error) => return Err(error.into()),
-                Ok(_) => {}
-            }
-            if hash_file(&path)? != *hash {
-                return Err(CoreError::InvalidData("已保存的原文快照发生变化。".into()));
-            }
-        }
-        for (file, path) in missing {
-            if cancellation.is_cancelled() {
-                return Err(gamel10n_engines::EngineError::Cancelled.into());
-            }
-            let source = originals
-                .iter()
-                .find(|(relative, _)| *relative == file)
-                .map(|(_, source)| source)
-                .ok_or_else(|| CoreError::InvalidData("缺少快照资源的输入绑定。".into()))?;
-            let parent = path
-                .parent()
-                .ok_or_else(|| CoreError::InvalidData("快照资源没有父目录。".into()))?;
-            fs::create_dir_all(parent)?;
-            crate::patching::check_path(&path)?;
-            let temporary = tempfile::NamedTempFile::new_in(parent)?;
-            progress.file("正在补齐已校验的缺失快照", source, file);
-            fs::copy(source, temporary.path())?;
-            if hash_file(temporary.path())? != hashes[file] {
-                return Err(CoreError::InvalidData("读取期间资源发生变化。".into()));
-            }
-            temporary
-                .persist_noclobber(path)
-                .map_err(|error| error.error)?;
-        }
-        return Ok((target, hashes));
-    }
-    fs::create_dir_all(project.join("sources"))?;
-    let pending = tempfile::tempdir_in(project.join("sources"))?;
-    for (file, source) in originals {
+    let excluded = match inputs {
+        Some(inputs) => inputs.excluded.clone(),
+        None => installer
+            .read_journal(game)?
+            .entries
+            .into_iter()
+            .flat_map(|entry| {
+                entry
+                    .backup_relative_path
+                    .into_iter()
+                    .chain((!entry.original_existed).then_some(entry.relative_path))
+            })
+            .collect(),
+    };
+    let source = ReadOnlySource::open_excluding(game, &originals, &excluded, cancellation)?;
+    let mut hashes = BTreeMap::new();
+    for relative in files {
         if cancellation.is_cancelled() {
             return Err(gamel10n_engines::EngineError::Cancelled.into());
         }
-        let path = resolve_relative(pending.path(), file)?;
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
+        let path = resolve_relative(source.directory(), relative)?;
+        if let Some(progress) = &progress {
+            progress.file("正在校验原始资源", &path, relative);
         }
-        progress.file("正在复制原文快照", &source, file);
-        fs::copy(source, &path)?;
-        if hash_file(&path)? != hashes[file] {
-            return Err(CoreError::InvalidData("读取期间资源发生变化。".into()));
+        let digest = hash_file(&path)?;
+        if let Some(expected) = bound_hashes.get(&relative.replace('\\', "/").to_lowercase())
+            && !digest.eq_ignore_ascii_case(expected)
+        {
+            return Err(CoreError::InvalidData(format!(
+                "已绑定的原始资源发生变化：{relative}"
+            )));
         }
+        hashes.insert(relative.clone(), digest);
     }
-    fs::rename(pending.path(), &target)?;
-    Ok((target, hashes))
+    Ok((source, hashes))
 }
 
 #[cfg(test)]
@@ -2232,76 +2185,34 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn bound_snapshot_restores_only_missing_files_with_identical_hashes() {
+    #[test]
+    fn referenced_sources_reject_changed_baselines_without_creating_snapshots() {
         let root = tempfile::tempdir().unwrap();
         let game = root.path().join("game");
+        let project = root.path().join("project");
         fs::create_dir(&game).unwrap();
         fs::write(game.join("data.bin"), b"original").unwrap();
-        let app = Application::open(root.path().join("data"), &crate::ToolPaths::new("missing"))
-            .await
-            .unwrap();
-        let project = app.add_project(&game).await.unwrap();
-        let directory = app.project_directory(&project.id).unwrap();
-        let hashes = BTreeMap::from([("data.bin".to_string(), hash_text("original"))]);
-        let source = directory
-            .join("sources")
-            .join(hash_text(&serde_json::to_string(&hashes).unwrap()));
-        fs::create_dir_all(&source).unwrap();
-        let inputs = AdaptationInputs {
-            files: BTreeMap::from([("data.bin".into(), game.join("data.bin"))]),
-            hashes: hashes.clone(),
-            ..Default::default()
-        };
-        for changed in [false, true] {
-            if changed {
-                fs::write(source.join("data.bin"), b"changed snapshot").unwrap();
-            }
-            let target = directory.clone();
-            let game = game.clone();
-            let inputs = inputs.clone();
-            let result = app
-                .run_file_task(&project.id, "adapt", move |progress| {
-                    snapshot(
-                        &target,
-                        &game,
-                        &["data.bin".into()],
-                        Some(&inputs),
-                        &CancellationToken::new(),
-                        progress,
-                    )
-                })
-                .await;
-            if changed {
-                assert!(result.is_err());
-                assert_eq!(
-                    fs::read(source.join("data.bin")).unwrap(),
-                    b"changed snapshot"
-                );
-            } else {
-                let (actual, actual_hashes) = result.unwrap();
-                assert_eq!(actual, source);
-                assert_eq!(actual_hashes, hashes);
-                assert_eq!(fs::read(source.join("data.bin")).unwrap(), b"original");
-            }
-        }
-        assert_eq!(fs::read(game.join("data.bin")).unwrap(), b"original");
-        fs::remove_file(source.join("data.bin")).unwrap();
-        fs::write(game.join("data.bin"), b"changed input").unwrap();
-        let result = app
-            .run_file_task(&project.id, "adapt", move |progress| {
-                snapshot(
-                    &directory,
-                    &game,
-                    &["data.bin".into()],
-                    Some(&inputs),
-                    &CancellationToken::new(),
-                    progress,
-                )
-            })
-            .await;
-        assert!(result.is_err());
-        assert!(!source.join("data.bin").exists());
+        let mut baseline = baseline_analysis(&project);
+        baseline.schema_version = 2;
+        baseline.source_directory = game.clone();
+        fs::remove_dir_all(project.join("sources")).unwrap();
+        let token = CancellationToken::new();
+        let inputs = adaptation_inputs(&project, &game, Some(&baseline), &token, None).unwrap();
+        let (source, hashes) = prepare_source(
+            &project,
+            &game,
+            &baseline.resource_files,
+            Some(&inputs),
+            &token,
+            None,
+        )
+        .unwrap();
+        assert_eq!(hashes, baseline.source_hashes);
+        assert!(!project.join("sources").exists());
+        drop(source);
+        fs::write(game.join("data.bin"), b"changed").unwrap();
+        assert!(adaptation_inputs(&project, &game, Some(&baseline), &token, None).is_err());
+        assert!(!project.join("sources").exists());
     }
 
     fn register_json_adapter(app: &Application, key: &str, script: &str) -> PathBuf {
@@ -3652,37 +3563,21 @@ mod tests {
 
         fs::write(game.join("text.json"), br#"["ONE","two","three","four"]"#).unwrap();
         let baseline = app.cached_analysis(&project.id).await.unwrap().unwrap();
-        let inputs = adaptation_inputs(
+        let changed = adaptation_inputs(
             &app.project_directory(&project.id).unwrap(),
             &game,
             Some(baseline.native().unwrap()),
             &token,
             None,
         )
-        .unwrap();
-        app.extract_adapter(
-            &project.id,
-            adapter.clone(),
-            probe.clone(),
-            &token,
-            ExtractionCoverage::Confirmed,
-            false,
-            None,
-            Some(proof.clone()),
-            Some(&inputs),
-        )
-        .await
-        .unwrap();
+        .unwrap_err();
+        assert!(changed.to_string().contains("哈希不一致"));
         assert_eq!(fs::read_to_string(&calls).unwrap(), before);
-        assert_eq!(
-            app.cached_analysis(&project.id)
-                .await
+        assert!(
+            !app.project_directory(&project.id)
                 .unwrap()
-                .unwrap()
-                .extraction()
-                .units[0]
-                .source_text,
-            "one"
+                .join("sources")
+                .exists()
         );
         app.extract_adapter(
             &project.id,
@@ -3854,43 +3749,6 @@ mod tests {
                 .await
                 .unwrap(),
             AdaptationObjective::ExpandCoverage
-        );
-    }
-
-    #[test]
-    fn snapshot_guard_rejects_writes_and_restores_permissions_when_dropped() {
-        let root = tempfile::tempdir().unwrap();
-        let source = root.path().join("sources/fixture");
-        fs::create_dir_all(&source).unwrap();
-        let path = source.join("data.bin");
-        fs::write(&path, b"original").unwrap();
-        let hashes = BTreeMap::from([("data.bin".into(), hash_text("original"))]);
-        {
-            let _guard = SourceReadOnlyGuard::new(root.path(), &source, &hashes).unwrap();
-            assert!(fs::metadata(&path).unwrap().permissions().readonly());
-            #[cfg(windows)]
-            assert!(fs::write(&path, b"modified").is_err());
-        }
-        assert!(!fs::metadata(&path).unwrap().permissions().readonly());
-        assert_eq!(fs::read(path).unwrap(), b"original");
-    }
-
-    #[test]
-    fn snapshot_guard_cleans_up_partial_setup_and_refuses_actual_game_directory() {
-        let root = tempfile::tempdir().unwrap();
-        let source = root.path().join("sources/fixture");
-        fs::create_dir_all(&source).unwrap();
-        let first = source.join("a.bin");
-        fs::write(&first, b"original").unwrap();
-        let hashes = BTreeMap::from([
-            ("a.bin".into(), hash_text("original")),
-            ("missing.bin".into(), hash_text("missing")),
-        ]);
-        assert!(SourceReadOnlyGuard::new(root.path(), &source, &hashes).is_err());
-        assert!(!fs::metadata(&first).unwrap().permissions().readonly());
-        assert!(
-            SourceReadOnlyGuard::new(root.path(), &root.path().join("game"), &BTreeMap::new())
-                .is_err()
         );
     }
 }

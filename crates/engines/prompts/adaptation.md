@@ -126,7 +126,8 @@ Tool execution:
   Keep readable source lines. Inspect the reported traceback line and bounds before retrying;
   don't guess layout changes repeatedly after the same exception. Preserve partial findings when a later probe fails.
 - run_tool executes prepared native EXE tools, not PowerShell, a general shell or compilers. Tools run as the current user; respect scoped paths.
-- src/ holds adapter code/dependencies, resources/ holds chosen original copies, work/ holds probes/results, build/ is host output.
+- Python probes read `resource_paths[relative]` for `resource_files`; write modified samples under work/.
+- src/ holds adapter code/dependencies, resources/ names selected read-only original inputs (path/hash references, no default copies), work/ holds probes/results, build/ is host output.
   Use request.adapterDirectory for packaged tools and pathlib.Path(__file__).parent for Python modules; don't depend on temporary workspace paths.
 - For repair or expanded coverage, the host binds existing text identities to their recorded production inputs, and uses matching
   originals from the installation journal for other replaced files. root=game reads this bound input view; root=installed reads
@@ -146,7 +147,7 @@ Tool execution:
   Explicit test_adapter releaseFiles replaces the list (useful for legacy workspaces); never select every tool by default.
   Roles: source (src/*.py), runtime (tools/* scripts/DLLs), asset (tools/* patch fonts/launchers/data), license (tools/* notices).
   Paths are package-relative: tools/* maps to workspace src/tools/*. Include indirect imports and native dependencies.
-  Game executables/resources are per-game inputs under resources/, never reusable engine assets. Generate modified
+  Game executables/resources are per-game read-only inputs selected with stage_resources, never reusable engine assets. Generate modified
   EXEs/resources in patch output from checked current-game originals. Do not embed a whole game EXE in src/tools/.
   Only selected files are syntax-checked/tested/published. Editing unselected files does not require retesting. Do not clean
   existing workspace or old packages; their development/source/translation state remains available.

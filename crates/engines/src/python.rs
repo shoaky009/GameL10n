@@ -6,7 +6,7 @@ use crate::{
 };
 
 // Embedded CPython ignores PYTHONPATH. Bootstrap restores the established package import roots.
-const BOOTSTRAP: &str = "import runpy,sys,json,io,os;from pathlib import Path;p=Path(sys.argv[1]).resolve();r=sys.stdin.read();d=json.loads(r);t=d.get('toolPaths') or {};l=t.get('engineLibrary');sys.path[:0]=[str(p.parent),str(p.parent.parent)]+([l,str(Path(l).parent/'native')] if l else []);os.environ['GAMEL10N_ADAPTER_HOST']=json.dumps(t.get('hostCommand'));os.environ['GAMEL10N_VNTEXTPATCH_COMMAND']=json.dumps(t.get('vnTextPatchCommand'));sys.dont_write_bytecode=True;sys.stdin=io.TextIOWrapper(io.BytesIO(r.encode('utf-8')),encoding='utf-8');sys.argv=[str(p)];runpy.run_path(str(p),run_name='__main__')";
+const BOOTSTRAP: &str = "import runpy,sys,json,io,os;from pathlib import Path;p=Path(sys.argv[1]).resolve();r=sys.stdin.read();d=json.loads(r);t=d.get('toolPaths') or {};l=t.get('engineLibrary');sys.path[:0]=[str(p.parent),str(p.parent.parent)]+([l,str(Path(l).parent/'native')] if l else []);os.environ['GAMEL10N_ADAPTER_HOST']=json.dumps(t.get('hostCommand'));os.environ['GAMEL10N_VNTEXTPATCH_COMMAND']=json.dumps(t.get('vnTextPatchCommand'));sys.dont_write_bytecode=True;protect_inputs(d.get('sourceDirectory'));sys.stdin=io.TextIOWrapper(io.BytesIO(r.encode('utf-8')),encoding='utf-8');sys.argv=[str(p)];runpy.run_path(str(p),run_name='__main__')";
 
 #[derive(Clone, Debug)]
 pub struct PythonAdapter {
@@ -28,7 +28,10 @@ impl PythonAdapter {
                     OsString::from("-X"),
                     OsString::from("utf8"),
                     OsString::from("-c"),
-                    OsString::from(BOOTSTRAP),
+                    OsString::from(format!(
+                        "{}\n{BOOTSTRAP}",
+                        include_str!("../python/readonly_inputs.py")
+                    )),
                     entry.into_os_string(),
                 ]),
         })

@@ -324,6 +324,19 @@ async fn selected_edit_patch_install_restore_and_restart_preserve_originals() {
             .join("adaptation")
             .exists()
     );
+    let project_root = app.project_directory(&project.id).unwrap();
+    assert!(!project_root.join("sources").exists());
+    app.cleanup_materials(
+        &project.id,
+        &[gamel10n_core::cleanup::CleanupCategory::SourceResources],
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        app.open_project(&project.id).await.unwrap().extra["materialsCleanup"]["sourceResourcesCleared"],
+        false
+    );
     let page = app
         .workbench_page(&project.id, &WorkbenchFilter::default(), 0, 100)
         .await
@@ -403,6 +416,27 @@ async fn selected_edit_patch_install_restore_and_restart_preserve_originals() {
         hash_file(&script).unwrap(),
         hash_file(&payload.join("script.rpy")).unwrap()
     );
+    app.save_translation_edit(&project.id, &selected, "你好，再会！".into(), true)
+        .await
+        .unwrap();
+    let rebuilt = app
+        .generate_patch(&project.id, Some(vec![selected.clone()]), false)
+        .await
+        .unwrap();
+    assert!(
+        fs::read_to_string(
+            rebuilt
+                .join(gamel10n_core::patching::PAYLOAD_DIRECTORY)
+                .join("script.rpy")
+        )
+        .unwrap()
+        .contains("你好，再会！")
+    );
+    assert!(!project_root.join("sources").exists());
+    assert_eq!(
+        hash_file(&game.join("script.rpy.bak")).unwrap(),
+        original_hash
+    );
     app.restore_game(&project.id).await.unwrap();
     assert_eq!(hash_file(&script).unwrap(), original_hash);
     assert_eq!(
@@ -425,7 +459,7 @@ async fn selected_edit_patch_install_restore_and_restart_preserve_originals() {
         .workbench_row(&project.id, &selected)
         .await
         .unwrap();
-    assert_eq!(row.text.as_deref(), Some("你好！"));
+    assert_eq!(row.text.as_deref(), Some("你好，再会！"));
     assert!(row.reviewed);
     let logs = reopened.log_tail(&project.id).await.unwrap();
     assert!(logs.contains("补丁已安装"));

@@ -21,8 +21,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, broadcast};
 
 use crate::{
-    CancellationToken, CoreError, GameProject, ProjectSummary, ToolPaths, logs::FileProgress,
-    projects::ProjectStore,
+    CancellationToken, CoreError, GameProject, ProjectSummary, ToolPaths, projects::ProjectStore,
 };
 
 /// UI-neutral task state. Status records belong to the project, not to a window.
@@ -73,6 +72,7 @@ pub struct StoredAnalysis {
     #[serde(default)]
     pub coverage_pending: bool,
     pub format: String,
+    /// Schema 1 points to a retained snapshot; schema 2 references the game root.
     pub source_directory: PathBuf,
     pub resource_files: Vec<String>,
     pub source_hashes: BTreeMap<String, String>,
@@ -403,7 +403,7 @@ impl Application {
                 let path = directory.join("extraction/native.json");
                 if path.is_file() {
                     let native: StoredAnalysis = read_json(&path)?;
-                    if native.schema_version != 1 {
+                    if !matches!(native.schema_version, 1 | 2) {
                         return Err(CoreError::InvalidData(
                             "不支持的提取缓存版本，请重新提取。".into(),
                         ));
@@ -503,7 +503,7 @@ impl Application {
                 "该目录没有匹配的已解包脚本；封包或其他格式需要对应的引擎适配。".into(),
             )
         })?;
-        self.progress(&project.id, "extract", "正在保存原始脚本快照。")
+        self.progress(&project.id, "extract", "正在核对原始脚本。")
             .await;
         let project_directory = self.store.directory(&project.id)?;
         let files = probe.required_files.clone();
@@ -511,17 +511,23 @@ impl Application {
             return Err(CoreError::InvalidData("解析器未声明必需资源。".into()));
         }
         let source = project.game_directory.clone();
-        let copied_files = files.clone();
-        let snapshot_root = project_directory.join("sources");
+        let selected = files.clone();
         let token = cancellation.clone();
-        let (snapshot, hashes) = self
+        let (input, hashes) = self
             .run_file_task(&project.id, "extract", move |progress| {
-                prepare_snapshot(&source, &snapshot_root, &copied_files, &token, &progress)
+                crate::engine_tasks::prepare_source(
+                    &project_directory,
+                    &source,
+                    &selected,
+                    None,
+                    &token,
+                    Some(progress),
+                )
             })
             .await?;
         self.progress(&project.id, "extract", "正在提取脚本文本。")
             .await;
-        let mut request = AdapterRequest::new("extract", &snapshot);
+        let mut request = AdapterRequest::new("extract", input.directory());
         request.format = Some(format.into());
         request.resource_files = Some(files.clone());
         let response = self.parser.execute(&request, cancellation).await?;
@@ -544,10 +550,10 @@ impl Application {
         }
         let count = extraction.units.len();
         let stored = StoredAnalysis {
-            schema_version: 1,
+            schema_version: 2,
             coverage_pending: false,
             format: format.into(),
-            source_directory: snapshot,
+            source_directory: project.game_directory.clone(),
             resource_files: files,
             source_hashes: hashes,
             extraction,
@@ -589,27 +595,36 @@ impl Application {
             .await?
             .ok_or_else(|| CoreError::InvalidData("请先提取脚本文本。".into()))?;
         let analysis = cached.native()?;
-        crate::cleanup::require_source_materials(&analysis.source_directory)?;
-        let snapshot = Arc::clone(&cached);
-        tokio::task::spawn_blocking(move || -> Result<(), CoreError> {
-            let snapshot = snapshot.native()?;
-            for (relative, expected) in &snapshot.source_hashes {
-                if hash_file(&resolve_relative(&snapshot.source_directory, relative)?)? != *expected
-                {
-                    return Err(CoreError::InvalidData(format!(
-                        "原始脚本快照已改变：{relative}"
-                    )));
-                }
-            }
-            Ok(())
-        })
-        .await??;
+        let project = self.store.get(id).await?;
+        let root = self.store.directory(id)?;
+        let baseline = Arc::clone(&cached);
+        let token = cancellation.clone();
+        let (source, _) = self
+            .run_file_task(id, "build", move |progress| {
+                let baseline = baseline.native()?;
+                let inputs = crate::engine_tasks::adaptation_inputs(
+                    &root,
+                    &project.game_directory,
+                    Some(baseline),
+                    &token,
+                    Some(progress.clone()),
+                )?;
+                crate::engine_tasks::prepare_source(
+                    &root,
+                    &project.game_directory,
+                    &baseline.resource_files,
+                    Some(&inputs),
+                    &token,
+                    Some(progress),
+                )
+            })
+            .await?;
         let patch_root = self.store.directory(id)?.join("patches");
         fs::create_dir_all(&patch_root)?;
         let patch = tempfile::Builder::new()
             .prefix("native-")
             .tempdir_in(&patch_root)?;
-        let mut request = AdapterRequest::new("build", &analysis.source_directory);
+        let mut request = AdapterRequest::new("build", source.directory());
         request.format = Some(analysis.format.clone());
         request.resource_files = Some(analysis.resource_files.clone());
         request.output_directory = Some(patch.path().to_path_buf());
@@ -650,6 +665,7 @@ impl Application {
                 "completedAt": chrono::Utc::now().to_rfc3339(),
                 "warnings": stored.extraction.warnings,
                 "coveragePending": stored.coverage_pending,
+                "sourceMode": if stored.schema_version == 2 { "reference" } else { "snapshot" },
             }),
         );
         if let Some(probe) = probe {
@@ -944,66 +960,6 @@ fn task_summary(state: &TaskState) -> serde_json::Value {
         "succeeded": state.succeeded,
         "running": false,
     })
-}
-
-fn prepare_snapshot(
-    source: &Path,
-    root: &Path,
-    files: &[String],
-    cancellation: &CancellationToken,
-    progress: &FileProgress,
-) -> Result<(PathBuf, BTreeMap<String, String>), CoreError> {
-    let mut hashes = BTreeMap::new();
-    for file in files {
-        if cancellation.is_cancelled() {
-            return Err(gamel10n_engines::EngineError::Cancelled.into());
-        }
-        let path = resolve_relative(source, file)?;
-        progress.file("正在校验原始脚本", &path, file);
-        hashes.insert(file.clone(), hash_file(&path)?);
-    }
-    let fingerprint = hash_text(
-        &hashes
-            .iter()
-            .map(|(path, hash)| format!("{path}\n{hash}\n"))
-            .collect::<String>(),
-    );
-    let snapshot = root.join(&fingerprint[..24]);
-    if snapshot.is_dir() {
-        for (relative, expected) in &hashes {
-            let path = resolve_relative(&snapshot, relative)?;
-            progress.file("正在校验已有脚本快照", &path, relative);
-            if hash_file(&path)? != *expected {
-                return Err(CoreError::InvalidData(
-                    "原文快照不完整或已经修改，请保留诊断并重新提取。".into(),
-                ));
-            }
-        }
-        return Ok((snapshot, hashes));
-    }
-    fs::create_dir_all(root)?;
-    let pending = tempfile::Builder::new()
-        .prefix(".snapshot-")
-        .tempdir_in(root)?;
-    for (relative, expected) in &hashes {
-        if cancellation.is_cancelled() {
-            return Err(gamel10n_engines::EngineError::Cancelled.into());
-        }
-        let destination = resolve_relative(pending.path(), relative)?;
-        if let Some(parent) = destination.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let path = resolve_relative(source, relative)?;
-        progress.file("正在复制脚本快照", &path, relative);
-        fs::copy(path, &destination)?;
-        if hash_file(&destination)? != *expected {
-            return Err(CoreError::InvalidData(format!(
-                "读取期间原文件发生变化：{relative}"
-            )));
-        }
-    }
-    fs::rename(pending.path(), &snapshot)?;
-    Ok((snapshot, hashes))
 }
 
 pub(crate) fn resolve_relative(root: &Path, relative: &str) -> Result<PathBuf, CoreError> {

@@ -299,6 +299,11 @@ impl EngineService {
         if fs::read_to_string(&helper).ok().as_deref() != Some(SOURCE) {
             fs::write(&helper, SOURCE)?;
         }
+        let guard = self.shared_directory.join("readonly_inputs.py");
+        const GUARD: &str = include_str!("../python/readonly_inputs.py");
+        if fs::read_to_string(&guard).ok().as_deref() != Some(GUARD) {
+            fs::write(&guard, GUARD)?;
+        }
         let result: Value = ToolProcess::new(self.tools.python())
             .with_arguments([
                 OsString::from("-I"),
@@ -1759,7 +1764,7 @@ impl EngineService {
     ) -> Result<VerificationResult, EngineError> {
         let preparation_started = Instant::now();
         let mut stage_timings_ms = BTreeMap::new();
-        Self::report(progress, "准备验收资源", "正在准备并校验资源副本。");
+        Self::report(progress, "准备验收资源", "正在校验原始资源。");
         fs::create_dir_all(directory)?;
         for resource in resources
             .iter()
@@ -1782,23 +1787,19 @@ impl EngineService {
             Some(expected) => selected_hashes(expected, resources)?,
             None => hashes(source, resources)?,
         };
-        let source_directory = directory.join("sources");
-        fs::create_dir_all(&source_directory)?;
-        for relative in resources {
-            if cancellation.is_cancelled() {
-                return Err(EngineError::Cancelled);
-            }
-            let input = resolve_relative(source, relative)?;
-            let output = resolve_relative(&source_directory, relative)?;
-            if let Some(parent) = output.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            fs::copy(input, output)?;
-        }
-        let before = hashes(&source_directory, resources)?;
+        let source_input = crate::ReadOnlySource::open(
+            source,
+            &resources
+                .iter()
+                .map(|relative| Ok((relative.clone(), resolve_relative(source, relative)?)))
+                .collect::<Result<_, EngineError>>()?,
+            cancellation,
+        )?;
+        let source_directory = source_input.directory();
+        let before = hashes(source_directory, resources)?;
         if before != original_hashes {
             return Err(EngineError::Rejected(
-                "资源在创建验收副本时发生变化，请重新暂存。".into(),
+                "验收输入发生变化，请重新选择资源。".into(),
             ));
         }
         let mut result = VerificationResult {
@@ -1821,7 +1822,7 @@ impl EngineService {
                 "验收文本提取",
                 "正在检查文本身份与已有译文可复用性。",
             );
-            let mut request = AdapterRequest::new("extract", &source_directory);
+            let mut request = AdapterRequest::new("extract", source_directory);
             request.resource_files = Some(resources.to_vec());
             if let Some(probe) = probe {
                 request.set_probe_context(probe);
@@ -2006,7 +2007,7 @@ impl EngineService {
                     ));
                 }
                 fs::create_dir_all(&output)?;
-                let mut build = AdapterRequest::new("build", &source_directory);
+                let mut build = AdapterRequest::new("build", source_directory);
                 build.resource_files = Some(resources.to_vec());
                 build.output_directory = Some(output.clone());
                 build.translations = Some(translations.clone());
@@ -2054,7 +2055,7 @@ impl EngineService {
                     result.original_roundtrip_passed = true;
                     continue;
                 }
-                let mut extract = built.extraction_request(&source_directory, &output, resources);
+                let mut extract = built.extraction_request(source_directory, &output, resources);
                 if let Some(probe) = probe {
                     extract.set_probe_context(probe);
                 }
@@ -2165,7 +2166,7 @@ impl EngineService {
                         &path,
                         &ValidationContext {
                             schema_version: 1,
-                            source_directory: &source_directory,
+                            source_directory,
                             output_directory: &output,
                             resource_files: resources,
                             output_files: &built.files,
@@ -2206,7 +2207,7 @@ impl EngineService {
                 if !matches!(
                     adapter,
                     AdapterHandle::Python { .. } | AdapterHandle::BuiltinKirikiriSmil
-                ) && hashes(&source_directory, resources)? != before
+                ) && hashes(source_directory, resources)? != before
                 {
                     return Err(EngineError::Rejected("适配器修改了只读资源副本。".into()));
                 }
@@ -2239,15 +2240,8 @@ impl EngineService {
                 result.diagnostics.push(format!("[{phase}] {error}"));
             }
         }
-        Self::report(
-            progress,
-            "复核验收资源",
-            "正在复核原始资源与验收副本的完整性。",
-        );
-        for (root, expected, description) in [
-            (source_directory.as_path(), &before, "验收副本"),
-            (source, &result.resource_hashes, "原始资源"),
-        ] {
+        Self::report(progress, "复核验收资源", "正在复核原始资源的完整性。");
+        for (root, expected, description) in [(source_directory, &before, "原始资源")] {
             match hashes(root, resources) {
                 Ok(actual) if &actual == expected => {}
                 Ok(_) => {
@@ -2434,7 +2428,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn verification_checks_copied_bytes_and_source_changes_with_known_hashes() {
+    async fn verification_checks_original_hashes_without_retaining_source_copies() {
         let Some(service) = service() else {
             return;
         };
@@ -2476,19 +2470,13 @@ mod tests {
             )
             .await
             .expect_err("the copied bytes must match the inspected hashes");
-        assert!(
-            error.to_string().contains("创建验收副本时发生变化"),
-            "{error}"
-        );
+        assert!(error.to_string().contains("验收输入发生变化"), "{error}");
 
         fs::write(source.join("text.json"), original).expect("restore fixture");
-        let mutate_after_copy = |event: EngineProgress| {
+        let inspect_input = |event: EngineProgress| {
             if event.stage == "验收文本提取" {
-                fs::write(
-                    source.join("text.json"),
-                    b"[\"ONE\",\"two\",\"three\",\"four\"]",
-                )
-                .expect("mutation after copying");
+                #[cfg(windows)]
+                assert!(fs::write(source.join("text.json"), b"mutation").is_err());
             }
         };
         let verification = root.path().join("changed");
@@ -2503,31 +2491,19 @@ mod tests {
                 Some(&expected),
                 None,
                 &cancellation,
-                Some(&mutate_after_copy),
+                Some(&inspect_input),
             )
             .await
             .expect("verification diagnostics");
-        assert!(!result.passed);
-        assert!(!result.cacheable);
-        assert!(
-            result.original_roundtrip_passed,
-            "the independent copy stays unchanged"
-        );
-        assert_eq!(
-            fs::read(verification.join("sources/text.json")).unwrap(),
-            original
-        );
+        assert!(result.passed, "{:?}", result.diagnostics);
+        assert!(result.original_roundtrip_passed);
+        assert!(!verification.join("sources").exists());
+        assert_eq!(fs::read(source.join("text.json")).unwrap(), original);
         assert_eq!(result.resource_hashes.len(), 1);
-        assert!(
-            result
-                .diagnostics
-                .iter()
-                .any(|item| item.contains("原始资源发生变化"))
-        );
     }
 
     #[tokio::test]
-    async fn verification_preserves_adapter_errors_and_checks_both_resource_roots() {
+    async fn verification_rejects_adapter_writes_without_changing_originals() {
         let Some(service) = service() else {
             return;
         };
@@ -2546,11 +2522,6 @@ mod tests {
             id: "engine.fixture".into(),
             version: "1".into(),
         };
-        let mutate_source = |event: EngineProgress| {
-            if event.stage == "验收文本提取" {
-                fs::write(source.join("text.json"), b"[\"ONE\"]").expect("mutation");
-            }
-        };
         let result = service
             .verify(
                 &adapter,
@@ -2559,26 +2530,21 @@ mod tests {
                 &root.path().join("verify"),
                 &[],
                 &CancellationToken::new(),
-                Some(&mutate_source),
+                None,
             )
             .await
             .expect("preserved failure diagnostics");
         assert!(!result.passed);
-        assert!(!result.cacheable);
-        for expected in [
-            "fixture extraction failure",
-            "验收副本完整性复核失败",
-            "原始资源发生变化",
-        ] {
-            assert!(
-                result
-                    .diagnostics
-                    .iter()
-                    .any(|item| item.contains(expected)),
-                "{:?}",
-                result.diagnostics
-            );
-        }
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|message| message.contains("read-only")),
+            "{:?}",
+            result.diagnostics
+        );
+        assert_eq!(fs::read(source.join("text.json")).unwrap(), b"[\"one\"]");
+        assert!(!root.path().join("verification/sources").exists());
     }
 
     #[tokio::test]
@@ -3202,7 +3168,8 @@ Path(r['responseFile']).write_text(json.dumps(dict(protocolVersion=1,success=Fal
             .execute(&adapter, &request, &CancellationToken::new())
             .await
             .expect_err("source mutation is fatal even when extraction is rejected");
-        assert!(matches!(error, EngineError::Rejected(message) if message.contains("只读源资源")));
+        assert!(error.to_string().contains("read-only"), "{error}");
+        assert_eq!(fs::read(source.join("scripts.dat")).unwrap(), b"original");
     }
 
     #[tokio::test]

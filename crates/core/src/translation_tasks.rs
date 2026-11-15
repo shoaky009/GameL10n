@@ -54,7 +54,7 @@ mod tests {
                 .unwrap()
                 .join("extraction/native.json"),
             &crate::StoredAnalysis {
-                schema_version: 1,
+                schema_version: 2,
                 coverage_pending: false,
                 format: "fixture".into(),
                 source_directory: game.clone(),
@@ -175,7 +175,12 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap_err();
-        assert!(first.to_string().contains("原文快照已变化"), "{first}");
+        assert!(
+            first
+                .to_string()
+                .contains("适配输入与已有提取资源的哈希不一致"),
+            "{first}"
+        );
         let mut states = Vec::new();
         while let Ok(event) = events.try_recv() {
             if let crate::AppEvent::TaskChanged(state) = event {
@@ -196,7 +201,12 @@ mod tests {
             .await
             .unwrap()
             .unwrap_err();
-        assert!(resumed.to_string().contains("原文快照已变化"), "{resumed}");
+        assert!(
+            resumed
+                .to_string()
+                .contains("适配输入与已有提取资源的哈希不一致"),
+            "{resumed}"
+        );
         let state = app.task_state(&id).await.unwrap();
         assert_eq!(
             (state.operation.as_str(), state.succeeded),

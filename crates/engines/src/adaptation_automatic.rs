@@ -2,10 +2,7 @@
 use super::*;
 use crate::discovery::{glob_match, is_link};
 use sha2::{Digest, Sha256};
-use std::{
-    io::{Read, Write},
-    time::Duration,
-};
+use std::{io::Read, time::Duration};
 
 const TRIAL_BYTES: u64 = 64 * 1024 * 1024;
 const TEMPLATE_BYTES: u64 = 256 * 1024 * 1024;
@@ -179,70 +176,28 @@ fn sample_hashes(
 
 fn stage(
     game: &Path,
-    workspace: &Path,
+    _workspace: &Path,
     state: &mut Session,
     lengths: &BTreeMap<String, u64>,
     expected: &BTreeMap<String, String>,
     token: &CancellationToken,
 ) -> Result<(), EngineError> {
-    fs::create_dir_all(workspace.join("work"))?;
-    let temporary = tempfile::Builder::new()
-        .prefix(".auto-stage-")
-        .tempdir_in(workspace.join("work"))?;
-    for (relative, length) in lengths {
-        cancelled(token)?;
-        let destination = resolve_relative(&workspace.join("resources"), relative)?;
-        if destination.is_file()
-            && checked_hash(&destination, *length, token)
-                .is_ok_and(|hash| hash == expected[relative])
-        {
-            continue;
-        }
-        let source = resolve_relative(game, relative)?;
-        let copy = resolve_relative(temporary.path(), relative)?;
-        if let Some(parent) = copy.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let mut input = fs::File::open(source)?;
-        let mut output = fs::File::create(&copy)?;
-        let mut buffer = [0_u8; 128 * 1024];
-        let mut total = 0_u64;
-        loop {
-            cancelled(token)?;
-            let count = input.read(&mut buffer)?;
-            if count == 0 {
-                break;
-            }
-            total += count as u64;
-            if total > *length {
-                return Err(reject(format!("自动试用复制超出样本预算：{relative}")));
-            }
-            output.write_all(&buffer[..count])?;
-        }
-        drop(output);
-        if checked_hash(&copy, *length, token)? != expected[relative] {
-            return Err(reject("自动试用复制的样本与原始资源不一致。"));
-        }
-    }
     if sample_hashes(game, lengths, token)? != *expected {
-        return Err(reject("自动试用暂存期间原始资源发生变化。"));
+        return Err(reject("自动试用期间原始资源发生变化。"));
     }
     for (relative, hash) in expected {
         cancelled(token)?;
-        let destination = resolve_relative(&workspace.join("resources"), relative)?;
-        let copy = resolve_relative(temporary.path(), relative)?;
-        if copy.is_file() {
-            if let Some(parent) = destination.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            fs::rename(copy, destination)?;
-        }
-        let hashes = state
+        let path = resolve_relative(game, relative)?;
+        state
             .extra
             .entry("resourceHashes".into())
-            .or_insert_with(|| json!({}));
-        hashes[relative] = json!(hash);
+            .or_insert_with(|| json!({}))[relative] = json!(hash);
+        state
+            .extra
+            .entry("resourcePaths".into())
+            .or_insert_with(|| json!({}))[relative] = json!(path);
     }
+    state.extra.insert("resourceRoot".into(), json!(game));
     Ok(())
 }
 
@@ -615,7 +570,13 @@ async fn try_component_sample(
 ) -> Result<Value, EngineError> {
     let source =
         components::sample_source(format)?.ok_or_else(|| reject("该组件未提供小样检查入口。"))?;
-    let input = resolve_relative(workspace, file)?;
+    let input = if let Some(relative) = file.strip_prefix("resources/") {
+        resources::file(workspace, state, relative)?
+    } else {
+        resolve_relative(workspace, file)?
+    };
+    let _input_handles =
+        crate::source::lock_inputs(&BTreeMap::from([(file.to_string(), input.clone())]), token)?;
     let size = input.metadata()?.len();
     if size > TRIAL_BYTES {
         return Err(reject("小样超过 64 MiB 预算。"));
@@ -709,7 +670,15 @@ pub(super) async fn component_trials(
     }
     let total = files.iter().try_fold(0_u64, |sum, file| {
         Ok::<_, EngineError>(
-            sum.saturating_add(resolve_relative(workspace, file)?.metadata()?.len()),
+            sum.saturating_add(
+                if let Some(relative) = file.strip_prefix("resources/") {
+                    resources::file(workspace, state, relative)?
+                } else {
+                    resolve_relative(workspace, file)?
+                }
+                .metadata()?
+                .len(),
+            ),
         )
     })?;
     if total > TRIAL_BYTES {
@@ -773,13 +742,14 @@ async fn try_cached_sample(
     files: &[String],
     token: &CancellationToken,
 ) -> Result<Value, EngineError> {
-    let root = resolve_relative(workspace, directory)?;
+    let source = resources::source(workspace, state, directory, Some(files), token)?;
+    let root = source.directory();
     let lengths: BTreeMap<_, _> = files
         .iter()
         .map(|file| {
             Ok((
                 file.clone(),
-                resolve_relative(&root, file)?.metadata()?.len(),
+                resolve_relative(root, file)?.metadata()?.len(),
             ))
         })
         .collect::<Result<_, EngineError>>()?;
@@ -795,7 +765,7 @@ async fn try_cached_sample(
     let started = Instant::now();
     let before = state.sample_checks.clone();
     let outcome = async {
-    let hashes = sample_hashes(&root, &lengths, token)?;
+    let hashes = sample_hashes(root, &lengths, token)?;
     let parser = parser_fingerprint(service, token)?;
     let fingerprint = hash_text(&json!({"trialRevision":3,"format":format,"directory":directory,"parser":parser,"files":hashes}).to_string());
     if let Some(trial) = state
@@ -819,7 +789,7 @@ async fn try_cached_sample(
             token,
         )
         .await?;
-    if sample_hashes(&root, &lengths, token)? != hashes
+    if sample_hashes(root, &lengths, token)? != hashes
         || result["sourceHashes"] != json!(hashes)
         || parser_fingerprint(service, token)? != parser
     {
@@ -893,7 +863,16 @@ pub(super) async fn inspect_samples(
     let token = &budget.token;
     let mut result = json!({"status":"incomplete","trials":[],"runtimeStatus":"not-tested"});
     let outcome = async {
-        let report = crate::adaptation_context::inspect_builtin_samples(workspace, files, token)?;
+        let bindings = AdaptationInputs {
+            files: resources::inputs(workspace, state)?
+                .files
+                .into_iter()
+                .map(|(relative, path)| (format!("resources/{relative}"), path))
+                .collect(),
+            ..Default::default()
+        };
+        let report =
+            crate::adaptation_context::inspect_builtin_samples(workspace, files, &bindings, token)?;
         result["candidates"] = report["candidates"].clone();
         result["components"] = report["components"].clone();
         let catalog = crate::adaptation_context::builtin_catalog();
@@ -922,7 +901,8 @@ pub(super) async fn inspect_samples(
             if !matches!(directory, "work" | "resources") {
                 continue;
             }
-            let root = resolve_relative(workspace, directory)?;
+            let source = resources::source(workspace, state, directory, None, token)?;
+            let root = source.directory();
             let mut selected = BTreeSet::new();
             for file in candidate["sampleFiles"]
                 .as_array()
@@ -942,7 +922,7 @@ pub(super) async fn inspect_samples(
                         })
                     })
                 {
-                    selected.extend(sample_group(definition, &root, file)?);
+                    selected.extend(sample_group(definition, root, file)?);
                 }
             }
             if selected.is_empty() {
@@ -950,7 +930,7 @@ pub(super) async fn inspect_samples(
             }
             let lengths = selected
                 .iter()
-                .map(|file| Ok(resolve_relative(&root, file)?.metadata()?.len()))
+                .map(|file| Ok(resolve_relative(root, file)?.metadata()?.len()))
                 .collect::<Result<Vec<_>, EngineError>>()?;
             let bytes = lengths
                 .iter()
@@ -999,7 +979,7 @@ pub(super) async fn inspect_samples(
                 {
                     break;
                 }
-                let size = resolve_relative(workspace, file)?.metadata()?.len();
+                let size = bindings.file(workspace, file)?.metadata()?.len();
                 if selected_bytes.saturating_add(size) > TRIAL_BYTES {
                     continue;
                 }
@@ -1163,7 +1143,7 @@ pub(super) async fn run_trials(
                 selected_bytes+=bytes.unwrap_or(0);lengths.extend(extra);scripts+=1;
             }
             if scripts==0{if skipped.len()<6{skipped.push(format!("{format}：没有可直接试用的裸脚本样本；封包、编译脚本和私有过滤器需要另行确认。"));}continue;}
-            attempted+=1;EngineService::report(progress,"自动试用内置解析器",format!("正在用 {} 个工作副本检查 {format} 的提取与原文回填。",lengths.len()));
+            attempted+=1;EngineService::report(progress,"自动试用内置解析器",format!("正在用 {} 个原始资源检查 {format} 的提取与原文回填。",lengths.len()));
             let candidate_budget=Budget::new(token,Duration::from_secs(20));let token=&candidate_budget.token;
             let hashes=sample_hashes(&request.game_directory,&lengths,token)?;
             let conflict=lengths.iter().find(|(file,length)|{
@@ -1791,6 +1771,76 @@ mod tests {
         assert_eq!(state.resource_patterns, ["**/*.xp3"]);
         assert_eq!(state.verified_package, Some(verified));
         assert_eq!(state.api_requests(), requests_before);
+    }
+
+    #[tokio::test]
+    async fn analysis_reads_original_backup_paths_without_materializing_resources() {
+        let root = tempfile::tempdir().unwrap();
+        let (service, mut request, workspace, mut state) =
+            fixture(root.path(), "KirikiriKs", "scene.bin");
+        if !service.tools.python().is_file() {
+            return;
+        }
+        let backup = request.game_directory.join("scene.bin.bak");
+        fs::write(&backup, b"original").unwrap();
+        fs::write(request.game_directory.join("scene.bin"), b"installed patch").unwrap();
+        request
+            .inputs
+            .files
+            .insert("scene.bin".into(), backup.clone());
+        request
+            .inputs
+            .hashes
+            .insert("scene.bin".into(), hash_file(&backup).unwrap());
+        let token = CancellationToken::new();
+        resources::stage(
+            &request,
+            &workspace,
+            &mut state,
+            &["scene.bin".into()],
+            false,
+            &token,
+            None,
+        )
+        .unwrap();
+        let result = service
+            .adaptation_tool(
+                &request,
+                &workspace,
+                &mut state,
+                "run_engine_python",
+                &json!({
+            "script":"work/inspect.py", "content":r#"from pathlib import Path
+assert resource_paths['scene.bin'].name == 'scene.bin.bak'
+assert resource_paths['scene.bin'].read_bytes() == b'original'
+for path in [resource_paths['scene.bin'], resource_directory / 'new.bin']:
+    try:
+        path.write_bytes(b'changed')
+    except PermissionError:
+        pass
+    else:
+        raise AssertionError('input write succeeded')
+Path('work/result.json').write_text('{}', encoding='utf8')
+"#}),
+                &token,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["success"], true, "{result}");
+        assert!(
+            fs::read_dir(workspace.join("resources"))
+                .unwrap()
+                .next()
+                .is_none()
+        );
+        assert!(!request.game_directory.join("new.bin").exists());
+        assert_eq!(fs::read(&backup).unwrap(), b"original");
+        assert_eq!(
+            fs::read(request.game_directory.join("scene.bin")).unwrap(),
+            b"installed patch"
+        );
+        fs::write(&backup, b"unlocked after analysis").unwrap();
     }
 
     #[tokio::test]
