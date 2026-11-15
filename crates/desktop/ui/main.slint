@@ -18,7 +18,7 @@ export component MainWindow inherits Window {
         VerticalLayout { width: 220px; spacing: 8px;
             HorizontalLayout { Heading { text: "游戏项目"; font-size: 18px; } Rectangle { horizontal-stretch: 1; } }
             Button { text: "添加游戏"; enabled: App.ready && !App.adding-game; clicked => { App.action("browse", ""); } }
-            HorizontalLayout { Button { text: "多选"; checkable: true; checked <=> App.multi-projects; } Button { text: "移除"; enabled: App.project-id != "" || App.selected-projects > 0; clicked => { App.action("remove-dialog", ""); } } }
+            HorizontalLayout { Button { text: App.multi-projects ? "取消" : "多选"; clicked => { App.action("project-selection", App.multi-projects ? "cancel" : "start"); } } Button { text: "移除"; enabled: App.project-id != "" || App.selected-projects > 0; clicked => { App.action("remove-dialog", ""); } } }
             LineEdit { text <=> App.project-query; placeholder-text: "搜索名称或路径"; edited => { App.action("projects", ""); } }
             ListView { vertical-stretch: 1; content-y <=> App.project-scroll-y;
                 for project in App.projects: Rectangle { height: App.project-row-height; clip: true; background: App.page == 0 && project.id == App.project-id ? Theme.tint : project-hit.has-hover ? Theme.hover : transparent; border-width: project-key.has-focus ? 1px : 0px; border-color: Theme.accent; border-radius: 4px;
@@ -37,7 +37,6 @@ export component MainWindow inherits Window {
                 }
             }
             Divider {}
-            Caption { text: "全局"; }
             NavigationButton { text: "模型配置"; selected: App.page == 1; clicked => { App.action("navigate", "apis"); } }
             NavigationButton { text: "全局引擎库"; selected: App.page == 2; clicked => { App.action("navigate", "catalog"); } }
             NavigationButton { text: "消耗指标"; selected: App.page == 5; clicked => { App.action("navigate", "metrics"); } }
@@ -97,7 +96,6 @@ export component MainWindow inherits Window {
             if App.page == 0: VerticalLayout { spacing: 8px; vertical-stretch: 0;
                 HorizontalLayout { spacing: 8px;
                     Button { text: root.logs-expanded ? "收起日志" : "展开日志"; clicked => { root.logs-expanded = !root.logs-expanded; } }
-                    Caption { text: App.busy ? "任务运行中" : "实时日志"; vertical-alignment: center; }
                     Rectangle { horizontal-stretch: 1; }
                     if root.logs-expanded: Button { text: "回到最新"; enabled: !logs.follow-tail; clicked => { logs.follow-tail = true; logs.scroll-to-end(); } }
                     Button { text: "打开日志目录"; enabled: App.project-id != ""; clicked => { App.action("open", "logs"); } }

@@ -718,12 +718,6 @@ async fn dispatch(ctx: &Context, action: &str, input: &UiInput) -> Result<(), Co
 pub async fn refresh_projects(ctx: &Context, query: &str) -> Result<(), CoreError> {
     let app = ctx.app().await;
     let query = query.to_owned();
-    let selected = ctx
-        .session
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .project_selection
-        .clone();
     let mut rows = Vec::new();
     let mut states = app.task_states().await;
     for p in app.list_projects(&query).await {
@@ -735,18 +729,21 @@ pub async fn refresh_projects(ctx: &Context, query: &str) -> Result<(), CoreErro
             path: p.game_directory.display().to_string().into(),
             running: state.as_ref().is_some_and(|s| s.running),
             status: status.into(),
-            selected: selected.contains(&p.id),
+            selected: false,
         });
     }
     let session = ctx.session.clone();
     ctx.update(move |ui| {
         let a = ui.global::<App>();
         if a.get_project_query().as_str() == query {
-            let preserve_position = {
+            let (preserve_position, selected_projects) = {
                 let mut session = session.lock().unwrap_or_else(|e| e.into_inner());
                 let preserve_position = session.project_list_query == query;
                 session.project_list_query = query;
-                preserve_position
+                for row in &mut rows {
+                    row.selected = session.project_selection.contains(row.id.as_str());
+                }
+                (preserve_position, session.project_selection.len())
             };
             let current = a.get_projects();
             let same_order = current.row_count() == rows.len()
@@ -778,7 +775,7 @@ pub async fn refresh_projects(ctx: &Context, query: &str) -> Result<(), CoreErro
             if !preserve_position {
                 a.set_project_scroll_y(0.0);
             }
-            a.set_selected_projects(selected.len() as i32);
+            a.set_selected_projects(selected_projects as i32);
         }
     });
     Ok(())

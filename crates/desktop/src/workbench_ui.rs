@@ -278,7 +278,7 @@ async fn save_editor(ctx: &Context, input: &UiInput, reviewed: bool) -> Result<(
             a.set_editor_has_issues(has_issues);
             a.set_editor_origin(origin);
             a.set_editor_invalid(invalid);
-            a.set_editor_status("已保存 · 普通翻译将保留此译文".into());
+            a.set_editor_status("已保存".into());
         }
     });
     Ok(())
@@ -390,13 +390,7 @@ async fn render_editor(ctx: &Context, input: &UiInput, editor_id: &str) -> Resul
         }
         let validation = validation_message(&row);
         let has_issues = row.failure.is_some() || !row.issues.is_empty();
-        let status = if row.edited {
-            "已保存 · 普通翻译将保留此译文"
-        } else if row.text.is_some() {
-            "已保存 · 等待校对"
-        } else {
-            "尚未翻译"
-        };
+        let status = if row.text.is_some() { "已保存" } else { "" };
         a.set_editor_location(
             format!(
                 "{}\n位置：{} · {}",
@@ -420,11 +414,7 @@ async fn render_editor(ctx: &Context, input: &UiInput, editor_id: &str) -> Resul
         a.set_editor_source(row.unit.source_text.into());
         a.set_editor_context(context.into());
         a.set_editor_text(row.text.unwrap_or_default().into());
-        a.set_editor_draft(
-            row.model_text
-                .unwrap_or_else(|| "没有模型初稿。".into())
-                .into(),
-        );
+        a.set_editor_draft(row.model_text.unwrap_or_default().into());
         a.set_editor_status(status.into());
         a.set_editor_validation(validation.into());
         a.set_editor_has_issues(has_issues);
@@ -689,7 +679,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                     a.set_editor_dirty(false);
                     a.set_editor_origin(origin);
                     a.set_editor_invalid(invalid);
-                    a.set_editor_status("已保存 · 普通翻译将保留此译文".into());
+                    a.set_editor_status("已保存".into());
                     a.set_editor_validation(validation.into());
                     a.set_editor_has_issues(has_issues);
                 }

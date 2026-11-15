@@ -226,6 +226,28 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                 settings_ui::refresh(ctx, None).await?;
             }
         }
+        "project-selection" => {
+            let selecting = input.argument == "start";
+            if !selecting {
+                ctx.session
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .project_selection
+                    .clear();
+            }
+            ctx.update(move |ui| {
+                let app = ui.global::<App>();
+                app.set_multi_projects(selecting);
+                if !selecting {
+                    app.set_selected_projects(0);
+                    let projects = app.get_projects();
+                    for (index, mut row) in projects.iter().enumerate() {
+                        row.selected = false;
+                        projects.set_row_data(index, row);
+                    }
+                }
+            });
+        }
         "toggle-project" => {
             {
                 let mut state = ctx.session.lock().unwrap_or_else(|e| e.into_inner());

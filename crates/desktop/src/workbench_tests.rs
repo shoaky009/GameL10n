@@ -265,6 +265,7 @@ fn project_actions_keep_settings_selection_and_saved_edits_in_sync_across_tabs()
         assert!(app.get_texts().iter().all(|row| row.selected));
         invoke_action(&ui, &ctx, "select-clear", "").await;
         assert_eq!(app.get_selected_texts(), 0);
+        assert!(ctx.app().await.load_text_selection(&project.id).await.unwrap().is_empty());
         assert_eq!(app.get_text_total(), 0);
         assert_eq!(app.get_texts().row_count(), 0);
         assert_eq!(app.get_offset(), 0);
@@ -597,6 +598,21 @@ fn project_actions_keep_settings_selection_and_saved_edits_in_sync_across_tabs()
         invoke_action(&ui, &ctx, "game-check-dialog", "").await;
         assert_eq!(app.get_check_launch_result(), "未检查");
         assert_eq!(app.get_check_unit_ids().row_count(), 0);
+
+        invoke_action(&ui, &ctx, "project-selection", "start").await;
+        invoke_action(&ui, &ctx, "toggle-project", &project.id).await;
+        invoke_action(&ui, &ctx, "toggle-project", &other_project.id).await;
+        assert!(app.get_multi_projects());
+        assert_eq!(app.get_selected_projects(), 2);
+        invoke_action(&ui, &ctx, "project-selection", "cancel").await;
+        assert!(!app.get_multi_projects());
+        assert_eq!(app.get_selected_projects(), 0);
+        assert!(ctx.session.lock().unwrap().project_selection.is_empty());
+        assert!(app.get_projects().iter().all(|row| !row.selected));
+        assert_eq!(app.get_project_id().as_str(), other_project.id);
+        invoke_action(&ui, &ctx, "remove", "").await;
+        assert!(host.open_project(&other_project.id).await.unwrap().is_removed);
+        assert!(!host.open_project(&project.id).await.unwrap().is_removed);
 
         slint::quit_event_loop().unwrap();
     })

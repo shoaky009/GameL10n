@@ -48,23 +48,21 @@ export component Workbench inherits FocusScope {
         Caption { text: App.counts; horizontal-stretch: 1; vertical-alignment: center; overflow: elide; wrap: no-wrap; }
         Rectangle { horizontal-stretch: 1; }
         Button { text: "全量翻译"; primary: true; enabled: !App.busy && App.recognition != ""; clicked => { App.action("translate", "all"); } }
-        if App.busy && (App.task-operation == "translate" || App.task-operation == "retranslate" || App.task-operation == "candidate"): Button { text: "暂停翻译"; clicked => { App.action("cancel", ""); } }
     }
     HorizontalLayout { spacing: 8px;
-        search-input := LineEdit { placeholder-text: "搜索原文、译文或位置 · Ctrl+K"; text <=> App.text-query; edited => { App.action("texts", "0"); } horizontal-stretch: 1; min-width: 120px; }
+        search-input := LineEdit { placeholder-text: "搜索原文、译文或位置"; text <=> App.text-query; edited => { App.action("texts", "0"); } horizontal-stretch: 1; min-width: 120px; }
         ComboBox { model: App.resources; current-index <=> App.resource-filter; width: 150px; selected => { App.action("texts", "0"); } }
         ComboBox { model: ["全部类型", "对白 / 旁白", "角色名", "选项", "菜单 / 界面", "物品 / 装备", "技能 / 天赋", "提示 / 说明"]; current-index <=> App.kind-filter; width: 120px; selected => { App.action("texts", "0"); } }
         ComboBox { model: ["全部状态与来源", "未翻译", "待校对", "已校对", "已保护译文", "格式问题", "翻译失败", "有候选", "自动译文", "人工译文", "历史来源未记录"]; current-index <=> App.status-filter; width: 156px; selected => { App.action("texts", "0"); } }
     }
-    HorizontalLayout { spacing: 8px;
-        Link { text: "选本页"; enabled: root.selection-enabled && App.texts.length > 0; clicked => { App.action("select-page", ""); } }
-        Link { text: "全选匹配"; enabled: root.selection-enabled && App.text-total > 0; clicked => { App.action("select-matching", ""); } }
-        Link { text: "清空"; enabled: root.selection-enabled && App.selected-texts > 0; clicked => { App.action("select-clear", ""); } }
-        Caption { text: App.selection-busy ? "更新中…" : "已选 " + App.selected-texts; vertical-alignment: center; wrap: no-wrap; }
-        Button { text: "翻译所选"; enabled: root.selection-enabled && !App.busy && App.selected-texts > 0; clicked => { App.action("translate", "selected"); } }
-        Button { text: "重新翻译所选"; enabled: root.selection-enabled && !App.busy && App.selected-texts > 0; clicked => { App.action("retranslate-dialog", ""); } }
-        Button { text: "试译并生成补丁"; enabled: root.selection-enabled && !App.busy && App.selected-texts > 0; clicked => { App.action("translate", "trial"); } }
-        Button { text: "批量确认校对"; enabled: root.selection-enabled && App.selected-texts > 0 && App.editor-editable; clicked => { App.action("bulk-review", ""); } }
+    HorizontalLayout { spacing: 8px; height: 32px;
+        Link { text: App.selected-texts > 0 ? "取消选择" : "选本页"; enabled: root.selection-enabled && (App.selected-texts > 0 || App.texts.length > 0); clicked => { App.action(App.selected-texts > 0 ? "select-clear" : "select-page", ""); } }
+        if App.selected-texts == 0: Link { text: "全选匹配"; enabled: root.selection-enabled && App.text-total > 0; clicked => { App.action("select-matching", ""); } }
+        if App.selected-texts > 0 || App.selection-busy: Caption { text: App.selection-busy ? "更新中…" : "已选 " + App.selected-texts; vertical-alignment: center; wrap: no-wrap; }
+        if App.selected-texts > 0: Button { text: "翻译所选"; enabled: root.selection-enabled && !App.busy; clicked => { App.action("translate", "selected"); } }
+        if App.selected-texts > 0: Button { text: "重新翻译所选"; enabled: root.selection-enabled && !App.busy; clicked => { App.action("retranslate-dialog", ""); } }
+        if App.selected-texts > 0: Button { text: "试译并生成补丁"; enabled: root.selection-enabled && !App.busy; clicked => { App.action("translate", "trial"); } }
+        if App.selected-texts > 0: Button { text: "批量确认校对"; enabled: root.selection-enabled && App.editor-editable; clicked => { App.action("bulk-review", ""); } }
         Rectangle { horizontal-stretch: 1; }
         CheckBox { text: "仅显示已选"; checked <=> App.only-selected; toggled => { App.action("texts", "0"); } }
     }
@@ -87,7 +85,7 @@ export component Workbench inherits FocusScope {
                                     CopyLink { label: "复制译文"; enabled: row.translation != ""; copy => { root.copy-text(row.translation); } }
                                 }
                                 HorizontalLayout { spacing: 6px; height: 24px;
-                                    Badge { text: row.translation == "" ? "未翻译" : row.origin == 1 ? "自动译文" : row.origin == 2 ? "人工译文" : "历史来源未记录"; tone: row.translation == "" ? 0 : row.origin; }
+                                    Badge { text: row.translation == "" ? "未翻译" : row.origin == 1 ? "自动" : row.origin == 2 ? "人工" : "来源未知"; tone: row.translation == "" ? 0 : row.origin; }
                                     if row.invalid || row.translation != "": Badge { text: row.invalid ? "格式问题" : row.reviewed ? "已校对" : "待校对"; tone: row.invalid ? 5 : row.reviewed ? 3 : 4; }
                                     if row.failed: Badge { text: "请求失败"; tone: 5; }
                                     if row.candidate: Badge { text: "有候选"; tone: 1; }
@@ -105,7 +103,6 @@ export component Workbench inherits FocusScope {
                                             text: row.translation; width: parent.width; height: parent.height; enabled: !App.loading;
                                             activated => { if row.id != App.editor-id { App.action("edit-text", row.id); } }
                                         }
-                                        if row.translation == "": Caption { text: "尚未翻译"; }
                                     }
                                 }
                                 Rectangle { height: 16px;
@@ -140,7 +137,7 @@ export component Workbench inherits FocusScope {
             VerticalLayout { padding: 12px; spacing: 8px;
                 HorizontalLayout { spacing: 6px;
                     Heading { text: "校对"; font-size: 16px; }
-                    Badge { text: App.editor-text == "" ? "未翻译" : App.editor-dirty || App.editor-origin == 2 ? "人工译文" : App.editor-origin == 1 ? "自动译文" : "历史来源未记录"; tone: App.editor-text == "" ? 0 : App.editor-dirty ? 2 : App.editor-origin; }
+                    Badge { text: App.editor-text == "" ? "未翻译" : App.editor-dirty || App.editor-origin == 2 ? "人工" : App.editor-origin == 1 ? "自动" : "来源未知"; tone: App.editor-text == "" ? 0 : App.editor-dirty ? 2 : App.editor-origin; }
                     if App.editor-invalid || App.editor-text != "": Badge { text: App.editor-invalid ? "格式问题" : App.editor-reviewed && !App.editor-dirty ? "已校对" : "待校对"; tone: App.editor-invalid ? 5 : App.editor-reviewed && !App.editor-dirty ? 3 : 4; }
                     Rectangle { horizontal-stretch: 1; }
                     Button { text: "↑"; width: 32px; horizontal-stretch: 0; enabled: root.editor-ready; clicked => { App.action("editor-step", "-1"); } }
@@ -178,7 +175,7 @@ export component Workbench inherits FocusScope {
                     CopyLink { label: "复制译文"; enabled: root.editor-ready && App.editor-text != ""; copy => { root.copy-text(App.editor-text); } }
                 }
                 translation-editor := TextEdit { text <=> App.editor-text; min-height: 100px; vertical-stretch: 2; enabled: root.editor-ready; read-only: !App.editor-editable; edited => { App.editor-dirty = true; App.action("edit-changed", ""); } }
-                Caption { text: App.editor-dirty ? "未保存 · Ctrl+S 保存" : App.editor-status; color: App.editor-dirty ? Theme.pending : Theme.secondary; wrap: no-wrap; overflow: elide; }
+                if App.editor-dirty || App.editor-status != "": Caption { text: App.editor-dirty ? "未保存" : App.editor-status; color: App.editor-dirty ? Theme.pending : Theme.secondary; wrap: no-wrap; overflow: elide; }
                 HorizontalLayout { spacing: 6px;
                     Button { text: "保存"; enabled: root.editor-ready && App.editor-editable; clicked => { App.action("save-edit", ""); } }
                     Button { text: "新候选"; enabled: root.editor-ready && !App.busy; clicked => { App.action("candidate", ""); } }

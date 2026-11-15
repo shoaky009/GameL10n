@@ -171,7 +171,7 @@ fn render_desktop_preview_fixtures() {
     app.set_editor_text("这里是我们的小书店。".into());
     app.set_editor_origin(2);
     app.set_editor_reviewed(true);
-    app.set_editor_status("已保存 · 普通翻译将保留此译文".into());
+    app.set_editor_status("已保存".into());
     app.set_editor_validation("文本格式检查通过。".into());
     app.set_editor_context("相邻文本：\n门口的风铃轻轻响起。\n角色：店员".into());
     app.set_patch_summary("已生成试译补丁 · 24 条译文 · 资源结构检查通过".into());
@@ -242,6 +242,21 @@ fn render_desktop_preview_fixtures() {
                 capture(&format!("{name}{suffix}"), width, height);
             }
         }
+        app.set_selected_texts(0);
+        app.set_texts(ModelRc::new(VecModel::from(
+            rows.iter()
+                .cloned()
+                .map(|mut row| {
+                    row.selected = false;
+                    row
+                })
+                .collect::<Vec<_>>(),
+        )));
+        app.set_tab(1);
+        for (width, height) in [(1120, 720), (1420, 900)] {
+            capture(&format!("workbench-unselected{suffix}"), width, height);
+        }
+        app.set_selected_texts(1);
         let mut combined = rows.clone();
         combined.rotate_left(3);
         app.set_texts(ModelRc::new(VecModel::from(combined)));
@@ -307,7 +322,7 @@ fn render_desktop_preview_fixtures() {
         app.set_editor_id("line-1".into());
         app.set_editor_source("ここは私たちの小さな書店です。".into());
         app.set_editor_text("这里是我们的小书店。".into());
-        app.set_editor_status("已保存 · 普通翻译将保留此译文".into());
+        app.set_editor_status("已保存".into());
         app.set_editor_reviewed(true);
         app.set_text_total(12840);
         app.set_shown(5);
