@@ -553,7 +553,7 @@ fn install_actions(ui: &MainWindow, context: &Context) {
         if action == "texts" && input.argument == "refresh" && ui.global::<App>().get_loading() {
             return;
         }
-        if matches!(action.as_str(), "adapt" | "review") {
+        if action == "adapt" {
             recognition_ui::clear_failure(&ui.global::<App>());
         }
         if action == "project" {
@@ -856,8 +856,8 @@ pub async fn subscribe_events(ctx: Context) {
                                 a.set_activity("".into());
                                 a.set_progress(0.0);
                                 a.set_task_usage(Default::default());
-                                recognition_ui::clear_failure(&a);
                                 if recognition_ui::recognition_task(&state.operation) {
+                                    recognition_ui::clear_failure(&a);
                                     a.set_adaptation_progress("".into());
                                     a.set_adaptation_notes("".into());
                                 }

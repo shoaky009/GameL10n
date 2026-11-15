@@ -100,7 +100,7 @@ pub fn task_status(
 }
 
 pub fn recognition_task(operation: &str) -> bool {
-    matches!(operation, "recognize" | "adapt" | "review" | "extract")
+    matches!(operation, "recognize" | "adapt" | "extract")
 }
 
 pub fn task_api<'a>(operation: &str, summary: &'a str) -> &'a str {
@@ -320,11 +320,20 @@ impl RecognitionView {
         let running = state.is_some_and(|s| s.running && s.operation == "adapt");
         let recognition_running =
             state.is_some_and(|s| s.running && recognition_task(&s.operation));
-        let current_progress =
-            state.is_some_and(|s| s.running && s.message == text(progress, "message"));
+        let same_operation = state.is_some_and(|s| {
+            progress
+                .get("operation")
+                .and_then(Value::as_str)
+                .map_or(s.operation == "adapt", |operation| operation == s.operation)
+        });
+        let current_progress = same_operation
+            && state.is_some_and(|s| s.running && s.message == text(progress, "message"));
         let coverage = lines(&result["pendingCoverage"]);
         let result_status = result.get("status").and_then(Value::as_str);
-        let failure = RecognitionFailure::new(state, result);
+        let failure = RecognitionFailure::new(
+            state.filter(|state| recognition_task(&state.operation)),
+            result,
+        );
         let mut status = project_status(state, extra);
         if !coverage_pending
             && state
@@ -419,17 +428,9 @@ impl RecognitionView {
             validation.extend(lines(&verification["diagnostics"]));
         }
         runtime_checks.extend(lines(&result["pendingRuntimeChecks"]));
-        let model_running =
-            state.is_some_and(|s| s.running && matches!(s.operation.as_str(), "adapt" | "review"));
-        let same_operation = state.is_some_and(|s| {
-            progress
-                .get("operation")
-                .and_then(Value::as_str)
-                .map_or(s.operation == "adapt", |operation| operation == s.operation)
-        });
         // The current step may advance before its progress snapshot is read.
         // Notes remain valid across steps of the same project's adaptation.
-        let note_source = if model_running && same_operation {
+        let note_source = if running && same_operation {
             progress
         } else if recognition_running {
             &Value::Null
@@ -691,6 +692,67 @@ mod tests {
     }
 
     #[test]
+    fn review_task_keeps_recognition_results_separate_from_its_progress_and_failure() {
+        let extra = BTreeMap::from([(
+            "analysis".into(),
+            json!({"unitCount":123,"engineId":"fixture","adapterId":"engine.fixture","adapterVersion":"1"}),
+        )]);
+        let result = json!({
+            "status":"Activated", "summary":"识别结果",
+            "progressNote":{"kind":"verified","message":"原文回填通过"}
+        });
+        let progress = json!({
+            "operation":"review", "stage":"总结引擎经验", "message":"总结任务详情",
+            "progressNote":{"kind":"update","message":"正在整理经验"}
+        });
+        for (running, succeeded) in [
+            (true, None),
+            (false, Some(true)),
+            (false, Some(false)),
+            (false, None),
+        ] {
+            let state = TaskState {
+                project_id: "one".into(),
+                operation: "review".into(),
+                running,
+                succeeded,
+                message: "总结任务详情".into(),
+            };
+            let view = RecognitionView::new(&extra, Some(&state), &progress, &result);
+            assert!(view.ready);
+            assert!(!view.running && !view.recognition_running);
+            assert_eq!(view.summary, "识别结果");
+            assert_eq!(view.notes, "主程序验证：原文回填通过");
+            assert!(view.progress.is_empty() && view.failure.message.is_empty());
+            assert_eq!(
+                view.status,
+                task_status("review", running, succeeded, None, false)
+            );
+        }
+    }
+
+    #[test]
+    fn review_does_not_replace_the_saved_recognition_failure() {
+        let result = json!({
+            "status":"Failed", "summary":"识别未完成",
+            "failure":{"category":"adapter","message":"资源格式尚未支持"}
+        });
+        for running in [true, false] {
+            let state = TaskState {
+                project_id: "one".into(),
+                operation: "review".into(),
+                running,
+                succeeded: (!running).then_some(false),
+                message: "总结 API 请求失败".into(),
+            };
+            let view = RecognitionView::new(&BTreeMap::new(), Some(&state), &Value::Null, &result);
+            assert!(!view.recognition_running);
+            assert_eq!(view.failure.title, "适配器错误");
+            assert_eq!(view.failure.message, "资源格式尚未支持");
+        }
+    }
+
+    #[test]
     fn running_adaptation_labels_previous_result_and_preserves_structured_progress() {
         let mut state = TaskState {
             project_id: "one".into(),
@@ -727,9 +789,11 @@ mod tests {
         assert_eq!(switched.progress, state.message);
         let mut review = progress;
         review["operation"] = json!("review");
+        review["message"] = json!(state.message);
         let other_operation =
             RecognitionView::new(&BTreeMap::new(), Some(&state), &review, &Value::Null);
         assert!(other_operation.notes.is_empty());
+        assert_eq!(other_operation.progress, state.message);
     }
 
     #[test]
@@ -844,13 +908,12 @@ mod tests {
     }
 
     #[test]
-    fn starting_or_pausing_a_task_hides_the_previous_failure() {
+    fn starting_or_pausing_recognition_hides_the_previous_failure() {
         let result = json!({"status":"Failed", "summary":"旧失败",
             "failure":{"category":"api", "message":"旧 API 错误", "nextAction":"重试"}});
         for (operation, running, succeeded) in [
             ("adapt", true, None),
             ("recognize", true, None),
-            ("review", true, None),
             ("adapt", false, None),
             ("recognize", false, Some(true)),
         ] {
