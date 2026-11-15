@@ -1,6 +1,6 @@
 import { Palette } from "std-widgets.slint";
 export struct ProjectRow { id: string, name: string, path: string, status: string, running: bool, selected: bool }
-export struct TextRow { id: string, location: string, source: string, translation: string, metadata: string, selected: bool }
+export struct TextRow { id: string, location: string, source: string, translation: string, metadata: string, selected: bool, origin: int, reviewed: bool, invalid: bool, failed: bool, candidate: bool }
 export struct NamedRow { id: string, name: string, detail: string, enabled: bool }
 export struct EngineRow { id: string, name: string, detail: string, enabled: bool, selected: bool }
 export struct TermRow { source: string, target: string }
@@ -14,8 +14,10 @@ export struct MetricTick { label: string, fraction: float }
 
 export global Theme {
     out property <bool> dark: Palette.color-scheme == ColorScheme.dark;
-    out property <color> surface: dark ? #171c24 : #ffffff;
-    out property <color> background: dark ? #111720 : #f4f7fb;
+    out property <color> surface: dark ? #1c2128 : #ffffff;
+    out property <color> background: dark ? #15191f : #f7f8fa;
+    out property <color> sidebar: dark ? #191e25 : #eef1f5;
+    out property <color> hover: dark ? #29313c : #e4eaf1;
     out property <color> tint: dark ? #253c55 : #e6f0fc;
     out property <color> accent: dark ? #94c5ff : #235b99;
     out property <color> title: dark ? #f0f5fc : #172b43;
@@ -24,6 +26,15 @@ export global Theme {
     out property <color> muted: dark ? #96a6bc : #596b80;
     out property <color> line: dark ? #354254 : #dbe4ef;
     out property <color> error: dark ? #ffb1a7 : #ac3023;
+    out property <color> automatic: dark ? #a6ccff : #275f9d;
+    out property <color> automatic-bg: dark ? #24374e : #eaf2fd;
+    out property <color> manual: dark ? #91d8d2 : #206b67;
+    out property <color> manual-bg: dark ? #203a3b : #e5f3f0;
+    out property <color> success: dark ? #a4d9b7 : #2a6a42;
+    out property <color> success-bg: dark ? #253d30 : #eaf4ed;
+    out property <color> pending: dark ? #e9c484 : #885b17;
+    out property <color> pending-bg: dark ? #423622 : #fbf1df;
+    out property <color> error-bg: dark ? #482d2d : #fcecea;
     out property <color> token-input: dark ? #94c5ff : #235b99;
     out property <color> token-output: dark ? #ffb366 : #a84d0d;
     out property <color> token-cached: dark ? #c5a6ed : #895db5;
@@ -174,6 +185,8 @@ export global App {
     in-out property <string> editor-text;
     in-out property <string> editor-draft;
     in-out property <string> editor-status;
+    in-out property <int> editor-origin;
+    in-out property <bool> editor-invalid;
     in-out property <string> editor-validation;
     in-out property <bool> editor-has-issues;
     in-out property <bool> editor-reviewed;
@@ -258,6 +271,29 @@ export global App {
 
 export component Label inherits Text { color: Theme.ink; font-size: 14px; line-height-factor: 1.2; wrap: word-wrap; }
 export component Caption inherits Text { color: Theme.muted; font-size: 13px; line-height-factor: 1.2; wrap: word-wrap; }
+export component Badge inherits Rectangle {
+    in property <string> text;
+    in property <int> tone;
+    height: 24px; width: badge-label.preferred-width + 16px; horizontal-stretch: 0;
+    border-radius: 4px;
+    background: tone == 1 ? Theme.automatic-bg : tone == 2 ? Theme.manual-bg : tone == 3 ? Theme.success-bg : tone == 4 ? Theme.pending-bg : tone == 5 ? Theme.error-bg : Theme.hover;
+    badge-label := Text { x: 8px; height: parent.height; text: root.text; font-size: 12px; vertical-alignment: center;
+        color: root.tone == 1 ? Theme.automatic : root.tone == 2 ? Theme.manual : root.tone == 3 ? Theme.success : root.tone == 4 ? Theme.pending : root.tone == 5 ? Theme.error : Theme.secondary;
+    }
+}
+
+export component NavigationButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> selected;
+    callback clicked;
+    height: 36px; border-radius: 5px;
+    background: selected ? Theme.tint : hit.has-hover ? Theme.hover : transparent;
+    border-width: keyboard.has-focus ? 1px : 0px; border-color: Theme.accent;
+    accessible-role: button; accessible-label: text; accessible-action-default => { root.clicked(); }
+    Text { x: 12px; width: parent.width - 24px; height: parent.height; text: root.text; color: root.selected ? Theme.accent : Theme.ink; font-weight: root.selected ? 600 : 400; vertical-alignment: center; }
+    keyboard := FocusScope { key-pressed(event) => { if event.text == Key.Return || event.text == " " { root.clicked(); return accept; } return reject; } }
+    hit := TouchArea { mouse-cursor: pointer; clicked => { keyboard.focus(); root.clicked(); } }
+}
 export component Link inherits Rectangle {
     in property <string> text;
     in property <bool> enabled: true;

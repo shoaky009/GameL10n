@@ -336,7 +336,19 @@ fn project_actions_keep_settings_selection_and_saved_edits_in_sync_across_tabs()
         assert_eq!(app.get_editor_text().as_str(), "确认校对后切换到下一页");
         let row = app.get_texts().row_data(99).unwrap();
         assert_eq!(row.translation.as_str(), "确认校对后切换到下一页");
-        assert!(row.metadata.contains("已校对"));
+        assert!(row.reviewed);
+        assert_eq!(row.origin, 2);
+        assert_eq!(app.get_editor_origin(), 2);
+        assert!(!app.get_editor_invalid());
+
+        for (filter, total) in [(8, 0), (9, 1), (10, 0)] {
+            app.set_status_filter(filter);
+            invoke_action(&ui, &ctx, "texts", "0").await;
+            assert_eq!(app.get_text_total(), total);
+        }
+        app.set_status_filter(0);
+        invoke_action(&ui, &ctx, "texts", "0").await;
+        invoke_action(&ui, &ctx, "edit-text", "line-099").await;
 
         // Saving an unchanged reviewed text must not revoke its review.
         invoke_action(&ui, &ctx, "save-edit", "").await;
@@ -511,6 +523,8 @@ fn project_actions_keep_settings_selection_and_saved_edits_in_sync_across_tabs()
         wait_for_actions(&ui,&ctx,"API test released").await;
         assert!(!app.get_api_testing());
         let settings_before = host.settings().await.unwrap().api_configuration.profiles.len();
+        invoke_action(&ui, &ctx, "tab", "0").await;
+        assert_eq!((app.get_page(), app.get_tab()), (0, 0));
         invoke_action(&ui,&ctx,"navigate","apis").await;
         invoke_action(&ui,&ctx,"api-add","").await;
         app.set_api_name("Unsaved fixture".into());

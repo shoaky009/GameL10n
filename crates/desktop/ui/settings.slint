@@ -63,7 +63,7 @@ export component ProjectSettings inherits ScrollView {
     VerticalLayout { padding: 16px; spacing: 16px;
         Heading { text: "游戏启动"; }
         Caption { text: App.launch-summary; }
-        HorizontalLayout { Button { text: "运行检查…"; enabled: !App.busy; clicked => { App.action("game-check-dialog", ""); } } Button { text: "启动设置…"; enabled: !App.busy; clicked => { App.action("launch-settings", ""); } } Button { text: "启动游戏"; enabled: !App.busy && App.launch-can-run; clicked => { App.action("launch-game", ""); } } Rectangle { horizontal-stretch: 1; } }
+        HorizontalLayout { Button { text: "配置启动入口…"; enabled: !App.busy; clicked => { App.action("launch-settings", ""); } } Button { text: "前往补丁与验证"; clicked => { App.action("tab", "2"); } } Rectangle { horizontal-stretch: 1; } }
         Divider {}
         HorizontalLayout { Button { text: "管理模型配置"; clicked => { App.action("navigate", "apis"); } } Rectangle { horizontal-stretch: 1; } }
         Caption { text: "未单独配置的项自动使用全局设置，修改后仅对当前项目生效。"; }

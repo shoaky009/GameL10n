@@ -99,6 +99,9 @@ pub fn restore_view(app: &App<'_>, view: &WorkbenchView) {
             "invalid",
             "failed",
             "candidate",
+            "automatic",
+            "manual",
+            "unknown",
         ]
         .iter()
         .position(|status| *status == view.status)
@@ -127,6 +130,8 @@ fn clear_editor(app: &App<'_>) {
     app.set_editor_has_issues(false);
     app.set_candidate("".into());
     app.set_editor_status("".into());
+    app.set_editor_origin(0);
+    app.set_editor_invalid(false);
     app.set_editor_reviewed(false);
     app.set_terms(ModelRc::default());
 }
@@ -253,6 +258,8 @@ async fn save_editor(ctx: &Context, input: &UiInput, reviewed: bool) -> Result<(
         .await?;
     let validation = validation_message(&row);
     let has_issues = row.failure.is_some() || !row.issues.is_empty();
+    let origin = origin_code(&row);
+    let invalid = !row.issues.is_empty();
     let id = input.project_id.clone();
     let editor = input.editor_id.clone();
     let text = input.editor_text.clone();
@@ -269,14 +276,9 @@ async fn save_editor(ctx: &Context, input: &UiInput, reviewed: bool) -> Result<(
             a.set_editor_reviewed(reviewed);
             a.set_editor_validation(validation.into());
             a.set_editor_has_issues(has_issues);
-            a.set_editor_status(
-                if reviewed {
-                    "已校对 · 手工译文受保护"
-                } else {
-                    "已保存 · 手工译文受保护"
-                }
-                .into(),
-            );
+            a.set_editor_origin(origin);
+            a.set_editor_invalid(invalid);
+            a.set_editor_status("已保存 · 普通翻译将保留此译文".into());
         }
     });
     Ok(())
@@ -289,37 +291,34 @@ pub async fn flush_editor(ctx: &Context, input: &UiInput) -> Result<(), CoreErro
     Ok(())
 }
 
+fn origin_code(row: &WorkbenchRow) -> i32 {
+    use gamel10n_translation::storage::TranslationOrigin;
+    match row.origin {
+        TranslationOrigin::Automatic => 1,
+        TranslationOrigin::Manual => 2,
+        TranslationOrigin::Unknown => 0,
+    }
+}
+
 fn row_metadata(row: &WorkbenchRow) -> String {
-    let status = if !row.issues.is_empty() {
-        "格式问题"
-    } else if row.reviewed {
-        "已校对"
-    } else if row.edited {
-        "手工编辑"
-    } else if row.text.is_some() {
-        "待校对"
-    } else {
-        "未翻译"
+    let kind = match row.unit.kind.as_str() {
+        "dialogue" | "narration" => "对白 / 旁白",
+        "name" => "角色名",
+        "choice" => "选项",
+        "ui" | "menu" => "菜单 / 界面",
+        "item" => "物品 / 装备",
+        "skill" => "技能 / 天赋",
+        "system" => "提示 / 说明",
+        other => other,
     };
     format!(
-        "{}{} · {}{}{}",
+        "{}{}",
         row.unit
             .speaker
             .as_ref()
             .map(|speaker| format!("{speaker} · "))
             .unwrap_or_default(),
-        row.unit.kind,
-        status,
-        if row.failure.is_some() {
-            " · 上次请求失败"
-        } else {
-            ""
-        },
-        if row.candidate.is_some() {
-            " · 有候选"
-        } else {
-            ""
-        }
+        kind
     )
 }
 
@@ -391,10 +390,8 @@ async fn render_editor(ctx: &Context, input: &UiInput, editor_id: &str) -> Resul
         }
         let validation = validation_message(&row);
         let has_issues = row.failure.is_some() || !row.issues.is_empty();
-        let status = if row.reviewed {
-            "已校对 · 手工译文受保护"
-        } else if row.edited {
-            "已保存 · 手工译文受保护"
+        let status = if row.edited {
+            "已保存 · 普通翻译将保留此译文"
         } else if row.text.is_some() {
             "已保存 · 等待校对"
         } else {
@@ -418,6 +415,8 @@ async fn render_editor(ctx: &Context, input: &UiInput, editor_id: &str) -> Resul
         view.editor_scroll_y = scroll;
         a.set_editor_scroll_y(scroll);
         drop(saved);
+        a.set_editor_origin(origin_code(&row));
+        a.set_editor_invalid(!row.issues.is_empty());
         a.set_editor_source(row.unit.source_text.into());
         a.set_editor_context(context.into());
         a.set_editor_text(row.text.unwrap_or_default().into());
@@ -545,6 +544,11 @@ async fn texts(ctx: &Context, input: &UiInput) -> Result<(), CoreError> {
             .map(|row| {
                 let metadata = row_metadata(&row);
                 TextRow {
+                    origin: origin_code(&row),
+                    reviewed: row.reviewed,
+                    invalid: !row.issues.is_empty(),
+                    failed: row.failure.is_some(),
+                    candidate: row.candidate.is_some(),
                     id: row.unit.id.clone().into(),
                     location: format!("{} · {}", row.unit.resource_path, row.unit.locator).into(),
                     source: row.unit.source_text.into(),
@@ -669,6 +673,8 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                 .await?;
             let validation = validation_message(&row);
             let has_issues = row.failure.is_some() || !row.issues.is_empty();
+            let origin = origin_code(&row);
+            let invalid = !row.issues.is_empty();
             let id = input.project_id.clone();
             let editor = input.editor_id.clone();
             let text = input.editor_text.clone();
@@ -681,7 +687,9 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                     && generation.load(Ordering::SeqCst) == revision
                 {
                     a.set_editor_dirty(false);
-                    a.set_editor_status("已保存 · 手工译文受保护".into());
+                    a.set_editor_origin(origin);
+                    a.set_editor_invalid(invalid);
+                    a.set_editor_status("已保存 · 普通翻译将保留此译文".into());
                     a.set_editor_validation(validation.into());
                     a.set_editor_has_issues(has_issues);
                 }

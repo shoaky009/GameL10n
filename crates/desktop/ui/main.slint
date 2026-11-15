@@ -1,5 +1,5 @@
 import { Button, LineEdit, CheckBox, SpinBox, ScrollView, ListView } from "std-widgets.slint";
-import { App, Theme, Label, Caption, Heading, SectionHeading, ReportText, Divider, ProjectRow, TextRow, NamedRow, EngineRow, TermRow, TokenDisplay, CleanupRow } from "state.slint";
+import { App, Theme, Label, Caption, Heading, SectionHeading, ReportText, Divider, ProjectRow, TextRow, NamedRow, EngineRow, TermRow, TokenDisplay, CleanupRow, NavigationButton } from "state.slint";
 import { ProjectSettings, GlobalApis } from "settings.slint";
 import { Workbench } from "workbench.slint";
 import { Recognition, PatchPage, TaskFeedback } from "project.slint";
@@ -13,14 +13,15 @@ export component MainWindow inherits Window {
     title: "GameL10n"; preferred-width: 1420px; preferred-height: 900px; min-width: 1120px; min-height: 720px;
     icon: @image-url("../assets/GameL10n.png");
     default-font-family: "Microsoft YaHei UI"; default-font-size: 14px; background: Theme.background;
-    HorizontalLayout { padding: 20px; spacing: 20px;
-        VerticalLayout { width: 240px; spacing: 12px;
-            Heading { text: "游戏项目"; font-size: 22px; }
+    property <bool> logs-expanded;
+    HorizontalLayout { padding: 16px; spacing: 20px;
+        VerticalLayout { width: 220px; spacing: 8px;
+            HorizontalLayout { Heading { text: "游戏项目"; font-size: 18px; } Rectangle { horizontal-stretch: 1; } }
             Button { text: "添加游戏"; enabled: App.ready && !App.adding-game; clicked => { App.action("browse", ""); } }
             HorizontalLayout { Button { text: "多选"; checkable: true; checked <=> App.multi-projects; } Button { text: "移除"; enabled: App.project-id != "" || App.selected-projects > 0; clicked => { App.action("remove-dialog", ""); } } }
             LineEdit { text <=> App.project-query; placeholder-text: "搜索名称或路径"; edited => { App.action("projects", ""); } }
             ListView { vertical-stretch: 1; content-y <=> App.project-scroll-y;
-                for project in App.projects: Rectangle { height: App.project-row-height; clip: true; background: project.id == App.project-id ? Theme.tint : transparent; border-radius: 4px;
+                for project in App.projects: Rectangle { height: App.project-row-height; clip: true; background: App.page == 0 && project.id == App.project-id ? Theme.tint : project-hit.has-hover ? Theme.hover : transparent; border-width: project-key.has-focus ? 1px : 0px; border-color: Theme.accent; border-radius: 4px;
                     HorizontalLayout { padding: 8px; spacing: 6px;
                         if App.multi-projects: CheckBox { checked: project.selected; toggled => { App.action("toggle-project", project.id); } }
                         Rectangle { horizontal-stretch: 1;
@@ -29,35 +30,53 @@ export component MainWindow inherits Window {
                                 Caption { text: App.concise-text(project.status); height: 20px; line-height-factor: 1; color: project.running ? Theme.accent : Theme.secondary; overflow: elide; wrap: no-wrap; }
                                 Caption { text: App.concise-text(project.path); height: 18px; font-size: 12px; line-height-factor: 1; overflow: elide; wrap: no-wrap; }
                             }
-                            TouchArea { clicked => { App.action("project", project.id); } }
+                            project-key := FocusScope { key-pressed(event) => { if event.text == Key.Return || event.text == " " { App.action("project", project.id); return accept; } return reject; } }
+                            project-hit := TouchArea { mouse-cursor: pointer; clicked => { project-key.focus(); App.action("project", project.id); } }
                         }
                     }
                 }
             }
             Divider {}
-            Button { text: "模型配置"; checked: App.page == 1; clicked => { App.action("navigate", "apis"); } }
-            Button { text: "全局引擎库"; checked: App.page == 2; clicked => { App.action("navigate", "catalog"); } }
-            Button { text: "消耗指标"; checked: App.page == 5; clicked => { App.action("navigate", "metrics"); } }
-            Button { text: "程序设置"; checked: App.page == 3; clicked => { App.action("navigate", "settings"); } }
-            Button { text: "关于"; checked: App.page == 4; clicked => { App.action("navigate", "about"); } }
+            Caption { text: "全局"; }
+            NavigationButton { text: "模型配置"; selected: App.page == 1; clicked => { App.action("navigate", "apis"); } }
+            NavigationButton { text: "全局引擎库"; selected: App.page == 2; clicked => { App.action("navigate", "catalog"); } }
+            NavigationButton { text: "消耗指标"; selected: App.page == 5; clicked => { App.action("navigate", "metrics"); } }
+            NavigationButton { text: "程序设置"; selected: App.page == 3; clicked => { App.action("navigate", "settings"); } }
+            NavigationButton { text: "关于"; selected: App.page == 4; clicked => { App.action("navigate", "about"); } }
         }
         VerticalLayout { spacing: 12px;
-            if App.page == 0: VerticalLayout { spacing: 12px; vertical-stretch: 1;
-                Heading { text: App.project-name == "" ? "选择或添加游戏" : App.project-name; font-size: 26px; wrap: no-wrap; overflow: elide; }
+            if App.page == 0: project-area := ScrollView {
+                vertical-stretch: 1;
+                horizontal-scrollbar-policy: always-off;
+                content-width: self.visible-width;
+                content-height: max(self.visible-height, project-content.min-height);
+                private property <string> project-key: App.project-id;
+                private property <int> tab-key: App.tab;
+                changed project-key => { self.content-y = 0px; }
+                changed tab-key => { self.content-y = 0px; }
+                project-content := VerticalLayout { width: project-area.visible-width; height: project-area.content-height; spacing: 12px;
+                if App.project-id == "": Heading { text: "选择或添加游戏"; font-size: 24px; }
                 if App.project-id != "": VerticalLayout { spacing: 12px;
-                    HorizontalLayout { spacing: 8px;
-                        Button { text: "开始全量翻译"; width: 128px; enabled: !App.busy; clicked => { App.action("translate", "all"); } }
-                        Button { text: "暂停"; width: 80px; enabled: App.busy; clicked => { App.action("cancel", ""); } }
-                        Button { text: "生成补丁"; width: 112px; enabled: !App.busy; clicked => { App.action("patch-dialog", ""); } }
+                    HorizontalLayout { spacing: 12px;
+                        Heading { text: App.project-name; font-size: 24px; wrap: no-wrap; overflow: elide; horizontal-stretch: 1; }
+                        Button { text: "项目文件"; clicked => { App.action("open", "project"); } }
+                        Button { text: "游戏目录"; clicked => { App.action("open", "game"); } }
+                    }
+                    ReportText { text: App.project-path; font-size: 12px; height: 20px; wrap: no-wrap; }
+                    HorizontalLayout { spacing: 4px;
+                        NavigationButton { text: "识别与适配"; width: 124px; selected: App.tab == 0; clicked => { App.action("tab", "0"); } }
+                        NavigationButton { text: "翻译与校对"; width: 124px; selected: App.tab == 1; clicked => { App.action("tab", "1"); } }
+                        NavigationButton { text: "补丁与验证"; width: 124px; selected: App.tab == 2; clicked => { App.action("tab", "2"); } }
+                        NavigationButton { text: "项目设置"; width: 124px; selected: App.tab == 3; clicked => { App.action("tab", "3"); } }
                         Rectangle { horizontal-stretch: 1; }
                     }
-                    HorizontalLayout { Button { text: "识别与适配"; checked: App.tab == 0; clicked => { App.action("tab", "0"); } } Button { text: "翻译与校对"; checked: App.tab == 1; clicked => { App.action("tab", "1"); } } Button { text: "补丁与验证"; checked: App.tab == 2; clicked => { App.action("tab", "2"); } } Button { text: "项目设置"; checked: App.tab == 3; clicked => { App.action("tab", "3"); } } Rectangle { horizontal-stretch: 1; } }
                     if App.tab == 0: Recognition {}
                     if App.tab == 1: Workbench {}
                     if App.tab == 2: PatchPage {}
                     if App.tab == 3: ProjectSettings {}
                 }
                 if App.project-id == "": VerticalLayout { Label { text: "添加游戏目录，然后选择识别方式。已有项目直接读取上次保存的结果。"; } Rectangle { vertical-stretch: 1; } }
+                }
             }
             if App.page == 1: GlobalApis {}
             if App.page == 2: EngineLibrary {}
@@ -74,15 +93,16 @@ export component MainWindow inherits Window {
                 Rectangle { vertical-stretch: 1; }
             }
             if App.page == 4: About {}
-            if (App.page == 0 && App.project-id != "" && !(App.tab == 0 && App.recognition-running) && (App.tab != 0 || !App.recognition-ready || App.busy)) || App.activity != "" || App.error != "": TaskFeedback {}
+            if App.busy || App.activity != "" || App.error != "" || App.recognition-failure-message != "": TaskFeedback {}
             if App.page == 0: VerticalLayout { spacing: 8px; vertical-stretch: 0;
                 HorizontalLayout { spacing: 8px;
-                    SectionHeading { text: "实时日志"; }
+                    Button { text: root.logs-expanded ? "收起日志" : "展开日志"; clicked => { root.logs-expanded = !root.logs-expanded; } }
+                    Caption { text: App.busy ? "任务运行中" : "实时日志"; vertical-alignment: center; }
                     Rectangle { horizontal-stretch: 1; }
-                    Button { text: "回到最新"; enabled: !logs.follow-tail; clicked => { logs.follow-tail = true; logs.scroll-to-end(); } }
+                    if root.logs-expanded: Button { text: "回到最新"; enabled: !logs.follow-tail; clicked => { logs.follow-tail = true; logs.scroll-to-end(); } }
                     Button { text: "打开日志目录"; enabled: App.project-id != ""; clicked => { App.action("open", "logs"); } }
                 }
-                Rectangle { height: 112px; background: Theme.surface; border-color: Theme.line; border-width: 1px;
+                Rectangle { height: root.logs-expanded ? 144px : 0px; visible: root.logs-expanded; background: Theme.surface; border-color: Theme.line; border-width: 1px;
                     logs := ScrollView {
                         property <bool> follow-tail: true;
                         property <string> project-key: App.project-id;

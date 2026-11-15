@@ -185,6 +185,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
             ctx.update(move |ui| {
                 let a = ui.global::<App>();
                 if a.get_project_id().as_str() == id {
+                    a.set_page(0);
                     a.set_tab(tab);
                     a.set_editor_dirty(false);
                     if tab == 1 {

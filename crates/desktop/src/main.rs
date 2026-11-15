@@ -9,6 +9,8 @@ mod recognition_ui;
 mod settings_ui;
 mod time_ui;
 mod token_ui;
+#[cfg(test)]
+mod ui_preview_tests;
 mod window_redraw;
 mod window_state;
 #[cfg(test)]
@@ -313,6 +315,9 @@ impl UiInput {
                 "invalid",
                 "failed",
                 "candidate",
+                "automatic",
+                "manual",
+                "unknown",
             ]
             .get(a.get_status_filter().max(0) as usize)
             .unwrap_or(&"all")
