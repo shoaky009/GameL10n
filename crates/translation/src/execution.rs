@@ -1034,6 +1034,7 @@ impl TranslationEngine {
                     let mut edit =
                         TranslationEdit::new(unit, &policy.target_language, (*text).clone(), false);
                     edit.is_generated = true;
+                    edit.origin = crate::storage::TranslationOrigin::Automatic;
                     changes.candidates.insert(unit.id.clone(), Some(edit));
                 } else if options.retranslation_id.is_some() {
                     // Keep review state changed after an interrupted task committed this exact result.
@@ -1051,6 +1052,7 @@ impl TranslationEngine {
                         );
                         edit.retranslation_id = options.retranslation_id.clone();
                         edit.is_generated = true;
+                        edit.origin = crate::storage::TranslationOrigin::Automatic;
                         changes.entries.insert(unit.id.clone(), Some(edit));
                         changes.candidates.insert(unit.id.clone(), None);
                     }

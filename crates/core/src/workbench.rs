@@ -5,7 +5,9 @@ use gamel10n_translation::{
     TranslationUnit, ValidationIssue,
     edits::EditChanges,
     execution::load_issues,
-    storage::{TranslationEdit, TranslationMemory, TranslationPolicy, memory_key},
+    storage::{
+        TranslationEdit, TranslationMemory, TranslationOrigin, TranslationPolicy, memory_key,
+    },
     text,
 };
 use serde::{Deserialize, Serialize};
@@ -37,6 +39,7 @@ pub struct WorkbenchRow {
     pub candidate: Option<String>,
     pub reviewed: bool,
     pub edited: bool,
+    pub origin: TranslationOrigin,
     pub issues: Vec<ValidationIssue>,
     pub failure: Option<String>,
     pub previous_edit: Option<String>,
@@ -87,6 +90,16 @@ impl RowState {
     fn edited(&self) -> bool {
         self.edit.as_ref().is_some_and(|edit| !edit.is_generated)
     }
+    fn origin(&self) -> TranslationOrigin {
+        self.edit
+            .as_ref()
+            .map(TranslationEdit::origin)
+            .unwrap_or(if self.model.is_some() {
+                TranslationOrigin::Automatic
+            } else {
+                TranslationOrigin::Unknown
+            })
+    }
     fn row(&self, unit: &TranslationUnit) -> WorkbenchRow {
         WorkbenchRow {
             unit: unit.clone(),
@@ -95,6 +108,7 @@ impl RowState {
             candidate: self.candidate.as_ref().map(|edit| edit.text.clone()),
             reviewed: self.reviewed(),
             edited: self.edited(),
+            origin: self.origin(),
             issues: self.issues.clone(),
             failure: self.failure().map(|failure| {
                 if self.text().is_some() && self.issues.is_empty() {
@@ -336,11 +350,13 @@ impl Workbench {
                 let mut edit =
                     TranslationEdit::new(unit, &self.policy.target_language, text.clone(), false);
                 edit.is_generated = true;
+                edit.origin = gamel10n_translation::storage::TranslationOrigin::Automatic;
                 row.candidate = Some(edit);
             } else if options.retranslation_id.is_some() {
                 let mut edit =
                     TranslationEdit::new(unit, &self.policy.target_language, text.clone(), false);
                 edit.is_generated = true;
+                edit.origin = gamel10n_translation::storage::TranslationOrigin::Automatic;
                 edit.retranslation_id = options.retranslation_id.clone();
                 row.edit = Some(edit);
                 row.candidate = None;
@@ -383,6 +399,9 @@ fn matches_filter(
         "failed" => row.failure().is_some(),
         "pending" => row.text().is_some() && !row.reviewed(),
         "edited" => row.edited(),
+        "automatic" => row.text().is_some() && row.origin() == TranslationOrigin::Automatic,
+        "manual" => row.text().is_some() && row.origin() == TranslationOrigin::Manual,
+        "unknown" => row.text().is_some() && row.origin() == TranslationOrigin::Unknown,
         "reviewed" => row.reviewed(),
         "invalid" => !row.issues.is_empty(),
         "candidate" => row.candidate.is_some(),
@@ -801,8 +820,15 @@ impl Application {
             }
             workbench.edits.update(|edits| -> Result<_, CoreError> {
                 let mut changes = EditChanges::default();
+                let origin = workbench
+                    .rows
+                    .get(&unit_id)
+                    .filter(|row| row.text() == Some(text.as_str()))
+                    .map(RowState::origin)
+                    .unwrap_or(TranslationOrigin::Manual);
                 let mut edit =
                     TranslationEdit::new(unit, &workbench.policy.target_language, text, reviewed);
+                edit.origin = origin;
                 edit.retranslation_id = edits
                     .find(unit, &workbench.policy.target_language)
                     .and_then(|old| old.retranslation_id.clone());
@@ -864,6 +890,7 @@ impl Application {
                             )
                         });
                     edit.reviewed = reviewed;
+                    edit.origin = row.origin();
                     edit.is_generated = false;
                     edit.updated_at = gamel10n_translation::storage::now();
                     changes.entries.insert(unit.id.clone(), Some(edit));
@@ -923,6 +950,7 @@ impl Application {
                     .ok_or_else(|| {
                         CoreError::InvalidData("当前文本没有已保存的候选译文。".into())
                     })?;
+                candidate.origin = TranslationOrigin::Automatic;
                 candidate.is_generated = false;
                 candidate.retranslation_id = edits
                     .find(unit, &workbench.policy.target_language)
@@ -1274,6 +1302,110 @@ mod tests {
         );
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
     }
+    #[tokio::test]
+    async fn translation_origin_is_independent_of_review_and_overwrite_protection() {
+        let (root, app, id, _) = fixture().await;
+        let automatic = app.workbench_row(&id, "1").await.unwrap();
+        assert_eq!(automatic.origin, TranslationOrigin::Automatic);
+        app.save_translation_edit(&id, "1", automatic.text.unwrap(), true)
+            .await
+            .unwrap();
+        let reviewed = app.workbench_row(&id, "1").await.unwrap();
+        assert_eq!(reviewed.origin, TranslationOrigin::Automatic);
+        assert!(reviewed.reviewed && reviewed.edited);
+        app.mark_reviewed(&id, &["1".into(), "2".into()], true)
+            .await
+            .unwrap();
+        assert_eq!(
+            app.workbench_row(&id, "2").await.unwrap().origin,
+            TranslationOrigin::Automatic
+        );
+        app.mark_reviewed(&id, &["1".into()], false).await.unwrap();
+        assert_eq!(
+            app.workbench_row(&id, "1").await.unwrap().origin,
+            TranslationOrigin::Automatic
+        );
+        app.save_translation_edit(&id, "1", "人工修订[name]".into(), false)
+            .await
+            .unwrap();
+        let manual = app.workbench_row(&id, "1").await.unwrap();
+        assert_eq!(manual.origin, TranslationOrigin::Manual);
+        assert!(manual.edited && !manual.reviewed);
+        let filter = WorkbenchFilter {
+            status: "manual".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            app.workbench_page(&id, &filter, 0, 100)
+                .await
+                .unwrap()
+                .total,
+            1
+        );
+        drop(app);
+        let app = Application::open(root.path().join("data"), &crate::ToolPaths::new("missing"))
+            .await
+            .unwrap();
+        assert_eq!(
+            app.workbench_row(&id, "1").await.unwrap().origin,
+            TranslationOrigin::Manual
+        );
+        assert_eq!(
+            app.workbench_row(&id, "2").await.unwrap().origin,
+            TranslationOrigin::Automatic
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_edits_keep_unknown_origin_while_generated_candidates_remain_automatic() {
+        let (root, app, id, units) = fixture().await;
+        let directory = app.project_directory(&id).unwrap();
+        let language = policy(&Value::Null).target_language;
+        let mut edits = TranslationEdits::default();
+        let mut legacy = serde_json::to_value(TranslationEdit::new(
+            &units[0],
+            &language,
+            "历史译文[name]".into(),
+            true,
+        ))
+        .unwrap();
+        legacy.as_object_mut().unwrap().remove("origin");
+        edits
+            .entries
+            .insert("1".into(), serde_json::from_value(legacy).unwrap());
+        let mut candidate =
+            TranslationEdit::new(&units[1], &language, "新的自动候选".into(), false);
+        candidate.origin = TranslationOrigin::Unknown;
+        candidate.is_generated = true;
+        edits.candidates.insert("2".into(), candidate);
+        edits.save(&directory).unwrap();
+        let legacy = app.workbench_row(&id, "1").await.unwrap();
+        assert_eq!(legacy.origin, TranslationOrigin::Unknown);
+        app.save_translation_edit(&id, "1", legacy.text.unwrap(), true)
+            .await
+            .unwrap();
+        assert_eq!(
+            app.workbench_row(&id, "1").await.unwrap().origin,
+            TranslationOrigin::Unknown
+        );
+        app.adopt_candidate(&id, "2").await.unwrap();
+        let adopted = app.workbench_row(&id, "2").await.unwrap();
+        assert_eq!(adopted.origin, TranslationOrigin::Automatic);
+        assert!(adopted.edited && !adopted.reviewed);
+        drop(app);
+        let app = Application::open(root.path().join("data"), &crate::ToolPaths::new("missing"))
+            .await
+            .unwrap();
+        assert_eq!(
+            app.workbench_row(&id, "1").await.unwrap().origin,
+            TranslationOrigin::Unknown
+        );
+        assert_eq!(
+            app.workbench_row(&id, "2").await.unwrap().origin,
+            TranslationOrigin::Automatic
+        );
+    }
+
     #[tokio::test]
     async fn manual_correction_and_review_keep_interrupted_retranslation_identity() {
         let (_root, app, id, units) = fixture().await;

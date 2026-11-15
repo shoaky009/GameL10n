@@ -336,6 +336,15 @@ pub fn valid_key(value: &str) -> bool {
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum TranslationOrigin {
+    Automatic,
+    Manual,
+    #[default]
+    Unknown,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct TranslationEdit {
@@ -348,6 +357,8 @@ pub struct TranslationEdit {
     pub retranslation_id: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_generated: bool,
+    #[serde(default)]
+    pub origin: TranslationOrigin,
 }
 impl TranslationEdit {
     pub fn new(unit: &TranslationUnit, language: &str, text: String, reviewed: bool) -> Self {
@@ -359,10 +370,19 @@ impl TranslationEdit {
             updated_at: now(),
             retranslation_id: None,
             is_generated: false,
+            origin: TranslationOrigin::Manual,
         }
     }
     pub fn matches(&self, unit: &TranslationUnit, language: &str) -> bool {
         self.language == language && self.source_signature == source_signature(unit)
+    }
+    /// Generated records predate explicit origin metadata and have known automatic provenance.
+    pub fn origin(&self) -> TranslationOrigin {
+        if self.is_generated {
+            TranslationOrigin::Automatic
+        } else {
+            self.origin
+        }
     }
 }
 

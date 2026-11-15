@@ -197,6 +197,7 @@ mod tests {
                     reviewed: false,
                     updated_at: "now".into(),
                     is_generated: true,
+                    origin: crate::storage::TranslationOrigin::Automatic,
                     retranslation_id: Some("b".repeat(32)),
                 }),
             )]),
