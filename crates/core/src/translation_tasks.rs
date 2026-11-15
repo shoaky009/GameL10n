@@ -176,9 +176,7 @@ mod tests {
                 .unwrap()
                 .unwrap_err();
         assert!(
-            first
-                .to_string()
-                .contains("适配输入与已有提取资源的哈希不一致"),
+            first.to_string().contains("已绑定的原始资源发生变化"),
             "{first}"
         );
         let mut states = Vec::new();
@@ -202,9 +200,7 @@ mod tests {
             .unwrap()
             .unwrap_err();
         assert!(
-            resumed
-                .to_string()
-                .contains("适配输入与已有提取资源的哈希不一致"),
+            resumed.to_string().contains("已绑定的原始资源发生变化"),
             "{resumed}"
         );
         let state = app.task_state(&id).await.unwrap();

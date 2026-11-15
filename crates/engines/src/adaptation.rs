@@ -1755,9 +1755,7 @@ impl EngineService {
             .into_iter()
             .map(|file| file.replace('\\', "/"))
             .collect();
-        let source_input =
-            resources::source(workspace, state, &directory, Some(&files), cancellation)?;
-        let source = source_input.directory();
+        let mut source_input = None;
         let check_roundtrip = boolean(args, "checkRoundtrip", true)?;
         let check_translation = boolean(args, "checkTranslation", true)?;
         let mut result = json!({"format":format,"status":"rejected","stage":"inputs","parseStatus":"not-run","roundtripStatus":if check_roundtrip{"not-run"}else{"skipped"},"translationStatus":if check_translation{"not-run"}else{"skipped"},"unitCount":0,"samples":[],"warnings":[],"sourceHashes":{},"error":null,"diagnostic":null,"runtimeStatus":"not-tested"});
@@ -1769,14 +1767,15 @@ impl EngineService {
             if files.len()>12 { result["status"]=json!("limit-exceeded"); return Err(EngineError::Rejected("单次试提取最多 12 个完整资源；这不是引擎不受支持的结论。".into())); }
             let selected:BTreeSet<_>=files.iter().map(|file|file.to_lowercase()).collect();
             if selected.len()!=files.len() { return Err(EngineError::Rejected("样本文件列表包含重复路径。".into())); }
-            require_builtin_companions(format,source,&files)?;
             for file in &files {
                 if cancellation.is_cancelled(){return Err(EngineError::Cancelled);}
-                let path=resolve_relative(source,file)?;
+                let path=resources::file(workspace,state,&format!("{directory}/{file}"))?;
                 sample_bytes=sample_bytes.saturating_add(path.metadata()?.len());
                 if sample_bytes>64*1024*1024 { result["status"]=json!("limit-exceeded"); return Err(EngineError::Rejected("所选样本合计超过单次 64 MiB；这不是引擎不受支持的结论。".into())); }
-                source_hashes.insert(file.clone(),hash_file(&path).map_err(file_error)?);
             }
+            let source = source_input.insert(resources::source(workspace,state,&directory,&files,cancellation)?).directory();
+            require_builtin_companions(format,source,&files)?;
+            source_hashes = hashes(source,&files)?;
             result["sourceHashes"]=json!(source_hashes);
             result["status"]=json!("failed");
             result["stage"]=json!("parse");
@@ -1831,10 +1830,14 @@ impl EngineService {
         if let Err(error) = outcome {
             result["error"] = json!(error.to_string());
         }
-        if !source_hashes.is_empty()
-            && hashes(source, &source_hashes.keys().cloned().collect::<Vec<_>>())
-                .ok()
-                .as_ref()
+        if let Some(source) = &source_input
+            && !source_hashes.is_empty()
+            && hashes(
+                source.directory(),
+                &source_hashes.keys().cloned().collect::<Vec<_>>(),
+            )
+            .ok()
+            .as_ref()
                 != Some(&source_hashes)
         {
             result["status"] = json!("failed");
@@ -2399,11 +2402,7 @@ impl EngineService {
         if !archive.starts_with("resources/") && !archive.starts_with("work/") {
             return Err(EngineError::Protocol("组件输入必须是已暂存资源。".into()));
         }
-        let archive_path = if let Some(relative) = archive.strip_prefix("resources/") {
-            resources::file(workspace, state, relative)?
-        } else {
-            resolve_relative(workspace, &archive)?
-        };
+        let archive_path = resources::file(workspace, state, &archive)?;
         let _input_handles = crate::source::lock_inputs(
             &BTreeMap::from([(archive.clone(), archive_path.clone())]),
             cancellation,

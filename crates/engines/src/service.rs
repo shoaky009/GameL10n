@@ -549,9 +549,9 @@ impl EngineService {
             .await
     }
 
-    // Verification supplies the snapshot hashes and, when reusing extraction,
-    // the output hashes observed before that extraction. Both are rechecked afterward.
-    async fn execute_with_hashes(
+    /// Supplies previously checked source and patch hashes to the adapter's integrity checks.
+    /// Callers must keep the checked inputs stable until execution starts.
+    pub async fn execute_with_hashes(
         &self,
         adapter: &AdapterHandle,
         request: &AdapterRequest,

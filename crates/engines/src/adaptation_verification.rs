@@ -330,11 +330,11 @@ async fn discover_inputs(
     cancellation: &CancellationToken,
     stats: &mut FingerprintStats,
 ) -> Result<DiscoveryInputs, EngineError> {
-    let source = resources::source(workspace, state, "resources", None, cancellation)?;
-    let staged_root = source.directory();
+    let staged_root = workspace.join("resources");
+    let staged_inputs = resources::inputs(workspace, state)?;
     if let Some(files) = trial {
         let (probe, evidence) = service
-            .probe_bounded_with_evidence(handle, staged_root, files, cancellation)
+            .probe_inputs_with_evidence(handle, &staged_root, files, &staged_inputs, cancellation)
             .await?;
         stats.record_probe(&evidence);
         return Ok(DiscoveryInputs {
@@ -350,8 +350,7 @@ async fn discover_inputs(
     let game = request
         .inputs
         .inventory(Inventory::scan(&request.game_directory)?)?;
-    let staged = resources::inputs(workspace, state)?
-        .inventory(Inventory::scan(&workspace.join("resources"))?)?;
+    let staged = staged_inputs.inventory(Inventory::scan(&staged_root)?)?;
     let mut patterns = state.resource_patterns.clone();
     if let Some(recognition) = &state.recognition {
         for rule in recognition.required.iter().chain(&recognition.hints) {
@@ -376,10 +375,11 @@ async fn discover_inputs(
         ));
     }
     let (sample, sample_evidence) = service
-        .probe_bounded_with_evidence(
+        .probe_inputs_with_evidence(
             handle,
-            staged_root,
+            &staged_root,
             &package.resources(&staged),
+            &staged_inputs,
             cancellation,
         )
         .await?;
@@ -498,7 +498,24 @@ fn fingerprint(
     } else {
         let game_hashes =
             input_hashes(&request.game_directory, &game_files, &request.inputs, stats)?;
-        let staged_hashes = input_hashes(&staged_root, &staged_files, &staged_bindings, stats)?;
+        let mut staged_hashes = BTreeMap::new();
+        let mut separate = BTreeSet::new();
+        for path in &staged_files {
+            if let Some(digest) = game_hashes.get(path)
+                && request.inputs.file(&request.game_directory, path)?
+                    == staged_bindings.file(&staged_root, path)?
+            {
+                staged_hashes.insert(path.clone(), digest.clone());
+            } else {
+                separate.insert(path.clone());
+            }
+        }
+        staged_hashes.extend(input_hashes(
+            &staged_root,
+            &separate,
+            &staged_bindings,
+            stats,
+        )?);
         for (path, hash) in &approved {
             if trial.is_some_and(|files| !files.iter().any(|file| file.eq_ignore_ascii_case(path)))
             {
@@ -947,13 +964,7 @@ pub(super) async fn test_adapter(
         verification_directory = Some(directory.join(
             format!("{}.json", output.path().file_name().unwrap_or_default().to_string_lossy()),
         ));
-        let source = resources::source(
-            workspace,
-            state,
-            "resources",
-            Some(&resources),
-            cancellation,
-        )?;
+        let source = resources::source(workspace, state, "resources", &resources, cancellation)?;
         let started = Instant::now();
         let forward = |event| {
             if let Some(callback) = callback {
@@ -1106,8 +1117,10 @@ pub(super) async fn test_adapter(
         result["trialBytes"] = json!(
             files
                 .iter()
-                .map(|file| resources::file(workspace, state, file)
-                    .and_then(|path| Ok(path.metadata()?.len())))
+                .map(
+                    |file| resources::file(workspace, state, &format!("resources/{file}"))
+                        .and_then(|path| Ok(path.metadata()?.len()))
+                )
                 .collect::<Result<Vec<_>, _>>()?
                 .into_iter()
                 .sum::<u64>()
@@ -1174,6 +1187,60 @@ mod tests {
 
     fn arguments() -> Value {
         json!({"kind":"engine","key":"fixture","name":"Fixture","resourcePatterns":["*.json","*.bin"]})
+    }
+
+    #[tokio::test]
+    async fn trial_discovery_reads_backup_headers_without_opening_unselected_resources() {
+        let root = tempfile::tempdir().unwrap();
+        let (service, request, workspace, mut state) = fixture(root.path());
+        if !service.tools.python().is_file() {
+            return;
+        }
+        let backup = request.game_directory.join("text.json.bak");
+        fs::rename(request.game_directory.join("text.json"), &backup).unwrap();
+        fs::remove_file(workspace.join("resources/text.json")).unwrap();
+        state
+            .extra
+            .insert("resourceRoot".into(), json!(request.game_directory));
+        state.extra.insert(
+            "resourceHashes".into(),
+            json!({"text.json":hash_file(&backup).unwrap(), "unselected.bin":"unused"}),
+        );
+        state.extra.insert(
+            "resourcePaths".into(),
+            json!({"text.json":backup, "unselected.bin":request.game_directory.join("absent.bin")}),
+        );
+        let package: PackageManifest =
+            serde_json::from_value(json!({"id":"engine.fixture","version":"1"})).unwrap();
+        let adapter = AdapterHandle::Python {
+            entry: workspace.join("src/adapter.py"),
+            package_directory: None,
+            id: "engine.fixture".into(),
+            version: "1".into(),
+        };
+        let mut stats = FingerprintStats::default();
+        let discovered = discover_inputs(
+            &service,
+            &request,
+            &workspace,
+            &state,
+            &package,
+            &adapter,
+            Some(&["text.json".into()]),
+            &CancellationToken::new(),
+            &mut stats,
+        )
+        .await
+        .unwrap();
+        assert_eq!(discovered.resources, ["text.json"]);
+        assert_eq!(stats.discovery_read_files, 1);
+        assert!(stats.discovery_read_bytes <= 65_536);
+        assert!(
+            fs::read_dir(workspace.join("resources"))
+                .unwrap()
+                .next()
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -1535,6 +1602,31 @@ mod tests {
             complete: true,
         };
         (request, workspace, state, discovery)
+    }
+
+    #[test]
+    fn full_fingerprint_hashes_shared_original_once_and_distinct_copies_separately() {
+        let root = tempfile::tempdir().unwrap();
+        let (request, workspace, mut state, discovery) = archive_fixture(root.path());
+        let mut stats = FingerprintStats::default();
+        let copied = fingerprint(
+            &request, &workspace, &state, false, None, &discovery, &mut stats,
+        )
+        .unwrap();
+        assert_eq!(stats.hashed_files, 2);
+        fs::remove_file(workspace.join("resources/archive.bin")).unwrap();
+        state.extra.insert(
+            "resourcePaths".into(),
+            json!({"archive.bin":request.game_directory.join("archive.bin")}),
+        );
+        let mut stats = FingerprintStats::default();
+        let referenced = fingerprint(
+            &request, &workspace, &state, false, None, &discovery, &mut stats,
+        )
+        .unwrap();
+        assert_eq!(stats.hashed_files, 1);
+        assert_eq!(stats.hashed_bytes, 256 * 1024);
+        assert_eq!(referenced.digest, copied.digest);
     }
 
     #[test]

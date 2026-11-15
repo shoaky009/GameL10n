@@ -201,9 +201,14 @@ fn stage(
     Ok(())
 }
 
-fn sample_group(definition: &Value, root: &Path, script: &str) -> Result<Vec<String>, EngineError> {
+fn sample_group(
+    definition: &Value,
+    root: &Path,
+    script: &str,
+    inputs: &AdaptationInputs,
+) -> Result<Vec<String>, EngineError> {
     let script = script.replace('\\', "/");
-    let source = resolve_relative(root, &script)?;
+    let source = inputs.file(root, &script)?;
     if !source.is_file() {
         return Err(reject(format!("候选样本不存在：{script}")));
     }
@@ -229,7 +234,7 @@ fn sample_group(definition: &Value, root: &Path, script: &str) -> Result<Vec<Str
             .join(companion)
             .to_string_lossy()
             .replace('\\', "/");
-        if resolve_relative(root, &relative)?.is_file() {
+        if inputs.file(root, &relative)?.is_file() {
             group.push(relative);
         } else if required {
             return Err(reject(format!(
@@ -570,11 +575,7 @@ async fn try_component_sample(
 ) -> Result<Value, EngineError> {
     let source =
         components::sample_source(format)?.ok_or_else(|| reject("该组件未提供小样检查入口。"))?;
-    let input = if let Some(relative) = file.strip_prefix("resources/") {
-        resources::file(workspace, state, relative)?
-    } else {
-        resolve_relative(workspace, file)?
-    };
+    let input = resources::file(workspace, state, file)?;
     let _input_handles =
         crate::source::lock_inputs(&BTreeMap::from([(file.to_string(), input.clone())]), token)?;
     let size = input.metadata()?.len();
@@ -670,15 +671,7 @@ pub(super) async fn component_trials(
     }
     let total = files.iter().try_fold(0_u64, |sum, file| {
         Ok::<_, EngineError>(
-            sum.saturating_add(
-                if let Some(relative) = file.strip_prefix("resources/") {
-                    resources::file(workspace, state, relative)?
-                } else {
-                    resolve_relative(workspace, file)?
-                }
-                .metadata()?
-                .len(),
-            ),
+            sum.saturating_add(resources::file(workspace, state, file)?.metadata()?.len()),
         )
     })?;
     if total > TRIAL_BYTES {
@@ -742,16 +735,18 @@ async fn try_cached_sample(
     files: &[String],
     token: &CancellationToken,
 ) -> Result<Value, EngineError> {
-    let source = resources::source(workspace, state, directory, Some(files), token)?;
-    let root = source.directory();
-    let lengths: BTreeMap<_, _> = files
+    let paths: BTreeMap<_, _> = files
         .iter()
         .map(|file| {
             Ok((
                 file.clone(),
-                resolve_relative(root, file)?.metadata()?.len(),
+                resources::file(workspace, state, &format!("{directory}/{file}"))?,
             ))
         })
+        .collect::<Result<_, EngineError>>()?;
+    let lengths: BTreeMap<_, _> = files
+        .iter()
+        .map(|file| Ok((file.clone(), paths[file].metadata()?.len())))
         .collect::<Result<_, EngineError>>()?;
     if files.is_empty()
         || files.len() > 12
@@ -764,8 +759,14 @@ async fn try_cached_sample(
     }
     let started = Instant::now();
     let before = state.sample_checks.clone();
+    let hash_samples = || {
+        paths
+            .iter()
+            .map(|(file, path)| Ok((file.clone(), checked_hash(path, lengths[file], token)?)))
+            .collect::<Result<BTreeMap<_, _>, EngineError>>()
+    };
     let outcome = async {
-    let hashes = sample_hashes(root, &lengths, token)?;
+    let hashes = hash_samples()?;
     let parser = parser_fingerprint(service, token)?;
     let fingerprint = hash_text(&json!({"trialRevision":3,"format":format,"directory":directory,"parser":parser,"files":hashes}).to_string());
     if let Some(trial) = state
@@ -789,7 +790,7 @@ async fn try_cached_sample(
             token,
         )
         .await?;
-    if sample_hashes(root, &lengths, token)? != hashes
+    if hash_samples()? != hashes
         || result["sourceHashes"] != json!(hashes)
         || parser_fingerprint(service, token)? != parser
     {
@@ -901,8 +902,6 @@ pub(super) async fn inspect_samples(
             if !matches!(directory, "work" | "resources") {
                 continue;
             }
-            let source = resources::source(workspace, state, directory, None, token)?;
-            let root = source.directory();
             let mut selected = BTreeSet::new();
             for file in candidate["sampleFiles"]
                 .as_array()
@@ -922,7 +921,16 @@ pub(super) async fn inspect_samples(
                         })
                     })
                 {
-                    selected.extend(sample_group(definition, root, file)?);
+                    for path in sample_group(
+                        definition,
+                        workspace,
+                        &format!("{directory}/{file}"),
+                        &bindings,
+                    )? {
+                        if let Some(relative) = path.strip_prefix(&format!("{directory}/")) {
+                            selected.insert(relative.to_owned());
+                        }
+                    }
                 }
             }
             if selected.is_empty() {
@@ -930,7 +938,12 @@ pub(super) async fn inspect_samples(
             }
             let lengths = selected
                 .iter()
-                .map(|file| Ok(resolve_relative(root, file)?.metadata()?.len()))
+                .map(|file| {
+                    Ok(bindings
+                        .file(workspace, &format!("{directory}/{file}"))?
+                        .metadata()?
+                        .len())
+                })
                 .collect::<Result<Vec<_>, EngineError>>()?;
             let bytes = lengths
                 .iter()
@@ -1135,7 +1148,7 @@ pub(super) async fn run_trials(
                 let ext=extension(script);let filename=Path::new(script).file_name().unwrap_or_default().to_string_lossy();
                 if !definition["extensions"].as_array().into_iter().flatten().any(|extension|extension.as_str().is_some_and(|extension|extension.trim_start_matches('.').eq_ignore_ascii_case(&ext)))
                     ||definition["companions"].as_array().into_iter().flatten().any(|name|name.as_str().is_some_and(|name|name.eq_ignore_ascii_case(&filename))){continue;}
-                let extra=(||->Result<BTreeMap<String,u64>,EngineError>{sample_group(definition,&request.game_directory,script)?.into_iter().filter(|file|!lengths.keys().any(|known:&String|known.eq_ignore_ascii_case(file))).map(|file|{let length=resolve_relative(&request.game_directory,&file)?.metadata()?.len();Ok((file,length))}).collect()})();
+                let extra=(||->Result<BTreeMap<String,u64>,EngineError>{sample_group(definition,&request.game_directory,script,&request.inputs)?.into_iter().filter(|file|!lengths.keys().any(|known:&String|known.eq_ignore_ascii_case(file))).map(|file|{let length=resolve_relative(&request.game_directory,&file)?.metadata()?.len();Ok((file,length))}).collect()})();
                 let extra=match extra{Ok(extra)=>extra,Err(error)=>{if skipped.len()<6{skipped.push(format!("{format}：{}",limit(&error.to_string(),240)));}continue;}};
                 let bytes=extra.values().try_fold(0_u64,|sum,length|sum.checked_add(*length));
                 if lengths.len()+extra.len()>12||bytes.is_none_or(|bytes|bytes>TRIAL_BYTES.saturating_sub(selected_bytes)){
@@ -1771,6 +1784,51 @@ mod tests {
         assert_eq!(state.resource_patterns, ["**/*.xp3"]);
         assert_eq!(state.verified_package, Some(verified));
         assert_eq!(state.api_requests(), requests_before);
+    }
+
+    #[tokio::test]
+    #[cfg(windows)]
+    async fn oversized_backup_samples_are_rejected_before_opening_or_copying() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let (service, request, workspace, mut state) =
+            fixture(root.path(), "KirikiriKs", "scene.ks");
+        let backup = request.game_directory.join("scene.ks.bak");
+        let exclusive = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .share_mode(0)
+            .open(&backup)
+            .unwrap();
+        exclusive.set_len(TRIAL_BYTES + 1).unwrap();
+        state
+            .extra
+            .insert("resourceRoot".into(), json!(request.game_directory));
+        state
+            .extra
+            .insert("resourcePaths".into(), json!({"scene.ks":backup}));
+        state
+            .extra
+            .insert("resourceHashes".into(), json!({"scene.ks":"unused"}));
+        let args = json!({"format":"KirikiriKs","directory":"resources","files":["scene.ks"]});
+        let result = service
+            .try_builtin_sample(&workspace, &mut state, &args, &CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(result["status"], "limit-exceeded", "{result}");
+        let error = try_cached_sample(
+            &service,
+            &workspace,
+            &mut state,
+            "KirikiriKs",
+            "resources",
+            &["scene.ks".into()],
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("64 MiB"), "{error}");
+        assert!(!workspace.join("resources/scene.ks").exists());
     }
 
     #[tokio::test]

@@ -602,7 +602,7 @@ impl Application {
         let (source, _) = self
             .run_file_task(id, "build", move |progress| {
                 let baseline = baseline.native()?;
-                let inputs = crate::engine_tasks::adaptation_inputs(
+                let inputs = crate::engine_tasks::source_inputs(
                     &root,
                     &project.game_directory,
                     Some(baseline),

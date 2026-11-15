@@ -746,6 +746,20 @@ impl Application {
         let game = project.game_directory.clone();
         let resources = files.clone();
         let token = cancellation.clone();
+        let previous = self.cached_analysis(id).await?;
+        let legacy_source = previous
+            .as_ref()
+            .and_then(|cached| cached.native().ok())
+            .filter(|stored| stored.schema_version == 1)
+            .filter(|stored| {
+                inputs.is_some_and(|inputs| {
+                    inputs
+                        .files
+                        .values()
+                        .any(|path| path.starts_with(&stored.source_directory))
+                })
+            })
+            .map(|stored| stored.source_directory.clone());
         let inputs = inputs.cloned();
         let (source, hashes) = self
             .run_file_task(id, &operation, move |progress| {
@@ -882,10 +896,10 @@ impl Application {
         let coverage_pending =
             coverage == ExtractionCoverage::CheckIfSmall && count < SMALL_EXTRACTION_THRESHOLD;
         let stored = StoredAnalysis {
-            schema_version: 2,
+            schema_version: if legacy_source.is_some() { 1 } else { 2 },
             coverage_pending,
             format: adapter.id().into(),
-            source_directory: project.game_directory.clone(),
+            source_directory: legacy_source.unwrap_or_else(|| project.game_directory.clone()),
             resource_files: files,
             source_hashes: hashes,
             extraction,
@@ -1326,7 +1340,7 @@ impl Application {
             let (source, _) = self
                 .run_file_task(id, &operation, move |progress| {
                     let stored = baseline.native()?;
-                    let inputs = adaptation_inputs(
+                    let inputs = source_inputs(
                         &root,
                         &project.game_directory,
                         Some(stored),
@@ -1421,16 +1435,25 @@ impl Application {
                 .ok_or_else(|| CoreError::InvalidData("资源缺少哈希。".into()))?;
             hashes.insert(path.to_owned(), hash.to_owned());
         }
+        let inputs = AdaptationInputs {
+            files: hashes
+                .keys()
+                .map(|relative| Ok((relative.clone(), resolve_relative(&directory, relative)?)))
+                .collect::<Result<_, CoreError>>()?,
+            hashes,
+            ..Default::default()
+        };
+        let (source, hashes) = prepare_source(
+            &root,
+            &directory,
+            &inputs.hashes.keys().cloned().collect::<Vec<_>>(),
+            Some(&inputs),
+            cancellation,
+            None,
+        )?;
         Ok((
             adapter,
-            ReadOnlySource::open(
-                &directory,
-                &hashes
-                    .keys()
-                    .map(|relative| Ok((relative.clone(), resolve_relative(&directory, relative)?)))
-                    .collect::<Result<_, CoreError>>()?,
-                cancellation,
-            )?,
+            source,
             probe.required_files.clone(),
             hashes,
             Some(probe),
@@ -1489,14 +1512,6 @@ impl Application {
                 version: probe.adapter_version.clone(),
             }),
         };
-        for (path, expected) in &hashes {
-            if cancellation.is_cancelled() {
-                return Err(gamel10n_engines::EngineError::Cancelled.into());
-            }
-            if hash_file(&resolve_relative(source, path)?)? != *expected {
-                return Err(CoreError::InvalidData(format!("原始资源已变化：{path}")));
-            }
-        }
         let root = self.project_directory(id)?;
         fs::create_dir_all(root.join("patches"))?;
         let fingerprint = {
@@ -1560,7 +1575,7 @@ impl Application {
             .await;
         let service = self.engine_service();
         let built = service
-            .execute(&adapter, &request, cancellation)
+            .execute_with_hashes(&adapter, &request, Some(&hashes), None, cancellation)
             .await?
             .build
             .ok_or_else(|| CoreError::InvalidData("适配器未返回补丁文件清单。".into()))?;
@@ -1572,7 +1587,7 @@ impl Application {
         request.operation = "validate".into();
         built.set_output_context(&mut request);
         let validation = service
-            .execute(&adapter, &request, cancellation)
+            .execute_with_hashes(&adapter, &request, Some(&hashes), None, cancellation)
             .await?
             .validation
             .ok_or_else(|| CoreError::InvalidData("适配器未返回结构验证结果。".into()))?;
@@ -1779,8 +1794,7 @@ impl Application {
             .begin(id, "verify", "正在验证所选适配器发布包。")
             .await?;
         let result = async {
-            let (_, source_input, files, hashes, probe) =
-                self.build_source(id, &cancellation).await?;
+            let (_, source_input, files, _, probe) = self.build_source(id, &cancellation).await?;
             let source = source_input.directory();
             let manifest = PackageManifest::load(package)?;
             if probe
@@ -1796,13 +1810,6 @@ impl Application {
                 .cached_analysis(id)
                 .await?
                 .ok_or_else(|| CoreError::InvalidData("请先提取项目文本。".into()))?;
-            for (relative, expected) in &hashes {
-                if hash_file(&crate::patching::safe_path(source, relative)?)? != *expected {
-                    return Err(CoreError::InvalidData(format!(
-                        "原始资源已变化：{relative}"
-                    )));
-                }
-            }
             let root = self.project_directory(id)?.join("validation");
             fs::create_dir_all(&root)?;
             let output = tempfile::Builder::new()
@@ -1851,7 +1858,32 @@ impl Application {
 }
 
 /// Binds baseline text identities to their recorded bytes without changing any source files.
-pub(crate) fn adaptation_inputs(
+fn adaptation_inputs(
+    project: &Path,
+    game: &Path,
+    baseline: Option<&StoredAnalysis>,
+    cancellation: &CancellationToken,
+    progress: Option<FileProgress>,
+) -> Result<AdaptationInputs, CoreError> {
+    let inputs = source_inputs(project, game, baseline, cancellation, progress)?;
+    for (relative, expected) in baseline
+        .into_iter()
+        .flat_map(|baseline| &baseline.source_hashes)
+    {
+        if cancellation.is_cancelled() {
+            return Err(gamel10n_engines::EngineError::Cancelled.into());
+        }
+        if !hash_file(&inputs.file(game, relative)?)?.eq_ignore_ascii_case(expected) {
+            return Err(CoreError::InvalidData(format!(
+                "适配输入与已有提取资源的哈希不一致：{relative}"
+            )));
+        }
+    }
+    Ok(inputs)
+}
+
+/// Resolves baseline paths; callers validate their bytes before using them.
+pub(crate) fn source_inputs(
     project: &Path,
     game: &Path,
     baseline: Option<&StoredAnalysis>,
@@ -1922,7 +1954,7 @@ pub(crate) fn adaptation_inputs(
                 crate::patching::safe_path(&source, &relative)?
             };
             if let Some(progress) = &progress {
-                progress.file("正在校验已有提取资源", &path, &relative);
+                progress.file("正在查找已有提取资源", &path, &relative);
             }
             let path = match fs::metadata(&path) {
                 Ok(metadata) if metadata.is_file() => path,
@@ -1936,11 +1968,6 @@ pub(crate) fn adaptation_inputs(
                 }
                 Err(error) => return Err(error.into()),
             };
-            if !hash_file(&path)?.eq_ignore_ascii_case(hashes[&key]) {
-                return Err(CoreError::InvalidData(format!(
-                    "适配输入与已有提取资源的哈希不一致：{relative}"
-                )));
-            }
             inputs
                 .hashes
                 .insert(relative.clone(), hashes[&key].to_ascii_lowercase());
@@ -2332,6 +2359,122 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn repaired_legacy_extraction_keeps_its_source_and_translations_after_restart() {
+        let tools = crate::ToolPaths::development();
+        if !tools.python().is_file() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let game = root.path().join("game");
+        fs::create_dir(&game).unwrap();
+        fs::write(game.join("text.json"), br#"["changed game"]"#).unwrap();
+        let app = Application::open(root.path().join("data"), &tools)
+            .await
+            .unwrap();
+        let project = app.add_project(&game).await.unwrap();
+        let directory = app.project_directory(&project.id).unwrap();
+        let source = directory.join("sources/original");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("text.json"), br#"["one","two"]"#).unwrap();
+        let package = register_json_adapter(
+            &app,
+            "fixture",
+            include_str!("../../engines/tests/fixtures/json_adapter.py"),
+        );
+        let adapter = PackageManifest::load(&package)
+            .unwrap()
+            .handle(&package)
+            .unwrap();
+        let token = CancellationToken::new();
+        let service = app.engine_service();
+        let probe = service
+            .execute(&adapter, &AdapterRequest::new("probe", &source), &token)
+            .await
+            .unwrap()
+            .probe
+            .unwrap();
+        let mut extract = AdapterRequest::new("extract", &source);
+        extract.resource_files = Some(probe.required_files.clone());
+        let extraction = service
+            .execute(&adapter, &extract, &token)
+            .await
+            .unwrap()
+            .extraction
+            .unwrap();
+        app.commit_analysis(
+            &project.id,
+            StoredAnalysis {
+                schema_version: 1,
+                coverage_pending: false,
+                format: adapter.id().into(),
+                source_directory: source.clone(),
+                resource_files: probe.required_files.clone(),
+                source_hashes: BTreeMap::from([(
+                    "text.json".into(),
+                    hash_file(&source.join("text.json")).unwrap(),
+                )]),
+                extraction,
+                adapter: Some(adapter.clone()),
+                probe: Some(probe.clone()),
+            },
+        )
+        .await
+        .unwrap();
+        app.save_translation_edit(&project.id, "0", "译文".into(), true)
+            .await
+            .unwrap();
+        let baseline = app.cached_analysis(&project.id).await.unwrap().unwrap();
+        let inputs = adaptation_inputs(
+            &directory,
+            &game,
+            Some(baseline.native().unwrap()),
+            &token,
+            None,
+        )
+        .unwrap();
+        app.extract_adapter(
+            &project.id,
+            adapter,
+            probe,
+            &token,
+            ExtractionCoverage::Confirmed,
+            false,
+            None,
+            None,
+            Some(&inputs),
+        )
+        .await
+        .unwrap();
+        drop(app);
+
+        let reopened = Application::open(root.path().join("data"), &tools)
+            .await
+            .unwrap();
+        let stored = reopened
+            .cached_analysis(&project.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.native().unwrap().source_directory, source);
+        assert_eq!(
+            reopened.open_project(&project.id).await.unwrap().extra["analysis"]["sourceMode"],
+            "snapshot"
+        );
+        let patch = reopened
+            .generate_patch(&project.id, None, false)
+            .await
+            .unwrap();
+        let texts: Vec<String> =
+            read_json(&patch.join(PAYLOAD_DIRECTORY).join("text.json")).unwrap();
+        assert_eq!(texts, ["译文", "two"]);
+        assert_eq!(
+            fs::read(game.join("text.json")).unwrap(),
+            br#"["changed game"]"#
+        );
+        assert_eq!(fs::read_dir(directory.join("sources")).unwrap().count(), 1);
     }
 
     #[tokio::test]

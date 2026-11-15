@@ -606,16 +606,17 @@ impl PatchInstaller {
         let target = safe_path(&game, &relative)?;
         self.report_file("正在查找并校验原始资源", &target, &relative);
         let journal = self.load_journal(&game, false)?;
-        let current = hash_if_present(&target)?;
         let Some(entry) = journal
             .entries
             .iter()
             .find(|entry| same_relative(&entry.relative_path, &relative))
         else {
-            return current
-                .map(|_| target)
+            return target
+                .is_file()
+                .then_some(target)
                 .ok_or_else(|| invalid("所需游戏资源不存在。"));
         };
+        let current = hash_if_present(&target)?;
         if current.is_some() && same_hash(current.as_deref(), entry.original_sha256.as_deref()) {
             return Ok(target);
         }

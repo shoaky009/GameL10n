@@ -465,10 +465,13 @@ pub(super) fn file(
     state: &Session,
     relative: &str,
 ) -> Result<PathBuf, EngineError> {
-    let staged = resource_path(&workspace.join("resources"), relative)?;
+    let staged = resource_path(workspace, relative)?;
     if staged.is_file() {
         return Ok(staged);
     }
+    let Some(relative) = relative.strip_prefix("resources/") else {
+        return Ok(staged);
+    };
     let paths: BTreeMap<String, PathBuf> = serde_json::from_value(
         state
             .extra
@@ -520,22 +523,14 @@ pub(super) fn source(
     workspace: &Path,
     state: &Session,
     directory: &str,
-    selected: Option<&[String]>,
+    selected: &[String],
     token: &CancellationToken,
 ) -> Result<crate::ReadOnlySource, EngineError> {
     if directory != "resources" && !directory.starts_with("resources/") {
         let root = resolve_relative(workspace, directory)?;
-        let files = match selected {
-            Some(files) => files.to_vec(),
-            None => Inventory::scan(&root)?
-                .files
-                .into_iter()
-                .map(|file| file.path)
-                .collect(),
-        };
         return crate::ReadOnlySource::open(
             &root,
-            &files
+            &selected
                 .iter()
                 .map(|relative| Ok((relative.clone(), resolve_relative(&root, relative)?)))
                 .collect::<Result<_, EngineError>>()?,
@@ -545,26 +540,16 @@ pub(super) fn source(
     let prefix = directory.strip_prefix("resources/").unwrap_or("");
     let inputs = inputs(workspace, state)?;
     let mut paths = BTreeMap::new();
-    if let Some(selected) = selected {
-        for relative in selected {
-            let logical = if prefix.is_empty() {
-                relative.clone()
-            } else {
-                format!("{prefix}/{relative}")
-            };
-            paths.insert(
-                relative.clone(),
-                inputs.file(&workspace.join("resources"), &logical)?,
-            );
-        }
-    } else {
-        for (logical, actual) in inputs.files {
-            if prefix.is_empty() {
-                paths.insert(logical, actual);
-            } else if let Some(relative) = logical.strip_prefix(&format!("{prefix}/")) {
-                paths.insert(relative.to_string(), actual);
-            }
-        }
+    for relative in selected {
+        let logical = if prefix.is_empty() {
+            relative.clone()
+        } else {
+            format!("{prefix}/{relative}")
+        };
+        paths.insert(
+            relative.clone(),
+            inputs.file(&workspace.join("resources"), &logical)?,
+        );
     }
     let root = state
         .extra
@@ -742,7 +727,8 @@ mod tests {
         );
         assert!(!workspace.join("resources/extra.bin").exists());
         assert_eq!(
-            fs::read(file(&workspace, &state, "keep.bin").unwrap()).expect("selected original"),
+            fs::read(file(&workspace, &state, "resources/keep.bin").unwrap())
+                .expect("selected original"),
             b"keep.bin"
         );
         assert!(request.game_directory.join("extra.bin").is_file());
@@ -778,7 +764,10 @@ mod tests {
         .expect("stage read-only source");
         let staged = workspace.join("resources/script.bin");
         assert!(!staged.exists());
-        assert_eq!(file(&workspace, &state, "script.bin").unwrap(), original);
+        assert_eq!(
+            file(&workspace, &state, "resources/script.bin").unwrap(),
+            original
+        );
         fs::write(&staged, b"legacy copy").expect("legacy copy");
         fs::set_permissions(&staged, read_only.clone()).expect("old read-only copy");
         request
@@ -793,7 +782,10 @@ mod tests {
             reconcile(&request, &workspace, &mut state, &token, None).expect("rebind copy");
         assert_eq!(changes.rebound, ["script.bin"]);
         assert!(!staged.exists());
-        assert_eq!(file(&workspace, &state, "script.bin").unwrap(), revised);
+        assert_eq!(
+            file(&workspace, &state, "resources/script.bin").unwrap(),
+            revised
+        );
         stage(&request, &workspace, &mut state, &[], true, &token, None).expect("remove old copy");
         assert!(!staged.exists());
         for path in [&original, &revised] {
