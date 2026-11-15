@@ -84,6 +84,10 @@ fn render_desktop_preview_fixtures() {
     app.set_recognition_ready(true);
     app.set_recognition_engine("KiriKiri".into());
     app.set_recognition_adapter("engine.kirikiri · 版本 1.2.0".into());
+    app.set_recognition_warnings(
+        "已覆盖脚本中的角色名、对白和选项；图片文字与系统菜单仍需确认。\n中文显示使用随补丁安装的字体，需在游戏内检查换行、存档和读档效果。".into(),
+    );
+    app.set_review_summary("已整理脚本文本提取、占位符保护及原文字节回填的验证经验。".into());
     app.set_status("文本可试译".into());
     app.set_resources(ModelRc::new(VecModel::from(vec![
         "全部资源".into(),
@@ -273,10 +277,8 @@ fn render_desktop_preview_fixtures() {
         });
         app.set_progress(0.5);
         capture(&format!("workbench-running{suffix}"), 1120, 720);
-        click(1052.0, 617.0);
+        click(1052.0, 492.0);
         capture(&format!("workbench-task-details{suffix}"), 1120, 720);
-        click(296.0, 680.0);
-        capture(&format!("workbench-running-expanded{suffix}"), 1120, 720);
         ui.window()
             .dispatch_event(slint::platform::WindowEvent::PointerScrolled {
                 position: slint::LogicalPosition::new(900.0, 70.0),
@@ -284,11 +286,28 @@ fn render_desktop_preview_fixtures() {
                 delta_y: -1000.0,
             });
         capture(
-            &format!("workbench-running-expanded-scrolled{suffix}"),
+            &format!("workbench-task-details-scrolled{suffix}"),
             1120,
             720,
         );
-        click(296.0, 528.0);
+        click(1052.0, 370.0);
+        app.set_tab(0);
+        app.set_recognition_running(true);
+        app.set_adaptation_running(true);
+        app.set_task_operation("adapt".into());
+        app.set_status("智能适配中".into());
+        app.set_activity("".into());
+        app.set_task_message("正在检查脚本结构与原文字节回填。".into());
+        app.set_adaptation_progress("正在检查脚本结构与原文字节回填。".into());
+        app.set_task_api_summary("分析 API：本地测试配置".into());
+        capture(&format!("recognition-running{suffix}"), 1120, 720);
+        app.set_recognition_running(false);
+        app.set_adaptation_running(false);
+        app.set_task_operation("review".into());
+        app.set_status("正在总结经验".into());
+        app.set_activity("正在整理同类引擎的验证经验。".into());
+        app.set_task_message("正在整理同类引擎的验证经验。".into());
+        capture(&format!("recognition-reviewing{suffix}"), 1120, 720);
         app.set_busy(false);
         app.set_activity("".into());
         app.set_page(1);
@@ -298,13 +317,20 @@ fn render_desktop_preview_fixtures() {
                 .into(),
         );
         capture(&format!("global-failure{suffix}"), 1120, 720);
-        app.set_recognition_failure_message("".into());
         app.set_page(0);
         app.set_tab(0);
+        capture(&format!("recognition-failed{suffix}"), 1120, 720);
+        app.set_recognition_failure_message("".into());
         app.set_recognition_ready(false);
         app.set_adaptation_pending_coverage("图片中的文字和运行时生成的菜单尚未覆盖。".into());
         app.set_adaptation_runtime_checks("需要在游戏内检查对话换行与字体显示。".into());
         capture(&format!("recognition-pending{suffix}"), 1120, 720);
+        let project_name = app.get_project_name();
+        app.set_project_name(
+            "星海旅人 · 穿越星空与海洋的漫长旅途 · 完整汉化项目与扩展章节合集".into(),
+        );
+        capture(&format!("recognition-long-title{suffix}"), 1120, 720);
+        app.set_project_name(project_name);
         app.set_adaptation_pending_coverage("".into());
         app.set_adaptation_runtime_checks("".into());
         app.set_recognition_ready(true);

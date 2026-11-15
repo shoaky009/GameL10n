@@ -1,5 +1,5 @@
 import { Button, LineEdit, TextEdit, ScrollView, ProgressIndicator } from "std-widgets.slint";
-import { App, Theme, Label, Caption, TokenCaption, Heading, SectionHeading, Divider, ReportText, Link, Badge } from "state.slint";
+import { App, Theme, Label, Caption, TokenCaption, Heading, SectionHeading, Divider, ReportText, Link } from "state.slint";
 
 export component TaskFeedback inherits Rectangle {
     property <bool> details;
@@ -103,14 +103,6 @@ component RunningRecognition inherits ScrollView {
     private property <string> project-key: App.project-id;
     changed project-key => { self.content-y = 0px; }
     VerticalLayout { padding: 8px; spacing: 8px; alignment: start;
-        HorizontalLayout { spacing: 16px;
-            Heading { text: App.status; font-size: 18px; }
-            Rectangle { horizontal-stretch: 1; }
-            if App.task-usage.text != "": TokenCaption {
-                value: App.task-usage; color: Theme.secondary;
-                max-width: root.width * 0.6; vertical-alignment: center;
-            }
-        }
         if App.task-api != "": ResultLine { title: "使用 API"; value: App.task-api; }
         ProgressIndicator { height: 3px; indeterminate: true; }
         ResultLine {
@@ -136,17 +128,8 @@ component CompletedRecognition inherits ScrollView {
     changed project-key => { self.content-y = 0px; }
     VerticalLayout { padding: 8px; spacing: 8px; alignment: start;
         if App.recognition-failure-message != "": RecognitionFailure {}
-        HorizontalLayout { spacing: 16px;
-            if App.source-materials-cleared || App.recognition-failure-message != "" || App.adaptation-result-title == "上次适配结果": Heading {
-                text: App.source-materials-cleared ? "工作文件已清理，成果已保留"
-                    : "已有提取结果仍可用";
-                font-size: 18px;
-            }
-            Rectangle { horizontal-stretch: 1; }
-            if App.adaptation-usage.text != "": TokenCaption {
-                value: App.adaptation-usage; color: Theme.secondary;
-                max-width: root.width * 0.55; vertical-alignment: center;
-            }
+        if App.source-materials-cleared || App.recognition-failure-message != "" || App.adaptation-result-title == "上次适配结果": Caption {
+            text: App.source-materials-cleared ? "工作文件已清理，成果已保留" : "已有提取结果仍可用";
         }
         RecognitionSummary {}
         Divider {}
@@ -181,11 +164,40 @@ component CompletedRecognition inherits ScrollView {
 
 export component Recognition inherits VerticalLayout {
     spacing: 12px;
-    HorizontalLayout { spacing: 8px;
-        Badge { text: App.recognition-running ? "识别中" : App.recognition-failure-message != "" ? "识别未完成" : App.recognition-ready ? App.adaptation-pending-coverage != "" ? "部分文字可试译" : "文本可试译" : App.recognition != "" ? "覆盖待确认" : "等待识别"; tone: App.recognition-running ? 1 : App.recognition-failure-message != "" ? 5 : App.recognition-ready ? App.adaptation-pending-coverage != "" ? 4 : 3 : App.recognition != "" ? 4 : 0; }
-        Button { text: App.recognition-ready ? "重新识别…" : "识别与适配"; primary: !App.recognition-ready; enabled: !App.busy; clicked => { App.action("adapt-dialog", ""); } }
-        Button { text: App.recognition-ready ? "查看文本并试译" : "查看保留文本"; primary: App.recognition-ready; enabled: App.recognition != "" && !App.busy; clicked => { App.action("tab", "1"); } }
+    HorizontalLayout { spacing: 20px;
+        HorizontalLayout { spacing: 8px; horizontal-stretch: 0;
+            Button { text: App.recognition-ready ? "重新识别…" : "识别与适配"; primary: !App.recognition-ready; enabled: !App.busy; clicked => { App.action("adapt-dialog", ""); } }
+            Button { text: App.recognition-ready ? "查看文本并试译" : "查看保留文本"; primary: App.recognition-ready; enabled: App.recognition != "" && !App.busy; clicked => { App.action("tab", "1"); } }
+        }
+        Rectangle { width: 1px;
+            Rectangle { width: 1px; height: 20px; y: (parent.height - self.height) / 2; background: Theme.line; }
+        }
+        HorizontalLayout { spacing: 12px; horizontal-stretch: 0;
+            Button { text: "总结经验"; enabled: !App.busy; clicked => { App.action("review", ""); } }
+            VerticalLayout { alignment: center; horizontal-stretch: 0;
+                HorizontalLayout { spacing: 12px;
+                    if App.review-summary != "": Link { text: "查看总结"; clicked => { App.modal = "engine-review"; } }
+                    if App.recognition-engine != "" || App.review-summary != "": Link { text: "同类引擎经验"; clicked => { App.action("open", "knowledge"); } }
+                }
+            }
+        }
         Rectangle { horizontal-stretch: 1; }
+    }
+    HorizontalLayout { padding-left: 8px; padding-right: 8px; spacing: 10px;
+        Rectangle { width: 8px;
+            Rectangle { width: 8px; height: 8px; y: (parent.height - self.height) / 2; border-radius: 4px;
+                background: App.recognition-running ? Theme.automatic : App.recognition-failure-message != "" ? Theme.error : App.recognition-ready ? App.adaptation-pending-coverage != "" ? Theme.pending : Theme.success : App.recognition != "" ? Theme.pending : Theme.muted;
+            }
+        }
+        Heading {
+            text: App.recognition-running ? App.status : App.recognition-failure-message != "" ? "识别未完成" : App.recognition-ready ? App.adaptation-pending-coverage != "" ? "部分文字可试译" : "文本可试译" : App.recognition != "" ? "覆盖待确认" : "等待识别";
+            font-size: 18px;
+        }
+        Rectangle { horizontal-stretch: 1; }
+        if App.recognition-running ? App.task-usage.text != "" : App.adaptation-usage.text != "": TokenCaption {
+            value: App.recognition-running ? App.task-usage : App.adaptation-usage; color: Theme.secondary;
+            max-width: root.width * 0.55; vertical-alignment: center;
+        }
     }
     if App.recognition-ready && !App.recognition-running: CompletedRecognition {}
     if App.recognition-running: RunningRecognition {}
@@ -200,10 +212,9 @@ export component Recognition inherits VerticalLayout {
         VerticalLayout { padding: 12px; spacing: 16px; alignment: start;
             if App.recognition-failure-message != "": RecognitionFailure {}
             VerticalLayout { spacing: 8px;
-                Heading { text: App.adaptation-result-title != "" ? App.adaptation-result-title : App.recognition != "" ? "覆盖待确认" : "等待识别"; }
+                if App.adaptation-result-title == "上次适配结果": Caption { text: App.adaptation-result-title; }
                 if App.recognition != "": RecognitionSummary {}
                 if App.recognition == "" && App.adaptation-summary == "" && !App.adaptation-running: Caption { text: "识别时先尝试已有适配器，未匹配时自动进入智能适配。智能适配使用项目或全局设置中的分析 API。"; }
-                if !App.adaptation-running && App.adaptation-usage.text != "": TokenCaption { value: App.adaptation-usage; }
             }
             AdaptationReport {}
             if !App.adaptation-running && App.adaptation-notes != "": VerticalLayout { spacing: 8px;
@@ -213,14 +224,6 @@ export component Recognition inherits VerticalLayout {
             if App.recognition-ready: Caption { text: "可翻译范围以提取结果为准。先选择容易在游戏中找到的文本试译，再检查字体、换行和显示效果。"; }
         }
     }
-    Divider {}
-    HorizontalLayout { spacing: 12px;
-        if App.recognition-engine != "" || App.review-summary != "": Link { text: "同类引擎经验"; clicked => { App.action("open", "knowledge"); } }
-        if App.review-summary != "": Link { text: "查看总结"; clicked => { App.modal = "engine-review"; } }
-        Rectangle { horizontal-stretch: 1; }
-        Button { text: "总结同类引擎经验"; enabled: !App.busy; clicked => { App.action("review", ""); } }
-    }
-
 }
 
 export component PatchPage inherits ScrollView {

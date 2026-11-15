@@ -1,5 +1,5 @@
 import { Button, LineEdit, CheckBox, SpinBox, ScrollView, ListView } from "std-widgets.slint";
-import { App, Theme, Label, Caption, Heading, SectionHeading, ReportText, Divider, ProjectRow, TextRow, NamedRow, EngineRow, TermRow, TokenDisplay, CleanupRow, NavigationButton } from "state.slint";
+import { App, Theme, Label, Caption, Heading, SectionHeading, ReportText, Divider, ProjectRow, TextRow, NamedRow, EngineRow, TermRow, TokenDisplay, CleanupRow, NavigationButton, Link } from "state.slint";
 import { ProjectSettings, GlobalApis } from "settings.slint";
 import { Workbench } from "workbench.slint";
 import { Recognition, PatchPage, TaskFeedback } from "project.slint";
@@ -13,7 +13,6 @@ export component MainWindow inherits Window {
     title: "GameL10n"; preferred-width: 1420px; preferred-height: 900px; min-width: 1120px; min-height: 720px;
     icon: @image-url("../assets/GameL10n.png");
     default-font-family: "Microsoft YaHei UI"; default-font-size: 14px; background: Theme.background;
-    property <bool> logs-expanded;
     HorizontalLayout { padding: 16px; spacing: 20px;
         VerticalLayout { width: 220px; spacing: 8px;
             HorizontalLayout { Heading { text: "游戏项目"; font-size: 18px; } Rectangle { horizontal-stretch: 1; } }
@@ -56,10 +55,15 @@ export component MainWindow inherits Window {
                 project-content := VerticalLayout { width: project-area.visible-width; height: project-area.content-height; spacing: 12px;
                 if App.project-id == "": Heading { text: "选择或添加游戏"; font-size: 24px; }
                 if App.project-id != "": VerticalLayout { spacing: 12px;
-                    HorizontalLayout { spacing: 12px;
-                        Heading { text: App.project-name; font-size: 24px; wrap: no-wrap; overflow: elide; horizontal-stretch: 1; }
-                        Button { text: "项目文件"; clicked => { App.action("open", "project"); } }
-                        Button { text: "游戏目录"; clicked => { App.action("open", "game"); } }
+                    HorizontalLayout { spacing: 16px;
+                        Heading { text: App.project-name; font-size: 24px; wrap: no-wrap; overflow: elide; min-width: 0px; max-width: parent.width - 200px; horizontal-stretch: 0; }
+                        VerticalLayout { alignment: center; horizontal-stretch: 0;
+                            HorizontalLayout { spacing: 16px;
+                                Link { text: "项目文件"; font-size: 13px; clicked => { App.action("open", "project"); } }
+                                Link { text: "游戏目录"; font-size: 13px; clicked => { App.action("open", "game"); } }
+                            }
+                        }
+                        Rectangle { horizontal-stretch: 1; }
                     }
                     ReportText { text: App.project-path; font-size: 12px; height: 20px; wrap: no-wrap; }
                     HorizontalLayout { spacing: 4px;
@@ -94,13 +98,14 @@ export component MainWindow inherits Window {
             if App.page == 4: About {}
             if App.busy || App.activity != "" || App.error != "" || App.recognition-failure-message != "": TaskFeedback {}
             if App.page == 0: VerticalLayout { spacing: 8px; vertical-stretch: 0;
-                HorizontalLayout { spacing: 8px;
-                    Button { text: root.logs-expanded ? "收起日志" : "展开日志"; clicked => { root.logs-expanded = !root.logs-expanded; } }
+                Divider {}
+                HorizontalLayout { spacing: 16px;
+                    Caption { text: "日志"; }
+                    Link { text: "回到最新"; font-size: 13px; enabled: !logs.follow-tail; clicked => { logs.follow-tail = true; logs.scroll-to-end(); } }
+                    Link { text: "打开日志目录"; font-size: 13px; enabled: App.project-id != ""; clicked => { App.action("open", "logs"); } }
                     Rectangle { horizontal-stretch: 1; }
-                    if root.logs-expanded: Button { text: "回到最新"; enabled: !logs.follow-tail; clicked => { logs.follow-tail = true; logs.scroll-to-end(); } }
-                    Button { text: "打开日志目录"; enabled: App.project-id != ""; clicked => { App.action("open", "logs"); } }
                 }
-                Rectangle { height: root.logs-expanded ? 144px : 0px; visible: root.logs-expanded; background: Theme.surface; border-color: Theme.line; border-width: 1px;
+                Rectangle { height: 128px; background: Theme.surface; border-color: Theme.line; border-width: 1px;
                     logs := ScrollView {
                         property <bool> follow-tail: true;
                         property <string> project-key: App.project-id;
