@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [string]$OutputDirectory,
-    [ValidateSet('Debug', 'Release')][string]$Configuration = 'Release'
+    [ValidateSet('Debug', 'Release')][string]$Configuration = 'Release',
+    [string]$Dotnet
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
@@ -26,13 +27,8 @@ for ($ancestor = $OutputDirectory; $ancestor; $ancestor = [IO.Path]::GetDirector
         throw "Output directory must not use a link or junction: $ancestor"
     }
 }
-& (Join-Path $PSScriptRoot 'prepare-runtime.ps1')
-& (Join-Path $PSScriptRoot 'build-game-check.ps1') -Configuration $Configuration
+& (Join-Path $PSScriptRoot 'prepare-tools.ps1') -Configuration $Configuration -Dotnet $Dotnet
 $runtime = Join-Path $repo 'target/runtime'
-$native = Join-Path $runtime 'vntextpatch/GameL10n.VnTextPatch.exe'
-$python = Join-Path $runtime 'python/python.exe'
-if (-not (Test-Path -LiteralPath $native -PathType Leaf)) { throw 'Build the native parser with scripts/build-vntextpatch.ps1 first.' }
-if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { throw 'Run scripts/prepare-python.ps1 first.' }
 $runtimeFiles = @(
     foreach ($name in @('GameL10n.VnTextPatch.exe', 'capstone.dll', 'sources.zip', 'Capstone.LICENSE.TXT', 'VNTextPatch.LICENSE', 'VNTextPatch.NOTICE.md')) {
         Get-Item -LiteralPath (Join-Path $runtime "vntextpatch/$name")
