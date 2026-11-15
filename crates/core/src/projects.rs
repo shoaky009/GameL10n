@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use gamel10n_translation::files::{hash_text, read_json, write_json};
+use gamel10n_translation::files::{FileError, hash_text, read_json, write_json};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
@@ -229,36 +229,39 @@ impl ProjectStore {
     pub async fn remove(&self, id: &str, delete_data: bool) -> Result<(), CoreError> {
         self.ensure_writable().await?;
         let directory = self.directory(id)?;
-        if !delete_data && directory.is_dir() {
-            let mut project = self.get(id).await?;
-            project.is_removed = true;
-            return self.save(&project).await;
-        }
-        let project = if directory.is_dir() {
-            let project = self.get(id).await?;
-            if paths_overlap(&directory, &project.game_directory) {
+        let index = self.index.lock().await;
+        if delete_data {
+            if index.projects.iter().any(|project| {
+                project.id == id && paths_overlap(&directory, &project.game_directory)
+            }) {
                 return Err(CoreError::InvalidData(
                     "项目目录与游戏目录重叠，不能删除；可仅移除记录。".into(),
                 ));
             }
             crate::application::resolve_relative(&self.root, &format!("games/{id}"))?;
-            Some(project)
-        } else {
-            None
-        };
-        {
-            let _index = self.index.lock().await;
-            let root = self.root.clone();
-            let pending_id = id.to_owned();
-            tokio::task::spawn_blocking(move || mark_index_pending(&root, &pending_id)).await??;
         }
-        if let Some(saved) = project {
-            tokio::task::spawn_blocking(move || -> Result<(), CoreError> {
-                if let Err(error) = remove_project_directory(&directory) {
-                    write_json(&directory.join("game.json"), &saved)?;
-                    return Err(error.into());
-                }
-                Ok(())
+        let root = self.root.clone();
+        let pending_id = id.to_owned();
+        let metadata_path = directory.join("game.json");
+        tokio::task::spawn_blocking(move || -> Result<(), CoreError> {
+            if delete_data {
+                mark_index_pending(&root, &pending_id)?;
+            } else if let Ok(Value::Object(mut metadata)) = read_json(&metadata_path) {
+                // Mark retained metadata for index reconstruction when possible. Removing a list
+                // entry does not require its project files to be readable or writable.
+                mark_index_pending(&root, &pending_id)?;
+                metadata.insert("isRemoved".into(), Value::Bool(true));
+                let _ = write_json(&metadata_path, &metadata);
+            }
+            Ok(())
+        })
+        .await??;
+        drop(index);
+        if delete_data {
+            tokio::task::spawn_blocking(move || match fs::remove_dir_all(directory) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error),
             })
             .await??;
         }
@@ -273,16 +276,35 @@ impl ProjectStore {
 
     pub async fn get(&self, id: &str) -> Result<GameProject, CoreError> {
         let path = self.directory(id)?.join("game.json");
-        if !path.is_file() {
-            return Err(CoreError::ProjectMissing(id.into()));
+        match tokio::task::spawn_blocking(move || read_json::<GameProject>(&path)).await? {
+            Ok(project) => {
+                validate_project(&project, id)?;
+                Ok(project)
+            }
+            Err(FileError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
+                let index = self.index.lock().await;
+                let summary = index
+                    .projects
+                    .iter()
+                    .find(|project| project.id == id)
+                    .ok_or_else(|| CoreError::ProjectMissing(id.into()))?;
+                let mut extra = summary.extra.clone();
+                let settings = ["analysisProfileId", "translationProfileIds"]
+                    .into_iter()
+                    .filter_map(|key| extra.remove(key).map(|value| (key.into(), value)))
+                    .collect();
+                Ok(GameProject {
+                    schema_version: 2,
+                    id: summary.id.clone(),
+                    name: summary.name.clone(),
+                    game_directory: summary.game_directory.clone(),
+                    settings: Value::Object(settings),
+                    is_removed: false,
+                    extra,
+                })
+            }
+            Err(error) => Err(error.into()),
         }
-        let expected_id = id.to_owned();
-        tokio::task::spawn_blocking(move || {
-            let project = read_json(&path)?;
-            validate_project(&project, &expected_id)?;
-            Ok(project)
-        })
-        .await?
     }
 
     pub async fn add(&self, directory: &Path) -> Result<GameProject, CoreError> {
@@ -299,7 +321,9 @@ impl ProjectStore {
             .iter()
             .find(|project| same_path(&project.game_directory, &directory))
         {
-            return self.get(&existing.id).await;
+            let id = existing.id.clone();
+            drop(index);
+            return self.get(&id).await;
         }
         let id = project_id(&directory)?;
         let game_path = self.directory(&id)?.join("game.json");
@@ -352,7 +376,7 @@ fn load_index(root: &Path) -> Result<ProjectIndex, CoreError> {
                     continue;
                 }
                 let path = entry.path().join("game.json");
-                if !path.exists() && pending.contains(&name) {
+                if !path.is_file() {
                     continue;
                 }
                 let project: GameProject = read_json(&path)?;
@@ -422,23 +446,6 @@ fn persist_index(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error.into()),
     }
-}
-
-fn remove_project_directory(directory: &Path) -> std::io::Result<()> {
-    // Keep the metadata available for retry/recovery until the material deletion succeeds.
-    for entry in fs::read_dir(directory)? {
-        let entry = entry?;
-        if entry.file_name() == "game.json" {
-            continue;
-        }
-        if entry.file_type()?.is_dir() {
-            fs::remove_dir_all(entry.path())?;
-        } else {
-            fs::remove_file(entry.path())?;
-        }
-    }
-    fs::remove_file(directory.join("game.json"))?;
-    fs::remove_dir(directory)
 }
 
 pub(crate) fn paths_overlap(left: &Path, right: &Path) -> bool {
@@ -537,6 +544,21 @@ pub fn default_data_directory() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn rebuilding_an_index_skips_directories_without_project_metadata() {
+        let temporary = tempfile::tempdir().unwrap();
+        let data = temporary.path().join("data");
+        let game = temporary.path().join("game");
+        fs::create_dir(&game).unwrap();
+        let store = ProjectStore::open(data.clone()).await.unwrap();
+        let project = store.add(&game).await.unwrap();
+        fs::create_dir(data.join("games/000000000000000000000001")).unwrap();
+        fs::remove_file(data.join("games/index.json")).unwrap();
+        drop(store);
+        let store = ProjectStore::open(data).await.unwrap();
+        assert_eq!(store.list("").await[0].id, project.id);
+    }
 
     #[tokio::test]
     async fn index_commit_does_not_clear_another_projects_pending_deletion() {

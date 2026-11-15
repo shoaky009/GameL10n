@@ -62,6 +62,41 @@ async fn recognition_reports_candidates_and_stops_when_a_required_tool_is_missin
 }
 
 #[tokio::test]
+async fn recognition_recreates_missing_project_files_before_scanning() {
+    for missing_directory in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let game = root.path().join("game");
+        fs::create_dir(&game).unwrap();
+        fs::write(game.join("script.rpy"), "label start:\n    \"Hello\"\n").unwrap();
+        let app = Application::open(
+            root.path().join("data"),
+            &ToolPaths::new(root.path().join("missing-tools")),
+        )
+        .await
+        .unwrap();
+        let project = app.add_project(&game).await.unwrap();
+        let directory = app.project_directory(&project.id).unwrap();
+        if missing_directory {
+            fs::remove_dir_all(&directory).unwrap();
+        } else {
+            fs::remove_file(directory.join("game.json")).unwrap();
+        }
+        assert!(matches!(
+            app.recognize(&project.id).await.unwrap_err(),
+            gamel10n_core::CoreError::Engine(gamel10n_engines::EngineError::ToolMissing(_))
+        ));
+        assert!(
+            app.log_tail(&project.id)
+                .await
+                .unwrap()
+                .contains("正在检查 Renpy")
+        );
+        assert!(directory.join("game.json").is_file());
+        assert_eq!(app.open_project(&project.id).await.unwrap().id, project.id);
+    }
+}
+
+#[tokio::test]
 async fn cancelled_recognition_does_not_start_intelligent_adaptation() {
     let root = tempfile::tempdir().unwrap();
     let game = root.path().join("game");

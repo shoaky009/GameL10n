@@ -694,21 +694,17 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                     root.unwrap_or_else(|| host.data_directory().into())
                         .join("logs"),
                 ),
-                "patch" => host
-                    .latest_patch(&input.project_id)
-                    .await?
-                    .map(|p| {
-                        gamel10n_core::patching::read_manifest(&p.patch_directory)?;
-                        Ok::<_, CoreError>(
-                            p.patch_directory
-                                .join(gamel10n_core::patching::PAYLOAD_DIRECTORY),
-                        )
-                    })
-                    .transpose()?,
+                "patch" => host.latest_patch(&input.project_id).await?.map(|p| {
+                    p.patch_directory
+                        .join(gamel10n_core::patching::PAYLOAD_DIRECTORY)
+                }),
                 "data" => Some(host.data_directory().into()),
                 _ => None,
             }
             .ok_or_else(|| CoreError::InvalidData("对应目录尚不存在。".into()))?;
+            if matches!(input.argument.as_str(), "project" | "logs" | "data") {
+                std::fs::create_dir_all(&path)?;
+            }
             crate::open_path(path)?;
         }
         _ => return Ok(false),

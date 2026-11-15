@@ -176,7 +176,7 @@ impl PatchInstaller {
     }
 
     pub fn read_journal(&self, game_directory: &Path) -> Result<InstallationJournal, CoreError> {
-        let game = directory_root(game_directory)?;
+        let game = std::path::absolute(game_directory)?;
         self.load_journal(&game, false)
     }
 
@@ -1747,6 +1747,26 @@ mod tests {
                 )
                 .unwrap();
         }
+    }
+
+    #[test]
+    fn reading_installation_records_does_not_require_the_game_directory() {
+        let fixture = Fixture::new();
+        fs::remove_dir(&fixture.game).unwrap();
+        assert!(
+            fixture
+                .installer
+                .read_journal(&fixture.game)
+                .unwrap()
+                .entries
+                .is_empty()
+        );
+        let entry = fixture.entry();
+        fixture.save_entry(entry.clone());
+        let saved = fixture.installer.read_journal(&fixture.game).unwrap();
+        assert_eq!(saved.entries[0].relative_path, entry.relative_path);
+        assert_eq!(saved.entries[0].original_sha256, entry.original_sha256);
+        assert!(!fixture.game.exists());
     }
 
     #[test]

@@ -21,6 +21,134 @@ async fn opening_a_project_does_not_require_tools_or_start_recognition() {
 }
 
 #[tokio::test]
+async fn indexed_projects_remain_usable_without_their_metadata() {
+    for missing_directory in [false, true] {
+        let temporary = tempfile::tempdir().unwrap();
+        let game = temporary.path().join("game");
+        fs::create_dir(&game).unwrap();
+        let data = temporary.path().join("data");
+        let app = Application::open(data.clone(), &ToolPaths::new("missing"))
+            .await
+            .unwrap();
+        let project = app.add_project(&game).await.unwrap();
+        let settings =
+            json!({"analysisProfileId":"analysis", "translationProfileIds":["translation"]});
+        app.save_project_settings(&project.id, settings.clone())
+            .await
+            .unwrap();
+        let directory = app.project_directory(&project.id).unwrap();
+        if missing_directory {
+            fs::remove_dir_all(&directory).unwrap();
+        } else {
+            fs::remove_file(directory.join("game.json")).unwrap();
+        }
+        drop(app);
+        let app = Application::open(data, &ToolPaths::new("missing"))
+            .await
+            .unwrap();
+        let opened = app.project_snapshot(&project.id).await.unwrap().project;
+        assert_eq!(opened.id, project.id);
+        assert_eq!(opened.game_directory, game);
+        assert_eq!(opened.settings, settings);
+        assert!(!directory.join("game.json").exists());
+        if missing_directory {
+            assert!(!directory.exists());
+        }
+        let added = tokio::time::timeout(std::time::Duration::from_secs(2), app.add_project(&game))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(added.id, project.id);
+        assert_eq!(app.list_projects("").await.len(), 1);
+        app.save_project_settings(&project.id, json!({"targetLanguage":"zh-CN"}))
+            .await
+            .unwrap();
+        let saved: GameProject = read_json(&directory.join("game.json")).unwrap();
+        assert_eq!(saved.settings["analysisProfileId"], "analysis");
+        assert_eq!(saved.settings["targetLanguage"], "zh-CN");
+    }
+}
+
+#[tokio::test]
+async fn removal_does_not_require_complete_project_files() {
+    for delete_data in [false, true] {
+        for missing in ["directory", "metadata", "invalid metadata"] {
+            let temporary = tempfile::tempdir().unwrap();
+            let game = temporary.path().join("game");
+            fs::create_dir(&game).unwrap();
+            fs::write(game.join("original.bin"), "original").unwrap();
+            let data = temporary.path().join("data");
+            let app = Application::open(data.clone(), &ToolPaths::new("missing"))
+                .await
+                .unwrap();
+            let project = app.add_project(&game).await.unwrap();
+            let directory = app.project_directory(&project.id).unwrap();
+            fs::write(
+                directory.join("translations.jsonl"),
+                "retained translations",
+            )
+            .unwrap();
+            match missing {
+                "directory" => fs::remove_dir_all(&directory).unwrap(),
+                "metadata" => fs::remove_file(directory.join("game.json")).unwrap(),
+                _ => fs::write(directory.join("game.json"), "invalid json").unwrap(),
+            }
+            for _ in 0..2 {
+                app.remove_projects(std::slice::from_ref(&project.id), delete_data)
+                    .await
+                    .unwrap();
+                assert!(app.list_projects("").await.is_empty());
+            }
+            assert_eq!(directory.exists(), !delete_data && missing != "directory");
+            if directory.exists() {
+                assert_eq!(
+                    fs::read_to_string(directory.join("translations.jsonl")).unwrap(),
+                    "retained translations"
+                );
+            }
+            assert_eq!(
+                fs::read_to_string(game.join("original.bin")).unwrap(),
+                "original"
+            );
+            drop(app);
+            let reopened = Application::open(data, &ToolPaths::new("missing"))
+                .await
+                .unwrap();
+            assert!(reopened.list_projects("").await.is_empty());
+        }
+    }
+}
+
+#[tokio::test]
+#[cfg(windows)]
+async fn index_removal_does_not_require_writable_project_metadata() {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let temporary = tempfile::tempdir().unwrap();
+    let game = temporary.path().join("game");
+    fs::create_dir(&game).unwrap();
+    let app = Application::open(temporary.path().join("data"), &ToolPaths::new("missing"))
+        .await
+        .unwrap();
+    let project = app.add_project(&game).await.unwrap();
+    let path = app
+        .project_directory(&project.id)
+        .unwrap()
+        .join("game.json");
+    let held = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(1)
+        .open(&path)
+        .unwrap();
+    app.remove_projects(std::slice::from_ref(&project.id), false)
+        .await
+        .unwrap();
+    assert!(app.list_projects("").await.is_empty());
+    assert!(path.is_file());
+    drop(held);
+}
+
+#[tokio::test]
 async fn project_list_sorts_saved_summaries_without_opening_project_directories() {
     let temporary = tempfile::tempdir().unwrap();
     let projects = [
