@@ -1172,6 +1172,29 @@ pub fn build_manifest(
     Ok(manifest)
 }
 
+/// Removes unchanged source copies from the payload and its install list.
+pub(crate) fn remove_unchanged_files(
+    patch_directory: &Path,
+    manifest: &mut PatchManifest,
+) -> Result<(), CoreError> {
+    let payload = directory_root(&safe_path(patch_directory, PAYLOAD_DIRECTORY)?)?;
+    for file in &manifest.files {
+        if same_hash(Some(&file.sha256), file.expected_original_sha256.as_deref()) {
+            remove_file(&safe_path(&payload, &file.relative_path)?)?;
+            if let Some(launch) = &mut manifest.launch
+                && launch.location == LaunchLocation::Patch
+                && same_relative(&launch.configuration.executable, &file.relative_path)
+            {
+                launch.location = LaunchLocation::Game;
+            }
+        }
+    }
+    manifest
+        .files
+        .retain(|file| !same_hash(Some(&file.sha256), file.expected_original_sha256.as_deref()));
+    validate_manifest(manifest)
+}
+
 fn validate_manifest(manifest: &mut PatchManifest) -> Result<(), CoreError> {
     if let Some(launch) = &manifest.launch {
         launch.configuration.validate_relative()?;
@@ -1723,6 +1746,72 @@ mod tests {
                 )
                 .unwrap();
         }
+    }
+
+    #[test]
+    fn unchanged_source_copies_are_removed_but_changed_and_new_paths_remain() {
+        let fixture = Fixture::new();
+        fs::create_dir(fixture.payload.join("Data")).unwrap();
+        fs::write(fixture.payload.join("data.bin"), b"modified").unwrap();
+        fs::write(fixture.payload.join("Data/unchanged.bin"), b"original").unwrap();
+        fs::write(fixture.payload.join("empty.bin"), b"").unwrap();
+        fs::write(fixture.payload.join("renamed.bin"), b"original").unwrap();
+        let originals = BTreeMap::from([
+            ("data.bin".into(), hash_text("original")),
+            ("data/UNCHANGED.bin".into(), hash_text("original")),
+            ("empty.bin".into(), hash_text("")),
+        ]);
+        let mut manifest = build_manifest(&fixture.patch, &originals).unwrap();
+
+        remove_unchanged_files(&fixture.patch, &mut manifest).unwrap();
+
+        assert_eq!(
+            manifest
+                .files
+                .iter()
+                .map(|file| file.relative_path.as_str())
+                .collect::<Vec<_>>(),
+            ["data.bin", "renamed.bin"]
+        );
+        assert!(!fixture.payload.join("Data/unchanged.bin").exists());
+        assert!(!fixture.payload.join("empty.bin").exists());
+        assert_eq!(
+            fs::read(fixture.payload.join("data.bin")).unwrap(),
+            b"modified"
+        );
+        assert_eq!(
+            fs::read(fixture.payload.join("renamed.bin")).unwrap(),
+            b"original"
+        );
+    }
+
+    #[test]
+    fn unchanged_patch_launcher_uses_the_game_executable() {
+        let fixture = Fixture::new();
+        fixture.prepare();
+        fs::write(fixture.payload.join("game.exe"), b"original executable").unwrap();
+        let mut manifest = build_manifest(
+            &fixture.patch,
+            &BTreeMap::from([("game.exe".into(), hash_text("original executable"))]),
+        )
+        .unwrap();
+        manifest.launch = Some(LaunchTarget {
+            location: LaunchLocation::Patch,
+            configuration: gamel10n_engines::protocol::LaunchConfiguration {
+                executable: "game.exe".into(),
+                arguments: "--windowed".into(),
+                working_directory: ".".into(),
+            },
+        });
+
+        remove_unchanged_files(&fixture.patch, &mut manifest).unwrap();
+
+        let launch = manifest.launch.unwrap();
+        assert_eq!(launch.location, LaunchLocation::Game);
+        assert_eq!(launch.configuration.executable, "game.exe");
+        assert_eq!(launch.configuration.arguments, "--windowed");
+        assert!(!fixture.payload.join("game.exe").exists());
+        assert_eq!(manifest.files.len(), 1);
     }
 
     #[test]

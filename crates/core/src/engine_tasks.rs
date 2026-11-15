@@ -4,7 +4,7 @@ use crate::{
     application::resolve_relative,
     catalog::{AdapterVersion, EngineCatalog, GameCompatibility},
     logs::FileProgress,
-    patching::{PAYLOAD_DIRECTORY, PatchInstaller, build_manifest},
+    patching::{PAYLOAD_DIRECTORY, PatchInstaller, build_manifest, remove_unchanged_files},
 };
 use gamel10n_engines::{
     AdapterHandle, EngineProgress, EngineService, PackageManifest, VerificationResult,
@@ -1465,7 +1465,7 @@ impl Application {
         fs::create_dir_all(root.join("patches"))?;
         let fingerprint = {
             let mut inputs =
-                json!({"adapter":adapter,"sources":hashes,"texts":translations,"version":2});
+                json!({"adapter":adapter,"sources":hashes,"texts":translations,"version":3});
             if let Some(probe) = &probe
                 && !probe.build_hints.is_empty()
             {
@@ -1562,12 +1562,6 @@ impl Application {
         source_guard.restore()?;
         let mut manifest = build_manifest(patch.path(), &hashes)?;
         manifest.launch = built.launch_target()?;
-        if let Some(launch) = &manifest.launch
-            && launch.location == gamel10n_engines::protocol::LaunchLocation::Game
-        {
-            let game = self.store.get(id).await?;
-            crate::launch::validate_configuration(&game.game_directory, &launch.configuration)?;
-        }
         if built.mode == BuildMode::Overlay {
             manifest.mode = built.mode;
             manifest.required_sources.clone_from(&hashes);
@@ -1584,6 +1578,18 @@ impl Application {
             return Err(CoreError::InvalidData(
                 "补丁文件与适配器声明不一致。".into(),
             ));
+        }
+        remove_unchanged_files(patch.path(), &mut manifest)?;
+        if manifest.files.is_empty() {
+            return Err(CoreError::InvalidData(
+                "所选译文没有产生需要写入的修改。".into(),
+            ));
+        }
+        if let Some(launch) = &manifest.launch
+            && launch.location == gamel10n_engines::protocol::LaunchLocation::Game
+        {
+            let game = self.store.get(id).await?;
+            crate::launch::validate_configuration(&game.game_directory, &launch.configuration)?;
         }
         write_json(&patch.path().join("patch-manifest.json"), &manifest)?;
         let count = self
@@ -1605,7 +1611,11 @@ impl Application {
                 .strip_prefix(&root)
                 .map(Path::to_path_buf)
                 .unwrap_or_else(|_| path.clone()),
-            launch_executable: built.launch_executable,
+            launch_executable: built.launch_executable.filter(|_| {
+                manifest.launch.as_ref().is_some_and(|launch| {
+                    launch.location == gamel10n_engines::protocol::LaunchLocation::Patch
+                })
+            }),
             total_units: count,
             translated_units: translations.len(),
             is_trial: unit_ids.is_some(),
@@ -2411,6 +2421,102 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn replacement_patches_exclude_unchanged_resources_and_reject_unchanged_output() {
+        let tools = crate::ToolPaths::development();
+        if !tools.python().is_file() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let game = root.path().join("game");
+        fs::create_dir_all(game.join("Data")).unwrap();
+        fs::write(game.join("text.json"), br#"["one","two"]"#).unwrap();
+        fs::write(game.join("Data/unchanged.bin"), b"original resource").unwrap();
+        let app = Application::open(root.path().join("data"), &tools)
+            .await
+            .unwrap();
+        let project = app.add_project(&game).await.unwrap();
+        let script = include_str!("../../engines/tests/fixtures/json_adapter.py")
+            .replace(
+                "requiredFiles=['text.json']",
+                "requiredFiles=['text.json', 'Data/unchanged.bin']",
+            )
+            .replace(
+                "    out['build'] = dict(files=['text.json'], warnings=[])",
+                "    (output / 'Data').mkdir(exist_ok=True)\n    (output / 'Data/unchanged.bin').write_bytes((root / 'Data/unchanged.bin').read_bytes())\n    out['build'] = dict(files=['text.json', 'Data/unchanged.bin'], warnings=[])",
+            );
+        let package = register_json_adapter(&app, "fixture", &script);
+        let adapter = PackageManifest::load(&package)
+            .unwrap()
+            .handle(&package)
+            .unwrap();
+        let token = CancellationToken::new();
+        let probe = app
+            .engine_service()
+            .execute(&adapter, &AdapterRequest::new("probe", &game), &token)
+            .await
+            .unwrap()
+            .probe
+            .unwrap();
+        app.extract_adapter(
+            &project.id,
+            adapter,
+            probe,
+            &token,
+            ExtractionCoverage::Confirmed,
+            false,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        app.save_translation_edit(&project.id, "0", "译文".into(), true)
+            .await
+            .unwrap();
+
+        let patch = app.generate_patch(&project.id, None, false).await.unwrap();
+        let manifest = crate::patching::read_manifest(&patch).unwrap();
+        assert_eq!(manifest.files.len(), 1);
+        assert_eq!(manifest.files[0].relative_path, "text.json");
+        assert!(
+            !patch
+                .join(PAYLOAD_DIRECTORY)
+                .join("Data/unchanged.bin")
+                .exists()
+        );
+        assert_eq!(
+            app.generate_patch(&project.id, None, false).await.unwrap(),
+            patch
+        );
+        app.install_patch(&project.id).await.unwrap();
+        assert_eq!(
+            fs::read(game.join("Data/unchanged.bin")).unwrap(),
+            b"original resource"
+        );
+        assert!(!game.join("Data/unchanged.bin.bak").exists());
+
+        app.save_translation_edit(&project.id, "0", "one".into(), true)
+            .await
+            .unwrap();
+        let error = app
+            .generate_patch(&project.id, None, false)
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("没有产生需要写入的修改"),
+            "{error}"
+        );
+        assert_eq!(
+            app.latest_patch(&project.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .patch_directory,
+            patch
+        );
     }
 
     #[tokio::test]
