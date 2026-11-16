@@ -335,6 +335,16 @@ impl Application {
         instruction: String,
         mode: RecognitionMode,
     ) -> Result<RecognitionResult, CoreError> {
+        self.recognize_in_task(id, instruction, mode, None).await
+    }
+
+    pub(crate) async fn recognize_in_task(
+        &self,
+        id: &str,
+        instruction: String,
+        mode: RecognitionMode,
+        task_cancellation: Option<&CancellationToken>,
+    ) -> Result<RecognitionResult, CoreError> {
         let forced = mode == RecognitionMode::Intelligent;
         let continuing = if forced {
             false
@@ -372,8 +382,11 @@ impl Application {
         } else {
             "recognize"
         };
-        let cancellation = self
-            .begin(
+        let cancellation = if let Some(cancellation) = task_cancellation {
+            self.start_metrics(id, operation).await;
+            cancellation.clone()
+        } else {
+            self.begin(
                 id,
                 operation,
                 if recover_missing {
@@ -386,7 +399,8 @@ impl Application {
                     "正在常规适配：扫描游戏目录并筛选已有适配器。"
                 },
             )
-            .await?;
+            .await?
+        };
         self.metrics_details(
             id,
             Some("recognize"),
@@ -471,15 +485,30 @@ impl Application {
             Ok(RecognitionResult::Adapted(Box::new(result)))
         }
         .await;
-        self.finish(
-            id,
-            operation,
-            result
-                .as_ref()
-                .map_err(ToString::to_string)
-                .and_then(RecognitionResult::task_outcome),
-        )
-        .await?;
+        if task_cancellation.is_none() {
+            self.finish(
+                id,
+                operation,
+                result
+                    .as_ref()
+                    .map_err(ToString::to_string)
+                    .and_then(RecognitionResult::task_outcome),
+            )
+            .await?;
+        } else {
+            let succeeded = if cancellation.is_cancelled() {
+                None
+            } else {
+                Some(
+                    result
+                        .as_ref()
+                        .map_err(ToString::to_string)
+                        .and_then(RecognitionResult::task_outcome)
+                        .is_ok(),
+                )
+            };
+            self.finish_metrics(id, succeeded).await;
+        }
         result
     }
 
@@ -1559,6 +1588,7 @@ impl Application {
                 if cancellation.is_cancelled() {
                     return Err(gamel10n_engines::EngineError::Cancelled.into());
                 }
+                previous.is_trial = unit_ids.is_some();
                 previous
                     .extra
                     .insert("adapterVersionRef".into(), json!(adapter_version));
@@ -1719,35 +1749,46 @@ impl Application {
         Ok(Some(result))
     }
 
-    pub async fn install_patch(&self, id: &str) -> Result<(), CoreError> {
+    pub(crate) async fn install_patch_in_task(
+        &self,
+        id: &str,
+        cancellation: &CancellationToken,
+    ) -> Result<crate::patching::PatchInstallResult, CoreError> {
+        if cancellation.is_cancelled() {
+            return Err(gamel10n_engines::EngineError::Cancelled.into());
+        }
         let project = self.store.get(id).await?;
         let patch = self
             .latest_patch(id)
             .await?
             .ok_or_else(|| CoreError::InvalidData("尚未生成补丁。".into()))?;
         let root = self.project_directory(id)?;
+        let cancellation = cancellation.clone();
+        self.run_file_task(id, "install", move |progress| {
+            let fallback = patch.launch_executable.as_ref().map(|executable| {
+                gamel10n_engines::protocol::LaunchTarget {
+                    location: gamel10n_engines::protocol::LaunchLocation::Patch,
+                    configuration: gamel10n_engines::protocol::LaunchConfiguration {
+                        executable: executable.clone(),
+                        arguments: String::new(),
+                        working_directory: ".".into(),
+                    },
+                }
+            });
+            PatchInstaller::new(root)
+                .with_launch_fallback(fallback)
+                .with_cancellation(cancellation.clone())
+                .with_progress(progress)
+                .install(&project.game_directory, &patch.patch_directory)
+        })
+        .await
+    }
+
+    pub async fn install_patch(&self, id: &str) -> Result<(), CoreError> {
         let cancellation = self
             .begin(id, "install", "正在核对文件并安装汉化补丁。")
             .await?;
-        let result = self
-            .run_file_task(id, "install", move |progress| {
-                let fallback = patch.launch_executable.as_ref().map(|executable| {
-                    gamel10n_engines::protocol::LaunchTarget {
-                        location: gamel10n_engines::protocol::LaunchLocation::Patch,
-                        configuration: gamel10n_engines::protocol::LaunchConfiguration {
-                            executable: executable.clone(),
-                            arguments: String::new(),
-                            working_directory: ".".into(),
-                        },
-                    }
-                });
-                PatchInstaller::new(root)
-                    .with_launch_fallback(fallback)
-                    .with_cancellation(cancellation)
-                    .with_progress(progress)
-                    .install(&project.game_directory, &patch.patch_directory)
-            })
-            .await;
+        let result = self.install_patch_in_task(id, &cancellation).await;
         self.finish(
             id,
             "install",
@@ -1764,20 +1805,31 @@ impl Application {
         .await?;
         result.map(|_| ())
     }
-    pub async fn restore_game(&self, id: &str) -> Result<(), CoreError> {
+    pub(crate) async fn restore_game_in_task(
+        &self,
+        id: &str,
+        cancellation: &CancellationToken,
+    ) -> Result<crate::patching::PatchRestoreResult, CoreError> {
+        if cancellation.is_cancelled() {
+            return Err(gamel10n_engines::EngineError::Cancelled.into());
+        }
         let project = self.store.get(id).await?;
         let root = self.project_directory(id)?;
+        let cancellation = cancellation.clone();
+        self.run_file_task(id, "restore", move |progress| {
+            PatchInstaller::new(root)
+                .with_cancellation(cancellation.clone())
+                .with_progress(progress)
+                .restore(&project.game_directory)
+        })
+        .await
+    }
+
+    pub async fn restore_game(&self, id: &str) -> Result<(), CoreError> {
         let cancellation = self
             .begin(id, "restore", "正在核对哈希并恢复原版。")
             .await?;
-        let result = self
-            .run_file_task(id, "restore", move |progress| {
-                PatchInstaller::new(root)
-                    .with_cancellation(cancellation)
-                    .with_progress(progress)
-                    .restore(&project.game_directory)
-            })
-            .await;
+        let result = self.restore_game_in_task(id, &cancellation).await;
         self.finish(
             id,
             "restore",
@@ -3563,6 +3615,7 @@ mod tests {
                 running: false,
                 message: String::new(),
                 succeeded: None,
+                workflow: None,
             };
             assert!(has_unfinished_adaptation(root.path(), Some(&interrupted)).unwrap());
         }

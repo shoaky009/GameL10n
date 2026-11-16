@@ -166,6 +166,7 @@ fn project_actions_keep_settings_selection_and_saved_edits_in_sync_across_tabs()
     .unwrap();
 
     let ui = MainWindow::new().unwrap();
+    assert!(!ui.global::<App>().get_automatic_workflow());
     let ctx = Context {
         host: Arc::new(RwLock::new(host)),
         window: ui.as_weak(),

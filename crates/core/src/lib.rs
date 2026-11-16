@@ -19,6 +19,7 @@ pub mod relocation;
 pub mod settings;
 pub mod translation_tasks;
 pub mod workbench;
+pub mod workflow;
 
 use thiserror::Error;
 
@@ -54,4 +55,6 @@ pub enum CoreError {
     ProjectBusy,
     #[error("启动配置已更新，请确认是否覆盖。")]
     LaunchConflict { revision: String },
+    #[error("{0}")]
+    WorkflowInput(String),
 }

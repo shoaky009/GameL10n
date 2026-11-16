@@ -66,6 +66,7 @@ fn main() {
         let result = CheckResult {
             launch: Observation::new(CheckStatus::Inconclusive, &message),
             text: Observation::new(CheckStatus::Inconclusive, message),
+            ..Default::default()
         };
         let _ = emit(CheckEvent::Launch(result.launch));
         let _ = emit(CheckEvent::Text(result.text));

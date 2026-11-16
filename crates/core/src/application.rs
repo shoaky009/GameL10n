@@ -33,6 +33,8 @@ pub struct TaskState {
     pub running: bool,
     pub message: String,
     pub succeeded: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow: Option<crate::workflow::WorkflowProgress>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -315,7 +317,15 @@ impl Application {
                 if saved.state.running {
                     saved.state.running = false;
                     saved.state.succeeded = None;
-                    saved.state.message = "上次任务已中断，已保存结果可继续使用。".into();
+                    saved.state.message = if let Some(workflow) = &mut saved.state.workflow {
+                        workflow.status = crate::workflow::WorkflowStatus::Interrupted;
+                        format!(
+                            "自动流程在步骤“{}”中断。已保存的译文和补丁保留，请确认游戏状态后重新开始。",
+                            workflow.step_id
+                        )
+                    } else {
+                        "上次任务已中断，已保存结果可继续使用。".into()
+                    };
                     saved.task_summary = Some(task_summary(&saved.state));
                     let recovered = saved.clone();
                     tokio::task::spawn_blocking(move || write_json(&path, &recovered)).await??;
@@ -766,6 +776,7 @@ impl Application {
             running: true,
             message: message.into(),
             succeeded: None,
+            workflow: None,
         };
         let path = self.project_directory(id)?.join("rust-task.json");
         let saved = state.clone();
@@ -806,20 +817,65 @@ impl Application {
             return false;
         };
         if !entry.state.running
-            || (entry.state.operation == operation && entry.state.message == message)
+            || ((entry.state.operation == operation || entry.state.workflow.is_some())
+                && entry.state.message == message)
         {
             return false;
         }
         let state = TaskState {
             project_id: id.into(),
-            operation: operation.into(),
+            operation: if entry.state.workflow.is_some() {
+                "workflow".into()
+            } else {
+                operation.into()
+            },
             running: true,
             message: message.into(),
             succeeded: None,
+            workflow: entry.state.workflow.clone(),
         };
         entry.state = state.clone();
         let _ = self.events.send(AppEvent::TaskChanged(state));
         true
+    }
+
+    pub(crate) async fn set_workflow_progress(
+        &self,
+        id: &str,
+        workflow: crate::workflow::WorkflowProgress,
+    ) -> Result<(), CoreError> {
+        let state = {
+            let mut tasks = self.tasks.lock().await;
+            let entry = tasks
+                .get_mut(id)
+                .ok_or_else(|| CoreError::InvalidData("自动流程任务不存在。".into()))?;
+            entry.state.operation = "workflow".into();
+            entry.state.message = format!(
+                "全自动汉化 · {}（{}）",
+                workflow.action.title(),
+                workflow.step_id
+            );
+            entry.state.workflow = Some(workflow);
+            entry.state.clone()
+        };
+        let path = self.project_directory(id)?.join("rust-task.json");
+        let saved = state.clone();
+        tokio::task::spawn_blocking(move || write_json(&path, &saved)).await??;
+        let _ = self.events.send(AppEvent::TaskChanged(state.clone()));
+        self.log_task_message(id, &state.message).await;
+        Ok(())
+    }
+
+    pub(crate) async fn mark_workflow_waiting(&self, id: &str) {
+        if let Some(workflow) = self
+            .tasks
+            .lock()
+            .await
+            .get_mut(id)
+            .and_then(|entry| entry.state.workflow.as_mut())
+        {
+            workflow.status = crate::workflow::WorkflowStatus::WaitingForInput;
+        }
     }
 
     pub(crate) async fn finish(
@@ -837,6 +893,26 @@ impl Application {
             .get(id)
             .is_some_and(|entry| entry.cancellation.is_cancelled());
         let succeeded = result.is_ok();
+        let mut workflow = self
+            .tasks
+            .lock()
+            .await
+            .get(id)
+            .and_then(|entry| entry.state.workflow.clone());
+        let waiting = workflow
+            .as_ref()
+            .is_some_and(|w| w.status == crate::workflow::WorkflowStatus::WaitingForInput);
+        if let Some(workflow) = &mut workflow {
+            workflow.status = if cancelled {
+                crate::workflow::WorkflowStatus::Interrupted
+            } else if waiting {
+                crate::workflow::WorkflowStatus::WaitingForInput
+            } else if succeeded {
+                crate::workflow::WorkflowStatus::Completed
+            } else {
+                crate::workflow::WorkflowStatus::Failed
+            };
+        }
         let mut state = TaskState {
             project_id: id.into(),
             operation: operation.into(),
@@ -846,7 +922,12 @@ impl Application {
             } else {
                 result.unwrap_or_else(|error| error)
             },
-            succeeded: if cancelled { None } else { Some(succeeded) },
+            succeeded: if cancelled || waiting {
+                None
+            } else {
+                Some(succeeded)
+            },
+            workflow,
         };
         let (summary, detail_error) = match self.completed_task_summary(&state) {
             Ok(summary) => (summary, None),
@@ -951,7 +1032,7 @@ impl Application {
 }
 
 fn task_summary(state: &TaskState) -> serde_json::Value {
-    serde_json::json!({
+    let mut summary = serde_json::json!({
         "stage": match state.succeeded {
             Some(true) => "任务已完成",
             Some(false) => "任务失败",
@@ -960,7 +1041,11 @@ fn task_summary(state: &TaskState) -> serde_json::Value {
         "operation": state.operation,
         "succeeded": state.succeeded,
         "running": false,
-    })
+    });
+    if let Some(workflow) = &state.workflow {
+        summary["workflow"] = serde_json::json!(workflow);
+    }
+    summary
 }
 
 pub(crate) fn resolve_relative(root: &Path, relative: &str) -> Result<PathBuf, CoreError> {

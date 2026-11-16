@@ -34,6 +34,10 @@ impl Observation {
 pub struct CheckResult {
     pub launch: Observation,
     pub text: Observation,
+    #[serde(default)]
+    pub closed: Observation,
+    #[serde(skip)]
+    pub visible_text: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -42,6 +46,7 @@ pub enum CheckMode {
     Launch,
     Text,
     LaunchAndText,
+    LocateText,
 }
 
 impl CheckMode {
@@ -164,6 +169,8 @@ pub struct CheckRequest {
     pub game_executable: Option<PathBuf>,
     pub settings: CheckSettings,
     pub expected: Vec<String>,
+    #[serde(default)]
+    pub close_after: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -172,6 +179,8 @@ pub enum CheckEvent {
     Launch(Observation),
     Text(Observation),
     ErrorWindow(ErrorWindow),
+    Closed(Observation),
+    VisibleText(String),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

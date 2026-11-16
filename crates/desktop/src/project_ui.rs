@@ -353,8 +353,13 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                 } else {
                     RecognitionMode::Automatic
                 };
-                app.recognize_with_mode(&input.project_id, input.instruction.clone(), mode)
-                    .await?;
+                if input.automatic_workflow {
+                    app.run_workflow(&input.project_id, input.instruction.clone(), mode)
+                        .await?;
+                } else {
+                    app.recognize_with_mode(&input.project_id, input.instruction.clone(), mode)
+                        .await?;
+                }
             } else {
                 app.adapt_project_with_objective(
                     &input.project_id,
@@ -371,6 +376,14 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                     .save_project_settings(&input.project_id, updates)
                     .await?;
             }
+        }
+        "workflow-config" => {
+            let path = ctx
+                .app()
+                .await
+                .workflow_configuration(&input.project_id)
+                .await?;
+            crate::open_path(path)?;
         }
         "review" => {
             ctx.app().await.review_engine(&input.project_id).await?;
@@ -852,7 +865,7 @@ pub async fn refresh_project(ctx: &Context, id: &str, opening: bool) -> Result<(
             !s.running
                 || !matches!(
                     s.operation.as_str(),
-                    "retranslate" | "extract" | "recognize"
+                    "retranslate" | "extract" | "recognize" | "workflow"
                 )
         }));
         if opening || a.get_page() != 0 || a.get_tab() != 1 {

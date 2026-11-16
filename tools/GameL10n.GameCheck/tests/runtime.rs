@@ -174,6 +174,13 @@ fn owned_error_dialogs_fail_startup_and_cleanup_rechecks_process_identity() {
         "failed",
         "{results:?}"
     );
+    assert!(
+        results.last().unwrap()["value"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("cannot load its resources"),
+        "{results:?}"
+    );
     fn cleanup(errors: Value) {
         use std::os::windows::process::CommandExt;
         let mut child = Command::new(env!("CARGO_BIN_EXE_gamel10n-game-check"))
@@ -227,5 +234,53 @@ fn owned_error_dialogs_fail_startup_and_cleanup_rechecks_process_identity() {
             "The normal game process must remain open after its error dialog closes."
         );
         let _ = CloseHandle(process);
+    }
+}
+
+#[test]
+#[ignore = "Requires a Windows desktop with English OCR and the game_fixture example."]
+fn automatic_location_closes_the_launched_process_tree() {
+    let fixture = GameFixture::new();
+    let mut request = fixture.request("locateText");
+    request["closeAfter"] = json!(true);
+    request["executable"] = json!(fixture.directory.path().join("Launcher.exe"));
+    request["arguments"] = json!(format!(
+        "--handoff=\"{}\" --keep-window",
+        fixture.directory.path().join("Game.exe").display()
+    ));
+    let results = check(&request);
+    assert!(
+        results.iter().any(|e| e["kind"] == "visibleText"
+            && e["value"]
+                .as_str()
+                .is_some_and(|text| text.contains("Welcome"))),
+        "{results:?}"
+    );
+    assert!(
+        results
+            .iter()
+            .any(|e| e["kind"] == "closed" && e["value"]["status"] == "passed"),
+        "{results:?}"
+    );
+    for name in ["Game", "Launcher"] {
+        let pid: u32 =
+            std::fs::read_to_string(fixture.directory.path().join(format!("{name}.pid")))
+                .unwrap()
+                .parse()
+                .unwrap();
+        unsafe {
+            use windows::Win32::{
+                Foundation::{CloseHandle, WAIT_OBJECT_0},
+                System::Threading::*,
+            };
+            if let Ok(process) = OpenProcess(PROCESS_SYNCHRONIZE, false, pid) {
+                assert_eq!(
+                    WaitForSingleObject(process, 0),
+                    WAIT_OBJECT_0,
+                    "{name} should be closed"
+                );
+                let _ = CloseHandle(process);
+            }
+        }
     }
 }

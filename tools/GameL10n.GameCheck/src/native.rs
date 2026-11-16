@@ -98,6 +98,22 @@ impl Session {
             let job = Handle(CreateJobObjectW(None, PCWSTR::null()).map_err(|e| {
                 Observation::new(CheckStatus::Inconclusive, format!("无法跟踪游戏进程：{e}"))
             })?);
+            if request.close_after {
+                let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+                limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                SetInformationJobObject(
+                    job.0,
+                    JobObjectExtendedLimitInformation,
+                    (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                    size_of_val(&limits) as u32,
+                )
+                .map_err(|e| {
+                    Observation::new(
+                        CheckStatus::Inconclusive,
+                        format!("无法设置游戏进程清理：{e}"),
+                    )
+                })?;
+            }
             let startup = STARTUPINFOW {
                 cb: size_of::<STARTUPINFOW>() as u32,
                 ..Default::default()
@@ -132,7 +148,7 @@ impl Session {
                     "无法继续启动游戏。",
                 ));
             }
-            // No kill-on-close limit: finishing a check leaves the game open for inspection.
+            // Manual checks keep the game open; automated checks own the whole process job.
             Ok(Self { job, process })
         }
     }
@@ -157,6 +173,21 @@ impl Session {
             let ids = std::slice::from_raw_parts(list.ProcessIdList.as_ptr(), count);
             Ok(ids.iter().map(|id| *id as u32).collect())
         }
+    }
+
+    fn close(&self) -> Result<(), String> {
+        unsafe {
+            TerminateJobObject(self.job.0, 0)
+                .map_err(|e| format!("无法关闭本次启动的游戏进程：{e}"))?;
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !self.processes()?.is_empty() {
+            if Instant::now() >= deadline {
+                return Err("本次游戏进程未在限定时间内退出。".into());
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        Ok(())
     }
 
     fn exit_code(&self) -> u32 {
@@ -252,6 +283,56 @@ fn error_dialog(window: HWND) -> bool {
         .iter()
         .any(|text| title.contains(text))
     }
+}
+
+fn error_message(window: HWND) -> String {
+    struct DialogText {
+        parts: Vec<String>,
+        remaining: usize,
+    }
+    unsafe extern "system" fn collect(window: HWND, data: LPARAM) -> BOOL {
+        // SAFETY: EnumChildWindows calls synchronously while this collection is borrowed.
+        let text = unsafe { &mut *(data.0 as *mut DialogText) };
+        if text.remaining == 0 {
+            return BOOL(0);
+        }
+        text.remaining -= 1;
+        let mut buffer = [0u16; 256];
+        let mut length = 0;
+        unsafe {
+            // Foreign controls may hang; bound both the message wait and the output length.
+            let _ = SendMessageTimeoutW(
+                window,
+                WM_GETTEXT,
+                WPARAM(buffer.len()),
+                LPARAM(buffer.as_mut_ptr() as isize),
+                SMTO_ABORTIFHUNG | SMTO_BLOCK,
+                80,
+                Some(&mut length),
+            );
+        }
+        let value = String::from_utf16_lossy(&buffer[..length.min(buffer.len() - 1)]);
+        if !value.trim().is_empty() {
+            text.parts.push(value);
+        }
+        BOOL(1)
+    }
+    let mut title = [0u16; 256];
+    let mut text = DialogText {
+        parts: vec![],
+        remaining: 6,
+    };
+    unsafe {
+        let length = GetWindowTextW(window, &mut title);
+        text.parts
+            .push(String::from_utf16_lossy(&title[..length as usize]));
+        let _ = EnumChildWindows(
+            Some(window),
+            Some(collect),
+            LPARAM((&mut text as *mut DialogText) as isize),
+        );
+    }
+    format!("游戏出现错误窗口：{}", text.parts.join("；"))
 }
 
 fn process_started(pid: u32) -> Option<u64> {
@@ -406,12 +487,13 @@ fn observe_launch(request: &CheckRequest) -> Result<Option<(Session, HWND)>, Str
         }
         let windows = windows_for(pids)?;
         if !windows.errors.is_empty() {
+            let message = error_message(HWND(windows.errors[0].window as usize as *mut _));
             for window in windows.errors {
                 emit(CheckEvent::ErrorWindow(window))?;
             }
             emit(CheckEvent::Launch(Observation::new(
                 CheckStatus::Failed,
-                "检测到游戏错误窗口，请查看游戏提示；关闭运行检查时会清理该错误窗口。",
+                message,
             )))?;
             return Ok(None);
         }
@@ -565,12 +647,13 @@ fn runtime_error(session: Option<&Session>) -> Result<bool, String> {
     if windows.errors.is_empty() {
         return Ok(false);
     }
+    let message = error_message(HWND(windows.errors[0].window as usize as *mut _));
     for window in windows.errors {
         emit(CheckEvent::ErrorWindow(window))?;
     }
     emit(CheckEvent::Launch(Observation::new(
         CheckStatus::Failed,
-        "游戏出现错误窗口，请查看游戏提示；关闭运行检查时会清理该错误窗口。",
+        message,
     )))?;
     Ok(true)
 }
@@ -673,6 +756,41 @@ fn check_text(
     })
 }
 
+fn locate_text(
+    request: &CheckRequest,
+    window: HWND,
+    session: Option<&Session>,
+) -> Result<Observation, String> {
+    let mut previous = String::new();
+    for _ in 0..4 {
+        if runtime_error(session)? {
+            return Err("游戏出现错误窗口，已停止定位文本。".into());
+        }
+        if unsafe { !IsWindow(Some(window)).as_bool() || IsIconic(window).as_bool() } {
+            return Err("游戏窗口已关闭或最小化，无法定位文本。".into());
+        }
+        let pixels = capture::capture(window, &request.settings.region)?;
+        let text = capture::recognize(pixels, &request.settings.language)?;
+        let normalized = normalize_text(&text);
+        if !normalized.is_empty() && normalized == previous {
+            if text.len() > 8000 {
+                return Err("画面文字过多，请缩小文本区域。".into());
+            }
+            emit(CheckEvent::VisibleText(text))?;
+            return Ok(Observation::new(
+                CheckStatus::Passed,
+                "已读取稳定的游戏原文画面。",
+            ));
+        }
+        previous = normalized;
+        thread::sleep(Duration::from_millis(400));
+    }
+    Ok(Observation::new(
+        CheckStatus::Inconclusive,
+        "游戏画面没有稳定且可识别的文字，请调整进入场景的操作。",
+    ))
+}
+
 pub fn run(request: &CheckRequest) -> Result<(), String> {
     unsafe {
         let _ =
@@ -715,12 +833,29 @@ pub fn run(request: &CheckRequest) -> Result<(), String> {
             RoInitialize(RO_INIT_MULTITHREADED)
                 .map_err(|e| format!("无法使用系统识别组件：{e}"))?;
         }
-        if request.mode == CheckMode::LaunchAndText {
+        if matches!(
+            request.mode,
+            CheckMode::LaunchAndText | CheckMode::LocateText
+        ) {
             scene(request, window, launch.as_ref().map(|(session, _)| session))?;
         }
-        check_text(request, window, launch.as_ref().map(|(session, _)| session))
+        if request.mode == CheckMode::LocateText {
+            locate_text(request, window, launch.as_ref().map(|(session, _)| session))
+        } else {
+            check_text(request, window, launch.as_ref().map(|(session, _)| session))
+        }
     })();
     emit(CheckEvent::Text(result.unwrap_or_else(|error| {
         Observation::new(CheckStatus::Inconclusive, error)
-    })))
+    })))?;
+    if request.close_after
+        && let Some((session, _)) = &launch
+    {
+        let closed = match session.close() {
+            Ok(()) => Observation::new(CheckStatus::Passed, "本次启动的游戏进程已关闭。"),
+            Err(message) => Observation::new(CheckStatus::Failed, message),
+        };
+        emit(CheckEvent::Closed(closed))?;
+    }
+    Ok(())
 }

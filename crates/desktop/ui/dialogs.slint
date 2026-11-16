@@ -64,6 +64,8 @@ export component DialogLayer inherits Rectangle {
                 Caption { text: "本次目标"; }
                 ComboBox { model: ["识别游戏", "修复现有问题", "补全遗漏文字"]; current-index <=> App.adaptation-objective; }
                 if App.adaptation-objective == 0: CheckBox { text: "强制智能识别（跳过常规匹配）"; checked <=> App.force-intelligent; }
+                if App.adaptation-objective == 0: CheckBox { text: "识别后自动试译验证、全量翻译并安装补丁"; checked <=> App.automatic-workflow; }
+                if App.adaptation-objective == 0 && App.automatic-workflow: Caption { text: "按项目流程配置自动启动游戏、执行场景操作并用 Windows OCR 验证，关闭本次游戏进程后继续全量汉化。异常时停止；可在项目设置编辑流程和分支。"; }
                 Caption { text: App.adaptation-objective == 1 ? "使用智能适配修复编码、字体、启动或回填问题，保留已有文本与译文的匹配关系；完成相关检查后先生成补丁试用。" : App.adaptation-objective == 2 ? "使用智能适配调查并补齐对白、菜单、界面等遗漏文字。请在下方说明未汉化的位置或原文。" : App.force-intelligent ? "直接调用分析 API 检查游戏资源，复用已有源码和引擎经验；不会因常规解析器匹配成功而提前结束。" : "先进行常规适配；未找到可用适配器或提取不足 1,000 条文本时，自动继续智能检查。已有结果保留，缺少分析 API 配置时会提示错误。"; }
                 Caption { text: "补充目标或遗漏文字的位置（可留空）"; } TextEdit { text <=> App.instruction; height: 140px; }
                 Caption { text: "本次智能适配 Token 预算（1,000–20,000,000）"; }

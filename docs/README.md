@@ -13,6 +13,7 @@
 | 主题 | 文档 |
 | --- | --- |
 | 项目、校对、日志与导航 | [桌面交互](desktop.md) |
+| 试译、游戏检查与全量安装编排 | [全自动汉化流程](automatic-workflow.md) |
 | 版本与模型的 Token、耗时趋势 | [消耗指标](consumption-metrics.md) |
 | API、翻译链与失败重试 | [模型接口配置](model-providers.md) |
 | 保存位置、恢复与清理 | [数据目录与迁移](data-storage.md) |

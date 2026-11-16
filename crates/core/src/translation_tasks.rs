@@ -385,10 +385,13 @@ impl Application {
         }
     }
 
-    pub async fn translate_project(
+    /// Translates inside an existing project task and releases its scheduler permit before returning.
+    pub(crate) async fn translate_in_task(
         &self,
         id: &str,
         mut options: TranslationOptions,
+        operation: &str,
+        cancellation: &CancellationToken,
     ) -> Result<TranslationRunResult, CoreError> {
         let project = self.store.get(id).await?;
         if options.batch_size == TranslationOptions::default().batch_size {
@@ -401,6 +404,69 @@ impl Application {
         let providers = self.translation_providers(id).await?;
         let policy = crate::workbench::validated_policy(&project.settings)?;
         let directory = self.store.directory(id)?;
+        self.progress(
+            id,
+            operation,
+            &format!(
+                "文本翻译 API 链：{}",
+                providers
+                    .iter()
+                    .map(|provider| format!("{}（{}）", provider.display_name(), provider.model()))
+                    .collect::<Vec<_>>()
+                    .join(" → ")
+            ),
+        )
+        .await;
+        if !options.candidate_only {
+            self.save_translation_scope(id, &options, false).await?;
+        }
+        // Release translation concurrency capacity before building, but keep the project task.
+        let result = {
+            let _permit = self.translation_permit(cancellation).await?;
+            let analysis = self
+                .cached_analysis(id)
+                .await?
+                .ok_or_else(|| CoreError::InvalidData("请先识别并提取游戏文本。".into()))?;
+            let engine = TranslationEngine::new(
+                directory,
+                Some(self.data_directory().join("memory").join(id)),
+            );
+            let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+            let report = move |progress| {
+                let _ = progress_tx.send(progress);
+            };
+            let run = engine.run(
+                &analysis.extraction().units,
+                &providers,
+                &policy,
+                &options,
+                cancellation,
+                report,
+            );
+            tokio::pin!(run);
+            let result = loop {
+                tokio::select! {
+                    result = &mut run => break result,
+                    Some(progress) = progress_rx.recv() => {
+                        self.translation_progress(id, operation, &analysis, &options, progress).await;
+                    },
+                }
+            };
+            while let Ok(progress) = progress_rx.try_recv() {
+                self.translation_progress(id, operation, &analysis, &options, progress)
+                    .await;
+            }
+            self.workbenches.lock().await.remove(id);
+            result.map_err(|error| CoreError::InvalidData(error.to_string()))?
+        };
+        Ok(result)
+    }
+
+    pub async fn translate_project(
+        &self,
+        id: &str,
+        options: TranslationOptions,
+    ) -> Result<TranslationRunResult, CoreError> {
         let operation = if options.retranslation_id.is_some() {
             "retranslate"
         } else if options.candidate_only {
@@ -412,68 +478,22 @@ impl Application {
         let mut final_operation = operation;
         let mut patch = None;
         let result = async {
-            self.progress(
-                id,
-                operation,
-                &format!(
-                    "文本翻译 API 链：{}",
-                    providers
-                        .iter()
-                        .map(|provider| format!("{}（{}）", provider.display_name(), provider.model()))
-                        .collect::<Vec<_>>()
-                        .join(" → ")
-                ),
-            )
-            .await;
-            if !options.candidate_only {
-                self.save_translation_scope(id, &options, false).await?;
-            }
-            // Release translation concurrency capacity before building, but keep the project task.
-            let result = {
-                let _permit = self.translation_permit(&cancellation).await?;
-                let analysis = self
-                    .cached_analysis(id)
-                    .await?
-                    .ok_or_else(|| CoreError::InvalidData("请先识别并提取游戏文本。".into()))?;
-                let engine = TranslationEngine::new(
-                    directory,
-                    Some(self.data_directory().join("memory").join(id)),
-                );
-                let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
-                let report = move |progress| {
-                    let _ = progress_tx.send(progress);
-                };
-                let run = engine.run(
-                    &analysis.extraction().units,
-                    &providers,
-                    &policy,
-                    &options,
-                    &cancellation,
-                    report,
-                );
-                tokio::pin!(run);
-                let result = loop {
-                    tokio::select! {
-                        result = &mut run => break result,
-                        Some(progress) = progress_rx.recv() => {
-                            self.translation_progress(id, operation, &analysis, &options, progress).await;
-                        },
-                    }
-                };
-                while let Ok(progress) = progress_rx.try_recv() {
-                    self.translation_progress(id, operation, &analysis, &options, progress).await;
-                }
-                self.workbenches.lock().await.remove(id);
-                result.map_err(|error| CoreError::InvalidData(error.to_string()))?
-            };
+            let result = self
+                .translate_in_task(id, options.clone(), operation, &cancellation)
+                .await?;
             if !options.candidate_only && result.failed == 0 {
                 if options.build_patch_after {
                     final_operation = "build";
                     self.progress(id, "build", "翻译已保存，正在检查原始资源并生成补丁。")
                         .await;
                     patch = Some(
-                        self.generate_patch_in_task(id, options.unit_ids.as_deref(), false, &cancellation)
-                            .await?,
+                        self.generate_patch_in_task(
+                            id,
+                            options.unit_ids.as_deref(),
+                            false,
+                            &cancellation,
+                        )
+                        .await?,
                     );
                 }
                 if cancellation.is_cancelled() {
@@ -541,7 +561,7 @@ impl Application {
         });
     }
 
-    async fn save_translation_scope(
+    pub(crate) async fn save_translation_scope(
         &self,
         id: &str,
         options: &TranslationOptions,

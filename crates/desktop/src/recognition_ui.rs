@@ -86,6 +86,7 @@ pub fn task_status(
         "restore" => "恢复原版",
         "verify" => "验证适配器",
         "cleanup" => "清理项目文件",
+        "workflow" => "全自动汉化",
         _ => "任务",
     };
     if running {
@@ -550,6 +551,7 @@ mod tests {
                 operation: "adapt".into(),
                 running: false,
                 succeeded: Some(false),
+                workflow: None,
                 message: "请先选择分析 API。".into(),
             }),
             Some(TaskState {
@@ -557,6 +559,7 @@ mod tests {
                 operation: "adapt".into(),
                 running: true,
                 succeeded: None,
+                workflow: None,
                 message: "正在检查覆盖".into(),
             }),
         ] {
@@ -606,6 +609,7 @@ mod tests {
                 operation: "adapt".into(),
                 running: false,
                 succeeded: Some(false),
+                workflow: None,
                 message: "修复失败".into(),
             };
             let view = RecognitionView::new(&extra, Some(&state), &Value::Null, &Value::Null);
@@ -625,6 +629,7 @@ mod tests {
             running: false,
             message: summary.into(),
             succeeded: Some(true),
+            workflow: None,
         };
         let result = json!({"status":"Activated","summary":summary,"nextAction":"先试译少量文本", "pendingCoverage":["窗口标题"], "pendingRuntimeChecks":["字体和布局"], "blocker":{"reason":"需要新样本"},"verification":{"passed":true,"runtimeTested":false}});
         let view = RecognitionView::new(
@@ -717,6 +722,7 @@ mod tests {
                 running,
                 succeeded,
                 message: "总结任务详情".into(),
+                workflow: None,
             };
             let view = RecognitionView::new(&extra, Some(&state), &progress, &result);
             assert!(view.ready);
@@ -743,6 +749,7 @@ mod tests {
                 operation: "review".into(),
                 running,
                 succeeded: (!running).then_some(false),
+                workflow: None,
                 message: "总结 API 请求失败".into(),
             };
             let view = RecognitionView::new(&BTreeMap::new(), Some(&state), &Value::Null, &result);
@@ -760,6 +767,7 @@ mod tests {
             running: true,
             message: "正在检查资源".into(),
             succeeded: None,
+            workflow: None,
         };
         let progress = json!({"stage":"执行适配工具", "message":"正在检查资源", "toolName":"test_adapter", "progressNote":{"kind":"exploring", "message":"调查新格式"}, "lastBreakthrough":{"kind":"verified", "message":"原文回填通过"}});
         let view = RecognitionView::new(
@@ -805,6 +813,7 @@ mod tests {
                 running: false,
                 message: "本次任务需要处理".into(),
                 succeeded,
+                workflow: None,
             };
             let view = RecognitionView::new(
                 &BTreeMap::new(),
@@ -843,6 +852,7 @@ mod tests {
             running: false,
             message: "分析 API 请求失败：服务商异常（HTTP 502）。\n确认服务恢复后重试".into(),
             succeeded: Some(false),
+            workflow: None,
         };
         let result = json!({
             "status":"Failed", "summary":"本次智能适配失败", "nextAction":"请稍后重试",
@@ -884,6 +894,7 @@ mod tests {
             running: false,
             message: "适配结束".into(),
             succeeded: Some(true),
+            workflow: None,
         };
         let result = json!({"status":"Failed", "summary":"智能适配失败",
             "diagnostics":["模型调用失败：API 请求失败（HTTP 502）。"],
@@ -923,6 +934,7 @@ mod tests {
                 running,
                 message: "当前任务".into(),
                 succeeded,
+                workflow: None,
             };
             let view = RecognitionView::new(&BTreeMap::new(), Some(&state), &Value::Null, &result);
             assert!(view.failure.message.is_empty(), "{operation}: {running}");
@@ -939,6 +951,7 @@ mod tests {
             running: false,
             message: "读取项目配置失败：文件被占用。".into(),
             succeeded: Some(false),
+            workflow: None,
         };
         let result = json!({"status":"Failed", "summary":"上次适配失败",
             "failure":{"category":"api", "message":"旧 API 错误", "nextAction":"旧提示"}});

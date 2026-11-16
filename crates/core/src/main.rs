@@ -31,6 +31,14 @@ enum Operation {
     },
     /// 添加游戏目录，不自动识别。
     Add { directory: PathBuf },
+    /// 执行项目 workflow.json 中的自动汉化流程（会启动游戏和安装补丁）。
+    Workflow {
+        project_id: String,
+        #[arg(long, default_value = "")]
+        instruction: String,
+        #[arg(long)]
+        intelligent: bool,
+    },
     /// 按指定的内置格式提取已经解包的脚本。
     Extract { project_id: String, format: String },
     /// 生成补丁到项目目录，不安装；译文文件为 ID 到译文的 JSON 字典。
@@ -159,6 +167,25 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             "{}",
             serde_json::to_string_pretty(&app.add_project(&directory).await?)?
         ),
+        Operation::Workflow {
+            project_id,
+            instruction,
+            intelligent,
+        } => {
+            let mode = if intelligent {
+                gamel10n_core::engine_tasks::RecognitionMode::Intelligent
+            } else {
+                gamel10n_core::engine_tasks::RecognitionMode::Automatic
+            };
+            app.run_workflow(&project_id, instruction, mode).await?;
+            println!(
+                "{}",
+                app.task_state(&project_id)
+                    .await
+                    .map(|state| state.message)
+                    .unwrap_or_default()
+            );
+        }
         Operation::Extract { project_id, format } => println!(
             "已提取 {} 条文本。",
             app.extract_native(&project_id, &format).await?

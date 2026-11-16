@@ -64,6 +64,7 @@ export component ProjectSettings inherits ScrollView {
         Heading { text: "游戏启动"; }
         Caption { text: App.launch-summary; }
         HorizontalLayout { Button { text: "配置启动入口…"; clicked => { App.action("launch-settings", ""); } } Rectangle { horizontal-stretch: 1; } }
+        HorizontalLayout { Button { text: "编辑自动流程配置…"; clicked => { App.action("workflow-config", ""); } } Rectangle { horizontal-stretch: 1; } }
         Divider {}
         HorizontalLayout { Button { text: "管理模型配置"; clicked => { App.action("navigate", "apis"); } } Rectangle { horizontal-stretch: 1; } }
         Caption { text: "未单独配置的项自动使用全局设置，修改后仅对当前项目生效。"; }

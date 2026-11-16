@@ -10,7 +10,15 @@ use protocol::{CheckEvent, CheckRequest, normalize_text};
 use std::{collections::BTreeSet, process::Stdio, time::Duration};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-static DESKTOP_CHECK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+pub(crate) static DESKTOP_CHECK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+pub(crate) fn display_text(unit: &crate::TranslationUnit, text: &str) -> String {
+    let mut text = text.to_owned();
+    for token in unit.protected_tokens.iter().flatten() {
+        text = text.replace(token, "");
+    }
+    text
+}
 
 pub fn parse_steps(text: &str) -> Result<Vec<SceneStep>, CoreError> {
     let mut steps = Vec::new();
@@ -135,10 +143,11 @@ impl Application {
             .filter(|u| ids.contains(&u.id))
             .filter_map(|u| {
                 let translated = translations.get(&u.id)?;
-                let normalized = normalize_text(translated);
+                let translated = display_text(u, translated);
+                let normalized = normalize_text(&translated);
                 (normalized.chars().filter(|c| c.is_alphanumeric()).count() >= 4
-                    && normalized != normalize_text(&u.source_text))
-                .then(|| translated.clone())
+                    && normalized != normalize_text(&display_text(u, &u.source_text)))
+                .then_some(translated)
             })
             .collect::<Vec<_>>();
         if expected.is_empty() {
@@ -147,6 +156,53 @@ impl Application {
             ));
         }
         Ok(expected)
+    }
+
+    pub(crate) async fn game_check_request(
+        &self,
+        id: &str,
+        mode: CheckMode,
+        settings: CheckSettings,
+        expected: Vec<String>,
+        close_after: bool,
+    ) -> Result<CheckRequest, CoreError> {
+        let project = self.store.get(id).await?;
+        let launch = self.launch_view(id).await?;
+        if !launch.can_launch {
+            return Err(CoreError::InvalidData(launch.reason));
+        }
+        let configuration = launch
+            .configuration
+            .ok_or_else(|| CoreError::InvalidData("请先设置游戏启动程序。".into()))?;
+        let (executable, working_directory) =
+            validate_configuration(&project.game_directory, &configuration)?;
+        let game_executable = self
+            .cached_analysis(id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|analysis| {
+                let original = analysis
+                    .native()
+                    .ok()?
+                    .probe
+                    .as_ref()?
+                    .original_executable
+                    .as_ref()?;
+                Some(project.game_directory.join(original))
+            })
+            .filter(|path| path.is_file());
+        Ok(CheckRequest {
+            mode,
+            executable,
+            working_directory,
+            game_directory: project.game_directory,
+            game_executable,
+            arguments: configuration.arguments,
+            settings,
+            expected,
+            close_after,
+        })
     }
 
     /// Emits only current observations; screenshots and check results are not persisted.
@@ -169,47 +225,14 @@ impl Application {
                 return Err(gamel10n_engines::EngineError::Cancelled.into());
             }
             let settings = self.game_check_settings(id).await?;
-            let project = self.store.get(id).await?;
-            let launch = self.launch_view(id).await?;
-            if !launch.can_launch {
-                return Err(CoreError::InvalidData(launch.reason));
-            }
-            let configuration = launch
-                .configuration
-                .ok_or_else(|| CoreError::InvalidData("请先设置游戏启动程序。".into()))?;
-            let (executable, working_directory) =
-                validate_configuration(&project.game_directory, &configuration)?;
-            let game_executable = self
-                .cached_analysis(id)
-                .await
-                .ok()
-                .flatten()
-                .and_then(|analysis| {
-                    let original = analysis
-                        .native()
-                        .ok()?
-                        .probe
-                        .as_ref()?
-                        .original_executable
-                        .as_ref()?;
-                    Some(project.game_directory.join(original))
-                })
-                .filter(|path| path.is_file());
-            let expected = if mode.reads_text() {
+            let expected = if mode.reads_text() && mode != CheckMode::LocateText {
                 self.game_check_expected(id, &settings.unit_ids).await?
             } else {
                 vec![]
             };
-            let request = CheckRequest {
-                mode,
-                executable,
-                working_directory,
-                game_directory: project.game_directory,
-                game_executable,
-                arguments: configuration.arguments,
-                settings,
-                expected,
-            };
+            let request = self
+                .game_check_request(id, mode, settings, expected, false)
+                .await?;
             self.run_game_check_tool(&request, &cancellation, stop, &mut result, &on_result)
                 .await
         }
@@ -245,7 +268,7 @@ impl Application {
         Ok(result)
     }
 
-    async fn run_game_check_tool(
+    pub(crate) async fn run_game_check_tool(
         &self,
         request: &CheckRequest,
         cancellation: &crate::CancellationToken,
@@ -278,11 +301,14 @@ impl Application {
             .take()
             .ok_or_else(|| CoreError::InvalidData("无法读取运行检查结果。".into()))?;
         let launch_seconds = if request.mode.launches() {
-            u64::from(request.settings.timeout_seconds)
+            u64::from(request.settings.timeout_seconds) + if request.close_after { 10 } else { 0 }
         } else {
             0
         };
-        let scene_milliseconds: u64 = if request.mode == CheckMode::LaunchAndText {
+        let scene_milliseconds: u64 = if matches!(
+            request.mode,
+            CheckMode::LaunchAndText | CheckMode::LocateText
+        ) {
             request
                 .settings
                 .steps
@@ -330,6 +356,15 @@ impl Application {
                 match event {
                     CheckEvent::Launch(value) => result.launch = value,
                     CheckEvent::Text(value) => result.text = value,
+                    CheckEvent::Closed(value) => result.closed = value,
+                    CheckEvent::VisibleText(value) => {
+                        if request.mode != CheckMode::LocateText || value.len() > 8000 {
+                            return Err(CoreError::InvalidData(
+                                "运行检查组件返回了无效的定位文本。".into(),
+                            ));
+                        }
+                        result.visible_text = Some(value);
+                    }
                     CheckEvent::ErrorWindow(value) => {
                         let mut windows = self.game_check_errors.lock().await;
                         if windows.len() < 32 && !windows.contains(&value) {
@@ -350,13 +385,21 @@ impl Application {
             {
                 return Err(CoreError::InvalidData("运行检查未返回完整结果。".into()));
             }
+            if request.close_after
+                && result.launch.status == CheckStatus::Passed
+                && result.closed.status == CheckStatus::NotChecked
+            {
+                return Err(CoreError::InvalidData(
+                    "无法确认本次游戏进程已关闭，自动流程已停止。".into(),
+                ));
+            }
             Ok(())
         };
         let completed = tokio::select! {
             biased;
             _ = cancellation.cancelled() => Err(gamel10n_engines::EngineError::Cancelled.into()),
             _ = stop.cancelled() => Err(gamel10n_engines::EngineError::Cancelled.into()),
-            completed = tokio::time::timeout(timeout, execution) => completed.map_err(|_| CoreError::InvalidData("运行检查超时，请在游戏中确认当前状态。".into()))?,
+            completed = tokio::time::timeout(timeout, execution) => completed.unwrap_or_else(|_| Err(CoreError::InvalidData("运行检查超时，请在游戏中确认当前状态。".into()))),
         };
         if completed.is_err() {
             let _ = child.kill().await;

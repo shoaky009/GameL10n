@@ -201,6 +201,7 @@ impl Context {
 
 #[derive(Clone, Default)]
 pub struct UiInput {
+    pub automatic_workflow: bool,
     pub check: game_check_ui::CheckInput,
     pub metrics: metrics_ui::MetricsInput,
     pub view_revision: u64,
@@ -398,6 +399,7 @@ impl UiInput {
             launch_executable: a.get_launch_executable().into(),
             launch_arguments: a.get_launch_arguments().into(),
             launch_directory: a.get_launch_directory().into(),
+            automatic_workflow: a.get_automatic_workflow(),
             launch_revision: a.get_launch_revision().into(),
             launch_conflict_revision: a.get_launch_conflict_revision().into(),
             launch_conflict_action: a.get_launch_conflict_action().into(),
@@ -890,7 +892,7 @@ pub async fn subscribe_events(ctx: Context) {
                                 !state.running
                                     || !matches!(
                                         state.operation.as_str(),
-                                        "retranslate" | "extract" | "recognize"
+                                        "retranslate" | "extract" | "recognize" | "workflow"
                                     ),
                             );
                             a.set_status(

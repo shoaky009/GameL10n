@@ -345,7 +345,15 @@ impl Application {
         let _guard = self.lock_project(id).await?;
         let _lifecycle = self.project_lifecycle.lock().await;
         if self.task_state(id).await.is_some_and(|state| {
-            state.running && matches!(state.operation.as_str(), "install" | "restore")
+            state.running
+                && (matches!(state.operation.as_str(), "install" | "restore")
+                    || state.workflow.as_ref().is_some_and(|workflow| {
+                        matches!(
+                            workflow.action,
+                            crate::workflow::WorkflowAction::LocateText
+                                | crate::workflow::WorkflowAction::InstallPatch
+                        )
+                    }))
         }) {
             return Err(CoreError::InvalidData(
                 "补丁正在安装或恢复，请在操作结束后检测启动入口。".into(),
@@ -377,7 +385,15 @@ impl Application {
         let _guard = self.lock_project(id).await?;
         let _lifecycle = self.project_lifecycle.lock().await;
         if self.task_state(id).await.is_some_and(|state| {
-            state.running && matches!(state.operation.as_str(), "install" | "restore")
+            state.running
+                && (matches!(state.operation.as_str(), "install" | "restore")
+                    || state.workflow.as_ref().is_some_and(|workflow| {
+                        matches!(
+                            workflow.action,
+                            crate::workflow::WorkflowAction::LocateText
+                                | crate::workflow::WorkflowAction::InstallPatch
+                        )
+                    }))
         }) {
             return Err(CoreError::InvalidData(
                 "补丁正在安装或恢复，请在操作结束后保存启动设置。".into(),
