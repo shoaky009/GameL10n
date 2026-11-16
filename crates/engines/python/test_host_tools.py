@@ -222,12 +222,28 @@ print(os.environ['GAMEL10N_QUESTION_ID'])
                 self.assertIn('original diagnostic', result['stderr'])
                 self.assertIn('reportError', result)
                 self.assertNotIn('report', result)
-        missing = self.execute('run', script='work/missing.py', reportFile='work/absent.json', content='pass')
+                if data is None:
+                    self.assertIn('脚本执行失败', result['reportError'])
+        missing = self.execute('run', script='work/missing.py', reportFile='work/absent.json',
+                               content="print('PAC analysis results')")
         self.assertFalse(missing['success'])
         self.assertEqual(missing['phase'], 'report')
         self.assertTrue(missing['executionSucceeded'])
+        self.assertEqual(missing['exitCode'], 0)
+        self.assertEqual(missing['stdout'].strip(), 'PAC analysis results')
+        self.assertEqual(missing['error'], '脚本执行成功，但未生成声明的报告：work/absent.json。')
+        self.assertEqual(missing['reportError'], missing['error'])
         self.assertEqual(missing['reportContract']['file'], 'work/absent.json')
         self.assertIn('write_report', missing['nextAction'])
+        self.assertIn('省略 reportFile', missing['nextAction'])
+
+    def test_stdout_only_probe_needs_no_report(self):
+        result = self.execute('run', script='work/stdout.py', content="print('PAC analysis results')")
+        self.assertTrue(result['success'])
+        self.assertTrue(result['executionSucceeded'])
+        self.assertEqual(result['stdout'].strip(), 'PAC analysis results')
+        self.assertNotIn('reportError', result)
+        self.assertNotIn('reportContract', result)
 
     def test_report_helper_writes_actual_findings_without_imports_from_nested_directory(self):
         result = self.execute('run', script='work/report-helper.py', reportFile='work/reports/helper.json',

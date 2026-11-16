@@ -864,14 +864,18 @@ def run(request):
                 result['success'] = False
                 result['error'] = result['error'] or '实验报告记录失败，请检查报告与诊断。'
         except (OSError, ValueError, RecursionError) as error:
-            result['reportError'] = str(error)
+            if isinstance(error, FileNotFoundError):
+                state = '脚本执行成功，但' if result['executionSucceeded'] else '脚本执行失败，且'
+                reason = f'{state}未生成声明的报告：{report}。'
+            else:
+                reason = str(error)
+            result['reportError'] = reason
             result['reportContract'] = dict(file=report, writer="write_report(status='completed', summary='...')",
                                           statuses=['completed', 'partial', 'failed'])
-            result['nextAction'] = ('检查已保留的 stdout/stderr 和已有报告，修正脚本的报告写入；'
-                                    'write_report 由执行器提供，按实际实验结论指定 status。'
-                                    '无需为恢复已有输出重新运行实验。')
+            result['nextAction'] = ('检查已保留的 stdout/stderr 和已有报告，修正脚本中的 write_report 调用或报告内容；'
+                                    '只需标准输出时省略 reportFile。无需为恢复已有输出重新运行实验。')
             if result['success']:
-                result.update(success=False, phase='report', error=str(error))
+                result.update(success=False, phase='report', error=reason)
     return result
 
 
