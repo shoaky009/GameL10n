@@ -450,7 +450,7 @@ impl EngineService {
             ),
             (
                 "kirikiri_text.py",
-                include_bytes!("../../../adapters/scripts/common/kirikiri_text.py"),
+                include_bytes!("../../../adapters/kirikiri/kirikiri_text.py"),
             ),
             (
                 "gamel10n_host.py",

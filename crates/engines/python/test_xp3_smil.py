@@ -13,8 +13,7 @@ import zlib
 ROOT = Path(__file__).resolve().parents[3]
 FIXTURES = ROOT / 'crates/engines/tests/fixtures'
 PIN = json.loads((ROOT / 'third_party/engine-tools/current.json').read_text('utf-8'))
-sys.path[:0] = [str(ROOT / 'adapters/components'), str(ROOT / 'adapters/scripts/common'),
-               str(ROOT / 'adapters/kirikiri'), str(FIXTURES),
+sys.path[:0] = [str(ROOT / 'adapters/components'), str(ROOT / 'adapters/kirikiri'), str(FIXTURES),
                str(ROOT / 'third_party/engine-tools/references' / PIN['revision'] / 'library.zip')]
 import smil_adapter as adapter
 import xp3_smil as xp3

@@ -36,8 +36,8 @@
 | --- | --- | --- |
 | [EAGLS / ALIS SCPACK](engines/eagls-scpack.md) | `eagls-script` 组件 | 完整源文本成员的解析与回填，界面和中文运行另行确认 |
 | [LiLiM SFA16 / AOS v2 / SCR](engines/sfa16-aos-v2.md) | `engine.sfa16.aos-v2` | AOS v2 剧情脚本，运行补丁须匹配已登记 EXE |
-| [System4 AIN v14 MSG1 + FNL](engines/system4-ain14-msg1-fnl.md) | `engine.system4-ain14-msg1-fnl` | MSG1 消息、FNL 补字及匹配运行时代码的修补 |
-| [QLIE FilePackVer3.0 + system_fix](engines/qlie-filepack3-systemfont.md) | `engine.qlie-filepack3-systemfont` | 匹配主封包、密钥及字体布局 |
+| [System4 FNL 补字](engines/system4-ain14-msg1-fnl.md) | `system4-fnl-glyph` 组件 | 参考字形尺寸的位图生成；AIN、FNL 读写和运行修补需单独适配 |
+| [QLIE 字体与启动](engines/qlie-filepack3-systemfont.md) | `qlie-sfnt-font` / `qlie-japanese-font-launcher` 组件 | 已确认的字体枚举及启动链；封包和脚本需单独适配 |
 | [VNTextPatch：22 个引擎系列／29 个格式](engines/vntextpatch.md) | `engine.vntextpatch-*` | 已解包脚本，封包与中文运行条件见格式表 |
 | [YU-RIS](engines/yuris.md) | `engine.vntextpatch-yuris` | YSTB／YSCF、伴随命令表及可选 SJIS 隧道 |
 | [Ren’Py RPYC2 与混合资源](engines/renpy-rpyc.md) | `template.loose-renpy-rpyc` / `template.rpa3-renpy-rpyc` / `template.renpy-mixed` | 松散脚本、RPA/ARC 3.0 与无路径冲突的源码组合 |
@@ -47,3 +47,18 @@
 
 [Artemis PFS 覆盖卷](engines/artemis-pfs.md)说明增量补丁的适用条件。
 [Valkyria DAT / SDT](engines/valkyria.md)说明参考解析、跳转验证及 GDI+ 字体创建的边界。
+
+## 源码组织
+
+仓库 `adapters/` 只保存随应用维护的内置适配器和可复用组件：
+
+| 目录 | 用途 |
+| --- | --- |
+| `components/` | 可复制的格式、封包、编码和字体组件，以及适配器共用的宿主接口 |
+| `kirikiri/` | 内置 SMIL 适配器与 KS、TJS 文本处理 |
+| `siglus/` | 内置 Siglus 脚本、字库和固定上游修正 |
+| `unity/` | 通用 SerializedFile 读写组件 |
+
+源码直接按引擎和用途命名，由 Git 管理历史，不保留哈希版本目录、生成适配器快照或特定游戏的补丁参数。其他内置解析器与注册入口位于 `crates/engines/`，第三方固定依赖位于 `third_party/`；存在源码文件不表示自动注册了完整引擎能力。
+
+用户生成的适配器保存在应用数据目录，沿用[发布包的版本与完整性校验](artifacts.md#正式适配器)，已有项目继续使用其固定版本。

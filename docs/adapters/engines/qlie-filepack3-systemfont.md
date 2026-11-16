@@ -1,6 +1,6 @@
-# QLIE FilePackVer3.0 + system_fix
+# QLIE 字体与启动组件
 
-标识：`engine.qlie-filepack3-systemfont`。处理匹配外置 `fkey`、EXE 密钥资源和 `system_fix` 字体布局的 `data0.pack`，提取剧情、姓名和选项。
+内置 `qlie-sfnt-font` 与 `qlie-japanese-font-launcher` 组件提供字体生成和 Windows 启动入口。应用不内置 `engine.qlie-filepack3-systemfont` 完整适配器；封包密钥、脚本、字体配置与资源加载顺序由当前适配器确认。
 
 补丁生成 `启动汉化.exe`，保留原 EXE，运行期间临时加载配套字体。需要转区时使用本机 Locale Emulator，并保留原 EXE 的 `.exe.le.config`。
 
@@ -8,7 +8,7 @@
 
 `component('qlie_font', request, input=..., output=..., family=..., map=...)` 生成配套 SFNT 字体，通过[组件辅助模块](../components.md#接入与版本管理)调用。
 
-字体度量按 MS Gothic／MS Mincho 比例配置，保留脚本字号和文本框尺寸。七个正文字体列表使用 `system`，独立外字槽保留；配置名称须匹配字体 `name` 表 ID 4 的完整 Regular 名称。启动器核对名称与日语枚举结果，正文和明朝体分别使用无衬线与衬线字体。
+字体度量按 MS Gothic／MS Mincho 比例配置，保留脚本字号和文本框尺寸。适配器按实际字体列表设置名称、保留独立外字槽，不套用固定槽位布局；配置名称须匹配字体 `name` 表 ID 4 的完整 Regular 名称。启动器核对名称与日语枚举结果，正文和明朝体分别使用无衬线与衬线字体。
 
 组件适用于已确认的单字体布局，字体文件及许可由适配器准备。
 

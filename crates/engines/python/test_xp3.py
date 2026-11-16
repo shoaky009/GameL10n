@@ -1,33 +1,30 @@
-"""XP3 name layouts, preserved index fields and sparse script recognition."""
+"""XP3 component name layouts, index metadata and checked member reads."""
 import io
 from pathlib import Path
 import struct
 import sys
-import tempfile
 import unittest
 import zlib
 
 
 ROOT = Path(__file__).resolve().parents[3]
-sys.path[:0] = [str(ROOT / 'adapters/components'), str(ROOT / 'adapters/scripts/common')]
+sys.path.insert(0, str(ROOT / 'adapters/components'))
 import xp3_adler
-from xp3_container import Archive, INV
-from xp3_runtime import execute
 
 
 def chunk(tag, body):
     return tag + struct.pack('<Q', len(body)) + body
 
 
-def archive_bytes(members, *, trailer=b'', info_size=None, filtered=True, checksum=None):
+def archive_bytes(members, *, trailer=b'', info_size=None, checksum=None):
     data = bytearray(b'XP3\r\n \n\x1a\x8bg\x01' + bytes(8))
     entries = []
     for name, content in members:
-        stored = zlib.compress(content.translate(INV) if filtered else content)
+        stored = zlib.compress(content)
         segment = struct.pack('<IQQQ', 1, len(data), len(content), len(stored))
         data.extend(stored)
         encoded = name.encode('utf-16le')
-        info = struct.pack('<IQQH', 0x80000000, len(content) if info_size is None else info_size,
+        info = struct.pack('<IQQH', 0, len(content) if info_size is None else info_size,
                            len(stored), len(encoded) // 2) + encoded + trailer
         body = chunk(b'info', info) + chunk(b'segm', segment)
         body += chunk(b'adlr', struct.pack('<I', zlib.adler32(content) & 0xffffffff
@@ -39,29 +36,6 @@ def archive_bytes(members, *, trailer=b'', info_size=None, filtered=True, checks
     struct.pack_into('<Q', data, 11, len(data))
     data.extend(b'\1' + struct.pack('<QQ', len(packed), len(index)) + packed)
     return bytes(data)
-
-
-def sparse_probe(root, contents):
-    source = root / 'source'
-    source.mkdir()
-    for name, data in contents.items():
-        (source / name).write_bytes(data[:19])
-    request = dict(operation='probe', sourceDirectory=str(source),
-                   probeFiles=[dict(path=name, length=len(data)) for name, data in contents.items()],
-                   probeRanges=[])
-    reads = []
-    for attempt in range(12):
-        result = execute(request, 'rot')
-        if not result.get('probeReads'):
-            return result, reads
-        for read in result['probeReads']:
-            offset, length = read['offset'], read['length']
-            data = contents[read['path']][offset:offset + length]
-            part = root / f'range-{attempt}-{len(reads)}'
-            part.write_bytes(data)
-            request['probeRanges'].append(dict(read, dataPath=str(part)))
-            reads.append(read)
-    raise AssertionError('XP3 probe did not finish within twelve range requests')
 
 
 class Xp3Test(unittest.TestCase):
@@ -85,60 +59,17 @@ class Xp3Test(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'member/segment lengths disagree'):
             xp3_adler.read_index(io.BytesIO(data))
 
-    def test_rebuild_preserves_name_terminators_and_unknown_metadata(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            original = root / 'original.xp3'
-            original.write_bytes(archive_bytes([('scene.ks', b'Hello\n'), ('other.ks', b'World\n')],
-                                               trailer=b'\0\0'))
-            archive = Archive(original, 'rot')
-            output = root / 'output.xp3'
-            archive.build(output, {'scene.ks': b'Changed\n'})
-            rebuilt = Archive(output, 'rot')
-            self.assertEqual([rebuilt.read(entry) for entry in rebuilt.entries], [b'Changed\n', b'World\n'])
-            records = list(xp3_adler._chunks(rebuilt.raw_index))
-            self.assertEqual(records[-1], (b'extr', b'preserved archive metadata'))
-            for tag, body in records[:-1]:
-                fields = dict(xp3_adler._chunks(body))
-                self.assertEqual(fields[b'info'][-2:], b'\0\0')
-                self.assertEqual(fields[b'extr'], b'preserved member metadata')
+    def test_index_reports_unknown_metadata_for_preservation(self):
+        stream = io.BytesIO(archive_bytes([('scene.ks', b'Hello\n')], trailer=b'\0\0'))
+        index = xp3_adler.read_index(stream)
+        self.assertEqual(index.unknown_chunk_count, 2)
+        self.assertEqual(xp3_adler.read_member(stream, index.entries[0]), b'Hello\n')
 
-    def test_sparse_probe_reads_the_index_and_a_script_before_matching(self):
-        with tempfile.TemporaryDirectory() as directory:
-            contents = {'data.xp3': archive_bytes([('scene.ks', b'Hello\n')], trailer=b'\0\0'),
-                        'image.xp3': archive_bytes([('image.png', b'image bytes')])}
-            result, reads = sparse_probe(Path(directory), contents)
-            self.assertTrue(reads)
-            self.assertEqual(result['probe']['requiredFiles'], ['data.xp3'])
-
-    def test_probe_rejects_a_header_without_a_valid_index(self):
-        with tempfile.TemporaryDirectory() as directory:
-            with self.assertRaisesRegex(ValueError, 'XP3'):
-                sparse_probe(Path(directory), {'data.xp3': xp3_adler.MAGIC + bytes(8)})
-
-    def test_probe_streams_full_resource_inputs_without_sparse_ranges(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / 'data.xp3').write_bytes(archive_bytes([('scene.ks', b'Hello\n')], trailer=b'\0\0'))
-            result = execute(dict(operation='probe', sourceDirectory=directory, resourceFiles=['data.xp3']), 'rot')
-            self.assertEqual(result['probe']['requiredFiles'], ['data.xp3'])
-
-    def test_probe_requires_a_matching_checksum_even_when_the_declared_value_is_zero(self):
-        with tempfile.TemporaryDirectory() as directory:
-            with self.assertRaises(ValueError):
-                sparse_probe(Path(directory), {'data.xp3': archive_bytes([('scene.ks', b'Hello\n')], checksum=0)})
-
-    def test_probe_rejects_an_archive_without_supported_scripts(self):
-        with tempfile.TemporaryDirectory() as directory:
-            result, _ = sparse_probe(Path(directory), {'image.xp3': archive_bytes([('image.png', b'image')])})
-            self.assertIsNone(result['probe'])
-
-    def test_probe_rejects_an_incompatible_filter_or_member_layout(self):
-        for data in (archive_bytes([('scene.ks', b'Hello\n')], filtered=False),
-                     archive_bytes([('scene.ks', b'Hello\n')], trailer=b'\0\0', info_size=910)):
-            with self.subTest(data=data[-16:]), tempfile.TemporaryDirectory() as directory:
-                with self.assertRaises(ValueError):
-                    sparse_probe(Path(directory), {'data.xp3': data})
+    def test_member_requires_a_matching_checksum_even_when_declared_zero(self):
+        stream = io.BytesIO(archive_bytes([('scene.ks', b'Hello\n')], checksum=0))
+        index = xp3_adler.read_index(stream)
+        with self.assertRaisesRegex(ValueError, 'Adler32 mismatch'):
+            xp3_adler.read_member(stream, index.entries[0])
 
 
 if __name__ == '__main__':

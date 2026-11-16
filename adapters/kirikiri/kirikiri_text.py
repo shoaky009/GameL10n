@@ -1,4 +1,4 @@
-"""Legacy KAG line slots and testo hint literals, with source character spans."""
+"""KAG dialogue and static TJS labels, retaining source-line slot identities."""
 from dataclasses import dataclass, field
 import re
 
@@ -13,9 +13,6 @@ class Span:
     syntax: str = 'ks'
     tokens: list = field(default_factory=list)
     suffix: str = ''
-    ruby: object = None
-    key_insert: int = -1
-    key_attribute: str = ''
 
 
 def unescape(raw):
@@ -118,23 +115,6 @@ def scan_ks(text):
                     if bracket not in tokens and len(tokens) < 64:
                         tokens.append(bracket)
             result.append(Span(line, offset + first, offset + last, row[first:last], kind, tokens=tokens))
-        offset += len(raw) + 1
-    return result
-
-
-def scan_ma(text):
-    result = []
-    offset = 0
-    for line, raw in enumerate(text.split('\n'), 1):
-        row = raw.rstrip('\r')
-        if row.lstrip(' \t').startswith(';'):
-            offset += len(raw) + 1
-            continue
-        pattern = r'(?<![\w])hint[ \t]*=[ \t]*"((?:\\.|[^"\\])*)"'
-        for match in re.finditer(pattern, row):
-            value = unescape(match[1])
-            if value.strip():
-                result.append(Span(line, offset + match.start(1), offset + match.end(1), value, 'ui', 'literal'))
         offset += len(raw) + 1
     return result
 
