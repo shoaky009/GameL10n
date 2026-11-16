@@ -1496,7 +1496,7 @@ impl Application {
         if cancellation.is_cancelled() {
             return Err(gamel10n_engines::EngineError::Cancelled.into());
         }
-        let translations = self.saved_translations(id, unit_ids, reviewed_only).await?;
+        let translations = Arc::new(self.saved_translations(id, unit_ids, reviewed_only).await?);
         if translations.is_empty() {
             return Err(CoreError::InvalidData(
                 "所选范围没有可用于补丁的有效译文。".into(),

@@ -219,7 +219,8 @@ with open(r['responseFile'],'w',encoding='utf-8') as output:
             request
                 .extra
                 .insert("fixture".into(), serde_json::json!("中文😀"));
-            request.translations = Some(BTreeMap::from([("stable-id".into(), "测试译文".into())]));
+            request.translations =
+                Some(BTreeMap::from([("stable-id".into(), "测试译文".into())]).into());
             let response = PythonAdapter::new(&paths, &entry)
                 .expect("adapter")
                 .execute(&request, &CancellationToken::new())

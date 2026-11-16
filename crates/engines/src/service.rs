@@ -2033,6 +2033,7 @@ impl EngineService {
                 ("部分试译", partial),
                 ("中文修改", changed),
             ] {
+                let translations = Arc::new(translations);
                 record_verification_stage(&mut stage_timings_ms, phase, &mut phase_started);
                 phase = match stage {
                     "原文回填" => "original-byte-roundtrip",

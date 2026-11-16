@@ -1,6 +1,6 @@
 //! CLI protocol v1 shared by native tools and Python adapters.
 
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
 use gamel10n_translation::{TranslationUnit, ValidationResult};
 use serde::{Deserialize, Serialize};
@@ -23,7 +23,7 @@ pub struct AdapterRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub format: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub translations: Option<BTreeMap<String, String>>,
+    pub translations: Option<Arc<BTreeMap<String, String>>>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
 }
@@ -300,6 +300,20 @@ impl AdapterResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_translations_keep_the_adapter_json_contract() {
+        let mut request = AdapterRequest::new("build", "source");
+        request.translations =
+            Some(BTreeMap::from([("line-1".into(), "中文😀\n第二行".into())]).into());
+        let value = serde_json::to_value(&request).expect("request JSON");
+        assert_eq!(
+            value["translations"],
+            serde_json::json!({"line-1": "中文😀\n第二行"})
+        );
+        let decoded: AdapterRequest = serde_json::from_value(value).expect("request roundtrip");
+        assert_eq!(decoded.translations, request.translations);
+    }
 
     #[test]
     fn legacy_resource_errors_allow_fallback_without_hiding_infrastructure_or_protocol_failures() {

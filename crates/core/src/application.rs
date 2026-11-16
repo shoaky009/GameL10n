@@ -628,7 +628,7 @@ impl Application {
         request.format = Some(analysis.format.clone());
         request.resource_files = Some(analysis.resource_files.clone());
         request.output_directory = Some(patch.path().to_path_buf());
-        request.translations = Some(translations);
+        request.translations = Some(translations.into());
         self.progress(id, "build", "正在回填译文并检查脚本结构。")
             .await;
         self.parser.execute(&request, cancellation).await?;

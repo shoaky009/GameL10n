@@ -338,7 +338,7 @@ pub(super) async fn check_translation(
     let mut build = AdapterRequest::new("build", source);
     build.resource_files = Some(files.to_vec());
     build.output_directory = Some(output.path().into());
-    build.translations = Some(BTreeMap::from([(unit.id.clone(), text.clone())]));
+    build.translations = Some(BTreeMap::from([(unit.id.clone(), text.clone())]).into());
     let built = trial_response(service, &build, format, result, cancellation)
         .await?
         .build

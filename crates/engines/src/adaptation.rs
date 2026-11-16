@@ -1813,7 +1813,7 @@ impl EngineService {
                 let mut build=AdapterRequest::new("build",source);
                 build.resource_files=Some(files.clone());
                 build.output_directory=Some(temporary.path().into());
-                build.translations=Some(BTreeMap::new());
+                build.translations=Some(BTreeMap::new().into());
                 let build=automatic::trial_response(self,&build,format,&mut result,cancellation).await?.build.ok_or_else(||EngineError::Protocol("内置解析器未返回原文回填结果。".into()))?;
                 let inventory=Inventory::scan(temporary.path())?;
                 let actual:BTreeSet<_>=inventory.files.iter().map(|file|file.path.to_lowercase()).collect();
