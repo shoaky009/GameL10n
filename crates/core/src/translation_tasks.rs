@@ -161,7 +161,7 @@ mod tests {
 
         std::fs::write(&extraction, original).unwrap();
         drop(permit);
-        let resumed = app.resume_translation(&id).await.unwrap();
+        let resumed = app.resume_translation(&id, true).await.unwrap();
         assert_eq!((resumed.completed, resumed.cache_hits), (1, 1));
         assert_eq!(resumed.translations["line-1"], "你好");
     }
@@ -195,10 +195,11 @@ mod tests {
         let scope = app.translation_scope(&id).await.unwrap().unwrap();
         assert!(!scope.completed && scope.build_patch_after);
         assert_eq!(scope.unit_ids, Some(vec!["line-1".into()]));
-        let resumed = tokio::time::timeout(Duration::from_secs(5), app.resume_translation(&id))
-            .await
-            .unwrap()
-            .unwrap_err();
+        let resumed =
+            tokio::time::timeout(Duration::from_secs(5), app.resume_translation(&id, true))
+                .await
+                .unwrap()
+                .unwrap_err();
         assert!(
             resumed.to_string().contains("已绑定的原始资源发生变化"),
             "{resumed}"
@@ -504,12 +505,18 @@ impl Application {
         result
     }
 
-    pub async fn resume_translation(&self, id: &str) -> Result<TranslationRunResult, CoreError> {
+    pub async fn resume_translation(
+        &self,
+        id: &str,
+        collect_translations: bool,
+    ) -> Result<TranslationRunResult, CoreError> {
         let scope = self
             .translation_scope(id)
             .await?
             .ok_or_else(|| CoreError::InvalidData("找不到可继续的翻译任务。".into()))?;
-        self.translate_project(id, scope.options()).await
+        let mut options = scope.options();
+        options.collect_translations = collect_translations;
+        self.translate_project(id, options).await
     }
 
     async fn translation_progress(

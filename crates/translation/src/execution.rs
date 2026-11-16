@@ -33,6 +33,9 @@ pub struct TranslationOptions {
     pub retry_uncertain_requests: bool,
     /// Host requests a patch after successful translation; resource building remains in core.
     pub build_patch_after: bool,
+    /// Materialize the returned text map only when the caller needs it. Never persisted.
+    #[serde(skip)]
+    pub collect_translations: bool,
 }
 impl Default for TranslationOptions {
     fn default() -> Self {
@@ -43,6 +46,7 @@ impl Default for TranslationOptions {
             retranslation_id: None,
             retry_uncertain_requests: true,
             build_patch_after: false,
+            collect_translations: true,
         }
     }
 }
@@ -186,20 +190,26 @@ struct CommitOptions {
 // These snapshots also preserve results if a user edits or deletes a correction during the run.
 struct CompletedTranslations {
     ids: HashSet<String>,
-    writer: BufWriter<File>,
+    writer: Option<BufWriter<File>>,
 }
 impl CompletedTranslations {
-    fn new(directory: &Path) -> Result<Self, ExecutionError> {
+    fn new(directory: &Path, collect_translations: bool) -> Result<Self, ExecutionError> {
         fs::create_dir_all(directory)?;
         Ok(Self {
             ids: HashSet::new(),
-            writer: BufWriter::new(tempfile::tempfile_in(directory)?),
+            writer: if collect_translations {
+                Some(BufWriter::new(tempfile::tempfile_in(directory)?))
+            } else {
+                None
+            },
         })
     }
 
     fn insert(&mut self, id: &str, text: &str) -> Result<(), ExecutionError> {
-        serde_json::to_writer(&mut self.writer, &(id, text)).map_err(Self::json_error)?;
-        self.writer.write_all(b"\n")?;
+        if let Some(writer) = &mut self.writer {
+            serde_json::to_writer(&mut *writer, &(id, text)).map_err(Self::json_error)?;
+            writer.write_all(b"\n")?;
+        }
         self.ids.insert(id.into());
         Ok(())
     }
@@ -219,13 +229,13 @@ impl CompletedTranslations {
         self.ids.len()
     }
 
-    fn into_translations(mut self) -> Result<BTreeMap<String, String>, ExecutionError> {
+    fn into_translations(self) -> Result<BTreeMap<String, String>, ExecutionError> {
         drop(self.ids);
-        self.writer.rewind()?;
-        let file = self
-            .writer
-            .into_inner()
-            .map_err(|error| error.into_error())?;
+        let Some(mut writer) = self.writer else {
+            return Ok(BTreeMap::new());
+        };
+        writer.rewind()?;
+        let file = writer.into_inner().map_err(|error| error.into_error())?;
         serde_json::Deserializer::from_reader(BufReader::new(file))
             .into_iter::<(String, String)>()
             .map(|entry| entry.map_err(Self::json_error))
@@ -308,7 +318,8 @@ impl TranslationEngine {
             ExecutionJournal::default()
         };
         let mut issues = load_issues(&self.directory);
-        let mut completed = CompletedTranslations::new(&self.directory)?;
+        let mut completed =
+            CompletedTranslations::new(&self.directory, options.collect_translations)?;
         let mut failed = BTreeSet::new();
         let mut cache_hits = 0;
         let mut usage = TokenUsage::default();

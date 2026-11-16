@@ -773,6 +773,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                             batch_size: 1,
                             unit_ids: Some(vec![input.editor_id.clone()]),
                             candidate_only: true,
+                            collect_translations: false,
                             ..Default::default()
                         },
                     )
@@ -834,7 +835,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                 return Ok(true);
             }
             if input.argument == "resume" {
-                let result = app.resume_translation(&input.project_id).await;
+                let result = app.resume_translation(&input.project_id, false).await;
                 ctx.refresh_texts(&input.project_id);
                 result?;
                 return Ok(true);
@@ -852,6 +853,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                 batch_size: input.batch_size.max(1) as usize,
                 unit_ids: ids,
                 build_patch_after: input.argument == "trial",
+                collect_translations: false,
                 ..Default::default()
             };
             if input.argument == "retranslate" {

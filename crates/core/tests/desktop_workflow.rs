@@ -415,11 +415,12 @@ async fn selected_edit_patch_install_restore_and_restart_preserve_originals() {
     let mut events = app.subscribe();
     for resume in [false, true] {
         let result = if resume {
-            app.resume_translation(&project.id).await
+            app.resume_translation(&project.id, false).await
         } else {
             app.translate_project(
                 &project.id,
                 gamel10n_translation::execution::TranslationOptions {
+                    collect_translations: false,
                     unit_ids: Some(vec![selected.clone()]),
                     build_patch_after: true,
                     ..Default::default()
