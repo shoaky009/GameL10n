@@ -38,8 +38,14 @@ export component DialogLayer inherits Rectangle {
             if App.modal == "api": ApiTestControls {}
             if App.modal == "patch-texts": ScrollView { height: 360px; horizontal-scrollbar-policy: always-off; content-width: self.visible-width;
                 VerticalLayout { spacing: 12px; alignment: start;
-                    ReportText { text: App.modal-message; }
+                    if App.patch-text-loading: Caption { text: "正在读取补丁文本…"; }
+                    if !App.patch-text-loading: ReportText { text: App.modal-message; }
                 }
+            }
+            if App.modal == "patch-texts": HorizontalLayout { spacing: 12px;
+                Button { text: "上一页"; enabled: !App.patch-text-loading && App.patch-text-offset > 0; clicked => { App.action("patch-texts-page", "" + max(0, App.patch-text-offset - 100)); } }
+                Caption { horizontal-stretch: 1; horizontal-alignment: center; text: App.patch-text-total == 0 ? "共 0 条" : "第 " + (App.patch-text-offset + 1) + "–" + min(App.patch-text-offset + 100, App.patch-text-total) + " 条，共 " + App.patch-text-total + " 条"; }
+                Button { text: "下一页"; enabled: !App.patch-text-loading && App.patch-text-offset + 100 < App.patch-text-total; clicked => { App.action("patch-texts-page", "" + (App.patch-text-offset + 100)); } }
             }
             if App.modal == "engine-review": ScrollView { height: min(440px, root.height - 220px); horizontal-scrollbar-policy: always-off; content-width: self.visible-width;
                 VerticalLayout { padding-right: 16px; alignment: start; ReportText { text: App.review-summary; } }

@@ -550,15 +550,60 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                 show_dialog(ctx, "adapt", "修复游戏显示问题", "修复当前补丁对应的适配器。确认新版补丁效果正常后，会自动清理未被其他项目使用的历史版本。".into());
             }
         }
-        "patch-texts" => {
+        "patch-texts" | "patch-texts-page" => {
+            let opening = action == "patch-texts";
+            let offset = if opening {
+                0
+            } else {
+                input.argument.parse::<usize>().unwrap_or(0)
+            };
+            let id = input.project_id.clone();
+            let opening_id = id.clone();
+            let revision = input.view_revision;
+            let opening_generation = ctx.generation.clone();
+            ctx.update(move |ui| {
+                let app = ui.global::<App>();
+                if opening_generation.load(Ordering::SeqCst) != revision
+                    || app.get_project_id().as_str() != opening_id
+                {
+                    return;
+                }
+                if opening {
+                    app.set_patch_text_total(0);
+                }
+                app.set_patch_text_offset(offset as i32);
+                app.set_patch_text_loading(true);
+                app.set_modal_message("".into());
+                app.set_error("".into());
+                app.set_modal("patch-texts".into());
+            });
             let host = ctx.app().await;
-            let records = host.latest_patch_texts(&input.project_id).await?;
-            let text = serde_json::to_string_pretty(&records)
-                .map_err(|e| CoreError::InvalidData(e.to_string()))?;
+            let result = host
+                .latest_patch_texts(&input.project_id, offset)
+                .await
+                .and_then(|page| {
+                    let text = serde_json::to_string_pretty(&page.texts)
+                        .map_err(|e| CoreError::InvalidData(e.to_string()))?;
+                    Ok((text, page.total))
+                });
+            let generation = ctx.generation.clone();
             ctx.update(move |ui| {
                 let a = ui.global::<App>();
-                a.set_modal_message(text.into());
-                a.set_modal("patch-texts".into());
+                if generation.load(Ordering::SeqCst) != revision
+                    || a.get_project_id().as_str() != id
+                    || a.get_modal().as_str() != "patch-texts"
+                    || a.get_patch_text_offset() != offset as i32
+                {
+                    return;
+                }
+                a.set_patch_text_loading(false);
+                match result {
+                    Ok((text, total)) => {
+                        a.set_modal_message(text.into());
+                        a.set_patch_text_total(total.min(i32::MAX as usize) as i32);
+                    }
+                    Err(error) => a.set_error(error.to_string().into()),
+                }
             });
         }
         "directory-dialog" => show_dialog(

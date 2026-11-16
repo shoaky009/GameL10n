@@ -25,7 +25,7 @@ use thiserror::Error;
 pub use application::{AppEvent, Application, StoredAnalysis, TaskState, TextPage};
 pub use gamel10n_engines::{CancellationToken, ToolPaths};
 pub use gamel10n_translation::TranslationUnit;
-pub use project_views::ProjectSnapshot;
+pub use project_views::{PatchTextPage, ProjectSnapshot};
 pub use projects::{GameProject, ProjectSummary, default_data_directory};
 
 pub fn native_formats() -> &'static [&'static str] {

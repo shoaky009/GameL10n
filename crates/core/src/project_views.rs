@@ -1,5 +1,8 @@
 //! Saved project details shared by desktop and command-line callers.
-use gamel10n_translation::files::read_json;
+use std::{fmt, fs::File, io::BufReader};
+
+use gamel10n_translation::files::{FileError, io_error, read_json};
+use serde::de::{DeserializeSeed, IgnoredAny, MapAccess, Visitor};
 use serde_json::Value;
 
 use crate::{Application, CoreError, GameProject, TaskState};
@@ -11,6 +14,58 @@ pub struct ProjectSnapshot {
     pub adaptation: Value,
     pub review: Value,
     pub warnings: Vec<String>,
+}
+
+#[derive(Default)]
+pub struct PatchTextPage {
+    pub texts: serde_json::Map<String, Value>,
+    pub total: usize,
+}
+
+struct PatchTextPageReader {
+    offset: usize,
+    legacy: bool,
+}
+
+impl<'de> DeserializeSeed<'de> for PatchTextPageReader {
+    type Value = PatchTextPage;
+
+    fn deserialize<D: serde::Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> Result<Self::Value, D::Error> {
+        deserializer.deserialize_map(self)
+    }
+}
+
+impl<'de> Visitor<'de> for PatchTextPageReader {
+    type Value = PatchTextPage;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("an object containing patch translations")
+    }
+
+    fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<Self::Value, M::Error> {
+        let mut page = PatchTextPage::default();
+        while let Some(id) = map.next_key::<String>()? {
+            if self.legacy && id == "texts" {
+                drop(page);
+                let page = map.next_value_seed(Self {
+                    offset: self.offset,
+                    legacy: false,
+                })?;
+                while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+                return Ok(page);
+            }
+            if page.total >= self.offset && page.texts.len() < 100 {
+                page.texts.insert(id, map.next_value()?);
+            } else {
+                map.next_value::<IgnoredAny>()?;
+            }
+            page.total += 1;
+        }
+        Ok(page)
+    }
 }
 
 impl Application {
@@ -51,8 +106,12 @@ impl Application {
         .await?
     }
 
-    /// Resolves the current and legacy patch snapshot layouts in one business API.
-    pub async fn latest_patch_texts(&self, id: &str) -> Result<Value, CoreError> {
+    /// Reads up to 100 records from the current or legacy snapshot without loading the full map.
+    pub async fn latest_patch_texts(
+        &self,
+        id: &str,
+        offset: usize,
+    ) -> Result<PatchTextPage, CoreError> {
         let patch = self
             .latest_patch(id)
             .await?
@@ -70,17 +129,32 @@ impl Application {
                         .unwrap_or_default()
                         .to_string_lossy()
                 ));
-            if path.try_exists()? {
-                return Ok(read_json(&path)?);
-            }
-            let legacy = patch.patch_directory.join("translation-snapshot.json");
-            if legacy.try_exists()? {
-                let saved: Value = read_json(&legacy)?;
-                return Ok(saved.get("texts").cloned().unwrap_or(saved));
-            }
-            Err(CoreError::InvalidData(
-                "这份旧补丁没有保存可浏览的译文快照。".into(),
-            ))
+            let (path, legacy) = if path.try_exists()? {
+                (path, false)
+            } else {
+                let legacy = patch.patch_directory.join("translation-snapshot.json");
+                if !legacy.try_exists()? {
+                    return Err(CoreError::InvalidData(
+                        "这份旧补丁没有保存可浏览的译文快照。".into(),
+                    ));
+                }
+                (legacy, true)
+            };
+            let file = File::open(&path).map_err(|error| io_error(&path, error))?;
+            let mut input = serde_json::Deserializer::from_reader(BufReader::new(file));
+            PatchTextPageReader { offset, legacy }
+                .deserialize(&mut input)
+                .and_then(|page| {
+                    input.end()?;
+                    Ok(page)
+                })
+                .map_err(|source| {
+                    FileError::Json {
+                        path: path.display().to_string(),
+                        source,
+                    }
+                    .into()
+                })
         })
         .await?
     }
