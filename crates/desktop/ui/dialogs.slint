@@ -12,6 +12,10 @@ export component DialogLayer inherits Rectangle {
             if App.modal == "launch": VerticalLayout { spacing: 10px;
                 Caption { text: App.launch-summary; }
                 if App.launch-reason != "": ReportText { text: App.launch-reason; }
+                if App.launch-conflict-revision != "": VerticalLayout { spacing: 8px;
+                    ReportText { text: App.launch-conflict-action == "launch-reset" ? "编辑期间启动配置已更新。是否仍要撤销手动设置，使用最新自动配置？" : "编辑期间启动配置已更新。是否用当前输入覆盖？"; }
+                    HorizontalLayout { Button { text: "载入最新配置"; clicked => { App.action("launch-reload", ""); } } Rectangle { horizontal-stretch: 1; } }
+                }
                 if App.launch-candidates.length > 0: Caption { text: "检测到的候选入口"; }
                 if App.launch-candidates.length > 0: ComboBox { model: App.launch-candidates; current-index <=> App.launch-candidate-index; selected(value) => { App.launch-executable = value; } }
                 Caption { text: "启动程序"; }
@@ -95,7 +99,7 @@ export component DialogLayer inherits Rectangle {
             if App.modal == "patch": ComboBox { model: ["全部有效译文", "仅所选文本", "仅已校对译文"]; current-index <=> App.patch-scope; }
             if App.modal == "verify-version": VerticalLayout { spacing: 8px; Caption { text: "用于验证的游戏项目"; } ComboBox { model: App.verification-project-names; current-index <=> App.verification-project-index; } }
             if App.modal == "directory": VerticalLayout { spacing: 10px; HorizontalLayout { LineEdit { text <=> App.new-directory; horizontal-stretch: 1; } Button { text: "浏览…"; clicked => { App.action("browse-data", ""); } } } CheckBox { text: "迁移现有数据（保留原目录）"; checked <=> App.migrate-data; } }
-            HorizontalLayout { Rectangle { horizontal-stretch: 1; } Button { text: App.modal == "game-check" || App.modal == "engine-review" || App.modal == "feedback" || App.modal == "patch-texts" ? "关闭" : "取消"; clicked => { if App.modal == "game-check" { App.action("game-check-close", ""); } if App.modal == "adapt" { App.action("adapt-cancel", ""); } if App.modal == "api" && App.api-testing { App.action("api-test-cancel", ""); } App.modal = ""; App.api-key = ""; } } if App.modal == "resume-translation": Button { text: "改为全量翻译"; clicked => { App.modal = ""; App.action("translate", "force-all"); } } if App.modal != "game-check" && App.modal != "patch-texts" && App.modal != "engine-review" && App.modal != "feedback": Button { text: App.modal == "resume-translation" ? "继续原选区" : App.modal == "cleanup" ? "清理所选文件" : "确认"; enabled: (App.modal != "api" || !App.api-testing) && (App.modal != "cleanup" || (!App.cleanup-loading && App.cleanup-selected)); primary: true; clicked => { App.action("confirm", App.modal); } } }
+            HorizontalLayout { Rectangle { horizontal-stretch: 1; } Button { text: App.modal == "game-check" || App.modal == "engine-review" || App.modal == "feedback" || App.modal == "patch-texts" ? "关闭" : "取消"; clicked => { if App.modal == "game-check" { App.action("game-check-close", ""); } if App.modal == "adapt" { App.action("adapt-cancel", ""); } if App.modal == "api" && App.api-testing { App.action("api-test-cancel", ""); } App.modal = ""; App.api-key = ""; } } if App.modal == "resume-translation": Button { text: "改为全量翻译"; clicked => { App.modal = ""; App.action("translate", "force-all"); } } if App.modal != "game-check" && App.modal != "patch-texts" && App.modal != "engine-review" && App.modal != "feedback": Button { text: App.modal == "launch" && App.launch-conflict-revision != "" ? "确认覆盖" : App.modal == "resume-translation" ? "继续原选区" : App.modal == "cleanup" ? "清理所选文件" : "确认"; enabled: (App.modal != "api" || !App.api-testing) && (App.modal != "cleanup" || (!App.cleanup-loading && App.cleanup-selected)); primary: true; clicked => { App.action("confirm", App.modal); } } }
         }
     }
 }

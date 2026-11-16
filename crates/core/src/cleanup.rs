@@ -179,6 +179,7 @@ impl Application {
                 .await??;
             }
         }
+        let _project = self.lock_project(id).await?;
         let mut project = self.store.get(id).await?;
         let source_resources_cleared = project
             .extra

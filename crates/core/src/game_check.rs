@@ -85,7 +85,12 @@ impl Application {
         let mut seen = BTreeSet::new();
         settings.unit_ids.retain(|id| seen.insert(id.clone()));
         let _guard = self.lock_project(id).await?;
-        if self.task_state(id).await.is_some_and(|s| s.running) {
+        let _lifecycle = self.project_lifecycle.lock().await;
+        if self
+            .task_state(id)
+            .await
+            .is_some_and(|state| state.running && state.operation == "game-check")
+        {
             return Err(CoreError::ProjectBusy);
         }
         self.ensure_writable().await?;

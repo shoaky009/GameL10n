@@ -23,6 +23,7 @@ async fn fixture() -> (tempfile::TempDir, Application, String) {
             arguments: String::new(),
             working_directory: ".".into(),
         }),
+        &app.launch_view(&id).await.unwrap().revision,
     )
     .await
     .unwrap();

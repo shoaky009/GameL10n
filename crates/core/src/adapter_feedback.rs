@@ -202,6 +202,7 @@ impl Application {
         id: &str,
         previous: &AdapterVersion,
     ) -> Result<(), CoreError> {
+        let _project = self.lock_project(id).await?;
         let mut project = self.store.get(id).await?;
         let Some(replacement) =
             current_adapter(&project.extra).filter(|current| current != previous)

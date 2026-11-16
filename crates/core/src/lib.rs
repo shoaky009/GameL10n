@@ -52,4 +52,6 @@ pub enum CoreError {
     ProjectMissing(String),
     #[error("这个项目已有运行中的任务。")]
     ProjectBusy,
+    #[error("启动配置已更新，请确认是否覆盖。")]
+    LaunchConflict { revision: String },
 }

@@ -275,6 +275,9 @@ pub struct UiInput {
     pub launch_executable: String,
     pub launch_arguments: String,
     pub launch_directory: String,
+    pub launch_revision: String,
+    pub launch_conflict_revision: String,
+    pub launch_conflict_action: String,
 }
 impl UiInput {
     fn capture(ui: &MainWindow, argument: String) -> Self {
@@ -395,6 +398,9 @@ impl UiInput {
             launch_executable: a.get_launch_executable().into(),
             launch_arguments: a.get_launch_arguments().into(),
             launch_directory: a.get_launch_directory().into(),
+            launch_revision: a.get_launch_revision().into(),
+            launch_conflict_revision: a.get_launch_conflict_revision().into(),
+            launch_conflict_action: a.get_launch_conflict_action().into(),
         }
     }
 }
@@ -679,7 +685,19 @@ async fn dispatch(ctx: &Context, action: &str, input: &UiInput) -> Result<(), Co
         let mut next = input.clone();
         let action = match input.argument.as_str() {
             "api" => "api-save",
-            "launch" => "launch-save",
+            "launch" => {
+                if !input.launch_conflict_revision.is_empty() {
+                    next.launch_revision
+                        .clone_from(&input.launch_conflict_revision);
+                    if input.launch_conflict_action == "launch-reset" {
+                        "launch-reset"
+                    } else {
+                        "launch-save"
+                    }
+                } else {
+                    "launch-save"
+                }
+            }
             "adapt" => "adapt",
             "remove" => "remove",
             "patch" => "generate-patch",
@@ -701,7 +719,9 @@ async fn dispatch(ctx: &Context, action: &str, input: &UiInput) -> Result<(), Co
             }
             _ => return Ok(()),
         };
-        ctx.update(|ui| ui.global::<App>().set_modal("".into()));
+        if input.argument != "launch" {
+            ctx.update(|ui| ui.global::<App>().set_modal("".into()));
+        }
         return Box::pin(dispatch(ctx, action, &next)).await;
     }
     if metrics_ui::handle(ctx, action, input).await?

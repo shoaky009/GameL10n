@@ -28,7 +28,7 @@ export component GameCheckControls inherits VerticalLayout {
             Caption { text: "待检查译文 · " + App.check-unit-ids.length + " 条"; }
             ReportText { text: App.check-expected; }
             HorizontalLayout { spacing: 8px;
-                Button { text: "使用文本页选区"; enabled: !App.check-running && !App.busy; clicked => { App.action("game-check-selection", ""); } }
+                Button { text: "使用文本页选区"; enabled: !App.check-running; clicked => { App.action("game-check-selection", ""); } }
                 Button { text: "选择文本…"; enabled: !App.check-running; clicked => { App.modal = ""; App.action("tab", "1"); } }
                 Rectangle { horizontal-stretch: 1; }
             }
@@ -50,7 +50,7 @@ export component GameCheckControls inherits VerticalLayout {
             Caption { text: "进入场景的操作（可留空，仅“启动并检查”时执行）"; }
             TextEdit { text <=> App.check-steps; height: 90px; enabled: !App.check-running; }
             Caption { text: "每行一个操作：等待 1000、按键 Enter、点击 50 50。等待单位为毫秒，点击坐标为百分比。"; }
-            HorizontalLayout { Button { text: "保存检查设置"; enabled: !App.check-running && !App.busy; clicked => { App.action("game-check-save", ""); } } Rectangle { horizontal-stretch: 1; } }
+            HorizontalLayout { Button { text: "保存检查设置"; enabled: !App.check-running; clicked => { App.action("game-check-save", ""); } } Rectangle { horizontal-stretch: 1; } }
         }
     }
     Caption { text: "游戏会保持打开。检查结果仅供本次查看，具体问题请在游戏中确认。"; }

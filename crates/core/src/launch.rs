@@ -1,10 +1,14 @@
 //! Game launch configuration and selection from adapter and installation metadata.
 
-use crate::{Application, CoreError, GameProject, patching::PatchInstaller};
+use crate::{
+    Application, CoreError, GameProject,
+    patching::{InstallationJournal, PatchInstaller},
+};
 use gamel10n_engines::{
     discovery::Inventory,
     protocol::{LaunchConfiguration, ProbeResult},
 };
+use gamel10n_translation::files::hash_text;
 use serde::{Deserialize, Serialize};
 use std::{
     path::{Path, PathBuf},
@@ -29,11 +33,26 @@ struct PatchOverride {
 }
 
 pub struct LaunchView {
+    pub revision: String,
     pub configuration: Option<LaunchConfiguration>,
     pub source: String,
     pub reason: String,
     pub candidates: Vec<String>,
     pub can_launch: bool,
+}
+
+fn revision(saved: &LaunchPreferences, journal: &InstallationJournal) -> Result<String, CoreError> {
+    // Ignore candidate ordering and diagnostics: only configuration changes conflict with edits.
+    let configuration = (
+        &saved.detected,
+        &saved.manual,
+        &saved.patch_override,
+        journal.extra.get("launch"),
+        journal.extra.get("launchPatch"),
+    );
+    let json = serde_json::to_string(&configuration)
+        .map_err(|error| CoreError::InvalidData(error.to_string()))?;
+    Ok(hash_text(&json))
 }
 
 fn preferences(project: &GameProject) -> Result<LaunchPreferences, CoreError> {
@@ -262,6 +281,7 @@ impl Application {
         let saved = preferences(&project)?;
         let journal = PatchInstaller::new(self.project_directory(id)?)
             .read_journal(&project.game_directory)?;
+        let revision = revision(&saved, &journal)?;
         let installed: Option<LaunchConfiguration> = journal
             .extra
             .get("launch")
@@ -312,6 +332,7 @@ impl Application {
             "未设置"
         };
         Ok(LaunchView {
+            revision,
             configuration,
             source: source.into(),
             reason,
@@ -322,8 +343,13 @@ impl Application {
 
     pub async fn detect_launch(&self, id: &str) -> Result<(), CoreError> {
         let _guard = self.lock_project(id).await?;
-        if self.task_state(id).await.is_some_and(|state| state.running) {
-            return Err(CoreError::ProjectBusy);
+        let _lifecycle = self.project_lifecycle.lock().await;
+        if self.task_state(id).await.is_some_and(|state| {
+            state.running && matches!(state.operation.as_str(), "install" | "restore")
+        }) {
+            return Err(CoreError::InvalidData(
+                "补丁正在安装或恢复，请在操作结束后检测启动入口。".into(),
+            ));
         }
         self.ensure_writable().await?;
         let mut project = self.store.get(id).await?;
@@ -346,19 +372,29 @@ impl Application {
         &self,
         id: &str,
         configuration: Option<LaunchConfiguration>,
+        expected_revision: &str,
     ) -> Result<(), CoreError> {
         let _guard = self.lock_project(id).await?;
-        if self.task_state(id).await.is_some_and(|state| state.running) {
-            return Err(CoreError::ProjectBusy);
+        let _lifecycle = self.project_lifecycle.lock().await;
+        if self.task_state(id).await.is_some_and(|state| {
+            state.running && matches!(state.operation.as_str(), "install" | "restore")
+        }) {
+            return Err(CoreError::InvalidData(
+                "补丁正在安装或恢复，请在操作结束后保存启动设置。".into(),
+            ));
         }
         self.ensure_writable().await?;
         let mut project = self.store.get(id).await?;
-        if let Some(configuration) = &configuration {
-            validate_configuration(&project.game_directory, configuration)?;
-        }
         let mut saved = preferences(&project)?;
         let journal = PatchInstaller::new(self.project_directory(id)?)
             .read_journal(&project.game_directory)?;
+        let revision = revision(&saved, &journal)?;
+        if revision != expected_revision {
+            return Err(CoreError::LaunchConflict { revision });
+        }
+        if let Some(configuration) = &configuration {
+            validate_configuration(&project.game_directory, configuration)?;
+        }
         if journal.extra.contains_key("launch") {
             saved.patch_override = configuration.map(|configuration| PatchOverride {
                 patch: journal
@@ -481,6 +517,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn settings_remain_editable_during_recognition_and_launch_changes_require_confirmation() {
+        let (_root, app, id) = fixture().await;
+        app.begin(&id, "recognize", "recognizing").await.unwrap();
+        app.detect_launch(&id).await.unwrap();
+        let initial = app.launch_view(&id).await.unwrap();
+        app.save_project_settings(&id, serde_json::json!({"targetLanguage":"en"}))
+            .await
+            .unwrap();
+        app.save_game_check_settings(&id, Default::default())
+            .await
+            .unwrap();
+        let manual = configuration("game.exe", "--manual");
+        app.save_launch(&id, Some(manual.clone()), &initial.revision)
+            .await
+            .unwrap();
+        let edited = app.launch_view(&id).await.unwrap();
+        let game = app.open_project(&id).await.unwrap().game_directory;
+        let stored = crate::StoredAnalysis {
+            schema_version: 2,
+            coverage_pending: false,
+            format: "fixture".into(),
+            source_directory: game,
+            resource_files: vec![],
+            source_hashes: Default::default(),
+            extraction: gamel10n_engines::protocol::ExtractionResult { units: vec![], warnings: vec![] },
+            adapter: None,
+            probe: Some(serde_json::from_value(serde_json::json!({
+                "engineId":"fixture", "adapterId":"fixture", "adapterVersion":"1", "description":"fixture",
+                "requiredFiles":[], "launch":configuration("game.exe", "--detected"),
+            })).unwrap()),
+        };
+        let guard = app.lock_project(&id).await.unwrap();
+        let commit = app.commit_analysis(&id, stored);
+        tokio::pin!(commit);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut commit)
+                .await
+                .is_err()
+        );
+        drop(guard);
+        commit.await.unwrap();
+        let project = app.open_project(&id).await.unwrap();
+        assert_eq!(project.settings["targetLanguage"], "en");
+        assert!(project.extra.contains_key("gameCheck"));
+        assert_eq!(
+            app.launch_view(&id).await.unwrap().configuration,
+            Some(manual)
+        );
+        let CoreError::LaunchConflict { revision } = app
+            .save_launch(&id, None, &edited.revision)
+            .await
+            .unwrap_err()
+        else {
+            panic!("expected launch conflict");
+        };
+        app.save_launch(&id, None, &revision).await.unwrap();
+        assert_eq!(
+            app.launch_view(&id).await.unwrap().configuration,
+            Some(configuration("game.exe", "--detected"))
+        );
+    }
+
+    #[tokio::test]
     async fn resource_pairs_select_the_game_among_multiple_executables() {
         let (_root, app, id) = fixture().await;
         let game = app.open_project(&id).await.unwrap().game_directory;
@@ -513,9 +612,13 @@ mod tests {
         let view = app.launch_view(&id).await.unwrap();
         assert!(!view.can_launch);
         assert!(view.reason.contains("转区"));
-        app.save_launch(&id, Some(configuration("game.exe", "--manual-route")))
-            .await
-            .unwrap();
+        app.save_launch(
+            &id,
+            Some(configuration("game.exe", "--manual-route")),
+            &view.revision,
+        )
+        .await
+        .unwrap();
         assert!(app.launch_view(&id).await.unwrap().can_launch);
     }
 
@@ -529,7 +632,9 @@ mod tests {
         assert!(!view.can_launch);
         assert!(view.reason.contains("多个"));
         let saved = configuration("another.exe", r#"--name "名字 with spaces" "" --flag"#);
-        app.save_launch(&id, Some(saved.clone())).await.unwrap();
+        app.save_launch(&id, Some(saved.clone()), &view.revision)
+            .await
+            .unwrap();
         app.detect_launch(&id).await.unwrap();
         drop(app);
         let app = Application::open(root.path().join("data"), &crate::ToolPaths::new("missing"))
@@ -564,7 +669,13 @@ mod tests {
         let (root, app, id) = fixture().await;
         let game = app.open_project(&id).await.unwrap().game_directory;
         let original = configuration("game.exe", "--original");
-        app.save_launch(&id, Some(original.clone())).await.unwrap();
+        app.save_launch(
+            &id,
+            Some(original.clone()),
+            &app.launch_view(&id).await.unwrap().revision,
+        )
+        .await
+        .unwrap();
         let installed = configuration("launcher.exe", "--translated");
         let directory = patch(
             root.path(),
@@ -584,7 +695,9 @@ mod tests {
         assert_eq!(view.source, "已安装补丁");
         assert_eq!(view.configuration, Some(installed));
         let custom = configuration("launcher.exe", "--custom");
-        app.save_launch(&id, Some(custom.clone())).await.unwrap();
+        app.save_launch(&id, Some(custom.clone()), &view.revision)
+            .await
+            .unwrap();
         assert_eq!(
             app.launch_view(&id).await.unwrap().configuration,
             Some(custom)
@@ -604,7 +717,13 @@ mod tests {
         let game = app.open_project(&id).await.unwrap().game_directory;
         std::fs::write(game.join("another.exe"), "fixture").unwrap();
         let original = configuration("game.exe", "--original");
-        app.save_launch(&id, Some(original.clone())).await.unwrap();
+        app.save_launch(
+            &id,
+            Some(original.clone()),
+            &app.launch_view(&id).await.unwrap().revision,
+        )
+        .await
+        .unwrap();
         let selected = configuration("another.exe", "--translated");
         let directory = patch(
             root.path(),
@@ -659,9 +778,13 @@ mod tests {
         );
         assert!(!installer.journal_path().exists());
         assert!(
-            app.save_launch(&id, Some(configuration("missing.exe", "")))
-                .await
-                .is_err()
+            app.save_launch(
+                &id,
+                Some(configuration("missing.exe", "")),
+                &app.launch_view(&id).await.unwrap().revision
+            )
+            .await
+            .is_err()
         );
     }
 
@@ -669,9 +792,13 @@ mod tests {
     async fn interrupted_installation_blocks_launch_until_restoration_finishes() {
         let (root, app, id) = fixture().await;
         let game = app.open_project(&id).await.unwrap().game_directory;
-        app.save_launch(&id, Some(configuration("game.exe", "")))
-            .await
-            .unwrap();
+        app.save_launch(
+            &id,
+            Some(configuration("game.exe", "")),
+            &app.launch_view(&id).await.unwrap().revision,
+        )
+        .await
+        .unwrap();
         let directory = patch(root.path(), "patch", None);
         let installer = PatchInstaller::new(app.project_directory(&id).unwrap());
         installer.install(&game, &directory).unwrap();
@@ -711,6 +838,7 @@ mod tests {
                 arguments,
                 working_directory: "bin".into(),
             }),
+            &app.launch_view(&id).await.unwrap().revision,
         )
         .await
         .unwrap();

@@ -693,16 +693,19 @@ impl Application {
                 }
             }
             reuse_failures.truncate(6);
-            let mut current = self.store.get(id).await?;
-            current.extra.insert(
-                "discovery".into(),
-                json!({
-                    "reuseFailures": reuse_failures,
-                    "builtinProbes": builtin_probes.values().collect::<Vec<_>>(),
-                    "diagnostics": diagnostics,
-                }),
-            );
-            self.store.save(&current).await?;
+            {
+                let _project = self.lock_project(id).await?;
+                let mut current = self.store.get(id).await?;
+                current.extra.insert(
+                    "discovery".into(),
+                    json!({
+                        "reuseFailures": reuse_failures,
+                        "builtinProbes": builtin_probes.values().collect::<Vec<_>>(),
+                        "diagnostics": diagnostics,
+                    }),
+                );
+                self.store.save(&current).await?;
+            }
             if !retry {
                 if known_phase && !known_only && extracted.is_none() {
                     known_phase = false;
@@ -1029,7 +1032,7 @@ impl Application {
         if cancellation.is_cancelled() {
             return Err(gamel10n_engines::EngineError::Cancelled.into());
         }
-        let mut project = self.store.get(id).await?;
+        let project = self.store.get(id).await?;
         let require_model_analysis = start.require_model_analysis
             || crate::projects::extraction_coverage_pending(&project.extra);
         crate::game_directory::validate(&project.game_directory)?;
@@ -1095,10 +1098,15 @@ impl Application {
         if cancellation.is_cancelled() {
             return Err(gamel10n_engines::EngineError::Cancelled.into());
         }
-        project
-            .extra
-            .insert("adaptationObjective".into(), json!(objective));
-        self.store.save(&project).await?;
+        let project = {
+            let _project = self.lock_project(id).await?;
+            let mut project = self.store.get(id).await?;
+            project
+                .extra
+                .insert("adaptationObjective".into(), json!(objective));
+            self.store.save(&project).await?;
+            project
+        };
         let api = self.task_api_summary(id).await?;
         self.log_task_message(id, api.lines().next().unwrap_or("分析 API 已选择。"))
             .await;

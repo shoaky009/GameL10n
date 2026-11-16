@@ -10,6 +10,7 @@ pub async fn refresh(ctx: &Context, id: &str, edit: bool) -> Result<(), CoreErro
         .launch_view(id)
         .await
         .unwrap_or_else(|error| LaunchView {
+            revision: String::new(),
             configuration: None,
             source: "未设置".into(),
             reason: error.to_string(),
@@ -30,6 +31,9 @@ pub async fn refresh(ctx: &Context, id: &str, edit: bool) -> Result<(), CoreErro
         app.set_launch_summary(summary.into());
         app.set_launch_can_run(view.can_launch);
         if edit || app.get_modal() != "launch" {
+            app.set_launch_revision(view.revision.into());
+            app.set_launch_conflict_revision("".into());
+            app.set_launch_conflict_action("".into());
             let configuration = view.configuration.unwrap_or_default();
             app.set_launch_executable(configuration.executable.into());
             app.set_launch_arguments(configuration.arguments.into());
@@ -88,8 +92,8 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                 });
             }
         }
-        "launch-save" => {
-            let configuration = LaunchConfiguration {
+        "launch-save" | "launch-reset" => {
+            let configuration = (action == "launch-save").then(|| LaunchConfiguration {
                 executable: input.launch_executable.trim().into(),
                 arguments: input.launch_arguments.clone(),
                 working_directory: if input.launch_directory.trim().is_empty() {
@@ -97,34 +101,61 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                 } else {
                     input.launch_directory.trim().into()
                 },
-            };
+            });
             if let Err(error) = ctx
                 .app()
                 .await
-                .save_launch(&input.project_id, Some(configuration))
+                .save_launch(&input.project_id, configuration, &input.launch_revision)
                 .await
             {
                 let id = input.project_id.clone();
                 let message = error.to_string();
+                let conflict_revision = match &error {
+                    CoreError::LaunchConflict { revision } => Some(revision.clone()),
+                    _ => None,
+                };
+                let conflict = conflict_revision.is_some();
+                let action = action.to_owned();
                 ctx.update(move |ui| {
                     let app = ui.global::<App>();
                     if app.get_project_id().as_str() == id {
                         app.set_modal("launch".into());
                         app.set_launch_reason(message.into());
+                        app.set_launch_conflict_revision(
+                            conflict_revision.unwrap_or_default().into(),
+                        );
+                        app.set_launch_conflict_action(if conflict {
+                            action.into()
+                        } else {
+                            "".into()
+                        });
+                        if conflict {
+                            app.set_error("".into());
+                        }
                     }
                 });
+                if conflict {
+                    refresh(ctx, &input.project_id, false).await?;
+                    return Ok(true);
+                }
                 return Err(error);
             }
-            refresh(ctx, &input.project_id, false).await?;
-            clear_error(ctx, &input.project_id);
-        }
-        "launch-detect" => {
-            ctx.app().await.detect_launch(&input.project_id).await?;
+            if action == "launch-save" {
+                let id = input.project_id.clone();
+                ctx.update(move |ui| {
+                    let app = ui.global::<App>();
+                    if app.get_project_id().as_str() == id && app.get_modal() == "launch" {
+                        app.set_modal("".into());
+                    }
+                });
+            }
             refresh(ctx, &input.project_id, true).await?;
             clear_error(ctx, &input.project_id);
         }
-        "launch-reset" => {
-            ctx.app().await.save_launch(&input.project_id, None).await?;
+        "launch-detect" | "launch-reload" => {
+            if action == "launch-detect" {
+                ctx.app().await.detect_launch(&input.project_id).await?;
+            }
             refresh(ctx, &input.project_id, true).await?;
             clear_error(ctx, &input.project_id);
         }

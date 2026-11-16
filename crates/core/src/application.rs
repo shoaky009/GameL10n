@@ -649,6 +649,7 @@ impl Application {
         stored: StoredAnalysis,
     ) -> Result<(), CoreError> {
         let count = stored.extraction.units.len();
+        let _project = self.lock_project(id).await?;
         let mut project = self.store.get(id).await?;
         let probe = stored.probe.as_ref();
         project.extra.remove("materialsCleanup");

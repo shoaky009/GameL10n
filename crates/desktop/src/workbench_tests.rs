@@ -565,6 +565,43 @@ fn project_actions_keep_settings_selection_and_saved_edits_in_sync_across_tabs()
         assert_eq!(app.get_launch_executable(), "game.exe");
         assert!(app.get_error().is_empty());
 
+        let baseline = app.get_launch_revision();
+        app.set_launch_arguments("--draft".into());
+        let configuration = gamel10n_engines::protocol::LaunchConfiguration {
+            executable: "game.exe".into(),
+            arguments: "--background".into(),
+            working_directory: ".".into(),
+        };
+        host.save_launch(&project.id, Some(configuration.clone()), baseline.as_str()).await.unwrap();
+        crate::launch_ui::refresh(&ctx, &project.id, false).await.unwrap();
+        invoke_action(&ui, &ctx, "confirm", "launch").await;
+        assert_eq!(app.get_modal(), "launch");
+        assert_eq!(app.get_launch_revision(), baseline);
+        assert_eq!(app.get_launch_arguments(), "--draft");
+        assert!(!app.get_launch_conflict_revision().is_empty());
+        assert_eq!(host.launch_view(&project.id).await.unwrap().configuration, Some(configuration.clone()));
+        let conflict = app.get_launch_conflict_revision();
+        let mut newer = configuration.clone();
+        newer.arguments = "--newer-background".into();
+        host.save_launch(&project.id, Some(newer), conflict.as_str()).await.unwrap();
+        invoke_action(&ui, &ctx, "confirm", "launch").await;
+        assert_eq!(app.get_modal(), "launch");
+        assert_ne!(app.get_launch_conflict_revision(), conflict);
+        assert_eq!(app.get_launch_arguments(), "--draft");
+        invoke_action(&ui, &ctx, "confirm", "launch").await;
+        assert_eq!(app.get_modal(), "");
+        assert_eq!(host.launch_view(&project.id).await.unwrap().configuration.unwrap().arguments, "--draft");
+
+        invoke_action(&ui, &ctx, "launch-settings", "").await;
+        host.save_launch(&project.id, Some(configuration), app.get_launch_revision().as_str()).await.unwrap();
+        invoke_action(&ui, &ctx, "launch-reset", "").await;
+        assert_eq!(app.get_launch_conflict_action(), "launch-reset");
+        invoke_action(&ui, &ctx, "launch-reload", "").await;
+        assert_eq!(app.get_launch_arguments(), "--background");
+        assert!(app.get_launch_conflict_revision().is_empty());
+        invoke_action(&ui, &ctx, "launch-reset", "").await;
+        assert_eq!(app.get_launch_arguments(), "");
+
         host.save_translation_edit(&project.id, "line-000", "运行检查测试译文".into(), false).await.unwrap();
         ctx.set_selection(&project.id, vec!["line-000".into()]);
         invoke_action(&ui, &ctx, "game-check-dialog", "").await;

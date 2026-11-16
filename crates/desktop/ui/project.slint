@@ -167,7 +167,7 @@ export component Recognition inherits VerticalLayout {
     HorizontalLayout { spacing: 20px;
         HorizontalLayout { spacing: 8px; horizontal-stretch: 0;
             Button { text: App.recognition-ready ? "重新识别…" : "识别与适配"; primary: !App.recognition-ready; enabled: !App.busy; clicked => { App.action("adapt-dialog", ""); } }
-            Button { text: App.recognition-ready ? "查看文本并试译" : "查看保留文本"; primary: App.recognition-ready; enabled: App.recognition != "" && !App.busy; clicked => { App.action("tab", "1"); } }
+            Button { text: App.recognition-ready ? "查看文本并试译" : "查看保留文本"; primary: App.recognition-ready; enabled: App.recognition != ""; clicked => { App.action("tab", "1"); } }
         }
         Rectangle { width: 1px;
             Rectangle { width: 1px; height: 20px; y: (parent.height - self.height) / 2; background: Theme.line; }
@@ -259,8 +259,8 @@ export component PatchPage inherits ScrollView {
         Caption { text: App.launch-summary; }
         HorizontalLayout { spacing: 8px;
             Button { text: "启动游戏"; enabled: !App.busy && App.launch-can-run; clicked => { App.action("launch-game", ""); } }
-            Button { text: "运行检查…"; enabled: !App.busy; clicked => { App.action("game-check-dialog", ""); } }
-            Button { text: "启动设置…"; enabled: !App.busy; clicked => { App.action("tab", "3"); } }
+            Button { text: "运行检查…"; clicked => { App.action("game-check-dialog", ""); } }
+            Button { text: "启动设置…"; clicked => { App.action("tab", "3"); } }
             Rectangle { horizontal-stretch: 1; }
         }
         Label { text: App.runtime-check == "" ? "尚未记录游戏内显示结果；结构校验不代表中文显示已经验证。" : App.runtime-check; }
