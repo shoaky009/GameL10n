@@ -1910,142 +1910,149 @@ impl EngineService {
                     )));
                 }
             }
-            let by_id: BTreeMap<_, _> = units.iter().map(|unit| (unit.id.as_str(), unit)).collect();
+            {
+                let by_id: BTreeMap<_, _> = units.iter().map(|unit| (unit.id.as_str(), unit)).collect();
+                record_verification_stage(&mut stage_timings_ms, phase, &mut phase_started);
+                phase = "existing-text-compatibility";
+                for previous in baseline {
+                    if by_id.get(previous.id.as_str()).is_none_or(|unit| {
+                        unit.resource_path != previous.resource_path
+                            || unit.locator != previous.locator
+                            || unit.source_text != previous.source_text
+                            || unit.context != previous.context
+                            || unit.speaker != previous.speaker
+                            || unit.kind != previous.kind
+                            || token_set(unit) != token_set(previous)
+                    }) {
+                        let mismatch = crate::VerificationIssue::new(
+                            crate::VerificationIssueCode::IdentityMismatch,
+                            phase,
+                        )
+                        .at(&previous.resource_path, Some(&previous.id))
+                        .unit_difference(
+                            previous,
+                            by_id.get(previous.id.as_str()).copied(),
+                            &previous.source_text,
+                            true,
+                            true,
+                        );
+                        let fields = mismatch.field_names();
+                        issue = Some(mismatch);
+                        return Err(EngineError::Rejected(format!(
+                            "已有文本身份或上下文发生变化：{}（变化字段：{fields}）",
+                            previous.id
+                        )));
+                    }
+                }
+            }
+            result.units = units.len();
             record_verification_stage(&mut stage_timings_ms, phase, &mut phase_started);
-            phase = "existing-text-compatibility";
-            for previous in baseline {
-                if by_id.get(previous.id.as_str()).is_none_or(|unit| {
-                    unit.resource_path != previous.resource_path
-                        || unit.locator != previous.locator
-                        || unit.source_text != previous.source_text
-                        || unit.context != previous.context
-                        || unit.speaker != previous.speaker
-                        || unit.kind != previous.kind
-                        || token_set(unit) != token_set(previous)
+            phase = "repeated-extraction";
+            {
+                let repeated = self
+                    .execute_with_hashes(adapter, &request, Some(&before), None, cancellation)
+                    .await?
+                    .extraction
+                    .ok_or_else(|| EngineError::Protocol("重复提取缺少结果。".into()))?;
+                let repeated: BTreeMap<_, _> = repeated
+                    .units
+                    .iter()
+                    .filter(|unit| !unit.source_text.trim().is_empty())
+                    .map(|unit| (unit.id.as_str(), unit))
+                    .collect();
+                if repeated.len() != units.len() {
+                    issue = Some(
+                        crate::VerificationIssue::new(crate::VerificationIssueCode::TextCount, phase)
+                            .difference(&units.len().to_string(), &repeated.len().to_string()),
+                    );
+                    return Err(EngineError::Rejected(
+                        "重复提取改变了文本内容或身份。".into(),
+                    ));
+                }
+                if let Some(unit) = units.iter().find(|unit| {
+                    repeated.get(unit.id.as_str()).is_none_or(|again| {
+                        again.source_text != unit.source_text
+                            || again.resource_path != unit.resource_path
+                            || again.locator != unit.locator
+                            || again.kind != unit.kind
+                            || again.speaker != unit.speaker
+                            || token_set(again) != token_set(unit)
+                    })
                 }) {
                     let mismatch = crate::VerificationIssue::new(
                         crate::VerificationIssueCode::IdentityMismatch,
                         phase,
                     )
-                    .at(&previous.resource_path, Some(&previous.id))
+                    .at(&unit.resource_path, Some(&unit.id))
                     .unit_difference(
-                        previous,
-                        by_id.get(previous.id.as_str()).copied(),
-                        &previous.source_text,
-                        true,
+                        unit,
+                        repeated.get(unit.id.as_str()).copied(),
+                        &unit.source_text,
+                        false,
                         true,
                     );
                     let fields = mismatch.field_names();
                     issue = Some(mismatch);
                     return Err(EngineError::Rejected(format!(
-                        "已有文本身份或上下文发生变化：{}（变化字段：{fields}）",
-                        previous.id
+                        "重复提取改变了文本内容或身份：{}（变化字段：{fields}）。",
+                        unit.id
                     )));
                 }
             }
-            result.units = units.len();
-            let original: BTreeMap<_, _> = units
-                .iter()
-                .map(|unit| (unit.id.clone(), unit.source_text.clone()))
-                .collect();
-            record_verification_stage(&mut stage_timings_ms, phase, &mut phase_started);
-            phase = "repeated-extraction";
-            let repeated = self
-                .execute_with_hashes(adapter, &request, Some(&before), None, cancellation)
-                .await?
-                .extraction
-                .ok_or_else(|| EngineError::Protocol("重复提取缺少结果。".into()))?;
-            let repeated: BTreeMap<_, _> = repeated
-                .units
-                .iter()
-                .filter(|unit| !unit.source_text.trim().is_empty())
-                .map(|unit| (unit.id.as_str(), unit))
-                .collect();
-            if repeated.len() != units.len() {
-                issue = Some(
-                    crate::VerificationIssue::new(crate::VerificationIssueCode::TextCount, phase)
-                        .difference(&units.len().to_string(), &repeated.len().to_string()),
-                );
-                return Err(EngineError::Rejected(
-                    "重复提取改变了文本内容或身份。".into(),
-                ));
-            }
-            if let Some(unit) = units.iter().find(|unit| {
-                repeated.get(unit.id.as_str()).is_none_or(|again| {
-                    again.source_text != unit.source_text
-                        || again.resource_path != unit.resource_path
-                        || again.locator != unit.locator
-                        || again.kind != unit.kind
-                        || again.speaker != unit.speaker
-                        || token_set(again) != token_set(unit)
-                })
-            }) {
-                let mismatch = crate::VerificationIssue::new(
-                    crate::VerificationIssueCode::IdentityMismatch,
-                    phase,
-                )
-                .at(&unit.resource_path, Some(&unit.id))
-                .unit_difference(
-                    unit,
-                    repeated.get(unit.id.as_str()).copied(),
-                    &unit.source_text,
-                    false,
-                    true,
-                );
-                let fields = mismatch.field_names();
-                issue = Some(mismatch);
-                return Err(EngineError::Rejected(format!(
-                    "重复提取改变了文本内容或身份：{}（变化字段：{fields}）。",
-                    unit.id
-                )));
-            }
-            let changed: BTreeMap<_, _> = units
-                .iter()
-                .enumerate()
-                .map(|(index, unit)| {
-                    (
-                        unit.id.clone(),
-                        gamel10n_translation::text::verification_text(unit, index, false),
-                    )
-                })
-                .collect();
-            let mutable: Vec<_> = units
-                .iter()
-                .enumerate()
-                .filter(|(_, unit)| changed[&unit.id] != unit.source_text)
-                .collect();
-            let mut partial = BTreeMap::new();
-            if let Some(&(index, unit)) = mutable.first() {
-                partial.insert(
-                    unit.id.clone(),
-                    gamel10n_translation::text::verification_text(unit, index, true),
-                );
-            }
-            if mutable.len() > 3 {
-                let (index, unit) = mutable[mutable.len() / 2];
-                partial.insert(
-                    unit.id.clone(),
-                    gamel10n_translation::text::verification_text(unit, index, true),
-                );
-            }
-            for (stage, translations) in [
-                ("原文回填", original),
-                ("部分试译", partial),
-                ("中文修改", changed),
-            ] {
-                let translations = Arc::new(translations);
+            let mut changed = BTreeMap::new();
+            for stage in ["原文回填", "部分试译", "中文修改"] {
                 record_verification_stage(&mut stage_timings_ms, phase, &mut phase_started);
                 phase = match stage {
                     "原文回填" => "original-byte-roundtrip",
                     "部分试译" => "partial-translation-build",
                     _ => "full-translation-build",
                 };
-                if stage != "原文回填" && mutable.is_empty() {
-                    return Err(EngineError::Rejected(
-                        "所有提取文本均为保护标记或空白，无法生成有效测试译文；请提取可见文字。"
-                            .into(),
-                    ));
-                }
+                let translations = match stage {
+                    "原文回填" => units
+                        .iter()
+                        .map(|unit| (unit.id.clone(), unit.source_text.clone()))
+                        .collect(),
+                    "部分试译" => {
+                        changed = units
+                            .iter()
+                            .enumerate()
+                            .map(|(index, unit)| {
+                                (
+                                    unit.id.clone(),
+                                    gamel10n_translation::text::verification_text(unit, index, false),
+                                )
+                            })
+                            .collect();
+                        let mutable: Vec<_> = units
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, unit)| changed[&unit.id] != unit.source_text)
+                            .collect();
+                        if mutable.is_empty() {
+                            return Err(EngineError::Rejected(
+                                "所有提取文本均为保护标记或空白，无法生成有效测试译文；请提取可见文字。"
+                                    .into(),
+                            ));
+                        }
+                        let mut partial = BTreeMap::new();
+                        if let Some(&(index, unit)) = mutable.first() {
+                            partial.insert(
+                                unit.id.clone(),
+                                gamel10n_translation::text::verification_text(unit, index, true),
+                            );
+                        }
+                        if mutable.len() > 3 {
+                            let (index, unit) = mutable[mutable.len() / 2];
+                            partial.insert(
+                                unit.id.clone(),
+                                gamel10n_translation::text::verification_text(unit, index, true),
+                            );
+                        }
+                        partial
+                    }
+                    _ => std::mem::take(&mut changed),
+                };
+                let translations = Arc::new(translations);
                 Self::report(
                     progress,
                     "验收资源回填",
