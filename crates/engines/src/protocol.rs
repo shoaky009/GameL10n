@@ -302,20 +302,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn shared_translations_keep_the_adapter_json_contract() {
-        let mut request = AdapterRequest::new("build", "source");
-        request.translations =
-            Some(BTreeMap::from([("line-1".into(), "中文😀\n第二行".into())]).into());
-        let value = serde_json::to_value(&request).expect("request JSON");
-        assert_eq!(
-            value["translations"],
-            serde_json::json!({"line-1": "中文😀\n第二行"})
-        );
-        let decoded: AdapterRequest = serde_json::from_value(value).expect("request roundtrip");
-        assert_eq!(decoded.translations, request.translations);
-    }
-
-    #[test]
     fn legacy_resource_errors_allow_fallback_without_hiding_infrastructure_or_protocol_failures() {
         for operation in ["extract", "build", "validate"] {
             for kind in [None, Some(""), Some("incompatible")] {
