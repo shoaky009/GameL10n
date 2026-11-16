@@ -61,7 +61,7 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: GameL10n ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
           body_path: ${{ runner.temp }}/release-notes.md
           files: artifacts/GameL10n-${{ github.ref_name }}-win-x64.zip
           fail_on_unmatched_files: true
