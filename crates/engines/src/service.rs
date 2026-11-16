@@ -301,16 +301,14 @@ impl EngineService {
         cancellation: &CancellationToken,
     ) -> Result<Value, EngineError> {
         const SOURCE: &str = include_str!("../python/host.py");
-        fs::create_dir_all(&self.shared_directory)?;
-        let helper = self.shared_directory.join("rust-host-v1.py");
-        if fs::read_to_string(&helper).ok().as_deref() != Some(SOURCE) {
-            fs::write(&helper, SOURCE)?;
-        }
-        let guard = self.shared_directory.join("readonly_inputs.py");
-        const GUARD: &str = include_str!("../python/readonly_inputs.py");
-        if fs::read_to_string(&guard).ok().as_deref() != Some(GUARD) {
-            fs::write(&guard, GUARD)?;
-        }
+        // Fresh files inherit grantable ACLs instead of retaining permissions from an old install.
+        let directory = tempfile::tempdir()?;
+        let helper = directory.path().join("rust-host-v1.py");
+        fs::write(&helper, SOURCE)?;
+        fs::write(
+            directory.path().join("readonly_inputs.py"),
+            include_str!("../python/readonly_inputs.py"),
+        )?;
         let mut process = ToolProcess::new(self.tools.python())
             .with_arguments([
                 OsString::from("-I"),
@@ -334,7 +332,7 @@ impl EngineService {
                     .as_str()
                     .ok_or_else(|| EngineError::Protocol("缺少执行工作目录。".into()))?,
             );
-            let mut read_paths = vec![self.tools.root.clone(), self.shared_directory.clone()];
+            let mut read_paths = vec![self.tools.root.clone(), directory.path().to_path_buf()];
             if let Some(paths) = request["resourcePaths"].as_object() {
                 read_paths.extend(paths.values().filter_map(Value::as_str).map(PathBuf::from));
             }
@@ -2488,6 +2486,60 @@ fn validate_raw_units(units: &[TranslationUnit], source: &Path) -> Result<(), En
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn python_execution_does_not_depend_on_cached_host_scripts() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let shared = root.path().join("shared");
+        fs::create_dir(&shared).unwrap();
+        let locks: Vec<_> = ["rust-host-v1.py", "readonly_inputs.py"]
+            .iter()
+            .map(|name| {
+                let path = shared.join(name);
+                fs::write(&path, "cached helper").unwrap();
+                fs::OpenOptions::new()
+                    .read(true)
+                    .share_mode(0)
+                    .open(path)
+                    .unwrap()
+            })
+            .collect();
+        let workspace = root.path().join("adaptation/current");
+        fs::create_dir_all(&workspace).unwrap();
+        let service =
+            EngineService::new(root.path(), ToolPaths::development()).with_shared_directory(shared);
+        for isolated in [false, true] {
+            let result = service
+                .clone()
+                .with_execution_isolation(isolated)
+                .helper(
+                    &json!({
+                        "operation":"run", "workspace":workspace,
+                        "script":"work/probe.py",
+                        "content":"save_sample('work/sample.bin', b'sample'); print('helper-ok')",
+                        "resourcePaths":{},
+                    }),
+                    &CancellationToken::new(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(result["exitCode"], 0, "{result}");
+            assert_eq!(result["stdout"].as_str().unwrap().trim(), "helper-ok");
+            assert_eq!(result["registeredSamples"], json!(["work/sample.bin"]));
+            let retained: BTreeSet<_> = fs::read_dir(workspace.join("work"))
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            assert_eq!(
+                retained,
+                BTreeSet::from([OsString::from("probe.py"), OsString::from("sample.bin")])
+            );
+        }
+        drop(locks);
+    }
 
     #[cfg(windows)]
     #[tokio::test]

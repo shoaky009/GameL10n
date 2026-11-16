@@ -805,9 +805,13 @@ def run(request):
     script_hash = hashlib.sha256(path.read_bytes()).hexdigest() if script else None
     sample_directory = safe(workspace, 'work')
     sample_directory.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix='.sample-files-', dir=sample_directory) as tracking:
-        sample_path = Path(tracking) / 'written.json'
-        input_path = Path(tracking) / 'inputs.json'
+    # Inherit the workspace ACL; private temporary-directory ACLs reject AppContainer tokens.
+    with (tempfile.NamedTemporaryFile(prefix='.sample-files-', suffix='.json', dir=sample_directory,
+                                     delete_on_close=False) as sample_file,
+          tempfile.NamedTemporaryFile(prefix='.resource-inputs-', suffix='.json', dir=sample_directory,
+                                     delete_on_close=False) as input_file):
+        sample_path = Path(sample_file.name)
+        input_path = Path(input_file.name)
         input_path.write_text(json.dumps(dict(roots=input_roots,
             directory=str(request.get('resourceDirectory') or workspace / 'resources'),
             paths=request.get('resourcePaths', {}))), encoding='utf8')
@@ -815,7 +819,7 @@ def run(request):
         environment.update(GAMEL10N_SAMPLE_ROOT=str(workspace), GAMEL10N_SAMPLE_FILES=str(sample_path),
                            GAMEL10N_SAMPLE_EXTENSIONS=json.dumps(sample_extensions))
         result = run_process([sys.executable, '-I', '-X', 'utf8', '-c', code, *target, *arguments], workspace, request, environment)
-        if sample_path.is_file():
+        if sample_path.is_file() and sample_path.stat().st_size:
             try:
                 sample_path = safe(workspace, sample_path.relative_to(workspace).as_posix())
                 with sample_path.open('rb') as stream:

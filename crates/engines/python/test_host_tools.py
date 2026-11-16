@@ -129,6 +129,7 @@ print('unchanged stdout')
         self.assertFalse(result['writtenFilesPartial'])
         self.assertEqual(result['stdout'].strip(), 'unchanged stdout')
         self.assertEqual(list((self.root / 'work').glob('.sample-files-*')), [])
+        self.assertEqual(list((self.root / 'work').glob('.resource-inputs-*')), [])
 
     def test_atomic_sample_replacement_and_failed_probe_keep_written_paths(self):
         result = self.execute('run', script='work/decode.py', sampleExtensions=['.scn'], content='''
@@ -151,6 +152,7 @@ raise ValueError('later experiment failed')
         self.assertEqual(result['registeredSamples'], ['work/samples/scene.bin'])
         self.assertEqual((self.root / 'work/samples/scene.bin').read_bytes(), b'new sample')
         self.assertEqual(list((self.root / 'work').glob('.sample-files-*')), [])
+        self.assertEqual(list((self.root / 'work').glob('.resource-inputs-*')), [])
 
     def test_memory_samples_reject_invalid_scope_and_excessive_inputs_before_writing(self):
         for expression in ("save_sample('../outside.ks', b'x')",
