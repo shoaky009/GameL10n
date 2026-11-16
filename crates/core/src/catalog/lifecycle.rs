@@ -158,6 +158,8 @@ impl EngineCatalog {
                 if let Some(candidate) = existing {
                     if !excluded || candidate.is_pinned {
                         candidate.is_known_game = true;
+                        candidate.coverage_confirmed =
+                            game.coverage_confirmed || game.runtime_status == "passed";
                     }
                 } else if family.enabled && !excluded {
                     candidates.push(EngineDiscoveryCandidate {
@@ -176,6 +178,8 @@ impl EngineCatalog {
                             .and_then(|value| serde_json::from_value(value.clone()).ok()),
                         is_pinned: false,
                         is_known_game: true,
+                        coverage_confirmed: game.coverage_confirmed
+                            || game.runtime_status == "passed",
                     });
                 }
                 known_updates.insert(

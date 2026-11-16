@@ -1806,7 +1806,11 @@
             },
             "allowPartial": {
               "type": "boolean",
-              "description": "Explicitly publish usable partial support with known missing coverage, disclosed in summary. Repair may retain unrelated coverage omissions without expanding scope."
+              "description": "Explicitly publish usable partial support with known missing coverage, disclosed in summary. Cannot bypass low extraction coverage review. Repair may retain unrelated coverage omissions without expanding scope."
+            },
+            "smallGameEvidence": {
+              "type": "string",
+              "description": "Only for genuinely small games below 1000 extracted units: identify the main text resources, their scale, and evidence ruling out missing main scripts. Requires coverageSamples checked by full test_adapter and no pendingCoverage. Never use auxiliary/help text or unresolved decoding as evidence of a small game."
             }
           },
           "required": [

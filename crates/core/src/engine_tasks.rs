@@ -9,7 +9,10 @@ use crate::{
 use gamel10n_engines::{
     AdapterHandle, EngineProgress, EngineService, PackageManifest, ReadOnlySource,
     VerificationResult, VerifiedExtraction,
-    adaptation::{AdaptationInputs, AdaptationLimits, AdaptationRequest, AdaptationResult},
+    adaptation::{
+        AdaptationInputs, AdaptationLimits, AdaptationRequest, AdaptationResult,
+        SMALL_EXTRACTION_THRESHOLD,
+    },
     discovery::Inventory,
     protocol::{AdapterRequest, BuildMode, ProbeResult},
     service::GeneratedAdapterReuseFailure,
@@ -69,8 +72,6 @@ pub enum RecognitionMode {
     Automatic,
     Intelligent,
 }
-
-const SMALL_EXTRACTION_THRESHOLD: usize = 1_000;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ExtractionCoverage {
@@ -412,7 +413,7 @@ impl Application {
             if continuing {
                 if recover_missing {
                     let recovered = self.recognize_existing(id, &cancellation, true).await?;
-                    if let Some(count) = recovered.extracted.filter(|count| *count > 0) {
+                    if let Some(count) = recovered.extracted.filter(|count| *count > 0 && (*count >= SMALL_EXTRACTION_THRESHOLD || recovered.known_game)) {
                         self.metrics_details(id, None, Some("reused"), None).await;
                         return Ok(RecognitionResult::Extracted(count));
                     }
@@ -543,7 +544,7 @@ impl Application {
                 });
                 let known_versions = candidates
                     .iter()
-                    .filter(|candidate| candidate.is_known_game)
+                    .filter(|candidate| candidate.is_known_game && candidate.coverage_confirmed)
                     .map(|candidate| (candidate.adapter_id.clone(), candidate.version.clone()))
                     .collect::<BTreeSet<_>>();
                 let mut known_packages = Vec::new();
@@ -955,6 +956,7 @@ impl Application {
                 variant: probe.engine_id.clone(),
                 adapter_version: probe.adapter_version.clone(),
                 structure_status: "passed".into(),
+                coverage_confirmed: true,
                 runtime_status: "not-tested".into(),
                 updated_at: Some(chrono::Utc::now().to_rfc3339()),
             };
@@ -1207,25 +1209,6 @@ impl Application {
             self.engine_progress(id, "adapt", progress).await?;
         }
         let mut result = result?;
-        let status = match result.status {
-            gamel10n_engines::AdaptationStatus::Activated
-            | gamel10n_engines::AdaptationStatus::Reused => "completed",
-            gamel10n_engines::AdaptationStatus::Failed
-            | gamel10n_engines::AdaptationStatus::Unavailable => "failed",
-            gamel10n_engines::AdaptationStatus::Unsupported => "unsupported",
-            _ => "paused",
-        };
-        self.metrics_details(
-            id,
-            None,
-            (result.status == gamel10n_engines::AdaptationStatus::Reused).then_some("reused"),
-            Some(status),
-        )
-        .await;
-        write_json(
-            &self.project_directory(id)?.join("adaptation-result.json"),
-            &result,
-        )?;
         if let Some(adapter) = &result.adapter {
             let probe = if let AdapterHandle::Python {
                 package_directory: Some(package),
@@ -1261,22 +1244,56 @@ impl Application {
             }
             .ok_or_else(|| CoreError::InvalidData("已发布适配器未匹配当前游戏。".into()))?;
             let trial = result.status == gamel10n_engines::AdaptationStatus::Activated;
-            self.extract_adapter(
-                id,
-                adapter.clone(),
-                probe,
-                cancellation,
-                ExtractionCoverage::Confirmed,
-                trial,
-                previous.as_ref(),
-                result.verified_extraction.take(),
-                Some(&request.inputs),
-            )
-            .await?;
+            let coverage = if trial
+                && !(request.objective.eq_ignore_ascii_case("repair")
+                    && crate::projects::extraction_coverage_pending(&project.extra))
+            {
+                ExtractionCoverage::Confirmed
+            } else {
+                ExtractionCoverage::CheckIfSmall
+            };
+            let count = self
+                .extract_adapter(
+                    id,
+                    adapter.clone(),
+                    probe,
+                    cancellation,
+                    coverage,
+                    trial,
+                    previous.as_ref(),
+                    result.verified_extraction.take(),
+                    Some(&request.inputs),
+                )
+                .await?;
             if trial && let Some(previous) = &previous {
                 self.remember_adapter_replacement(id, previous).await?;
             }
+            if !trial && count < SMALL_EXTRACTION_THRESHOLD {
+                result.status = gamel10n_engines::AdaptationStatus::Incomplete;
+                result.summary = format!("已保留 {count} 条文本，主要文本覆盖待确认。");
+                result.next_action = "继续适配，核对主要脚本和文本来源。".into();
+                result.adapter = None;
+            }
         }
+        let status = match result.status {
+            gamel10n_engines::AdaptationStatus::Activated
+            | gamel10n_engines::AdaptationStatus::Reused => "completed",
+            gamel10n_engines::AdaptationStatus::Failed
+            | gamel10n_engines::AdaptationStatus::Unavailable => "failed",
+            gamel10n_engines::AdaptationStatus::Unsupported => "unsupported",
+            _ => "paused",
+        };
+        self.metrics_details(
+            id,
+            None,
+            (result.status == gamel10n_engines::AdaptationStatus::Reused).then_some("reused"),
+            Some(status),
+        )
+        .await;
+        write_json(
+            &self.project_directory(id)?.join("adaptation-result.json"),
+            &result,
+        )?;
         Ok(result)
     }
 
@@ -2774,6 +2791,7 @@ mod tests {
         let app = Application::open(root.path().join("data"), &tools)
             .await
             .unwrap();
+        app.save_execution_isolation(false).await.unwrap();
         let project = app.add_project(&game).await.unwrap();
         let script = include_str!("../../engines/tests/fixtures/json_adapter.py").replace(
             "r = json.load(sys.stdin)",
@@ -3223,6 +3241,7 @@ mod tests {
                         variant: "fixture".into(),
                         adapter_version: "1".into(),
                         structure_status: "passed".into(),
+                        coverage_confirmed: true,
                         runtime_status: "not-tested".into(),
                         updated_at: None,
                     },
@@ -3279,6 +3298,7 @@ mod tests {
                     variant: "fixture".into(),
                     adapter_version: "1".into(),
                     structure_status: "passed".into(),
+                    coverage_confirmed: true,
                     runtime_status: "not-tested".into(),
                     updated_at: None,
                 },
@@ -3411,6 +3431,163 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rejected_small_extraction_continues_until_budget_without_registering_compatibility() {
+        let tools = crate::ToolPaths::development();
+        if !tools.python().is_file() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let game = root.path().join("game");
+        fs::create_dir(&game).unwrap();
+        fs::write(
+            game.join("text.json"),
+            serde_json::to_vec(&vec!["line"; 22]).unwrap(),
+        )
+        .unwrap();
+        let app = Application::open(root.path().join("data"), &tools)
+            .await
+            .unwrap();
+        let project = app.add_project(&game).await.unwrap();
+        register_json_adapter(
+            &app,
+            "fixture",
+            include_str!("../../engines/tests/fixtures/json_adapter.py"),
+        );
+        let (endpoint, server) = local_analysis_responses(vec![
+            analysis_tool("stage_resources", json!({"files":["text.json"]})),
+            analysis_tool("copy_adapter", json!({"id":"engine.fixture","version":"1"})),
+            analysis_tool(
+                "test_adapter",
+                json!({"kind":"engine","key":"fixture","name":"Fixture","resourcePatterns":["*.json"],"coverageSamples":[{"resourcePath":"text.json","locator":"0","sourceText":"line"}]}),
+            ),
+            analysis_tool(
+                "finish",
+                json!({"summary":"Helper text only","allowPartial":true}),
+            ),
+            analysis_tool(
+                "checkpoint",
+                json!({"notes":"Main text sources still require analysis."}),
+            ),
+        ]);
+        use_local_analysis(&app, endpoint).await;
+        app.save_defaults(Some("local".into()), vec![], 1_000_000, 5)
+            .await
+            .unwrap();
+        let result = app.recognize(&project.id).await.unwrap();
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 5);
+        assert!(
+            requests[4]["messages"]
+                .to_string()
+                .contains("主要文本覆盖尚未确认")
+        );
+        let RecognitionResult::Adapted(result) = result else {
+            panic!("coverage review required")
+        };
+        assert_eq!(
+            result.status,
+            gamel10n_engines::AdaptationStatus::BudgetExhausted
+        );
+        assert!(result.adapter.is_none());
+        let saved = app.open_project(&project.id).await.unwrap();
+        assert!(crate::projects::extraction_coverage_pending(&saved.extra));
+        let directory = app.project_directory(&project.id).unwrap();
+        assert!(
+            directory
+                .join("adaptation/current/src/adapter.py")
+                .is_file()
+        );
+        assert_eq!(
+            app.text_page(&project.id, "", 0, 100).await.unwrap().total,
+            22
+        );
+        assert!(
+            EngineCatalog::open(app.data_directory())
+                .unwrap()
+                .discovery_candidates_for_game(&project.id, None)
+                .unwrap()
+                .iter()
+                .all(|candidate| !candidate.is_known_game)
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_adaptation_reuse_keeps_small_extraction_incomplete() {
+        let tools = crate::ToolPaths::development();
+        if !tools.python().is_file() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let game = root.path().join("game");
+        fs::create_dir(&game).unwrap();
+        fs::write(game.join("text.json"), br#"["one","two"]"#).unwrap();
+        let app = Application::open(root.path().join("data"), &tools)
+            .await
+            .unwrap();
+        let project = app.add_project(&game).await.unwrap();
+        register_json_adapter(
+            &app,
+            "fixture",
+            include_str!("../../engines/tests/fixtures/json_adapter.py"),
+        );
+        let (endpoint, server) = local_analysis_responses(vec![]);
+        use_local_analysis(&app, endpoint).await;
+        let result = app.adapt_project(&project.id, String::new()).await.unwrap();
+        assert!(server.join().unwrap().is_empty());
+        assert_eq!(
+            result.status,
+            gamel10n_engines::AdaptationStatus::Incomplete
+        );
+        assert!(result.adapter.is_none());
+        assert!(crate::projects::extraction_coverage_pending(
+            &app.open_project(&project.id).await.unwrap().extra
+        ));
+        let stored: Value = read_json(
+            &app.project_directory(&project.id)
+                .unwrap()
+                .join("adaptation-result.json"),
+        )
+        .unwrap();
+        assert_eq!(stored["status"], "Incomplete");
+    }
+
+    #[tokio::test]
+    async fn legacy_publication_does_not_confirm_small_extraction_coverage() {
+        let tools = crate::ToolPaths::development();
+        if !tools.python().is_file() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let game = root.path().join("game");
+        fs::create_dir(&game).unwrap();
+        fs::write(game.join("text.json"), br#"["one","two"]"#).unwrap();
+        let app = Application::open(root.path().join("data"), &tools)
+            .await
+            .unwrap();
+        let project = app.add_project(&game).await.unwrap();
+        let package = register_json_adapter(
+            &app,
+            "fixture",
+            include_str!("../../engines/tests/fixtures/json_adapter.py"),
+        );
+        let compatibility: GameCompatibility = serde_json::from_value(json!({"gameId":project.id,"title":"Fixture","variant":"fixture","adapterVersion":"1","structureStatus":"passed"})).unwrap();
+        EngineCatalog::open(app.data_directory())
+            .unwrap()
+            .register_trial_package(&package, compatibility, None)
+            .unwrap();
+        assert!(
+            app.recognize(&project.id)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("API")
+        );
+        assert!(crate::projects::extraction_coverage_pending(
+            &app.open_project(&project.id).await.unwrap().extra
+        ));
+    }
+
+    #[tokio::test]
     async fn pending_coverage_survives_api_failure_and_cancellation_then_small_game_confirmation() {
         let tools = crate::ToolPaths::development();
         if !tools.python().is_file() {
@@ -3491,13 +3668,17 @@ mod tests {
             ),
             analysis_tool(
                 "finish",
-                json!({"summary":"Small fixture coverage verified"}),
+                json!({"summary":"Small extraction without size evidence","allowPartial":true}),
+            ),
+            analysis_tool(
+                "finish",
+                json!({"summary":"Small fixture coverage verified","smallGameEvidence":"text.json is the only game resource, with exactly two original entries; both are independently anchored."}),
             ),
         ]);
         use_local_analysis(&app, endpoint).await;
         let result = app.recognize(&project.id).await.unwrap();
         let requests = server.join().unwrap();
-        assert_eq!(requests.len(), 4);
+        assert_eq!(requests.len(), 5);
         let RecognitionResult::Adapted(result) = result else {
             panic!("coverage confirmation result")
         };
@@ -3696,6 +3877,7 @@ mod tests {
         let app = Application::open(root.path().join("data"), &tools)
             .await
             .unwrap();
+        app.save_execution_isolation(false).await.unwrap();
         let project = app.add_project(&game).await.unwrap();
         let package = app
             .data_directory()

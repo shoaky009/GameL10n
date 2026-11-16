@@ -29,6 +29,9 @@ stripped trees, verify aligned bools, inherited fields and PPtr widths against s
 For ExpandCoverage, work on known actionable omissions before finish. For Repair, retain unrelated known omissions and
 publish the completed repair with allowPartial=true and explicit summary disclosure; do not start other categories automatically.
 Partial coverage must be explicit; resource checks and sample checks never prove full UI/runtime coverage.
+Below 1000 extracted units, continue investigating the main text sources; allowPartial cannot bypass this review.
+Only a genuinely small game may finish with verified coverageSamples, no known text omissions, and smallGameEvidence
+identifying the main resources, their scale and evidence ruling out missing scripts. Repair with an existing text baseline retains its scope.
 
 Work toward the next executable milestone: identify format, extract real player-visible text, reproduce original bytes, rebuild representative
 Chinese text with a compatible runtime plan, then test_adapter and finish. Integrate working probes into src promptly.

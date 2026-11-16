@@ -164,7 +164,16 @@ pub(super) fn gaps(state: &Session, workspace: &Path) -> Value {
         gaps.push(json!({"capability":"verified-roundtrip","ticketId":ticket.id,"contract":ticket.issue.code,"stage":ticket.issue.stage,"resolution":"repair the failing contract or provide new discriminating evidence"}));
     }
     if state.verified_package.is_some() {
-        gaps.push(json!({"capability":"publication-decision","resolution":"finish when the current objective is complete; disclose remaining coverage and runtime checks"}));
+        if !state.objective.eq_ignore_ascii_case("repair")
+            && state
+                .verification
+                .as_ref()
+                .is_some_and(|result| result.units < SMALL_EXTRACTION_THRESHOLD)
+        {
+            gaps.push(json!({"capability":"main-text-coverage","resolution":"continue investigating the main text sources; a small game requires verified coverageSamples and smallGameEvidence in finish, without known text omissions; allowPartial cannot bypass this check"}));
+        } else {
+            gaps.push(json!({"capability":"publication-decision","resolution":"finish when the current objective is complete; disclose remaining coverage and runtime checks"}));
+        }
     } else if gaps.is_empty() {
         gaps.push(json!({"capability":"full-resource-verification","resolution":"host executes the saved recipe; otherwise use test_adapter"}));
     }

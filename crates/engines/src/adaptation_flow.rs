@@ -1777,9 +1777,13 @@ mod tests {
             tool_response(
                 "trial",
                 "test_adapter",
-                json!({"kind":"engine","key":"fixture","name":"Fixture","resourcePatterns":["*.json"],"trialFiles":["text.json"]}),
+                json!({"kind":"engine","key":"fixture","name":"Fixture","resourcePatterns":["*.json"],"trialFiles":["text.json"],"coverageSamples":[{"resourcePath":"text.json","locator":"0","sourceText":"原文"}]}),
             ),
-            tool_response("finish", "finish", json!({"summary":"Fixture verified"})),
+            tool_response(
+                "finish",
+                "finish",
+                json!({"summary":"Fixture verified","smallGameEvidence":"text.json is the only game resource and contains two entries."}),
+            ),
         ]);
         let events = std::sync::Mutex::new(Vec::new());
         let result = run(
@@ -1872,9 +1876,14 @@ mod tests {
                 json!({"id":manifest.id,"version":manifest.version}),
             ),
             tool_response(
+                "coverage",
+                "test_adapter",
+                json!({"kind":"engine","key":"fixture","name":"Fixture","resourcePatterns":["*.json"],"coverageSamples":[{"resourcePath":"text.json","locator":"0","sourceText":"另一个输入"}]}),
+            ),
+            tool_response(
                 "finish",
                 "finish",
-                json!({"summary":"Second fixture independently verified"}),
+                json!({"summary":"Second fixture independently verified","smallGameEvidence":"text.json is the only game resource and contains three entries."}),
             ),
         ]);
         let events = std::sync::Mutex::new(Vec::new());
@@ -1895,7 +1904,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(server.join().unwrap().len(), 2);
+        assert_eq!(server.join().unwrap().len(), 3);
         assert_eq!(reused.0, AdaptationStatus::Activated);
         assert_eq!(state.verification.as_ref().unwrap().units, 3);
         assert_ne!(

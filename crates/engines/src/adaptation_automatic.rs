@@ -1360,7 +1360,7 @@ pub(super) async fn run_template(
         if !state.text_coverage.is_object(){state.text_coverage=json!({});}let mut checks=coverage_list(state,"runtimeChecks");checks.push(RUNTIME_CHECK.into());state.text_coverage["runtimeChecks"]=json!(checks);
         report["stage"]=json!("verification");record(state,path,"automaticTemplate",report.clone()).await?;EngineService::report(progress,"验证自动组合适配器","正在检查原字节往返，先做少量中文试写，通过后再验收全量中文回填。");
         let tested=service.test_adapter(request,workspace,state,&composed["testArguments"],token,progress).await?;report["diagnostics"]=tested["diagnostics"].clone();
-        if tested["passed"]!=true||tested["stage"]!="finish-ready"{return Ok(None);}
+        if tested["passed"]!=true||tested["stage"]!="finish-ready"||tested["coveragePending"]==true{return Ok(None);}
         report["stage"]=json!("scope-recheck");record(state,path,"automaticTemplate",report.clone()).await?;
         let current=scan(&request.game_directory,token)?;if paths.keys().ne(current.keys()){state.verified_package=None;state.verified_fingerprint=None;return Err(reject("自动组合期间游戏目录发生变化或未完整读取，需重新确认模板适用范围；未自动发布。"));}
         report["stage"]=json!("publish");record(state,path,"automaticTemplate",report.clone()).await?;
@@ -2350,7 +2350,7 @@ Path('work/result.json').write_text('{}', encoding='utf8')
     }
 
     #[tokio::test]
-    async fn complete_loose_template_verifies_and_publishes_without_model() {
+    async fn small_template_retains_verification_for_model_coverage_review() {
         let root = tempfile::tempdir().unwrap();
         let (service, request, workspace, mut state) = fixture(root.path(), "Renpy", "script.rpy");
         if !service.tools.vntextpatch().is_file() || !service.tools.python().is_file() {
@@ -2359,6 +2359,41 @@ Path('work/result.json').write_text('{}', encoding='utf8')
         fs::write(
             request.game_directory.join("script.rpy"),
             "label start:\n    \"こんにちは世界。\"\n",
+        )
+        .unwrap();
+        let adapter = run(
+            &service,
+            &request,
+            &workspace,
+            &mut state,
+            &workspace.join("session.json"),
+            &CancellationToken::new(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(adapter.is_none());
+        assert_eq!(state.extra["automaticTemplate"]["status"], "incomplete");
+        let verification = state.verification.as_ref().unwrap();
+        assert!(verification.passed);
+        assert_eq!(verification.units, 1);
+        assert!(state.verified_package.is_some());
+        assert!(!request.package_directory.join("packages").exists());
+    }
+
+    #[tokio::test]
+    async fn complete_loose_template_verifies_and_publishes_without_model() {
+        let root = tempfile::tempdir().unwrap();
+        let (service, request, workspace, mut state) = fixture(root.path(), "Renpy", "script.rpy");
+        if !service.tools.vntextpatch().is_file() || !service.tools.python().is_file() {
+            return;
+        }
+        fs::write(
+            request.game_directory.join("script.rpy"),
+            format!(
+                "label start:\n{}",
+                "    \"こんにちは世界。\"\n".repeat(SMALL_EXTRACTION_THRESHOLD)
+            ),
         )
         .unwrap();
         let original = fs::read(request.game_directory.join("script.rpy")).unwrap();
@@ -2396,7 +2431,7 @@ Path('work/result.json').write_text('{}', encoding='utf8')
 key = 0x12345678
 body = bytearray(b'RPA-3.0 ' + b'0' * 16 + b' 12345678\n')
 index = {}
-for name, data in {'script.rpy': 'label start:\n    "こんにちは世界。"\n'.encode(), 'image.png': b'fixture-media'}.items():
+for name, data in {'script.rpy': ('label start:\n' + '    "こんにちは世界。"\n' * 1000).encode(), 'image.png': b'fixture-media'}.items():
     index[name] = [(len(body) ^ key, len(data) ^ key, b'')]
     body.extend(data)
 body[8:24] = f'{len(body):016x}'.encode()

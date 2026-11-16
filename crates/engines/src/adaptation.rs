@@ -51,6 +51,9 @@ mod workflow;
 pub use failure::{AdaptationFailure, AdaptationFailureCategory};
 pub use resources::AdaptationInputs;
 
+/// Extraction size below which the main text sources need an explicit coverage review.
+pub const SMALL_EXTRACTION_THRESHOLD: usize = 1_000;
+
 use crate::{
     AdapterHandle, CancellationToken, EngineError, EngineProgress, EngineService, PackageManifest,
     ProgressCallback, VerificationResult, VerifiedExtraction,
@@ -2748,6 +2751,20 @@ impl EngineService {
             ));
         }
         let pending = coverage_list(state, "pending");
+        if small_extraction_needs_review(request, state)
+            && (!pending.is_empty()
+                || state.text_coverage["samples"]
+                    .as_array()
+                    .is_none_or(Vec::is_empty)
+                || args["smallGameEvidence"]
+                    .as_str()
+                    .is_none_or(|evidence| evidence.trim().is_empty()))
+        {
+            return Err(EngineError::Rejected(format!(
+                "仅提取 {} 条文本，主要文本覆盖尚未确认，不能发布；allowPartial 不能跳过此检查。继续调查主要脚本和封包；若确为小体量游戏，先提供通过完整验收的 coverageSamples，再用 smallGameEvidence 说明主要文本资源、规模及排除遗漏的依据，且不能仍有已知文字遗漏。",
+                state.verification.as_ref().map_or(0, |result| result.units)
+            )));
+        }
         if !pending.is_empty()
             && !args
                 .get("allowPartial")
@@ -2838,7 +2855,12 @@ impl EngineService {
             &destination.join("package.json"),
         )?;
         if let Some(verification) = &state.verification {
-            write_json(&destination.join("verification.json"), verification).map_err(file_error)?;
+            let mut report = serde_json::to_value(verification)?;
+            if small_extraction_needs_review(request, state) {
+                report["smallGameEvidence"] = args["smallGameEvidence"].clone();
+                report["coverageSamples"] = state.text_coverage["samples"].clone();
+            }
+            write_json(&destination.join("verification.json"), &report).map_err(file_error)?;
             capability::publish(&destination, &manifest, verification)?;
         }
         PackageManifest::load(&destination)?.handle(&destination)?;
@@ -3785,6 +3807,11 @@ fn coverage_list(state: &Session, key: &str) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+fn small_extraction_needs_review(request: &AdaptationRequest<'_>, state: &Session) -> bool {
+    state.verification.as_ref().is_some_and(|verification| {
+        verification.passed && verification.units < SMALL_EXTRACTION_THRESHOLD
+    }) && !(request.objective.eq_ignore_ascii_case("repair") && !request.baseline_units.is_empty())
 }
 fn apply_coverage(state: &mut Session, args: &Value) -> Result<(), EngineError> {
     let mut coverage = if state.text_coverage.is_object() {
@@ -5693,6 +5720,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn small_extraction_cannot_publish_without_verified_coverage_evidence() {
+        let root = tempfile::tempdir().expect("fixture");
+        let (service, request, workspace, mut state) = fixture(root.path());
+        if !service.tools.python().is_file() || !service.tools.vntextpatch().is_file() {
+            return;
+        }
+        let text = serde_json::to_vec(&vec!["原文"; 22]).unwrap();
+        fs::write(request.game_directory.join("text.json"), &text).unwrap();
+        fs::write(workspace.join("resources/text.json"), text).unwrap();
+        state.extra.insert(
+            "resourceHashes".into(),
+            json!({"text.json":hash_file(&request.game_directory.join("text.json")).unwrap()}),
+        );
+        let args =
+            json!({"kind":"engine","key":"fixture","name":"Fixture","resourcePatterns":["*.json"]});
+        let token = CancellationToken::new();
+        let tested = service
+            .test_adapter(&request, &workspace, &mut state, &args, &token, None)
+            .await
+            .unwrap();
+        assert_eq!(tested["passed"], true, "{tested}");
+        assert_eq!(tested["units"], 22);
+        assert_eq!(tested["extractedSources"], json!({"text.json":22}));
+        assert_eq!(tested["coveragePending"], true);
+        assert!(state.verified_package.is_some());
+        for evidence in [Value::Null, json!(true), json!("All resources are small")] {
+            let error = service.finish_adapter(&request, &workspace, &mut state,
+                &json!({"summary":"Partial helper text only","allowPartial":true,"smallGameEvidence":evidence}), &token).await.unwrap_err();
+            assert!(
+                error.to_string().contains("主要文本覆盖尚未确认"),
+                "{error}"
+            );
+            assert!(!request.package_directory.join("packages").exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn small_game_requires_both_verified_anchors_and_no_known_omissions() {
+        let root = tempfile::tempdir().expect("fixture");
+        let (service, request, workspace, mut state) = fixture(root.path());
+        if !service.tools.python().is_file() || !service.tools.vntextpatch().is_file() {
+            return;
+        }
+        let mut args = json!({"kind":"engine","key":"fixture","name":"Fixture","resourcePatterns":["*.json"],"coverageSamples":[{"resourcePath":"text.json","locator":"0","sourceText":"原文"}],"pendingCoverage":["Unconfirmed text coverage"]});
+        let token = CancellationToken::new();
+        let tested = service
+            .test_adapter(&request, &workspace, &mut state, &args, &token, None)
+            .await
+            .unwrap();
+        assert_eq!(tested["passed"], true, "{tested}");
+        let proof = json!({"summary":"Small game verified","allowPartial":true,"smallGameEvidence":"text.json is the only game resource, with four original entries and no additional scripts or archives."});
+        assert!(
+            service
+                .finish_adapter(&request, &workspace, &mut state, &proof, &token)
+                .await
+                .is_err()
+        );
+        args["pendingCoverage"] = json!([]);
+        let reused = service
+            .test_adapter(&request, &workspace, &mut state, &args, &token, None)
+            .await
+            .unwrap();
+        assert_eq!(reused["reused"], true, "{reused}");
+        assert!(
+            service
+                .finish_adapter(
+                    &request,
+                    &workspace,
+                    &mut state,
+                    &json!({"summary":"Missing size evidence"}),
+                    &token
+                )
+                .await
+                .is_err()
+        );
+        let published = service
+            .finish_adapter(&request, &workspace, &mut state, &proof, &token)
+            .await
+            .unwrap();
+        let directory = Path::new(published["packageDirectory"].as_str().unwrap());
+        let report: Value = read_json(&directory.join("verification.json")).unwrap();
+        assert_eq!(report["smallGameEvidence"], proof["smallGameEvidence"]);
+        assert_eq!(report["coverageSamples"], args["coverageSamples"]);
+    }
+
+    #[tokio::test]
     async fn only_unchanged_fully_verified_packages_can_publish() {
         let root = tempfile::tempdir().expect("fixture");
         let (service, request, workspace, mut session) = fixture(root.path());
@@ -5702,8 +5815,7 @@ mod tests {
         let entry = workspace.join("src/adapter.py");
         let source = fs::read_to_string(&entry).expect("fixture source");
         fs::write(&entry,source.replace("requiredFiles=['text.json']","requiredFiles=['text.json']+(['extra.json'] if (root / 'extra.json').is_file() else [])")).expect("discovery fixture");
-        let args =
-            json!({"kind":"engine","key":"fixture","name":"Fixture","resourcePatterns":["*.json"]});
+        let args = json!({"kind":"engine","key":"fixture","name":"Fixture","resourcePatterns":["*.json"],"coverageSamples":[{"resourcePath":"text.json","locator":"0","sourceText":"原文"}]});
         let verified = service
             .test_adapter(
                 &request,
@@ -5721,7 +5833,7 @@ mod tests {
                 &request,
                 &workspace,
                 &mut session,
-                &json!({"summary":"静态验收通过；游戏显示未测试。"}),
+                &json!({"summary":"静态验收通过；游戏显示未测试。","smallGameEvidence":"text.json is the only text resource and contains four entries; no other scripts or archives are present."}),
                 &CancellationToken::new(),
             )
             .await
@@ -5733,7 +5845,7 @@ mod tests {
                 &request,
                 &workspace,
                 &mut session,
-                &json!({"summary":"stale discovery"}),
+                &json!({"summary":"stale discovery","smallGameEvidence":"text.json is the only text resource, with four original entries and no other scripts."}),
                 &CancellationToken::new(),
             )
             .await
@@ -5749,7 +5861,7 @@ mod tests {
                     &changed_request,
                     &workspace,
                     &mut session,
-                    &json!({"summary":"changed objective"}),
+                    &json!({"summary":"changed objective","smallGameEvidence":"text.json is the only text resource, with four original entries and no other scripts."}),
                     &CancellationToken::new(),
                 )
                 .await
@@ -5777,7 +5889,7 @@ mod tests {
                     &changed_request,
                     &workspace,
                     &mut session,
-                    &json!({"summary":"changed baseline"}),
+                    &json!({"summary":"changed baseline","smallGameEvidence":"text.json is the only text resource, with four original entries and no other scripts."}),
                     &CancellationToken::new(),
                 )
                 .await
@@ -5792,7 +5904,7 @@ mod tests {
                     &request,
                     &workspace,
                     &mut session,
-                    &json!({"summary":"stale"}),
+                    &json!({"summary":"stale","smallGameEvidence":"text.json is the only text resource, with four original entries and no other scripts."}),
                     &CancellationToken::new(),
                 )
                 .await

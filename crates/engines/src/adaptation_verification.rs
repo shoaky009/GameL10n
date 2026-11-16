@@ -1155,6 +1155,26 @@ pub(super) async fn test_adapter(
         );
     }
     result = refresh_result(result, state, reused);
+    if let Some(verification) = &verification {
+        result["units"] = json!(verification.units);
+        result["extractedSourceCount"] = json!(verification.extracted_sources.len());
+        result["extractedSources"] = json!(
+            verification
+                .extracted_sources
+                .iter()
+                .take(8)
+                .collect::<BTreeMap<_, _>>()
+        );
+    }
+    let coverage_pending =
+        passed && stage == "finish-ready" && small_extraction_needs_review(request, state);
+    result["coveragePending"] = json!(coverage_pending);
+    if coverage_pending {
+        result["nextAction"] = json!(format!(
+            "资源往返验收通过，但仅提取 {} 条文本（少于 {SMALL_EXTRACTION_THRESHOLD} 条），主要文本覆盖待确认。检查 extractedSources，继续调查主要脚本和封包，不能用 allowPartial 跳过。若确为小体量游戏，提供独立 coverageSamples 并通过完整验收，再在 finish 的 smallGameEvidence 中说明主要文本资源、规模及排除遗漏的依据；有已知文字遗漏时仍不能完成。",
+            verification.as_ref().map_or(0, |result| result.units)
+        ));
+    }
     result["compileMs"] = json!(compile_ms);
     stats.apply(&mut result);
     if cacheable && input.is_some() {

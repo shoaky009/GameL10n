@@ -61,6 +61,8 @@ pub struct GameCompatibility {
     pub variant: String,
     pub adapter_version: String,
     pub structure_status: String,
+    #[serde(default)]
+    pub coverage_confirmed: bool,
     #[serde(default = "not_tested")]
     pub runtime_status: String,
     #[serde(default)]
@@ -201,6 +203,7 @@ pub struct EngineDiscoveryCandidate {
     pub descriptor: Option<EngineDiscoveryDescriptor>,
     pub is_pinned: bool,
     pub is_known_game: bool,
+    pub coverage_confirmed: bool,
 }
 
 impl EngineDiscoveryCandidate {
@@ -717,6 +720,7 @@ impl EngineCatalog {
                     descriptor,
                     is_pinned,
                     is_known_game: false,
+                    coverage_confirmed: false,
                 });
             }
         }
@@ -731,6 +735,7 @@ impl EngineCatalog {
                 descriptor: None,
                 is_pinned: true,
                 is_known_game: false,
+                coverage_confirmed: false,
             });
         }
         candidates.sort_by(|left, right| {
@@ -1982,6 +1987,7 @@ mod tests {
                     variant: "sample".into(),
                     adapter_version: "v4".into(),
                     structure_status: "passed".into(),
+                    coverage_confirmed: true,
                     runtime_status: "not-tested".into(),
                     updated_at: None,
                 }),
@@ -2022,6 +2028,7 @@ mod tests {
                     variant: "fixture".into(),
                     adapter_version: "v1".into(),
                     structure_status: "passed".into(),
+                    coverage_confirmed: true,
                     runtime_status: "not-tested".into(),
                     updated_at: None,
                 },
@@ -2131,6 +2138,7 @@ mod tests {
                     variant: "fixture".into(),
                     adapter_version: "v2".into(),
                     structure_status: "passed".into(),
+                    coverage_confirmed: true,
                     runtime_status: "not-tested".into(),
                     updated_at: None,
                 },

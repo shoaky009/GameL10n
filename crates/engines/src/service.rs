@@ -96,6 +96,8 @@ pub struct VerificationResult {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub issues: Vec<crate::VerificationIssue>,
     pub units: usize,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extracted_sources: BTreeMap<String, usize>,
     pub runtime_tested: bool,
     pub resource_hashes: BTreeMap<String, String>,
     #[serde(default = "cacheable_verification")]
@@ -1901,6 +1903,11 @@ impl EngineService {
                 .collect();
             gamel10n_translation::validate_units(&units)
                 .map_err(|error| EngineError::Rejected(error.to_string()))?;
+            let mut sources = BTreeMap::new();
+            for unit in &units {
+                *sources.entry(unit.resource_path.as_str()).or_default() += 1;
+            }
+            result.extracted_sources = sources.into_iter().map(|(path, count)| (path.to_owned(), count)).collect();
             for sample in coverage["samples"].as_array().into_iter().flatten() {
                 if !units.iter().any(|unit| {
                     Some(unit.resource_path.as_str()) == sample["resourcePath"].as_str()

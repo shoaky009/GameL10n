@@ -402,6 +402,7 @@ mod tests {
                     variant: "".into(),
                     adapter_version: version.into(),
                     structure_status: "passed".into(),
+                    coverage_confirmed: true,
                     runtime_status: "not-tested".into(),
                     updated_at: None,
                 },
