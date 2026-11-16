@@ -87,7 +87,8 @@ internal static class InputChannel
 
 internal static class InputFile
 {
-    public static FileStream OpenRead(string path) => Open(path, FileMode.Open, FileAccess.Read);
+    public static FileStream OpenRead(string path) => InputChannel.Contains(path)
+        ? Open(path, FileMode.Open, FileAccess.Read) : System.IO.File.OpenRead(path);
     public static FileStream Open(string path, FileMode mode, FileAccess access = FileAccess.ReadWrite)
     {
         if (!InputChannel.Contains(path)) return System.IO.File.Open(path, mode, access);

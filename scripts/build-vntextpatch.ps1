@@ -43,8 +43,8 @@ try {
         -p:PublishAot=true -p:StripSymbols=true -p:OptimizationPreference=Size `
         -o $OutputDirectory
     if ($LASTEXITCODE -ne 0) { throw "VNTextPatch NativeAOT build failed ($LASTEXITCODE)." }
-    & $python (Join-Path $repo 'scripts/build_vntextpatch.py') --output $OutputDirectory --sources-only
-    if ($LASTEXITCODE -ne 0) { throw "VNTextPatch source bundle failed ($LASTEXITCODE)." }
+    & $python (Join-Path $repo 'scripts/build_vntextpatch.py') --output $OutputDirectory --verify-only
+    if ($LASTEXITCODE -ne 0) { throw "VNTextPatch runtime verification failed ($LASTEXITCODE)." }
 } finally { Pop-Location }
 Get-Item -LiteralPath (Join-Path $OutputDirectory 'GameL10n.VnTextPatch.exe') |
     Select-Object FullName, Length
