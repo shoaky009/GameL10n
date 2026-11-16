@@ -106,7 +106,7 @@ impl Drop for AclLock {
 }
 
 struct Container {
-    name: Vec<u16>,
+    name: String,
     sid: PSID,
     _network_sids: Box<[[u32; SECURITY_MAX_SID_SIZE as usize / 4]; 2]>,
     capabilities: Vec<SID_AND_ATTRIBUTES>,
@@ -130,15 +130,13 @@ impl Container {
             });
         }
         let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-        let name = wide(OsStr::new(&format!(
-            "GameL10n.Run.{}.{nonce}",
-            std::process::id()
-        )));
+        let name = format!("GameL10n.Run.{}.{nonce}", std::process::id());
+        let profile_name = wide(OsStr::new(&name));
         let sid = unsafe {
             CreateAppContainerProfile(
-                PCWSTR(name.as_ptr()),
-                PCWSTR(name.as_ptr()),
-                PCWSTR(name.as_ptr()),
+                PCWSTR(profile_name.as_ptr()),
+                PCWSTR(profile_name.as_ptr()),
+                PCWSTR(profile_name.as_ptr()),
                 Some(&capabilities),
             )?
         };
@@ -185,8 +183,9 @@ impl Drop for Container {
             }
             Err(error) => eprintln!("无法清理隔离目录授权：{error}"),
         }
+        let profile_name = wide(OsStr::new(&self.name));
         unsafe {
-            if let Err(error) = DeleteAppContainerProfile(PCWSTR(self.name.as_ptr())) {
+            if let Err(error) = DeleteAppContainerProfile(PCWSTR(profile_name.as_ptr())) {
                 eprintln!("无法清理 AppContainer 配置：{error}");
             }
             FreeSid(self.sid);
@@ -552,6 +551,14 @@ pub fn run() -> Result<u32> {
         .prefix("gamel10n-isolated-")
         .tempdir()?;
     let mut container = Container::create()?;
+    // Windows redirects TEMP beneath the supplied LOCALAPPDATA for this profile.
+    fs::create_dir_all(
+        temporary
+            .path()
+            .join("Packages")
+            .join(&container.name)
+            .join("AC/Temp"),
+    )?;
     {
         let _lock = AclLock::acquire()?;
         let mut paths = BTreeMap::new();

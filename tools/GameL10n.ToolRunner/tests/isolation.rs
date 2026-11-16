@@ -82,7 +82,9 @@ fn file_permissions_environment_and_arguments_are_enforced() {
             "allowedRead":"allowed", "outsideReadDenied":true, "outsideWriteDenied":true,
             "inputWriteDenied":true, "allowedWrite":true, "environment":null, "temporaryWrite":true,
             "arguments":["中文 path", "", "trailing\\", "a\\\"b"],
-        })
+        }),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 

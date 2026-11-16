@@ -8,6 +8,15 @@ use std::{
 
 fn inspect(request: &Value) -> Value {
     let path = |key: &str| Path::new(request[key].as_str().unwrap());
+    let temporary = std::env::temp_dir().join("fixture.tmp");
+    let temporary_write = std::fs::write(&temporary, b"temp");
+    if let Err(error) = &temporary_write {
+        eprintln!(
+            "Temporary file {} (TEMP={:?}): {error}",
+            temporary.display(),
+            std::env::var_os("TEMP")
+        );
+    }
     json!({
         "allowedRead": std::fs::read_to_string(path("allowedFile")).ok(),
         "outsideReadDenied": std::fs::read(path("outsideFile")).is_err(),
@@ -15,7 +24,7 @@ fn inspect(request: &Value) -> Value {
         "inputWriteDenied": std::fs::write(path("allowedFile"), b"changed").is_err(),
         "allowedWrite": std::fs::write(path("allowedOutput"), b"output").is_ok(),
         "environment": std::env::var("GAMEL10N_ISOLATION_TEST_SECRET").ok(),
-        "temporaryWrite": std::fs::write(std::env::temp_dir().join("fixture.tmp"), b"temp").is_ok(),
+        "temporaryWrite": temporary_write.is_ok(),
         "arguments": std::env::args().skip(1).collect::<Vec<_>>(),
     })
 }
