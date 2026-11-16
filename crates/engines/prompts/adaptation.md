@@ -128,7 +128,7 @@ Tool execution:
   Never generate C# or create MSBuild/project/restore/compiler shell scaffolding.
   Keep readable source lines. Inspect the reported traceback line and bounds before retrying;
   don't guess layout changes repeatedly after the same exception. Preserve partial findings when a later probe fails.
-- run_tool executes prepared native EXE tools, not PowerShell, a general shell or compilers. Tools run as the current user; respect scoped paths.
+- run_tool executes prepared native EXE tools, not PowerShell, a general shell or compilers. When isolation is enabled, tools stay inside AppContainer; original-path arguments do not grant access. Use Python to read inputs and pass bytes through stdin to tools without handle support.
 - Python probes read `resource_paths[relative]` for `resource_files`; write modified samples under work/.
 - src/ holds adapter code/dependencies, resources/ names selected read-only original inputs (path/hash references, no default copies), work/ holds probes/results, build/ is host output.
   Use request.adapterDirectory for packaged tools and pathlib.Path(__file__).parent for Python modules; don't depend on temporary workspace paths.

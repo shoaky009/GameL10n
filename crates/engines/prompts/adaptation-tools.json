@@ -937,7 +937,7 @@
       "type": "function",
       "function": {
         "name": "run_engine_python",
-        "description": "Run one script OR pinned library module. Supply script + content to write/run a work/*.py probe in ONE call. Injected save_sample('work/sample.ext', decoded_bytes) saves/registers complete memory samples (<=12 files/64 MiB), independent of workingDirectory. The host checks registered samples with existing parsers/components in this call and reuses unchanged results. It also discovers normal Python output files. Read selected originals through injected resource_paths (relative name to actual Path) and resource_files. Inputs are read-only; arguments and JSON stdin resolve selected resources/ aliases. Write experiments to work/. Use shared Python, UTF-8, no pip/downloads. With reportFile, call injected write_report(status='completed'|'partial'|'failed', summary=..., tested=..., matched=..., details=...) with actual findings; reports remain observations. executionSucceeded describes the process separately from report errors. Long stdout is previewed; read_tool_result retains original output. Can follow edits in an ordered batch; independent reads require a separate batch.",
+        "description": "Run one script OR pinned library module. Supply script + content to write/run a work/*.py probe in ONE call. Injected save_sample('work/sample.ext', decoded_bytes) saves/registers complete memory samples (<=12 files/64 MiB), independent of workingDirectory. The host checks registered samples with existing parsers/components in this call and reuses unchanged results. It also discovers normal Python output files. Read selected originals through injected resource_paths (relative name to actual Path) and resource_files. Inputs are read-only; arguments and JSON stdin resolve selected resources/ aliases. Under isolation, Python and the current fixed native parser read originals through host handles; other external tools need stdin or handle support, not direct original-path access. Write experiments to work/. Use shared Python, UTF-8, no pip/downloads. With reportFile, call injected write_report(status='completed'|'partial'|'failed', summary=..., tested=..., matched=..., details=...) with actual findings; reports remain observations. executionSucceeded describes the process separately from report errors. Long stdout is previewed; read_tool_result retains original output. Can follow edits in an ordered batch; independent reads require a separate batch.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -1364,7 +1364,7 @@
       "type": "function",
       "function": {
         "name": "run_tool",
-        "description": "Run an existing workspace executable; legacy dotnet/powershell commands must be ported to Python. For analysis scripts use run_engine_python; do not compile C# probes. Pass arguments as an array. Selected resources/<relative> arguments resolve to read-only original inputs; write output under work/. Output bounded.",
+        "description": "Run an existing workspace executable; legacy dotnet/powershell commands must be ported to Python. For analysis scripts use run_engine_python; do not compile C# probes. Pass arguments as an array. Selected resources/<relative> arguments resolve to original paths. Under isolation, external tools must accept stdin or read-only handles to read originals; path arguments alone do not grant access. Write output under work/. Output bounded.",
         "parameters": {
           "type": "object",
           "properties": {

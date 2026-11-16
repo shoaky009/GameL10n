@@ -19,6 +19,8 @@
 
 分析脚本放在 `work/`，通过 `run_engine_python` 执行。`stage_resources` 只登记原文件路径和 SHA-256；脚本通过注入的 `resource_paths[相对路径]` 直接读取，实验输出写到 `work/`。调用工具时，参数数组和 JSON 标准输入中的已选 `resources/相对路径` 自动解析为真实输入路径。正式依赖从 `request['adapterDirectory']` 定位，不能引用工作区绝对路径。任务结束后开发资料保留，可继续修复或总结。
 
+开启[执行隔离](execution-isolation.md)时，Python 和支持句柄通道的固定原生解析器可读取原输入。其他外部工具需使用标准输入或其支持的句柄接口，原路径本身不授予访问权。
+
 ## 正式适配器
 
 Manifest v4 包位于：

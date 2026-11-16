@@ -78,7 +78,7 @@ impl PythonAdapter {
         let mut process = self.process.clone();
         if self.isolate_execution {
             process = process.with_arguments([OsString::from("--isolated")]);
-            let mut read_paths = vec![self.paths.root.clone(), request.source_directory.clone()];
+            let mut read_paths = vec![self.paths.root.clone()];
             if let Some(parent) = self.entry.parent() {
                 read_paths.push(parent.into());
             }
@@ -135,7 +135,8 @@ impl PythonAdapter {
             }
             process = process
                 .with_current_directory(directory.path())
-                .with_isolation(self.paths.isolated_runner(), read_paths, write_paths);
+                .with_isolation(self.paths.isolated_runner(), read_paths, write_paths)
+                .with_isolated_inputs(vec![request.source_directory.clone()]);
         }
         let response = process
             .with_response_file(response_file)
@@ -149,6 +150,52 @@ impl PythonAdapter {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn input_handles_support_python_children_and_native_extract_build_validate() {
+        let paths = ToolPaths::development();
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("ゲーム");
+        std::fs::create_dir(&source).unwrap();
+        let original = "[cm]\nこれは元の文章です。\n[p]\n";
+        std::fs::write(source.join("script.ks"), format!("\u{feff}{original}")).unwrap();
+        std::fs::write(source.join("data.bin"), b"untouched").unwrap();
+        let outside = directory.path().join("private.txt");
+        std::fs::write(&outside, b"private").unwrap();
+        let workspace = directory.path().join("adaptation/current");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let entry = workspace.join("adapter.py");
+        std::fs::write(
+            &entry,
+            include_str!("../tests/fixtures/check_isolated_inputs.py"),
+        )
+        .unwrap();
+        let mut request = AdapterRequest::new("validate", source.clone());
+        request.output_directory = Some(workspace.join("output"));
+        request
+            .extra
+            .insert("outside".into(), serde_json::json!(outside));
+        request.extra.insert(
+            "inputBootstrap".into(),
+            serde_json::json!(include_str!("../python/isolation.py")),
+        );
+        request.extra.insert(
+            "toolPaths".into(),
+            serde_json::json!({"vnTextPatchCommand":[paths.vntextpatch()]}),
+        );
+        let result = PythonAdapter::new(&paths, &entry)
+            .unwrap()
+            .execute(&request, &CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(result.validation.unwrap().passed);
+        assert_eq!(
+            std::fs::read_to_string(source.join("script.ks")).unwrap(),
+            format!("\u{feff}{original}")
+        );
+        assert_eq!(std::fs::read_dir(&source).unwrap().count(), 2);
+    }
 
     #[cfg(windows)]
     #[tokio::test]

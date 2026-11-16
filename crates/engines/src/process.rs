@@ -26,6 +26,7 @@ pub struct ToolProcess {
 struct ProcessIsolation {
     runner: PathBuf,
     read_paths: Vec<PathBuf>,
+    input_paths: Vec<PathBuf>,
     write_paths: Vec<PathBuf>,
 }
 
@@ -68,8 +69,17 @@ impl ToolProcess {
         self.isolation = Some(ProcessIsolation {
             runner,
             read_paths,
+            input_paths: Vec::new(),
             write_paths,
         });
+        self
+    }
+
+    /// Supply game inputs through read-only handles, without changing their ACLs.
+    pub fn with_isolated_inputs(mut self, paths: Vec<PathBuf>) -> Self {
+        if let Some(isolation) = &mut self.isolation {
+            isolation.input_paths = paths;
+        }
         self
     }
 
@@ -125,6 +135,7 @@ impl ToolProcess {
                 "arguments": arguments,
                 "directory": self.directory,
                 "readPaths": isolation.read_paths,
+                "inputPaths": isolation.input_paths,
                 "writePaths": isolation.write_paths,
                 "input": request,
             }))?;

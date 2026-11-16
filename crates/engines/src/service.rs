@@ -340,16 +340,21 @@ impl EngineService {
                     .ok_or_else(|| EngineError::Protocol("缺少执行工作目录。".into()))?,
             );
             let mut read_paths = vec![self.tools.root.clone(), directory.path().to_path_buf()];
+            let mut input_paths = Vec::new();
             if let Some(paths) = request["resourcePaths"].as_object() {
-                read_paths.extend(paths.values().filter_map(Value::as_str).map(PathBuf::from));
+                input_paths.extend(paths.values().filter_map(Value::as_str).map(PathBuf::from));
             }
             // Only run_engine_python supplies these host-resolved paths. run_tool
             // arguments must not become filesystem grants through extra JSON keys.
             if request["operation"] == "run" {
-                for key in ["resourceDirectory", "library"] {
-                    if let Some(path) = request[key].as_str().filter(|path| !path.is_empty()) {
-                        read_paths.push(path.into());
-                    }
+                if let Some(path) = request["resourceDirectory"]
+                    .as_str()
+                    .filter(|p| !p.is_empty())
+                {
+                    input_paths.push(path.into());
+                }
+                if let Some(path) = request["library"].as_str().filter(|path| !path.is_empty()) {
+                    read_paths.push(path.into());
                 }
                 for key in ["hostCommand", "vnTextPatchCommand"] {
                     if let Some(executable) = request["toolPaths"][key][0].as_str() {
@@ -363,11 +368,10 @@ impl EngineService {
                     }
                 }
             }
-            process = process.with_current_directory(&workspace).with_isolation(
-                self.tools.isolated_runner(),
-                read_paths,
-                vec![workspace],
-            );
+            process = process
+                .with_current_directory(&workspace)
+                .with_isolation(self.tools.isolated_runner(), read_paths, vec![workspace])
+                .with_isolated_inputs(input_paths);
         }
         let result: Value = process.execute(request, cancellation).await?;
         if !result

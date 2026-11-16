@@ -54,6 +54,9 @@ use windows::{
     core::{PCWSTR, PWSTR},
 };
 
+#[path = "inputs.rs"]
+mod inputs;
+
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 #[derive(Deserialize)]
@@ -64,6 +67,8 @@ struct Request {
     arguments: Vec<String>,
     directory: Option<PathBuf>,
     read_paths: Vec<PathBuf>,
+    #[serde(default)]
+    input_paths: Vec<PathBuf>,
     write_paths: Vec<PathBuf>,
     input: serde_json::Value,
 }
@@ -379,7 +384,7 @@ fn quote(argument: &str) -> String {
     result
 }
 
-fn environment(executable: &Path, temporary: &Path) -> Result<Vec<u16>> {
+fn environment(executable: &Path, temporary: &Path, inputs: &str) -> Result<Vec<u16>> {
     let system = std::env::var_os("SystemRoot").ok_or("Windows 缺少 SystemRoot。")?;
     let system = PathBuf::from(system);
     let mut values = BTreeMap::new();
@@ -397,6 +402,7 @@ fn environment(executable: &Path, temporary: &Path) -> Result<Vec<u16>> {
     for key in ["TEMP", "TMP", "USERPROFILE", "APPDATA", "LOCALAPPDATA"] {
         values.insert(key, temporary.as_os_str().to_owned());
     }
+    values.insert("GAMEL10N_INPUT_HANDLES", inputs.into());
     values.insert("PYTHONUTF8", "1".into());
     values.insert("PYTHONDONTWRITEBYTECODE", "1".into());
     let mut block = Vec::new();
@@ -418,7 +424,10 @@ fn execute(request: &Request, container: &Container, temporary: &Path) -> Result
     let stdin = inherit(HANDLE(input.as_raw_handle()))?;
     let stdout = inherit(unsafe { GetStdHandle(STD_OUTPUT_HANDLE)? })?;
     let stderr = inherit(unsafe { GetStdHandle(STD_ERROR_HANDLE)? })?;
-    let handles = [stdin.0, stdout.0, stderr.0];
+    let job = Handle(unsafe { CreateJobObjectW(None, PCWSTR::null())? });
+    let mut inputs = inputs::Inputs::new(&request.input_paths, temporary, job.0)?;
+    let mut handles = vec![stdin.0, stdout.0, stderr.0];
+    handles.extend(inputs.handles.iter().map(|handle| handle.0));
     let capabilities = SECURITY_CAPABILITIES {
         AppContainerSid: container.sid,
         Capabilities: container.capabilities.as_ptr().cast_mut(),
@@ -426,7 +435,6 @@ fn execute(request: &Request, container: &Container, temporary: &Path) -> Result
         ..Default::default()
     };
     let attributes = Attributes::new()?;
-    let job = Handle(unsafe { CreateJobObjectW(None, PCWSTR::null())? });
     let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
     limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
     unsafe {
@@ -450,7 +458,7 @@ fn execute(request: &Request, container: &Container, temporary: &Path) -> Result
             0,
             PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
             Some(handles.as_ptr().cast()),
-            size_of_val(&handles),
+            std::mem::size_of_val(handles.as_slice()),
             None,
             None,
         )?;
@@ -481,7 +489,7 @@ fn execute(request: &Request, container: &Container, temporary: &Path) -> Result
             .unwrap_or(temporary)
             .as_os_str(),
     );
-    let environment = environment(&request.executable, temporary)?;
+    let environment = environment(&request.executable, temporary, &inputs.environment)?;
     let mut information = PROCESS_INFORMATION::default();
     unsafe {
         CreateProcessW(
@@ -506,6 +514,7 @@ fn execute(request: &Request, container: &Container, temporary: &Path) -> Result
             )
         })?;
     }
+    inputs.handles.clear();
     let process = Handle(information.hProcess);
     let thread = Handle(information.hThread);
     let start = (|| -> Result<()> {

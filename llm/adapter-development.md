@@ -116,7 +116,7 @@ RPYC2 编译脚本优先使用 `loose-renpy-rpyc` 或 `rpa3-renpy-rpyc`，直接
 
 ## 本地探针与工作目录
 
-临时分析和处理脚本统一放在 `work/*.py`，通过 `run_engine_python` 使用发行包中的共享 Python 解释器运行，也可直接调用固定工具库的模块。参数及标准输入输出使用 UTF-8，可用 `workingDirectory` 指定工作区内的运行目录；不使用系统 Python、pip 或临时下载的运行时。正式适配器也使用 Python，入口为 `src/adapter.py`；`test_adapter` 检查语法、打包并执行完整资源验收，自动准备固定共享 Python 依赖。发行包不含 C# 编译器。`run_tool` 用于调用已有工具和文件编排。
+临时分析和处理脚本统一放在 `work/*.py`，通过 `run_engine_python` 使用发行包中的共享 Python 解释器运行，也可直接调用固定工具库的模块。参数及标准输入输出使用 UTF-8，可用 `workingDirectory` 指定工作区内的运行目录；不使用系统 Python、pip 或临时下载的运行时。正式适配器也使用 Python，入口为 `src/adapter.py`；`test_adapter` 检查语法、打包并执行完整资源验收，自动准备固定共享 Python 依赖。发行包不含 C# 编译器。`run_tool` 用于调用已有工具和文件编排。开启隔离时，原输入通过 Python 或支持句柄通道的固定原生解析器读取；其他外部工具需接收标准输入或只读句柄，不能直接打开游戏原路径。
 
 Python 探针使用 `run_engine_python`，其他本地工具使用 `run_tool`。临时脚本、报告和解包结果放在 `work/`；原始资源副本放在 `resources/`。只有正式解析代码和运行依赖进入 `src/` 及 `src/tools/`。完整路径和保留规则见[产物说明](../docs/adapters/artifacts.md)。
 
