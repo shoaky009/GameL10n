@@ -345,7 +345,7 @@ mod tests {
 
     #[cfg(windows)]
     #[tokio::test]
-    async fn isolation_startup_errors_keep_the_reason_and_settings_guidance() {
+    async fn isolation_startup_errors_keep_only_the_specific_reason() {
         let paths = crate::ToolPaths::development();
         let directory = tempfile::tempdir().unwrap();
         let process = ToolProcess::new(paths.python()).with_isolation(
@@ -358,7 +358,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(&error, EngineError::Isolation(message) if message.contains("missing-input") && message.contains("程序设置")),
+            matches!(&error, EngineError::Isolation(message) if message.contains("missing-input") && message.lines().count() == 1),
             "{error}"
         );
     }

@@ -160,7 +160,7 @@ impl Container {
         self.grants.push(path.clone());
         change_acl(&path, self.sid, permissions, false).map_err(|error| {
             format!(
-                "无法为隔离进程授权{}路径 {}：{error}",
+                "执行前{}授权失败，脚本未启动：{}；{error}",
                 if writable { "写入" } else { "读取" },
                 display_path(&path)
             )
@@ -301,7 +301,7 @@ fn change_acl(path: &Path, sid: PSID, permissions: u32, revoke: bool) -> Result<
     };
     win32_result(status).map_err(|error| {
         if error.kind() == io::ErrorKind::PermissionDenied {
-            format!("无权修改访问权限；文件可读不代表能为隔离进程授权：{error}")
+            format!("当前用户无权更改访问权限：{error}；请授予该路径的“更改权限”，或改用当前用户拥有的目录。")
         } else {
             format!("更新访问权限失败：{error}")
         }

@@ -188,16 +188,17 @@ fn child_abnormal_exit_is_a_tool_failure() {
 }
 
 #[test]
-fn invalid_authorization_fails_with_reason_and_settings_guidance() {
+fn invalid_authorization_reports_only_the_specific_reason() {
     let directory = fixture();
     let mut request = request(directory.path(), input(directory.path()));
     request["readPaths"] = json!([directory.path().canonicalize().unwrap().join("missing")]);
     let output = launch(&request).wait_with_output().unwrap();
     let error = String::from_utf8(output.stderr).unwrap();
     assert!(
-        !output.status.success() && error.contains("程序设置") && error.contains("隔离运行环境"),
+        !output.status.success() && error.contains("无法检查隔离授权路径"),
         "{error}"
     );
+    assert_eq!(error.lines().count(), 1, "{error}");
     assert!(
         error.contains("missing") && !error.contains(r"\\?\"),
         "{error}"

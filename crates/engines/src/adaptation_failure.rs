@@ -70,7 +70,7 @@ impl AdaptationFailure {
                 Category::Tool,
                 "isolation-failed",
                 error.to_string(),
-                "修复隔离运行工具、Windows 环境或目录权限；也可在程序设置中关闭执行隔离后，点击“继续适配”。关闭会增加恶意指令或提示词投毒导致文件泄露、修改或删除的风险。",
+                "处理上述错误后点击“继续适配”；隔离选项位于程序设置。",
                 None,
             ),
             EngineError::ToolMissing(_) => (
@@ -129,7 +129,7 @@ impl AdaptationFailure {
             category,
             code: code.into(),
             message,
-            next_action: format!("{action}已有源码和已提交步骤会继续使用。"),
+            next_action: action.into(),
             http_status,
         }
     }
@@ -141,14 +141,16 @@ mod tests {
     use gamel10n_translation::provider::{ProviderDiagnostic, ProviderError};
 
     #[test]
-    fn isolation_failure_guides_the_user_to_environment_or_settings() {
+    fn isolation_failure_keeps_the_reason_and_concise_settings_guidance() {
         let failure =
             AdaptationFailure::from_error(&EngineError::Isolation("无法设置目录权限".into()));
         assert_eq!(failure.category, AdaptationFailureCategory::Tool);
         assert_eq!(failure.code, "isolation-failed");
         assert!(failure.message.contains("无法设置目录权限"));
-        assert!(failure.next_action.contains("程序设置"));
-        assert!(failure.next_action.contains("投毒"));
+        assert_eq!(
+            failure.next_action,
+            "处理上述错误后点击“继续适配”；隔离选项位于程序设置。"
+        );
     }
 
     #[test]

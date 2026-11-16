@@ -647,9 +647,10 @@ pub(super) async fn run(
             let success = history::successful(&value);
             if !success && let Some(progress) = progress {
                 let diagnostic = failure_diagnostic(&value)
+                    .and_then(|text| text.lines().next())
                     .unwrap_or("未返回错误详情。")
                     .chars()
-                    .take(600)
+                    .take(160)
                     .collect::<String>();
                 progress(state.progress(EngineProgress {
                     stage: "工具执行失败".into(),
