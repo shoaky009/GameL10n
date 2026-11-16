@@ -165,14 +165,41 @@ fn killing_runner_terminates_the_entire_job() {
 }
 
 #[test]
+fn child_abnormal_exit_is_a_tool_failure() {
+    let directory = fixture();
+    for code in [0xC000_0022u32, 0xC000_0005, 0xC000_0135] {
+        let output = launch(&request(
+            directory.path(),
+            json!({"action":"exit", "code":code}),
+        ))
+        .wait_with_output()
+        .unwrap();
+        let diagnostic = String::from_utf8(output.stderr).unwrap();
+        assert_eq!(output.status.code(), Some(1), "{diagnostic}");
+        assert!(
+            diagnostic.contains(&format!("0x{code:08X}")),
+            "{diagnostic}"
+        );
+        assert!(
+            !diagnostic.contains("GameL10n-Isolation-Failed:"),
+            "{diagnostic}"
+        );
+    }
+}
+
+#[test]
 fn invalid_authorization_fails_with_reason_and_settings_guidance() {
     let directory = fixture();
     let mut request = request(directory.path(), input(directory.path()));
-    request["readPaths"] = json!([directory.path().join("missing")]);
+    request["readPaths"] = json!([directory.path().canonicalize().unwrap().join("missing")]);
     let output = launch(&request).wait_with_output().unwrap();
     let error = String::from_utf8(output.stderr).unwrap();
     assert!(
         !output.status.success() && error.contains("程序设置") && error.contains("隔离运行环境"),
+        "{error}"
+    );
+    assert!(
+        error.contains("missing") && !error.contains(r"\\?\"),
         "{error}"
     );
     assert!(!directory.path().join("work/output.txt").exists());

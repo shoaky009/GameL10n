@@ -70,6 +70,7 @@ fn main() {
     io::stdin().read_to_end(&mut bytes).unwrap();
     let request: Value = serde_json::from_slice(&bytes).unwrap();
     match request["action"].as_str() {
+        Some("exit") => std::process::exit(request["code"].as_u64().unwrap() as i32),
         #[cfg(windows)]
         Some("network") => println!("{}", json!(network_capabilities())),
         Some("nested") => {

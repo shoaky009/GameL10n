@@ -273,6 +273,22 @@ fn selectors(args: &Value) -> Value {
     Value::Object(result)
 }
 
+fn failure_diagnostic(value: &Value) -> Option<&str> {
+    ["error", "reportError"]
+        .into_iter()
+        .filter_map(|key| value[key].as_str())
+        .map(str::trim)
+        .find(|text| !text.is_empty())
+        .or_else(|| {
+            value["stderr"]
+                .as_str()?
+                .lines()
+                .rev()
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+        })
+}
+
 fn result_trace(value: &Value) -> Value {
     let mut result = serde_json::Map::new();
     if let Some(samples) = value.get("builtinSamples") {
@@ -314,6 +330,14 @@ fn result_trace(value: &Value) -> Value {
                 json!(error.chars().take(600).collect::<String>()),
             );
         }
+    }
+    if !history::successful(value)
+        && let Some(error) = failure_diagnostic(value)
+    {
+        result.insert(
+            "error".into(),
+            json!(error.chars().take(600).collect::<String>()),
+        );
     }
     if let Some(report) = value["report"].as_object() {
         result.insert(
@@ -621,6 +645,19 @@ pub(super) async fn run(
                 object.entry("success").or_insert(json!(true));
             }
             let success = history::successful(&value);
+            if !success && let Some(progress) = progress {
+                let diagnostic = failure_diagnostic(&value)
+                    .unwrap_or("未返回错误详情。")
+                    .chars()
+                    .take(600)
+                    .collect::<String>();
+                progress(state.progress(EngineProgress {
+                    stage: "工具执行失败".into(),
+                    message: format!("{}：{diagnostic}", call.name),
+                    tool_name: Some(call.name.clone()),
+                    ..EngineProgress::default()
+                }));
+            }
             if success
                 && value["changed"] == true
                 && matches!(call.name.as_str(), "write_file" | "replace_text")
@@ -1006,6 +1043,23 @@ mod tests {
         assert!(trace.get("stderr").is_none());
         assert!(trace["report"].get("details").is_none());
     }
+
+    #[test]
+    fn failed_process_trace_includes_the_error_from_stderr() {
+        let value = json!({
+            "success":false,"exitCode":1,"error":null,
+            "stderr":"Traceback (most recent call last):\n  source code\nPermissionError: access denied\n\n"
+        });
+        let trace = result_trace(&value);
+        assert_eq!(trace["error"], "PermissionError: access denied");
+        assert!(trace.get("stderr").is_none());
+        assert!(
+            result_trace(&json!({"success":true,"stderr":"warning"}))
+                .get("error")
+                .is_none()
+        );
+    }
+
     fn fixture(root: &Path) -> (EngineService, AdaptationRequest<'static>, PathBuf, Session) {
         let workspace = root.join("adaptation/current");
         fs::create_dir_all(workspace.join("work")).unwrap();
@@ -1074,6 +1128,119 @@ mod tests {
         assert!(matches!(error, EngineError::Isolation(_)), "{error}");
         assert!(server.join().unwrap().is_empty());
         assert_eq!(state.pending_calls.len(), 1);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn denied_script_access_is_logged_and_returned_to_the_model() {
+        for name in ["run_engine_python", "run_tool"] {
+            for write in [false, true] {
+                let root = tempfile::tempdir().unwrap();
+                let (_, mut request, workspace, mut state) = fixture(root.path());
+                request.limits.maximum_turns = 1;
+                let private = root.path().join("private.txt");
+                fs::write(&private, "must not leak").unwrap();
+                let args = if name == "run_engine_python" {
+                    let operation = if write {
+                        "p.write_text('changed')"
+                    } else {
+                        "print(p.read_text())"
+                    };
+                    json!({"script":"work/denied.py", "content":format!(
+                        "from pathlib import Path\np = Path({})\n{operation}\n", json!(private)
+                    )})
+                } else {
+                    let operation = if write {
+                        format!(
+                            "[IO.File]::WriteAllText('{}', 'changed')",
+                            private.display().to_string().replace('\'', "''")
+                        )
+                    } else {
+                        format!(
+                            "[IO.File]::ReadAllText('{}')",
+                            private.display().to_string().replace('\'', "''")
+                        )
+                    };
+                    let script = workspace.join("work/denied.ps1");
+                    fs::write(
+                        &script,
+                        format!("$ErrorActionPreference = 'Stop'\n{operation}\n"),
+                    )
+                    .unwrap();
+                    json!({"executable":"powershell", "arguments":["-ExecutionPolicy","Bypass","-File",script]})
+                };
+                let arguments = args.to_string();
+                state.messages.push(json!({"role":"assistant","tool_calls":[{"id":"denied","type":"function","function":{"name":name,"arguments":arguments}}]}));
+                state.pending_calls.push(ToolCall {
+                    id: "denied".into(),
+                    name: name.into(),
+                    arguments,
+                });
+                let service = EngineService::new(
+                    Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
+                    crate::ToolPaths::development(),
+                );
+                let (provider, server) = model(vec![file_response(
+                    ApiProtocol::ChatCompletions,
+                    "recovered",
+                    "work/recovered.py",
+                    false,
+                )]);
+                let progress = std::sync::Mutex::new(Vec::new());
+                let trace = std::sync::Mutex::new(Vec::new());
+                let result = run(
+                    &service,
+                    &request,
+                    &provider,
+                    &workspace,
+                    &workspace.join("session.json"),
+                    &mut state,
+                    "continue".into(),
+                    &CancellationToken::new(),
+                    Some(&|event| progress.lock().unwrap().push(event)),
+                    &|event| {
+                        trace.lock().unwrap().push(event);
+                        Ok(())
+                    },
+                )
+                .await
+                .unwrap();
+                assert_eq!(result.0, AdaptationStatus::BudgetExhausted);
+                let requests = server.join().unwrap();
+                let message = requests[0]["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|message| message["tool_call_id"] == "denied")
+                    .unwrap();
+                let failure: Value =
+                    serde_json::from_str(message["content"].as_str().unwrap()).unwrap();
+                assert_eq!(failure["success"], false, "{failure}");
+                assert_ne!(failure["exitCode"], 0, "{failure}");
+                assert!(!failure["stderr"].as_str().unwrap().is_empty(), "{failure}");
+                if name == "run_engine_python" {
+                    assert!(
+                        failure["stderr"]
+                            .as_str()
+                            .unwrap()
+                            .contains("PermissionError"),
+                        "{failure}"
+                    );
+                }
+                assert_eq!(fs::read_to_string(&private).unwrap(), "must not leak");
+                assert_eq!(
+                    fs::read_to_string(workspace.join("work/recovered.py")).unwrap(),
+                    "pass\n"
+                );
+                let progress = progress.into_inner().unwrap();
+                assert!(progress.iter().any(|event| event.stage == "工具执行失败"
+                    && event.tool_name.as_deref() == Some(name)));
+                let trace = trace.into_inner().unwrap();
+                assert!(trace.iter().any(|event| event["operation"] == "tool-end"
+                    && event["call"]["id"] == "denied"
+                    && event["result"]["error"].is_string()));
+            }
+        }
     }
 
     #[test]

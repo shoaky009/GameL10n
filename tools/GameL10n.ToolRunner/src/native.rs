@@ -2,7 +2,7 @@ use std::{
     collections::BTreeMap,
     ffi::{OsStr, c_void},
     fs,
-    io::{Read, Seek, SeekFrom, Write},
+    io::{self, Read, Seek, SeekFrom, Write},
     mem::{size_of, size_of_val},
     os::windows::{ffi::OsStrExt, fs::MetadataExt, io::AsRawHandle},
     path::{Path, PathBuf},
@@ -14,7 +14,7 @@ use windows::{
     Win32::{
         Foundation::{
             CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, HANDLE, HLOCAL, LocalFree,
-            WAIT_ABANDONED, WAIT_OBJECT_0,
+            WAIT_ABANDONED, WAIT_OBJECT_0, WIN32_ERROR,
         },
         Security::{
             ACL,
@@ -160,9 +160,9 @@ impl Container {
         self.grants.push(path.clone());
         change_acl(&path, self.sid, permissions, false).map_err(|error| {
             format!(
-                "无法授权{}目录或文件 {}：{error}",
+                "无法为隔离进程授权{}路径 {}：{error}",
                 if writable { "写入" } else { "读取" },
-                path.display()
+                display_path(&path)
             )
         })?;
         Ok(())
@@ -177,7 +177,7 @@ impl Drop for Container {
                         && let Err(error) =
                             check_tree(path).and_then(|()| change_acl(path, self.sid, 0, true))
                     {
-                        eprintln!("无法清理隔离目录授权 {}：{error}", path.display());
+                        eprintln!("无法清理隔离目录授权 {}：{error}", display_path(path));
                     }
                 }
             }
@@ -197,14 +197,32 @@ fn wide(value: &OsStr) -> Vec<u16> {
     value.encode_wide().chain(Some(0)).collect()
 }
 
+fn display_path(path: &Path) -> String {
+    let path = path.to_string_lossy();
+    if let Some(path) = path.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{path}")
+    } else {
+        path.strip_prefix(r"\\?\").unwrap_or(&path).to_owned()
+    }
+}
+
+fn win32_result(status: WIN32_ERROR) -> io::Result<()> {
+    if status.is_ok() {
+        Ok(())
+    } else {
+        // These APIs return the error directly; COM error information may be stale.
+        Err(io::Error::from_raw_os_error(status.0 as i32))
+    }
+}
+
 fn checked_path(path: &Path) -> Result<PathBuf> {
     let path = std::path::absolute(path)?;
     for ancestor in path.ancestors() {
         let metadata = ancestor
             .symlink_metadata()
-            .map_err(|error| format!("无法检查隔离授权路径 {}：{error}", ancestor.display()))?;
+            .map_err(|error| format!("无法检查隔离授权路径 {}：{error}", display_path(ancestor)))?;
         if metadata.file_attributes() & 0x400 != 0 {
-            return Err(format!("隔离授权路径不能使用重解析点：{}", ancestor.display()).into());
+            return Err(format!("隔离授权路径不能使用重解析点：{}", display_path(ancestor)).into());
         }
     }
     Ok(path.canonicalize()?)
@@ -216,9 +234,11 @@ fn check_tree(path: &Path) -> Result<()> {
             let entry = entry?;
             let metadata = entry.path().symlink_metadata()?;
             if metadata.file_attributes() & 0x400 != 0 {
-                return Err(
-                    format!("隔离授权目录不能包含重解析点：{}", entry.path().display()).into(),
-                );
+                return Err(format!(
+                    "隔离授权目录不能包含重解析点：{}",
+                    display_path(&entry.path())
+                )
+                .into());
             }
             if metadata.is_dir() {
                 check_tree(&entry.path())?;
@@ -232,7 +252,7 @@ fn change_acl(path: &Path, sid: PSID, permissions: u32, revoke: bool) -> Result<
     let name = wide(path.as_os_str());
     let mut old_acl: *mut ACL = std::ptr::null_mut();
     let mut descriptor = PSECURITY_DESCRIPTOR::default();
-    unsafe {
+    let status = unsafe {
         GetNamedSecurityInfoW(
             PCWSTR(name.as_ptr()),
             SE_FILE_OBJECT,
@@ -243,8 +263,8 @@ fn change_acl(path: &Path, sid: PSID, permissions: u32, revoke: bool) -> Result<
             None,
             &mut descriptor,
         )
-        .ok()?;
-    }
+    };
+    win32_result(status).map_err(|error| format!("读取访问权限失败：{error}"))?;
     let _descriptor = Allocation(descriptor.0);
     // A null DACL grants unrestricted access and is unsuitable for isolation.
     if old_acl.is_null() {
@@ -265,11 +285,10 @@ fn change_acl(path: &Path, sid: PSID, permissions: u32, revoke: bool) -> Result<
         },
     };
     let mut new_acl = std::ptr::null_mut();
-    unsafe {
-        SetEntriesInAclW(Some(&[entry]), Some(old_acl), &mut new_acl).ok()?;
-    }
+    let status = unsafe { SetEntriesInAclW(Some(&[entry]), Some(old_acl), &mut new_acl) };
+    win32_result(status).map_err(|error| format!("生成隔离访问权限失败：{error}"))?;
     let _new_acl = Allocation(new_acl.cast());
-    unsafe {
+    let status = unsafe {
         SetNamedSecurityInfoW(
             PCWSTR(name.as_ptr()),
             SE_FILE_OBJECT,
@@ -279,8 +298,14 @@ fn change_acl(path: &Path, sid: PSID, permissions: u32, revoke: bool) -> Result<
             Some(new_acl),
             None,
         )
-        .ok()?;
-    }
+    };
+    win32_result(status).map_err(|error| {
+        if error.kind() == io::ErrorKind::PermissionDenied {
+            format!("无权修改访问权限；文件可读不代表能为隔离进程授权：{error}")
+        } else {
+            format!("更新访问权限失败：{error}")
+        }
+    })?;
     Ok(())
 }
 
@@ -477,7 +502,7 @@ fn execute(request: &Request, container: &Container, temporary: &Path) -> Result
         .map_err(|error| {
             format!(
                 "无法在 AppContainer 中启动 {}：{error}",
-                request.executable.display()
+                display_path(&request.executable)
             )
         })?;
     }
@@ -523,7 +548,9 @@ fn execute(request: &Request, container: &Container, temporary: &Path) -> Result
         TerminateJobObject(job.0, code)?;
     }
     if code >= 0x8000_0000 {
-        return Err(format!("隔离进程无法正常启动或运行，Windows 退出码为 0x{code:08X}。请检查可执行文件及其运行依赖。 ").into());
+        // Preserve the child status in diagnostics without reporting a runner failure.
+        eprintln!("工具进程异常结束，Windows 退出码为 0x{code:08X}。");
+        return Ok(1);
     }
     Ok(code)
 }
@@ -594,6 +621,35 @@ pub fn run() -> Result<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn displayed_paths_use_drive_and_unc_notation() {
+        for (input, expected) in [
+            (r"\\?\I:\ゲーム\script.pac", r"I:\ゲーム\script.pac"),
+            (r"\\?\UNC\server\share\ゲーム", r"\\server\share\ゲーム"),
+            (r"I:\ゲーム\script.pac", r"I:\ゲーム\script.pac"),
+        ] {
+            assert_eq!(display_path(Path::new(input)), expected);
+        }
+    }
+
+    #[test]
+    fn acl_errors_use_returned_status_despite_stale_com_error_information() {
+        use windows::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND};
+
+        let stale =
+            windows::core::Error::new(ERROR_FILE_NOT_FOUND.to_hresult(), "unrelated missing file");
+        let _: windows::core::HRESULT = stale.into();
+        let error = win32_result(ERROR_ACCESS_DENIED).unwrap_err();
+        let captured = ERROR_ACCESS_DENIED.ok().unwrap_err();
+        assert_eq!(captured.message(), "unrelated missing file");
+        assert_eq!(error.raw_os_error(), Some(5));
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            error.to_string(),
+            io::Error::from_raw_os_error(5).to_string()
+        );
+    }
 
     #[test]
     fn quoting_preserves_empty_arguments_quotes_and_trailing_slashes() {
