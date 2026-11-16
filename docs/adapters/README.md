@@ -43,7 +43,7 @@
 | [Ren’Py RPYC2 与混合资源](engines/renpy-rpyc.md) | `template.loose-renpy-rpyc` / `template.rpa3-renpy-rpyc` / `template.renpy-mixed` | 松散脚本、RPA/ARC 3.0 与无路径冲突的源码组合 |
 | [Siglus / Scene.pck](engines/siglus.md) | `engine.siglus` | 已确认场景和显示调用，FKDS 48/441 字库模板 |
 | [KiriKiri / SMIL / SmileCrypt](engines/kirikiri-smil-smile.md) | `engine.kirikiri-smil-smile` | 名称映射、已确认过滤器配置、PSB SCN 与静态脚本显示槽 |
-| [Unity SerializedFile](engines/unity-serialized-text.md) | `unity-serialized-file` 组件 / `engine.unity-textasset-dialogue-json` | Unity 2022 v22 容器与 TextAsset 字节读写；文本布局另行确认 |
+| [Unity SerializedFile](engines/unity-serialized-text.md) | `unity-serialized-file` 组件 | Unity 2022 v22 容器与 TextAsset 字节读写；文本布局另行确认 |
 
 [Artemis PFS 覆盖卷](engines/artemis-pfs.md)说明增量补丁的适用条件。
 [Valkyria DAT / SDT](engines/valkyria.md)说明参考解析、跳转验证及 GDI+ 字体创建的边界。

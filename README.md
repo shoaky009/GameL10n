@@ -32,7 +32,6 @@ GameL10n 是面向游戏文本汉化的 Windows 桌面工具，提供从资源�
 - [更新日志](CHANGELOG.md)
 - [开发与构建](docs/development.md)
 - [免责声明与版权投诉](DISCLAIMER.md)
-- [仓库内容检查记录](docs/repository-content-review.md)
 - [全部文档](docs/README.md)
 
 ## 许可
