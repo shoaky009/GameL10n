@@ -485,6 +485,7 @@ pub(super) async fn run(
     let mut turns = 0;
     let output_limit = request.limits.maximum_output_tokens;
     let mut recovering_output = false;
+    let mut tool_call_retries = 0;
     let mut summaries = 0;
     for key in ["lastImplementationTurn", "lastVerificationProgressTurn"] {
         if !state.extra.contains_key(key) {
@@ -822,10 +823,17 @@ pub(super) async fn run(
         );
         save_session(path, state).await?;
         let requested = output_limit.min((remaining - estimated).min(u64::from(u32::MAX)) as u32);
+        if tool_call_retries > 0 {
+            trace_run(json!({"operation":"tool-call-retry","retry":tool_call_retries}))?;
+        }
         if let Some(progress) = progress {
             progress(EngineProgress {
                 stage: "智能适配".into(),
-                message: "正在分析资源或规划下一步操作。".into(),
+                message: if tool_call_retries == 0 {
+                    "正在分析资源或规划下一步操作。".into()
+                } else {
+                    format!("工具调用格式无效，正在重试（{tool_call_retries}/2）。")
+                },
                 usage: state.usage.clone(),
                 turn: state.total_turns,
                 api_requests: Some(state.api_requests()),
@@ -842,7 +850,6 @@ pub(super) async fn run(
         }
         let started = Instant::now();
         turns += 1;
-        state.workflow.last_decision = decision_key;
         repair::analyzing(state);
         let requests_before = provider.request_count();
         let metrics_before = provider.request_metrics();
@@ -883,6 +890,14 @@ pub(super) async fn run(
                         None,
                     ));
                 }
+                if matches!(
+                    error.diagnostic.code.as_str(),
+                    "tool-call" | "agent-tool-format"
+                ) && tool_call_retries < 2
+                {
+                    tool_call_retries += 1;
+                    continue;
+                }
                 if error.diagnostic.code == "output-token-limit"
                     && !recovering_output
                     && requested == output_limit
@@ -900,6 +915,8 @@ pub(super) async fn run(
             }
         };
         recovering_output = false;
+        tool_call_retries = 0;
+        state.workflow.last_decision = decision_key;
         state.total_turns += 1;
         let mut usage = response.usage.clone();
         if usage.input_tokens == 0 {
@@ -1167,6 +1184,206 @@ mod tests {
 
     fn summary_response(reason: &str) -> Value {
         json!({"id":"fixture","choices":[{"finish_reason":reason,"message":{"role":"assistant","content":"仍在探索：正在核对资源结构。"}}],"usage":{"prompt_tokens":100,"completion_tokens":20,"prompt_tokens_details":{"cached_tokens":50}}})
+    }
+
+    fn file_response(protocol: ApiProtocol, id: &str, path: &str, malformed: bool) -> Value {
+        let mut calls = vec![(
+            id.to_owned(),
+            json!({"path":path,"content":"pass\n"}).to_string(),
+        )];
+        if malformed {
+            calls.push((format!("{id}-invalid"), "{".into()));
+        }
+        match protocol {
+            ApiProtocol::ChatCompletions => json!({
+                "choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":null,
+                    "tool_calls":calls.iter().map(|(id,arguments)| json!({"id":id,"type":"function","function":{"name":"write_file","arguments":arguments}})).collect::<Vec<_>>()}}],
+                "usage":{"prompt_tokens":100,"completion_tokens":20,"prompt_tokens_details":{"cached_tokens":50}}
+            }),
+            ApiProtocol::Responses => json!({
+                "status":"completed",
+                "output":calls.iter().map(|(id,arguments)| json!({"type":"function_call","call_id":id,"name":"write_file","arguments":arguments})).collect::<Vec<_>>(),
+                "usage":{"input_tokens":100,"output_tokens":20,"input_tokens_details":{"cached_tokens":50}}
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_call_format_retries_preserve_context_usage_and_execute_only_valid_batches() {
+        for protocol in [ApiProtocol::ChatCompletions, ApiProtocol::Responses] {
+            let root = tempfile::tempdir().unwrap();
+            let (service, mut request, workspace, mut state) = fixture(root.path());
+            request.limits.maximum_turns = 6;
+            let malformed = file_response(protocol, "rejected", "work/rejected.py", true);
+            let (provider, server) = model_with_protocol(
+                vec![
+                    malformed.clone(),
+                    malformed.clone(),
+                    file_response(protocol, "first", "work/first.py", false),
+                    malformed.clone(),
+                    malformed,
+                    file_response(protocol, "second", "work/second.py", false),
+                ],
+                protocol,
+            );
+            let events = std::sync::Mutex::new(Vec::new());
+            let result = run(
+                &service,
+                &request,
+                &provider,
+                &workspace,
+                &workspace.join("session.json"),
+                &mut state,
+                "Continue implementation.".into(),
+                &CancellationToken::new(),
+                None,
+                &|event| {
+                    events.lock().unwrap().push(event);
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(result.0, AdaptationStatus::BudgetExhausted);
+            let requests = server.join().unwrap();
+            assert_eq!(requests.len(), 6);
+            for batch in requests.chunks(3) {
+                assert_eq!(batch[0], batch[1]);
+                assert_eq!(batch[1], batch[2]);
+            }
+            assert!(!workspace.join("work/rejected.py").exists());
+            assert_eq!(
+                fs::read_to_string(workspace.join("work/first.py")).unwrap(),
+                "pass\n"
+            );
+            assert_eq!(
+                fs::read_to_string(workspace.join("work/second.py")).unwrap(),
+                "pass\n"
+            );
+            assert_eq!(state.total_turns, 2);
+            assert_eq!(state.api_requests(), 6);
+            assert_eq!(state.usage.input_tokens, 600);
+            assert_eq!(state.usage.output_tokens, 120);
+            assert_eq!(state.usage.cached_tokens, Some(300));
+            let events = events.into_inner().unwrap();
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| event["operation"] == "tool-end")
+                    .count(),
+                2
+            );
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| event["operation"] == "tool-call-retry")
+                    .map(|event| event["retry"].as_u64().unwrap())
+                    .collect::<Vec<_>>(),
+                [1, 2, 1, 2]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_call_format_retries_stop_after_two_and_keep_the_last_error() {
+        let root = tempfile::tempdir().unwrap();
+        let (service, request, workspace, mut state) = fixture(root.path());
+        repair::observe(
+            &mut state,
+            repair::Scope::Full,
+            "adapter-v1",
+            &json!({"passed":false,"issues":[{"code":"text-mismatch","stage":"extract","expected":"original","actual":"changed"}]}),
+        );
+        assert!(
+            workflow::decision_key(&state, &workspace)
+                .unwrap()
+                .is_some()
+        );
+        let malformed = file_response(
+            ApiProtocol::ChatCompletions,
+            "rejected",
+            "work/rejected.py",
+            true,
+        );
+        let (provider, server) = model(vec![malformed; 3]);
+        let path = workspace.join("session.json");
+        let error = run(
+            &service,
+            &request,
+            &provider,
+            &workspace,
+            &path,
+            &mut state,
+            "Repair the text mismatch.".into(),
+            &CancellationToken::new(),
+            None,
+            &|_| Ok(()),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(error, EngineError::Api(error) if error.diagnostic.code == "agent-tool-format")
+        );
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 3);
+        let initial = requests[0]["messages"].as_array().unwrap();
+        assert_eq!(
+            &requests[1]["messages"].as_array().unwrap()[..initial.len()],
+            initial
+        );
+        assert_eq!(requests[1], requests[2]);
+        assert_eq!(state.total_turns, 0);
+        assert!(!workspace.join("work/rejected.py").exists());
+        let restored = load_session(&path).unwrap();
+        assert_eq!(restored.api_requests(), 3);
+        assert_eq!(restored.usage.input_tokens, 300);
+        assert_eq!(restored.usage.cached_tokens, Some(150));
+    }
+
+    #[tokio::test]
+    async fn tool_call_format_retry_obeys_cancellation_and_turn_budget() {
+        for cancel in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let (service, mut request, workspace, mut state) = fixture(root.path());
+            request.limits.maximum_turns = 1;
+            let (provider, server) = model(vec![file_response(
+                ApiProtocol::ChatCompletions,
+                "rejected",
+                "work/rejected.py",
+                true,
+            )]);
+            let cancellation = CancellationToken::new();
+            let result = run(
+                &service,
+                &request,
+                &provider,
+                &workspace,
+                &workspace.join("session.json"),
+                &mut state,
+                "Continue implementation.".into(),
+                &cancellation,
+                None,
+                &|event| {
+                    if cancel && event["operation"] == "model" && event["status"] == "failed" {
+                        cancellation.cancel();
+                    }
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                result.0,
+                if cancel {
+                    AdaptationStatus::Cancelled
+                } else {
+                    AdaptationStatus::BudgetExhausted
+                }
+            );
+            assert_eq!(server.join().unwrap().len(), 1);
+            assert_eq!(state.api_requests(), 1);
+            assert!(!workspace.join("work/rejected.py").exists());
+        }
     }
 
     #[tokio::test]
