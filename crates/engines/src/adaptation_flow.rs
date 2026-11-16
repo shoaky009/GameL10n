@@ -613,6 +613,7 @@ pub(super) async fn run(
                         None,
                     ));
                 }
+                Err(error @ EngineError::Isolation(_)) => return Err(error),
                 Err(error) => json!({"success":false,"error":error.to_string()}),
             };
             if let Some(object) = value.as_object_mut() {
@@ -704,7 +705,9 @@ pub(super) async fn run(
                 .await
             {
                 Ok(value) => value,
-                Err(EngineError::Cancelled) => return Err(EngineError::Cancelled),
+                Err(error @ (EngineError::Cancelled | EngineError::Isolation(_))) => {
+                    return Err(error);
+                }
                 Err(error) => {
                     json!({"passed":false,"success":false,"error":error.to_string(),"repairTickets":repair::packet(state)})
                 }
@@ -1019,6 +1022,41 @@ mod tests {
             workspace,
             state,
         )
+    }
+
+    #[tokio::test]
+    async fn isolation_startup_failure_stops_before_another_model_request() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut service, request, workspace, mut state) = fixture(root.path());
+        service.isolate_execution = true;
+        fs::create_dir_all(service.tools.python().parent().unwrap()).unwrap();
+        // It must never be launched when the isolated runner is missing.
+        fs::write(service.tools.python(), "must not execute").unwrap();
+        let arguments = json!({"executable":"work/tool.exe"}).to_string();
+        state.messages.push(json!({"role":"assistant","tool_calls":[{"id":"run","type":"function","function":{"name":"run_tool","arguments":arguments}}]}));
+        state.pending_calls.push(ToolCall {
+            id: "run".into(),
+            name: "run_tool".into(),
+            arguments,
+        });
+        let (provider, server) = model(vec![]);
+        let error = run(
+            &service,
+            &request,
+            &provider,
+            &workspace,
+            &workspace.join("session.json"),
+            &mut state,
+            "continue".into(),
+            &CancellationToken::new(),
+            None,
+            &|_| Ok(()),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, EngineError::Isolation(_)), "{error}");
+        assert!(server.join().unwrap().is_empty());
+        assert_eq!(state.pending_calls.len(), 1);
     }
 
     #[test]

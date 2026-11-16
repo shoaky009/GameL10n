@@ -33,6 +33,7 @@ jobs:
             tools/GameL10n.QlieLauncher -> ../../target/qlie-launcher/cargo
             tools/GameL10n.FontBridge -> ../../target/fontbridge/cargo
             tools/GameL10n.GameCheck -> ../../target/game-check
+            tools/GameL10n.ToolRunner -> ../../target/tool-runner
 
       - name: Check Rust formatting
         run: |
@@ -44,6 +45,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Font bridge formatting failed.' }
           cargo fmt --manifest-path tools/GameL10n.GameCheck/Cargo.toml -- --check
           if ($LASTEXITCODE -ne 0) { throw 'Game check formatting failed.' }
+          cargo fmt --manifest-path tools/GameL10n.ToolRunner/Cargo.toml -- --check
+          if ($LASTEXITCODE -ne 0) { throw 'Tool runner formatting failed.' }
 
       - uses: actions/setup-dotnet@v4
         with:
@@ -64,6 +67,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Launcher Clippy failed.' }
           cargo clippy --manifest-path tools/GameL10n.GameCheck/Cargo.toml --target-dir target/game-check --all-targets --all-features --locked -- -D warnings
           if ($LASTEXITCODE -ne 0) { throw 'Game check Clippy failed.' }
+          cargo clippy --manifest-path tools/GameL10n.ToolRunner/Cargo.toml --target-dir target/tool-runner --all-targets --all-features --locked -- -D warnings
+          if ($LASTEXITCODE -ne 0) { throw 'Tool runner Clippy failed.' }
 
       - name: Test Rust workspace
         run: cargo test --workspace --locked
@@ -73,6 +78,9 @@ jobs:
 
       - name: Test game checks
         run: cargo test --manifest-path tools/GameL10n.GameCheck/Cargo.toml --target-dir target/game-check --locked
+
+      - name: Test execution isolation
+        run: cargo test --manifest-path tools/GameL10n.ToolRunner/Cargo.toml --target-dir target/tool-runner --locked
 
       - name: Test Python components
         run: ./target/runtime/python/python.exe -I -X utf8 -m unittest discover -s crates/engines/python -p 'test_*.py'

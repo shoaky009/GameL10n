@@ -76,6 +76,7 @@ pub struct GlobalSettings {
     pub maximum_translations: usize,
     pub adaptation_token_budget: u64,
     pub adaptation_maximum_turns: u32,
+    pub isolate_llm_execution: bool,
     pub api_configuration: ApiConfiguration,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
@@ -88,6 +89,7 @@ impl Default for GlobalSettings {
             maximum_translations: 2,
             adaptation_token_budget: 1_000_000,
             adaptation_maximum_turns: 60,
+            isolate_llm_execution: cfg!(windows),
             api_configuration: ApiConfiguration::default(),
             extra: BTreeMap::new(),
         }
@@ -187,7 +189,7 @@ impl Application {
         self.read_settings()
     }
 
-    fn read_settings(&self) -> Result<GlobalSettings, CoreError> {
+    pub(crate) fn read_settings(&self) -> Result<GlobalSettings, CoreError> {
         let path = self.data_directory().join("settings.json");
         if !path.is_file() {
             return Ok(GlobalSettings::default());
@@ -244,6 +246,15 @@ impl Application {
         }
         self.update_settings(|s| {
             s.maximum_translations = count;
+            Ok(())
+        })
+        .await?;
+        Ok(())
+    }
+
+    pub async fn save_execution_isolation(&self, enabled: bool) -> Result<(), CoreError> {
+        self.update_settings(|settings| {
+            settings.isolate_llm_execution = enabled && cfg!(windows);
             Ok(())
         })
         .await?;
@@ -540,6 +551,28 @@ fn validate_profiles(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn old_settings_use_the_platform_isolation_default() {
+        let settings: GlobalSettings = serde_json::from_value(json!({"schemaVersion":2})).unwrap();
+        assert_eq!(settings.isolate_llm_execution, cfg!(windows));
+    }
+
+    #[tokio::test]
+    async fn execution_isolation_preference_survives_other_settings_updates() {
+        let root = tempfile::tempdir().unwrap();
+        let app = Application::open(root.path().join("data"), &crate::ToolPaths::new("missing"))
+            .await
+            .unwrap();
+        app.save_execution_isolation(false).await.unwrap();
+        app.save_concurrency(3).await.unwrap();
+        assert!(!app.settings().await.unwrap().isolate_llm_execution);
+        app.save_execution_isolation(true).await.unwrap();
+        assert_eq!(
+            app.settings().await.unwrap().isolate_llm_execution,
+            cfg!(windows)
+        );
+    }
 
     #[test]
     fn legacy_profiles_use_the_larger_analysis_limit_and_preserve_custom_fields() {

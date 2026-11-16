@@ -1394,7 +1394,9 @@ pub(super) async fn run_template(
                 diagnostics.drain(..diagnostics.len() - 12);
             }
             record(state, path, "automaticTemplate", report).await?;
-            if cancellation.is_cancelled() {
+            if matches!(&error, EngineError::Isolation(_)) {
+                Err(error)
+            } else if cancellation.is_cancelled() {
                 Err(EngineError::Cancelled)
             } else {
                 Ok(None)

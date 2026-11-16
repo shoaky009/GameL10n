@@ -1,6 +1,7 @@
 use std::{collections::BTreeMap, path::PathBuf};
 
 use clap::{Parser, Subcommand};
+use gamel10n_core::settings::GlobalSettings;
 use gamel10n_core::{Application, ToolPaths, default_data_directory};
 use gamel10n_engines::{
     CancellationToken, EngineService, PackageManifest,
@@ -104,10 +105,22 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             return Err("工具入口使用 stdout JSON，请省略 responseFile。".into());
         }
         let cancellation = CancellationToken::new();
+        let settings_path = arguments
+            .data_directory
+            .clone()
+            .unwrap_or_else(default_data_directory)
+            .join("settings.json");
+        let settings: GlobalSettings =
+            if (package.is_some() || python_adapter.is_some()) && settings_path.try_exists()? {
+                read_json(&settings_path)?
+            } else {
+                GlobalSettings::default()
+            };
         let response = if let Some(package) = package {
             let (manifest, runtime) = PackageManifest::load_runtime(&package)?;
             let handle = manifest.handle(&runtime)?;
             EngineService::new(tools.asset_root(), tools.clone())
+                .with_execution_isolation(settings.isolate_llm_execution)
                 .with_shared_directory(
                     arguments
                         .data_directory
@@ -119,6 +132,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .await?
         } else if let Some(entry) = python_adapter {
             PythonAdapter::new(&tools, &entry)?
+                .with_execution_isolation(settings.isolate_llm_execution)
                 .execute(&request, &cancellation)
                 .await?
         } else {

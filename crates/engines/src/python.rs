@@ -1,4 +1,9 @@
-use std::{ffi::OsString, io::BufWriter, path::Path, time::Duration};
+use std::{
+    ffi::OsString,
+    io::BufWriter,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use crate::{
     CancellationToken, EngineError, ToolPaths, ToolProcess,
@@ -11,6 +16,9 @@ const BOOTSTRAP: &str = "import runpy,sys,json,io,os;from pathlib import Path;p=
 #[derive(Clone, Debug)]
 pub struct PythonAdapter {
     process: ToolProcess,
+    paths: ToolPaths,
+    entry: PathBuf,
+    isolate_execution: bool,
 }
 
 impl PythonAdapter {
@@ -20,6 +28,9 @@ impl PythonAdapter {
         }
         let entry = entry.canonicalize()?;
         Ok(Self {
+            paths: paths.clone(),
+            entry: entry.clone(),
+            isolate_execution: cfg!(windows),
             process: ToolProcess::new(paths.python())
                 .with_timeout(Duration::from_secs(600))
                 .with_maximum_output_bytes(8 * 1024 * 1024)
@@ -35,6 +46,11 @@ impl PythonAdapter {
                     entry.into_os_string(),
                 ]),
         })
+    }
+
+    pub fn with_execution_isolation(mut self, enabled: bool) -> Self {
+        self.isolate_execution = cfg!(windows) && enabled;
+        self
     }
 
     pub async fn execute(
@@ -58,9 +74,68 @@ impl PythonAdapter {
                 .extra
                 .insert("translationsFile".into(), serde_json::json!(path));
         }
-        let response = self
-            .process
-            .clone()
+        let mut process = self.process.clone();
+        if self.isolate_execution {
+            let mut read_paths = vec![self.paths.root.clone(), request.source_directory.clone()];
+            if let Some(parent) = self.entry.parent() {
+                read_paths.push(parent.into());
+            }
+            for key in ["adapterDirectory", "validationContextFile"] {
+                if let Some(path) = request.extra.get(key).and_then(serde_json::Value::as_str) {
+                    read_paths.push(path.into());
+                }
+            }
+            if let Some(ranges) = request
+                .extra
+                .get("probeRanges")
+                .and_then(serde_json::Value::as_array)
+            {
+                read_paths.extend(
+                    ranges
+                        .iter()
+                        .filter_map(|range| range["dataPath"].as_str())
+                        .map(PathBuf::from),
+                );
+            }
+            if let Some(tools) = request.extra.get("toolPaths") {
+                for key in ["engineLibrary", "hostCommand", "vnTextPatchCommand"] {
+                    let paths = if let Some(arguments) = tools[key].as_array() {
+                        arguments
+                            .iter()
+                            .filter_map(serde_json::Value::as_str)
+                            .collect::<Vec<_>>()
+                    } else {
+                        tools[key].as_str().into_iter().collect()
+                    };
+                    for path in paths {
+                        let path = Path::new(path);
+                        if path.is_absolute() && path.exists() {
+                            read_paths.push(if path.is_file() {
+                                path.parent().unwrap_or(path).into()
+                            } else {
+                                path.into()
+                            });
+                        }
+                    }
+                }
+            }
+            let mut write_paths = vec![directory.path().to_path_buf()];
+            if let Some(workspace) = self
+                .entry
+                .ancestors()
+                .find(|path| path.ends_with("adaptation/current"))
+            {
+                write_paths.push(workspace.into());
+            }
+            if let Some(output) = &request.output_directory {
+                std::fs::create_dir_all(output)?;
+                write_paths.push(output.clone());
+            }
+            process = process
+                .with_current_directory(directory.path())
+                .with_isolation(self.paths.isolated_runner(), read_paths, write_paths);
+        }
+        let response = process
             .with_response_file(response_file)
             .execute::<_, AdapterResponse>(&request, cancellation)
             .await?;

@@ -596,6 +596,16 @@ impl EngineService {
                     )?;
                     return Ok(completed);
                 }
+                Err(error @ EngineError::Isolation(_)) => {
+                    let completed = failed_result(
+                        &mut state,
+                        &error,
+                        "执行隔离未能启动，现有进度已保留。",
+                        diagnostics,
+                    );
+                    save_session(&path, &mut state).await?;
+                    return Ok(completed);
+                }
                 Err(error) => diagnostics.push(error.to_string()),
             }
         }
@@ -2641,7 +2651,7 @@ impl EngineService {
                 result["repairTickets"] = repair::packet(state);
                 Ok(result)
             }
-            Err(EngineError::Cancelled) => Err(EngineError::Cancelled),
+            Err(error @ (EngineError::Cancelled | EngineError::Isolation(_))) => Err(error),
             Err(error) => {
                 let stage = if [
                     "verificationCache",

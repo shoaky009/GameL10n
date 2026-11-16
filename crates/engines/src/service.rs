@@ -188,6 +188,7 @@ pub struct EngineService {
     preferred_adapter: Option<String>,
     ordered_packages_only: bool,
     pub(crate) build_identity: Option<(String, String)>,
+    pub(crate) isolate_execution: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -208,11 +209,17 @@ impl EngineService {
             preferred_adapter: None,
             ordered_packages_only: false,
             build_identity: None,
+            isolate_execution: cfg!(windows),
         }
     }
 
     pub fn with_shared_directory(mut self, directory: impl Into<PathBuf>) -> Self {
         self.shared_directory = directory.into();
+        self
+    }
+
+    pub fn with_execution_isolation(mut self, enabled: bool) -> Self {
+        self.isolate_execution = cfg!(windows) && enabled;
         self
     }
 
@@ -304,7 +311,7 @@ impl EngineService {
         if fs::read_to_string(&guard).ok().as_deref() != Some(GUARD) {
             fs::write(&guard, GUARD)?;
         }
-        let result: Value = ToolProcess::new(self.tools.python())
+        let mut process = ToolProcess::new(self.tools.python())
             .with_arguments([
                 OsString::from("-I"),
                 OsString::from("-X"),
@@ -318,9 +325,46 @@ impl EngineService {
                     .unwrap_or(600)
                     .clamp(1, 600)
                     + 10,
-            ))
-            .execute(request, cancellation)
-            .await?;
+            ));
+        if self.isolate_execution
+            && matches!(request["operation"].as_str(), Some("run" | "run_tool"))
+        {
+            let workspace = PathBuf::from(
+                request["workspace"]
+                    .as_str()
+                    .ok_or_else(|| EngineError::Protocol("缺少执行工作目录。".into()))?,
+            );
+            let mut read_paths = vec![self.tools.root.clone(), self.shared_directory.clone()];
+            if let Some(paths) = request["resourcePaths"].as_object() {
+                read_paths.extend(paths.values().filter_map(Value::as_str).map(PathBuf::from));
+            }
+            // Only run_engine_python supplies these host-resolved paths. run_tool
+            // arguments must not become filesystem grants through extra JSON keys.
+            if request["operation"] == "run" {
+                for key in ["resourceDirectory", "library"] {
+                    if let Some(path) = request[key].as_str().filter(|path| !path.is_empty()) {
+                        read_paths.push(path.into());
+                    }
+                }
+                for key in ["hostCommand", "vnTextPatchCommand"] {
+                    if let Some(executable) = request["toolPaths"][key][0].as_str() {
+                        let path = Path::new(executable);
+                        if path.is_absolute()
+                            && path.is_file()
+                            && let Some(parent) = path.parent()
+                        {
+                            read_paths.push(parent.into());
+                        }
+                    }
+                }
+            }
+            process = process.with_current_directory(&workspace).with_isolation(
+                self.tools.isolated_runner(),
+                read_paths,
+                vec![workspace],
+            );
+        }
+        let result: Value = process.execute(request, cancellation).await?;
         if !result
             .get("success")
             .and_then(Value::as_bool)
@@ -659,6 +703,7 @@ impl EngineService {
                         .await?,
                 );
                 PythonAdapter::new(&self.tools, entry)?
+                    .with_execution_isolation(self.isolate_execution)
                     .execute(&request, cancellation)
                     .await
             }
@@ -674,11 +719,13 @@ impl EngineService {
                     json!({"engineLibrary":prepared["library"],"python":self.tools.python()}),
                 );
                 PythonAdapter::new(&self.tools, &entry)?
+                    .with_execution_isolation(false)
                     .execute(&request, cancellation)
                     .await
             }
             AdapterHandle::BuiltinSfa16 => {
                 PythonAdapter::new(&self.tools, &self.sfa16_entry()?)?
+                    .with_execution_isolation(false)
                     .execute(&request, cancellation)
                     .await
             }
@@ -693,6 +740,7 @@ impl EngineService {
                     json!({"engineLibrary":library,"python":self.tools.python()}),
                 );
                 PythonAdapter::new(&self.tools, &entry)?
+                    .with_execution_isolation(false)
                     .execute(&request, cancellation)
                     .await
             }
@@ -1242,7 +1290,9 @@ impl EngineService {
                         }
                     }
                 }
-                Err(EngineError::Cancelled) => return Err(EngineError::Cancelled),
+                Err(error @ (EngineError::Cancelled | EngineError::Isolation(_))) => {
+                    return Err(error);
+                }
                 Err(
                     error @ (EngineError::Io(_)
                     | EngineError::ToolMissing(_)
@@ -1412,7 +1462,9 @@ impl EngineService {
                                 });
                             }
                             Ok(_) => {}
-                            Err(EngineError::Cancelled) => return Err(EngineError::Cancelled),
+                            Err(error @ (EngineError::Cancelled | EngineError::Isolation(_))) => {
+                                return Err(error);
+                            }
                             Err(error) => {
                                 if let Some(format) = format {
                                     record_builtin_probe(
@@ -1431,7 +1483,9 @@ impl EngineService {
                         }
                     }
                 }
-                Err(EngineError::Cancelled) => return Err(EngineError::Cancelled),
+                Err(error @ (EngineError::Cancelled | EngineError::Isolation(_))) => {
+                    return Err(error);
+                }
                 Err(
                     error @ (EngineError::Io(_)
                     | EngineError::ToolMissing(_)
@@ -2228,7 +2282,7 @@ impl EngineService {
                 result.passed = true;
                 result.diagnostics.push("文本提取、原文逐字节回填、中文修改及部分翻译验收通过；游戏启动与显示尚未测试。".into());
             }
-            Err(EngineError::Cancelled) => return Err(EngineError::Cancelled),
+            Err(error @ (EngineError::Cancelled | EngineError::Isolation(_))) => return Err(error),
             Err(error) => {
                 result.cacheable = !matches!(
                     &error,
@@ -2426,6 +2480,31 @@ fn validate_raw_units(units: &[TranslationUnit], source: &Path) -> Result<(), En
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn run_tool_extra_arguments_cannot_expand_file_access() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("adaptation/current");
+        fs::create_dir_all(&workspace).unwrap();
+        let private = root.path().join("private.txt");
+        fs::write(&private, "must not leak").unwrap();
+        let script = workspace.join("check.ps1");
+        fs::write(&script, format!(
+            "$ErrorActionPreference = 'Stop'\ntry {{ $null = [IO.File]::ReadAllText('{}'); exit 1 }} catch {{ Write-Output 'denied'; exit 0 }}\n",
+            private.display().to_string().replace('\'', "''")
+        )).unwrap();
+        let service = EngineService::new(root.path(), ToolPaths::development())
+            .with_shared_directory(root.path().join("shared"));
+        let result = service.helper(&json!({
+            "operation":"run_tool", "workspace":workspace,
+            "executable":"powershell", "arguments":["-ExecutionPolicy", "Bypass", "-File", script],
+            "resourcePaths":{},
+            "library":root.path(), "resourceDirectory":root.path(),
+        }), &CancellationToken::new()).await.unwrap();
+        assert_eq!(result["exitCode"], 0);
+        assert!(result["stdout"].as_str().unwrap().contains("denied"));
+    }
 
     #[tokio::test]
     async fn verification_checks_original_hashes_without_retaining_source_copies() {

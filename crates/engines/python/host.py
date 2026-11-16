@@ -1,4 +1,4 @@
-"""Fixed JSON helper for Rust-owned adaptation. Subprocesses are not a sandbox."""
+"""Fixed JSON helper; the Rust host selects OS isolation before running scripts."""
 import ast
 from datetime import datetime, timezone
 import hashlib

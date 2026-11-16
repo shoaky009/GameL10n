@@ -1010,7 +1010,7 @@ pub(super) async fn test_adapter(
                     vec!["真实游戏与样本的探测结果一致；尚未执行完整资源哈希校验、提取及回填验收，不能发布。".into()]
                 }),
         ),
-        Err(EngineError::Cancelled) => return Err(EngineError::Cancelled),
+        Err(error @ (EngineError::Cancelled | EngineError::Isolation(_))) => return Err(error),
         Err(error) => {
             cacheable &= !matches!(&error, EngineError::Io(_) | EngineError::Timeout);
             (false, vec![error.to_string()])
@@ -1036,7 +1036,7 @@ pub(super) async fn test_adapter(
                 input.as_ref() != Some(&final_input.digest)
                     || implementation != workspace_fingerprint(workspace, state)?
             }
-            Err(EngineError::Cancelled) => return Err(EngineError::Cancelled),
+            Err(error @ (EngineError::Cancelled | EngineError::Isolation(_))) => return Err(error),
             Err(error) => {
                 diagnostics.push(format!("验收输入复核失败：{error}"));
                 true

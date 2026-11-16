@@ -92,6 +92,9 @@ export component MainWindow inherits Window {
                 Caption { text: "可迁移现有数据或仅切换目录，完成后立即生效。运行中的任务会先暂停并保存进度。"; }
                 Divider {} Label { text: "同时翻译的游戏数量"; }
                 HorizontalLayout { SpinBox { value <=> App.concurrency; minimum: 1; maximum: 8; } Rectangle { horizontal-stretch: 1; } }
+                Divider {} Label { text: "LLM 执行隔离"; }
+                CheckBox { text: "隔离执行 LLM 脚本与生成适配器"; checked <=> App.isolate-llm-execution; enabled: App.isolation-supported; }
+                Caption { text: App.isolation-supported ? "默认开启，保存后用于后续执行。关闭后，LLM 生成的脚本和适配器将以当前用户权限运行，恶意指令或提示词投毒可能导致文件泄露、修改或删除。" : "当前平台暂不支持执行隔离。LLM 脚本和生成适配器以当前用户权限运行。"; }
                 HorizontalLayout { Button { text: "保存程序设置"; primary: true; clicked => { App.action("save-application", ""); } } Rectangle { horizontal-stretch: 1; } }
                 Rectangle { vertical-stretch: 1; }
             }

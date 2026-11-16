@@ -39,6 +39,7 @@ $runtimeFiles = @(
     }
     Get-Item -LiteralPath (Join-Path $runtime 'host/credentials.py')
     Get-Item -LiteralPath (Join-Path $runtime 'game-check/GameL10n.GameCheck.exe')
+    Get-Item -LiteralPath (Join-Path $runtime 'tool-runner/GameL10n.ToolRunner.exe')
     Get-Item -LiteralPath (Join-Path $runtime 'adapter-components/QlieLauncher.exe')
     Get-Item -LiteralPath (Join-Path $runtime 'adapter-components/GameL10n.FontBridge.dll')
     Get-Item -LiteralPath (Join-Path $runtime 'adapter-components/GameL10n.FontBridge.LICENSE')

@@ -249,13 +249,16 @@ fn adaptation_task_outcome(result: &AdaptationResult) -> Result<String, String> 
 }
 
 impl Application {
-    pub fn engine_service(&self) -> EngineService {
-        EngineService::new(self.tools.asset_root(), self.tools.clone())
-            .with_build_identity(
-                crate::metrics::SOFTWARE_VERSION,
-                crate::metrics::BUILD_GIT_HASH,
-            )
-            .with_shared_directory(self.data_directory().join("extensions/engine-tools"))
+    pub fn engine_service(&self) -> Result<EngineService, CoreError> {
+        Ok(
+            EngineService::new(self.tools.asset_root(), self.tools.clone())
+                .with_execution_isolation(self.read_settings()?.isolate_llm_execution)
+                .with_build_identity(
+                    crate::metrics::SOFTWARE_VERSION,
+                    crate::metrics::BUILD_GIT_HASH,
+                )
+                .with_shared_directory(self.data_directory().join("extensions/engine-tools")),
+        )
     }
     pub async fn package_directories(&self) -> Result<Vec<PathBuf>, CoreError> {
         let root = self.data_directory().to_path_buf();
@@ -559,7 +562,7 @@ impl Application {
                 return Err(gamel10n_engines::EngineError::Cancelled.into());
             }
             let mut service = self
-                .engine_service()
+                .engine_service()?
                 .with_disabled_families(disabled.clone())
                 .with_preferred_adapter(preferred_adapter.clone())
                 .with_excluded_adapters(excluded.clone());
@@ -790,7 +793,7 @@ impl Application {
             request.set_probe_context(&probe);
             self.progress(id, &operation, "正在提取并校验文本身份。")
                 .await;
-            let service = self.engine_service();
+            let service = self.engine_service()?;
             let mut extraction = service
                 .execute(&adapter, &request, cancellation)
                 .await?
@@ -1152,7 +1155,7 @@ impl Application {
             let _ = tx.send(progress);
         };
         let service = self
-            .engine_service()
+            .engine_service()?
             .with_disabled_families(catalog.disabled_family_ids()?);
         let future = service.adapt(&request, &provider, cancellation, Some(&report));
         tokio::pin!(future);
@@ -1286,7 +1289,7 @@ impl Application {
             .await?;
         self.metrics_provider(id, &provider).await;
         let result=async {
-            let (tx,mut rx)=tokio::sync::mpsc::unbounded_channel::<EngineProgress>();let report=move|p|{let _=tx.send(p);};let service=self.engine_service();let directory=self.project_directory(id)?;let knowledge=self.data_directory().join("extensions/engine-knowledge");
+            let (tx,mut rx)=tokio::sync::mpsc::unbounded_channel::<EngineProgress>();let report=move|p|{let _=tx.send(p);};let service=self.engine_service()?;let directory=self.project_directory(id)?;let knowledge=self.data_directory().join("extensions/engine-knowledge");
             let api = self.task_api_summary(id).await?;
             self.log_task_message(id, api.lines().next().unwrap_or("分析 API 已选择。")).await;
             let future=service.review(&directory,&knowledge,&provider,&limits,&cancellation,Some(&report));tokio::pin!(future);
@@ -1573,7 +1576,7 @@ impl Application {
         }
         self.progress(id, "build", "正在回填译文并验证补丁结构。")
             .await;
-        let service = self.engine_service();
+        let service = self.engine_service()?;
         let built = service
             .execute_with_hashes(&adapter, &request, Some(&hashes), None, cancellation)
             .await?
@@ -1815,7 +1818,7 @@ impl Application {
             let output = tempfile::Builder::new()
                 .prefix("package-")
                 .tempdir_in(root)?;
-            let service = self.engine_service();
+            let service = self.engine_service()?;
             if let Some(probe) = &probe {
                 service
                     .verify_probed(
@@ -2389,7 +2392,7 @@ mod tests {
             .handle(&package)
             .unwrap();
         let token = CancellationToken::new();
-        let service = app.engine_service();
+        let service = app.engine_service().unwrap();
         let probe = service
             .execute(&adapter, &AdapterRequest::new("probe", &source), &token)
             .await
@@ -2509,6 +2512,7 @@ mod tests {
         let token = CancellationToken::new();
         let probe = app
             .engine_service()
+            .unwrap()
             .execute(&adapter, &AdapterRequest::new("probe", &game), &token)
             .await
             .unwrap()
@@ -2620,6 +2624,7 @@ mod tests {
         request.resource_files = Some(vec!["text.json".into(), "text.json.000".into()]);
         let probe = app
             .engine_service()
+            .unwrap()
             .execute(&adapter, &request, &token)
             .await
             .unwrap()
@@ -2988,6 +2993,7 @@ mod tests {
         let token = CancellationToken::new();
         let probe = app
             .engine_service()
+            .unwrap()
             .execute(&adapter, &AdapterRequest::new("probe", &game), &token)
             .await
             .unwrap()
@@ -3650,6 +3656,7 @@ mod tests {
         let token = CancellationToken::new();
         let verified = app
             .engine_service()
+            .unwrap()
             .verify(
                 &adapter,
                 &game,

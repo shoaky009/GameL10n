@@ -216,6 +216,8 @@ pub async fn refresh(ctx: &Context, project_id: Option<&str>) -> Result<(), Core
         a.set_loaded_budget(a.get_budget());
         a.set_loaded_turns(a.get_turns());
         a.set_concurrency(settings.maximum_translations as i32);
+        a.set_isolation_supported(cfg!(windows));
+        a.set_isolate_llm_execution(cfg!(windows) && settings.isolate_llm_execution);
         a.set_language(
             ps.get("targetLanguage")
                 .and_then(Value::as_str)
@@ -592,9 +594,10 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
             }
         }
         "save-application" => {
-            ctx.app()
-                .await
-                .save_concurrency(input.concurrency.max(0) as usize)
+            let host = ctx.app().await;
+            host.save_concurrency(input.concurrency.max(0) as usize)
+                .await?;
+            host.save_execution_isolation(input.isolate_llm_execution)
                 .await?;
             ctx.update(|ui| ui.global::<App>().set_activity("程序设置已保存。".into()));
         }

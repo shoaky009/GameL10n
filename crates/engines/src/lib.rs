@@ -38,6 +38,8 @@ pub use verification_diagnostic::{
 pub enum EngineError {
     #[error("找不到工具：{0}")]
     ToolMissing(PathBuf),
+    #[error("执行隔离失败：{0}")]
+    Isolation(String),
     #[error("工具执行失败：{0}")]
     Io(#[from] std::io::Error),
     #[error("工具返回的 JSON 无效：{0}")]
@@ -86,6 +88,10 @@ impl ToolPaths {
 
     pub fn python(&self) -> PathBuf {
         self.root.join("python/python.exe")
+    }
+
+    pub fn isolated_runner(&self) -> PathBuf {
+        self.root.join("tool-runner/GameL10n.ToolRunner.exe")
     }
 
     /// Root containing adapters in the workspace or application distribution.

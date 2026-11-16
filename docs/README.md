@@ -19,6 +19,7 @@
 | 保存位置、恢复与清理 | [数据目录与迁移](data-storage.md) |
 | 适配目标、费用与验证 | [识别与智能适配](adapters/automatic-adaptation.md) |
 | 工具、缓存与会话 | [执行与恢复机制](adapters/adaptation-internals.md) |
+| Windows 文件访问与执行限制 | [LLM 执行隔离](adapters/execution-isolation.md) |
 | 候选筛选与识别声明 | [引擎识别](adapters/recognition.md) |
 | 源码、补丁与工作资料 | [产物与目录约定](adapters/artifacts.md) |
 

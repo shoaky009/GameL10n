@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::EngineError;
 
-/// JSON subprocess execution. A separate process is not a security sandbox.
+/// JSON subprocess execution, optionally through the isolated native runner.
 #[derive(Clone, Debug)]
 pub struct ToolProcess {
     executable: PathBuf,
@@ -19,6 +19,14 @@ pub struct ToolProcess {
     response_file: Option<PathBuf>,
     maximum_output_bytes: Option<u64>,
     preserve_failure_response: bool,
+    isolation: Option<ProcessIsolation>,
+}
+
+#[derive(Clone, Debug)]
+struct ProcessIsolation {
+    runner: PathBuf,
+    read_paths: Vec<PathBuf>,
+    write_paths: Vec<PathBuf>,
 }
 
 impl ToolProcess {
@@ -31,6 +39,7 @@ impl ToolProcess {
             response_file: None,
             maximum_output_bytes: None,
             preserve_failure_response: false,
+            isolation: None,
         }
     }
 
@@ -46,6 +55,21 @@ impl ToolProcess {
 
     pub fn with_current_directory(mut self, directory: impl Into<PathBuf>) -> Self {
         self.directory = Some(directory.into());
+        self
+    }
+
+    /// The host supplies access roots; the child receives only the tool request.
+    pub fn with_isolation(
+        mut self,
+        runner: PathBuf,
+        read_paths: Vec<PathBuf>,
+        write_paths: Vec<PathBuf>,
+    ) -> Self {
+        self.isolation = Some(ProcessIsolation {
+            runner,
+            read_paths,
+            write_paths,
+        });
         self
     }
 
@@ -79,13 +103,43 @@ impl ToolProcess {
         if !self.executable.is_file() {
             return Err(EngineError::ToolMissing(self.executable.clone()));
         }
-        let input = serde_json::to_vec(request)?;
+        let (executable, input) = if let Some(isolation) = &self.isolation {
+            if !isolation.runner.is_file() {
+                return Err(EngineError::Isolation(format!(
+                    "无法启动执行隔离，缺少原生工具：{}。请修复运行工具，或在程序设置中明确关闭隔离。",
+                    isolation.runner.display()
+                )));
+            }
+            let arguments = self
+                .arguments
+                .iter()
+                .map(|argument| {
+                    argument.to_str().ok_or_else(|| {
+                        EngineError::Protocol("隔离执行参数必须是有效的 Unicode。".into())
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let input = serde_json::to_vec(&serde_json::json!({
+                "protocolVersion": 1,
+                "executable": self.executable,
+                "arguments": arguments,
+                "directory": self.directory,
+                "readPaths": isolation.read_paths,
+                "writePaths": isolation.write_paths,
+                "input": request,
+            }))?;
+            (&isolation.runner, input)
+        } else {
+            (&self.executable, serde_json::to_vec(request)?)
+        };
         let response_file = self.response_file.clone();
         let maximum_output_bytes = self.maximum_output_bytes;
         let preserve_failure_response = self.preserve_failure_response;
-        let mut command = Command::new(&self.executable);
+        let mut command = Command::new(executable);
+        if self.isolation.is_none() {
+            command.args(&self.arguments);
+        }
         command
-            .args(&self.arguments)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -97,7 +151,14 @@ impl ToolProcess {
         command.creation_flags(0x08000000); // CREATE_NO_WINDOW: CLI helpers must not open consoles.
         #[cfg(unix)]
         command.process_group(0);
-        let mut child = command.spawn()?;
+        let isolated = self.isolation.is_some();
+        let mut child = command.spawn().map_err(|error| {
+            if isolated {
+                EngineError::Isolation(format!("无法启动原生隔离工具 {}：{error}。请修复运行工具与目录权限，或在程序设置中关闭隔离后重试。", executable.display()))
+            } else {
+                EngineError::Io(error)
+            }
+        })?;
         let process_id = child.id();
         let mut stdin = child
             .stdin
@@ -130,6 +191,20 @@ impl ToolProcess {
                 return Err(EngineError::Protocol("工具输出超过大小限制。".into()));
             }
             if !status.success() {
+                let diagnostic = String::from_utf8_lossy(&stderr);
+                if isolated
+                    && let Some((_, reason)) = diagnostic.split_once("GameL10n-Isolation-Failed: ")
+                {
+                    return Err(EngineError::Isolation(reason.trim().to_owned()));
+                }
+                if isolated
+                    && let Some(code) = status.code().filter(|code| *code as u32 >= 0x8000_0000)
+                {
+                    return Err(EngineError::Isolation(format!(
+                        "原生隔离工具无法正常启动或运行，Windows 退出码为 0x{:08X}。请恢复完整运行工具并检查 Windows 环境，或在程序设置中关闭执行隔离后重试。",
+                        code as u32
+                    )));
+                }
                 if preserve_failure_response {
                     let file = response_file.clone();
                     let diagnostic = tokio::task::spawn_blocking(move || {
@@ -250,6 +325,43 @@ async fn read_limited(stream: impl AsyncRead + Unpin, limit: u64) -> Result<Vec<
 mod tests {
     use super::*;
     use serde_json::{Value, json};
+
+    #[tokio::test]
+    async fn missing_isolation_runner_never_falls_back_to_the_original_program() {
+        let directory = tempfile::tempdir().unwrap();
+        let process = ToolProcess::new(std::env::current_exe().unwrap()).with_isolation(
+            directory.path().join("missing-runner.exe"),
+            vec![],
+            vec![],
+        );
+        let error = process
+            .execute::<_, Value>(&json!({}), &CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, EngineError::Isolation(message) if message.contains("程序设置") && message.contains("缺少原生工具"))
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn isolation_startup_errors_keep_the_reason_and_settings_guidance() {
+        let paths = crate::ToolPaths::development();
+        let directory = tempfile::tempdir().unwrap();
+        let process = ToolProcess::new(paths.python()).with_isolation(
+            paths.isolated_runner(),
+            vec![directory.path().join("missing-input")],
+            vec![],
+        );
+        let error = process
+            .execute::<_, Value>(&json!({}), &CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, EngineError::Isolation(message) if message.contains("missing-input") && message.contains("程序设置")),
+            "{error}"
+        );
+    }
 
     fn python(script: &str) -> Option<ToolProcess> {
         let executable = crate::ToolPaths::development().python();

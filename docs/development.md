@@ -45,7 +45,7 @@ cargo test --manifest-path tools/GameL10n.QlieLauncher/Cargo.toml --locked
 ./scripts/prepare-tools.ps1
 ```
 
-准备脚本恢复便携 Python 和固定归档，安装缺失的 Windows Rust 目标，并依次构建 VNTextPatch、QLIE 启动器、字体桥接和运行检查组件。重复执行复用编译缓存。MSVC 工具和 .NET SDK 需预先安装；SDK 自动从 `DOTNET_ROOT_X64`、`DOTNET_ROOT`、PATH、用户目录的 `.dotnet` 和系统安装目录中查找，跳过低于 .NET 10 的版本。可通过 `./scripts/publish.ps1 -Dotnet 'C:/path/to/dotnet.exe'` 或 `prepare-tools.ps1`、`build-vntextpatch.ps1` 的同名参数指定 SDK。仅恢复 Python 时，`prepare-python.ps1 -ArchivePath` 支持使用固定版本的本地归档。
+准备脚本恢复便携 Python 和固定归档，安装缺失的 Windows Rust 目标，并依次构建 VNTextPatch、QLIE 启动器、字体桥接、运行检查和执行隔离组件。重复执行复用编译缓存。MSVC 工具和 .NET SDK 需预先安装；SDK 自动从 `DOTNET_ROOT_X64`、`DOTNET_ROOT`、PATH、用户目录的 `.dotnet` 和系统安装目录中查找，跳过低于 .NET 10 的版本。可通过 `./scripts/publish.ps1 -Dotnet 'C:/path/to/dotnet.exe'` 或 `prepare-tools.ps1`、`build-vntextpatch.ps1` 的同名参数指定 SDK。仅恢复 Python 时，`prepare-python.ps1 -ArchivePath` 支持使用固定版本的本地归档。
 
 | 工具 | 位置与维护方式 |
 | --- | --- |
@@ -54,6 +54,7 @@ cargo test --manifest-path tools/GameL10n.QlieLauncher/Cargo.toml --locked
 | 共享引擎工具库 | `third_party/engine-tools` 保存版本与固定归档，准备后位于 `target/runtime/engine-tools` |
 | 预编译运行组件 | `target/runtime/adapter-components`；[QLIE 启动器](adapters/engines/qlie-filepack3-systemfont.md#启动组件接入与构建)、[GDI+ 字体桥接](adapters/components/gdiplus-font-bridge.md) |
 | 游戏运行检查 | `target/runtime/game-check/GameL10n.GameCheck.exe`；独立 Rust 工具，依赖 Windows 捕获与 OCR 能力 |
+| LLM 执行隔离 | `target/runtime/tool-runner/GameL10n.ToolRunner.exe`；独立 Rust 工具，封装 Windows AppContainer |
 
 `prepare-python.ps1`、`prepare-tools.ps1` 和 `publish.ps1` 自动准备固定归档及宿主脚本；开发时可单独运行 `scripts/prepare-runtime.ps1` 刷新这些文件。`publish.ps1` 将运行依赖打包到发行目录的 `tools/`。版本固定与恢复规则见[固定工具依赖](adapters/adaptation-internals.md#固定工具依赖)。
 
