@@ -15,8 +15,9 @@ use gamel10n_translation::{
     files::{hash_file, hash_text, read_json, write_json},
     provider::{OpenAiProvider, ToolCall},
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer, ser::SerializeMap};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 #[path = "adaptation_automatic.rs"]
 mod automatic;
@@ -2710,7 +2711,7 @@ impl EngineService {
             .extra
             .get("rustVerifiedContextFingerprint")
             .and_then(Value::as_str)
-            != Some(verification_context(request).as_str())
+            != Some(verification_context(request)?.as_str())
         {
             return Err(EngineError::Rejected(
                 "适配目标或已有文本基线发生变化，请重新完整验收。".into(),
@@ -3407,8 +3408,14 @@ fn workspace_fingerprint(workspace: &Path, state: &Session) -> Result<String, En
         &json!({"hostRevision":1,"files":files,"selection":state.release_files,"patterns":state.resource_patterns,"recognition":state.recognition,"family":state.family}),
     )?))
 }
-fn verification_context(request: &AdaptationRequest<'_>) -> String {
-    hash_text(&json!({"objective":request.objective,"baseline":request.baseline_units}).to_string())
+fn verification_context(request: &AdaptationRequest<'_>) -> Result<String, EngineError> {
+    let mut hash = Sha256::new();
+    let mut serializer = serde_json::Serializer::new(&mut hash);
+    let mut context = serializer.serialize_map(Some(2))?;
+    context.serialize_entry("objective", &request.objective)?;
+    context.serialize_entry("baseline", request.baseline_units)?;
+    context.end()?;
+    Ok(format!("{:x}", hash.finalize()))
 }
 fn safe_call_id(id: &str) -> String {
     hash_text(id)[..32].into()

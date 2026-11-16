@@ -155,11 +155,11 @@ fn report_verification_progress(
     state.update_progress("verified", message, Some("test_adapter"), callback);
 }
 
-fn evidence(
-    request: &AdaptationRequest<'_>,
+fn evidence<'a>(
+    request: &AdaptationRequest<'a>,
     state: &Session,
     trial: Option<&[String]>,
-) -> (Value, Vec<TranslationUnit>) {
+) -> (Value, Vec<&'a TranslationUnit>) {
     let mut coverage = state.text_coverage.clone();
     let included = |path: &str| {
         trial.is_none_or(|files| {
@@ -181,7 +181,6 @@ fn evidence(
             .baseline_units
             .iter()
             .filter(|unit| included(&unit.resource_path))
-            .cloned()
             .collect()
     } else {
         vec![]
@@ -537,7 +536,35 @@ fn fingerprint(
         (json!(game_hashes), json!(staged_hashes), staged_hashes)
     };
     let (coverage, baseline) = evidence(request, state, trial);
-    let digest = hash_text(&json!({"cacheSchema":4,"verifierRevision":VERIFIER_REVISION,"host":"rust-python-v2","implementation":workspace_fingerprint(workspace,state)?,"gameDirectory":request.game_directory,"discovery":discovery.evidence,"gameResources":game_inputs,"stagedResources":staged_inputs,"approvedResources":approved.iter().filter(|(path,_)|trial.is_none_or(|files|files.iter().any(|file|file.eq_ignore_ascii_case(path)))).collect::<BTreeMap<_,_>>(),"objective":request.objective,"baseline":baseline,"coverage":samples(&coverage),"launchInspection":state.extra.get("launchInspection"),"discoveryOnly":discovery_only,"trialFiles":trial}).to_string());
+    // Preserve the JSON field order used by saved fingerprints without materializing the baseline.
+    let mut hash = Sha256::new();
+    let mut serializer = serde_json::Serializer::new(&mut hash);
+    let mut inputs = serializer.serialize_map(Some(15))?;
+    inputs.serialize_entry("cacheSchema", &4)?;
+    inputs.serialize_entry("verifierRevision", &VERIFIER_REVISION)?;
+    inputs.serialize_entry("host", "rust-python-v2")?;
+    inputs.serialize_entry("implementation", &workspace_fingerprint(workspace, state)?)?;
+    inputs.serialize_entry("gameDirectory", &request.game_directory)?;
+    inputs.serialize_entry("discovery", &discovery.evidence)?;
+    inputs.serialize_entry("gameResources", &game_inputs)?;
+    inputs.serialize_entry("stagedResources", &staged_inputs)?;
+    inputs.serialize_entry(
+        "approvedResources",
+        &approved
+            .iter()
+            .filter(|(path, _)| {
+                trial.is_none_or(|files| files.iter().any(|file| file.eq_ignore_ascii_case(path)))
+            })
+            .collect::<BTreeMap<_, _>>(),
+    )?;
+    inputs.serialize_entry("objective", &request.objective)?;
+    inputs.serialize_entry("baseline", &baseline)?;
+    inputs.serialize_entry("coverage", &samples(&coverage))?;
+    inputs.serialize_entry("launchInspection", &state.extra.get("launchInspection"))?;
+    inputs.serialize_entry("discoveryOnly", &discovery_only)?;
+    inputs.serialize_entry("trialFiles", &trial)?;
+    inputs.end()?;
+    let digest = format!("{:x}", hash.finalize());
     Ok(InputFingerprint {
         digest,
         staged_hashes,
@@ -563,18 +590,19 @@ fn accept(
     implementation: &str,
     verification: VerificationResult,
     request: &AdaptationRequest<'_>,
-) {
+) -> Result<(), EngineError> {
+    let context = verification_context(request)?;
     state.verified_package = Some(package);
     state.verified_fingerprint = Some(implementation.into());
     state.verification = Some(verification);
-    state.extra.insert(
-        "rustVerifiedContextFingerprint".into(),
-        json!(verification_context(request)),
-    );
+    state
+        .extra
+        .insert("rustVerifiedContextFingerprint".into(), json!(context));
     state.extra.insert(
         "rustVerifiedCoverageFingerprint".into(),
         json!(hash_text(&samples(&state.text_coverage).to_string())),
     );
+    Ok(())
 }
 
 #[expect(
@@ -977,7 +1005,7 @@ pub(super) async fn test_adapter(
                 source.directory(),
                 &resources,
                 output.path(),
-                &baseline,
+                baseline,
                 &coverage,
                 Some(&fingerprint.staged_hashes),
                 probe.as_ref(),
@@ -1091,7 +1119,7 @@ pub(super) async fn test_adapter(
                 .clone()
                 .ok_or_else(|| EngineError::Protocol("完整验收缺少结果。".into()))?,
             request,
-        );
+        )?;
     }
     let mut result = json!({"passed":passed,"stage":stage,"diagnostics":diagnostics,"id":id,"version":version,"compileMs":compile_ms,"verificationMs":verification_ms,"verificationStagesMs":if reused {None}else{verification.as_ref().map(|result|&result.stage_timings_ms)},"trialFiles":trial,"probe":probe,"nextAction":if !passed{"修复 diagnostics 后重新验收。"}else if stage=="trial"{"小范围试验通过；省略 trialFiles 执行完整验收后才能 finish。"}else if stage=="discovery"{"资源发现通过；执行完整 test_adapter 后才能发布。"}else{"完整资源验收通过，当前目标完成后 finish；已知遗漏需要 allowPartial 并明确披露。"}});
     result["issues"] = json!(
@@ -1602,6 +1630,105 @@ mod tests {
             complete: true,
         };
         (request, workspace, state, discovery)
+    }
+
+    #[test]
+    fn streaming_verification_fingerprints_preserve_saved_digests() {
+        let root = tempfile::tempdir().expect("fixture");
+        let (request, workspace, mut state, discovery) = archive_fixture(root.path());
+        let baseline: Vec<TranslationUnit> = serde_json::from_value(json!([
+            {"id":"line-1","resourcePath":"archive.bin","locator":"0","sourceText":"中文😀\n\"原文\" {name}","context":"上下文","speaker":"角色","protectedTokens":["{name}"]},
+            {"id":"line-2","resourcePath":"outside.bin","locator":"1","sourceText":"outside","context":""}
+        ])).expect("baseline");
+        let mut request = AdaptationRequest {
+            baseline_units: &baseline,
+            ..request
+        };
+        state.text_coverage = json!({"samples":[
+            {"resourcePath":"archive.bin","sourceText":"中文😀"},
+            {"resourcePath":"outside.bin","sourceText":"outside"}
+        ]});
+        let files = discovery.resources.clone();
+        let paths = files.iter().cloned().collect();
+        let approved: BTreeMap<String, String> =
+            serde_json::from_value(state.extra["resourceHashes"].clone()).expect("approved hashes");
+        let staged_root = workspace.join("resources");
+        let staged_bindings = resources::inputs(&workspace, &state).expect("staged bindings");
+        for objective in ["Repair", "develop"] {
+            request.objective = objective.into();
+            if objective == "Repair" {
+                state
+                    .extra
+                    .insert("launchInspection".into(), json!({"note":"中文😀"}));
+            } else {
+                state.extra.remove("launchInspection");
+            }
+            assert_eq!(
+                verification_context(&request).expect("context fingerprint"),
+                hash_text(&json!({"objective":request.objective,"baseline":baseline}).to_string())
+            );
+            for discovery_only in [true, false] {
+                let (game_inputs, staged_inputs) = if discovery_only {
+                    (
+                        json!(
+                            file_identities(&request.game_directory, &paths, &request.inputs)
+                                .expect("game identities")
+                        ),
+                        json!(
+                            file_identities(&staged_root, &paths, &staged_bindings)
+                                .expect("staged identities")
+                        ),
+                    )
+                } else {
+                    (
+                        json!(hashes(&request.game_directory, &files).expect("game hashes")),
+                        json!(hashes(&staged_root, &files).expect("staged hashes")),
+                    )
+                };
+                for trial in [None, Some(files.as_slice())] {
+                    let (coverage, baseline) = evidence(&request, &state, trial);
+                    assert_eq!(
+                        baseline.len(),
+                        if objective == "Repair" {
+                            if trial.is_some() { 1 } else { 2 }
+                        } else {
+                            0
+                        }
+                    );
+                    let expected = hash_text(&json!({
+                        "cacheSchema":4,
+                        "verifierRevision":VERIFIER_REVISION,
+                        "host":"rust-python-v2",
+                        "implementation":workspace_fingerprint(&workspace,&state).expect("implementation"),
+                        "gameDirectory":request.game_directory,
+                        "discovery":discovery.evidence,
+                        "gameResources":game_inputs,
+                        "stagedResources":staged_inputs,
+                        "approvedResources":approved,
+                        "objective":request.objective,
+                        "baseline":baseline,
+                        "coverage":samples(&coverage),
+                        "launchInspection":state.extra.get("launchInspection"),
+                        "discoveryOnly":discovery_only,
+                        "trialFiles":trial,
+                    }).to_string());
+                    let actual = fingerprint(
+                        &request,
+                        &workspace,
+                        &state,
+                        discovery_only,
+                        trial,
+                        &discovery,
+                        &mut FingerprintStats::default(),
+                    )
+                    .expect("streaming fingerprint");
+                    assert_eq!(
+                        actual.digest, expected,
+                        "{objective}, discovery={discovery_only}, trial={trial:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

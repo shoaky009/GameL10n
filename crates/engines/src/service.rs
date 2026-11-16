@@ -1803,13 +1803,13 @@ impl EngineService {
         clippy::too_many_arguments,
         reason = "Coverage anchors are independent of resource and baseline verification inputs."
     )]
-    pub(crate) async fn verify_with_coverage(
+    pub(crate) async fn verify_with_coverage<'a>(
         &self,
         adapter: &AdapterHandle,
         source: &Path,
         resources: &[String],
         directory: &Path,
-        baseline: &[TranslationUnit],
+        baseline: impl IntoIterator<Item = &'a TranslationUnit>,
         coverage: &Value,
         expected_source_hashes: Option<&BTreeMap<String, String>>,
         probe: Option<&ProbeResult>,
