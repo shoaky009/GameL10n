@@ -265,7 +265,9 @@ async fn validation_context_reuses_real_extractions_and_still_rejects_output_mut
         fs::create_dir_all(&game).expect("fixture");
         fs::write(game.join("text.json"), r#"["one","two","three","four"]"#).expect("fixture");
         let source_hash = hash_file(&game.join("text.json")).expect("hash");
-        let entry = case.join("adapter.py");
+        let workspace = case.join("adaptation/current");
+        fs::create_dir_all(&workspace).expect("workspace");
+        let entry = workspace.join("adapter.py");
         fs::write(
             &entry,
             script.replace(
@@ -293,7 +295,7 @@ async fn validation_context_reuses_real_extractions_and_still_rejects_output_mut
             .await
             .expect("verification");
         assert_eq!(result.passed, !corrupt_output, "{:?}", result.diagnostics);
-        let contexts: Vec<serde_json::Value> = fs::read_to_string(case.join("contexts.jsonl"))
+        let contexts: Vec<serde_json::Value> = fs::read_to_string(workspace.join("contexts.jsonl"))
             .expect("validator used the context")
             .lines()
             .map(|line| serde_json::from_str(line).expect("context record"))

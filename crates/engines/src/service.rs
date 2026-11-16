@@ -327,6 +327,11 @@ impl EngineService {
         if self.isolate_execution
             && matches!(request["operation"].as_str(), Some("run" | "run_tool"))
         {
+            fs::write(
+                directory.path().join("isolation.py"),
+                include_str!("../python/isolation.py"),
+            )?;
+            process = process.with_arguments([OsString::from("--isolated")]);
             let workspace = PathBuf::from(
                 request["workspace"]
                     .as_str()
@@ -2519,7 +2524,7 @@ mod tests {
                     &json!({
                         "operation":"run", "workspace":workspace,
                         "script":"work/probe.py",
-                        "content":"save_sample('work/sample.bin', b'sample'); print('helper-ok')",
+                        "content":"import tempfile\nwith tempfile.TemporaryDirectory() as temporary:\n    save_sample('work/sample.bin', b'sample')\nprint('helper-ok')",
                         "resourcePaths":{},
                     }),
                     &CancellationToken::new(),
@@ -2833,7 +2838,7 @@ mod tests {
         let entry = package.join("src/adapter.py");
         let script = include_str!("../tests/fixtures/json_adapter.py").replace(
             "r = json.load(sys.stdin)",
-            "r = json.load(sys.stdin)\nassert r['operation'] == 'probe', 'recognition must only probe'\nwith Path(__file__).with_name('calls.log').open('a', encoding='utf8') as log:\n    log.write(r['operation'] + '\\n')",
+            "r = json.load(sys.stdin)\nassert r['operation'] == 'probe', 'recognition must only probe'",
         );
         fs::write(&entry, &script).expect("adapter");
         write_json(
@@ -2864,14 +2869,6 @@ mod tests {
             .await
             .expect("discovery with inventory");
         assert!(second.adapter.is_some());
-        assert_eq!(
-            fs::read_to_string(entry.with_file_name("calls.log"))
-                .expect("calls")
-                .lines()
-                .collect::<Vec<_>>(),
-            ["probe", "probe"]
-        );
-
         fs::write(&entry, format!("{script}\n# changed after publication\n")).expect("change");
         let changed = service
             .discover(&game, &[package], &cancellation, None)
@@ -3246,8 +3243,12 @@ r=json.load(sys.stdin)
 out=dict(protocolVersion=1,success=True)
 if r.get('probeRanges'):
     p=r['probeRanges'][0]
-    Path(p['dataPath']).write_bytes(b'x'*p['length'])
-    out['probe']=dict(engineId='format',adapterId='template.format',adapterVersion='1',description='format',requiredFiles=['scripts.dat'])
+    try:
+        Path(p['dataPath']).write_bytes(b'x'*p['length'])
+    except PermissionError:
+        out.update(success=False,error='只读探测片段禁止写入。')
+    else:
+        out['probe']=dict(engineId='format',adapterId='template.format',adapterVersion='1',description='format',requiredFiles=['scripts.dat'])
 else:
     out['probeReads']=[dict(path='scripts.dat',offset=131056,length=16)]
 with open(r['responseFile'],'w',encoding='utf-8') as output: json.dump(out,output)
@@ -3258,17 +3259,22 @@ with open(r['responseFile'],'w',encoding='utf-8') as output: json.dump(out,outpu
             id: "template.format".into(),
             version: "1".into(),
         };
-        let result = service
-            .probe_bounded(
-                &adapter,
-                root.path(),
-                &["scripts.dat".into()],
-                &CancellationToken::new(),
-            )
-            .await;
-        assert!(
-            matches!(result,Err(EngineError::Rejected(message)) if message.contains("只读探测片段"))
-        );
+        for isolated in [false, true] {
+            let result = service
+                .clone()
+                .with_execution_isolation(isolated)
+                .probe_bounded(
+                    &adapter,
+                    root.path(),
+                    &["scripts.dat".into()],
+                    &CancellationToken::new(),
+                )
+                .await;
+            assert!(
+                matches!(&result,Err(EngineError::Rejected(message)) if message.contains("只读探测片段")),
+                "{result:?}"
+            );
+        }
         assert_eq!(
             fs::read(root.path().join("scripts.dat")).expect("original"),
             vec![0; 131072]

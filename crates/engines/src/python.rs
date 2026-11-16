@@ -11,7 +11,7 @@ use crate::{
 };
 
 // Embedded CPython ignores PYTHONPATH. Bootstrap restores the established package import roots.
-const BOOTSTRAP: &str = "import runpy,sys,json,io,os;from pathlib import Path;p=Path(sys.argv[1]).resolve();r=sys.stdin.read();d=json.loads(r);t=d.get('toolPaths') or {};l=t.get('engineLibrary');sys.path[:0]=[str(p.parent),str(p.parent.parent)]+([l,str(Path(l).parent/'native')] if l else []);os.environ['GAMEL10N_ADAPTER_HOST']=json.dumps(t.get('hostCommand'));os.environ['GAMEL10N_VNTEXTPATCH_COMMAND']=json.dumps(t.get('vnTextPatchCommand'));sys.dont_write_bytecode=True;protect_inputs(d.get('sourceDirectory'));sys.stdin=io.TextIOWrapper(io.BytesIO(r.encode('utf-8')),encoding='utf-8');sys.argv=[str(p)];runpy.run_path(str(p),run_name='__main__')";
+const BOOTSTRAP: &str = "import runpy,sys,json,io,os;from pathlib import Path;configure_tempfiles('--isolated' in sys.argv[2:]);p=Path(sys.argv[1]).resolve();r=sys.stdin.read();d=json.loads(r);t=d.get('toolPaths') or {};l=t.get('engineLibrary');sys.path[:0]=[str(p.parent),str(p.parent.parent)]+([l,str(Path(l).parent/'native')] if l else []);os.environ['GAMEL10N_ADAPTER_HOST']=json.dumps(t.get('hostCommand'));os.environ['GAMEL10N_VNTEXTPATCH_COMMAND']=json.dumps(t.get('vnTextPatchCommand'));sys.dont_write_bytecode=True;protect_inputs(d.get('sourceDirectory'));sys.stdin=io.TextIOWrapper(io.BytesIO(r.encode('utf-8')),encoding='utf-8');sys.argv=[str(p)];runpy.run_path(str(p),run_name='__main__')";
 
 #[derive(Clone, Debug)]
 pub struct PythonAdapter {
@@ -40,7 +40,8 @@ impl PythonAdapter {
                     OsString::from("utf8"),
                     OsString::from("-c"),
                     OsString::from(format!(
-                        "{}\n{BOOTSTRAP}",
+                        "{}\n{}\n{BOOTSTRAP}",
+                        include_str!("../python/isolation.py"),
                         include_str!("../python/readonly_inputs.py")
                     )),
                     entry.into_os_string(),
@@ -76,6 +77,7 @@ impl PythonAdapter {
         }
         let mut process = self.process.clone();
         if self.isolate_execution {
+            process = process.with_arguments([OsString::from("--isolated")]);
             let mut read_paths = vec![self.paths.root.clone(), request.source_directory.clone()];
             if let Some(parent) = self.entry.parent() {
                 read_paths.push(parent.into());
@@ -147,6 +149,73 @@ impl PythonAdapter {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn renpy_adapters_extract_build_and_validate_under_isolation() {
+        let paths = ToolPaths::development();
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().join("adaptation/current");
+        let package = workspace.join("tools");
+        std::fs::create_dir_all(&package).unwrap();
+        for (name, source) in [
+            (
+                "gamel10n_host.py",
+                include_str!("../../../adapters/components/gamel10n_host.py"),
+            ),
+            (
+                "engine_archive.py",
+                include_str!("../../../adapters/components/engine_archive.py"),
+            ),
+            (
+                "renpy_rpyc_adapter.py",
+                include_str!("../../../adapters/components/renpy_rpyc_adapter.py"),
+            ),
+            (
+                "renpy_mixed_adapter.py",
+                include_str!("../../../adapters/components/renpy_mixed_adapter.py"),
+            ),
+        ] {
+            std::fs::write(package.join(name), source).unwrap();
+        }
+        std::fs::write(
+            package.join("adapter-template.json"),
+            r#"{"schemaVersion":1,"templateVersion":1,"format":"Renpy"}"#,
+        )
+        .unwrap();
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let entry = workspace.join("adapter.py");
+        std::fs::write(&entry, r#"import contextlib,io,json,runpy,sys
+from pathlib import Path
+r=json.load(sys.stdin)
+fixtures=Path(r['toolPaths']['engineLibrary']).parent
+sys.path.insert(0,str(fixtures))
+sys.argv=[str(fixtures/'check_renpy_rpyc_adapter.py'),r['adapterDirectory']]
+output=io.StringIO()
+with contextlib.redirect_stdout(output):
+    runpy.run_path(sys.argv[0],run_name='__main__')
+assert output.getvalue().strip()=='rpyc-adapter-ok'
+Path(r['responseFile']).write_text(json.dumps(dict(protocolVersion=1,success=True,validation=dict(passed=True,issues=[],runtimeStatus='not-tested'))),encoding='utf-8')
+"#).unwrap();
+        let source = directory.path().join("game");
+        std::fs::create_dir(&source).unwrap();
+        let mut request = AdapterRequest::new("validate", source);
+        request
+            .extra
+            .insert("adapterDirectory".into(), serde_json::json!(workspace));
+        request.extra.insert(
+            "toolPaths".into(),
+            serde_json::json!({
+                "engineLibrary":fixtures.join("renpy-rpyc-reference-e9b8018.zip"),
+            }),
+        );
+        let result = PythonAdapter::new(&paths, &entry)
+            .unwrap()
+            .execute(&request, &CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(result.validation.unwrap().passed);
+    }
 
     #[tokio::test]
     async fn resource_failures_allow_fallback_but_explicit_infrastructure_errors_stop_it() {

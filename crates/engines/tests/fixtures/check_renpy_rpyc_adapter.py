@@ -104,6 +104,14 @@ reject(lambda: mixed.execute(packed), "加载冲突")
 (source / "nested").mkdir()
 archive(source / "nested/one.rpa", {"other.rpyc": original})
 reject(lambda: mixed.execute(dict(packed, resourceFiles=["script.rpyc", "nested/one.rpa"])), "加载根目录")
+archive(source / "one.rpa", {"other.rpyc": original})
+combined = dict(request("extract"), resourceFiles=["script.rpyc", "one.rpa"])
+units = mixed.execute(combined)["extraction"]["units"]
+assert len(units) == 8
+output = Path("mixed-output").absolute()
+mixed.execute(dict(combined, operation="build", outputDirectory=str(output),
+                   translations={units[0]["id"]: "你好 [player] {b}混合资源{/b}"}))
+assert mixed.execute(dict(combined, operation="validate", outputDirectory=str(output)))["validation"]["passed"]
 assert not list(Path.cwd().glob("renpy-*")), "mixed temporary resources leaked"
 assert not list(Path.cwd().glob("rpyc-*")), "temporary resources leaked"
 print("rpyc-adapter-ok")

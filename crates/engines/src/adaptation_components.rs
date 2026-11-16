@@ -121,10 +121,7 @@ pub(super) async fn check_sample(
     request: &Value,
     cancellation: &CancellationToken,
 ) -> Result<Value, EngineError> {
-    fs::create_dir_all(&service.shared_directory)?;
-    let directory = tempfile::Builder::new()
-        .prefix("sample-check-")
-        .tempdir_in(&service.shared_directory)?;
+    let directory = tempfile::Builder::new().prefix("sample-check-").tempdir()?;
     let entry = directory.path().join("component.py");
     fs::write(&entry, source)?;
     let driver = "import json,runpy,sys;sys.dont_write_bytecode=True;sys.path.insert(0,sys.argv[1]);component=runpy.run_path(sys.argv[2]);print(json.dumps(component['main'](json.load(sys.stdin)),ensure_ascii=True))";
