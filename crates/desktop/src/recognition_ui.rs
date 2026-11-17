@@ -144,6 +144,30 @@ fn lines(value: &Value) -> Vec<String> {
         .collect()
 }
 
+fn diagnostic_summary(value: &Value) -> String {
+    let chars = value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|line| !line.trim().is_empty())
+        .enumerate()
+        .flat_map(|(index, line)| (index > 0).then_some('\n').into_iter().chain(line.chars()));
+    let mut summary = String::new();
+    let mut line_count = 1;
+    for (index, character) in chars.enumerate() {
+        if index == 800 || (character == '\n' && line_count == 8) {
+            summary.push_str("…\n完整内容见项目目录中的 adaptation-result.json。");
+            break;
+        }
+        summary.push(character);
+        if character == '\n' {
+            line_count += 1;
+        }
+    }
+    summary
+}
+
 fn note(value: &Value, fallback: &str) -> String {
     let message = text(value, "message");
     if message.is_empty() {
@@ -254,7 +278,7 @@ impl RecognitionFailure {
             let failure = &result["failure"];
             let mut message = text(failure, "message").to_owned();
             if message.is_empty() {
-                message = lines(&result["diagnostics"]).join("\n");
+                message = diagnostic_summary(&result["diagnostics"]);
             }
             if message.is_empty() {
                 message = text(result, "summary").to_owned();
@@ -396,7 +420,7 @@ impl RecognitionView {
         {
             String::new()
         } else {
-            lines(&result["diagnostics"]).join("\n")
+            diagnostic_summary(&result["diagnostics"])
         };
         let mut runtime_checks = Vec::new();
         let mut validation = Vec::new();
@@ -426,7 +450,10 @@ impl RecognitionView {
                     }
                 ));
             }
-            validation.extend(lines(&verification["diagnostics"]));
+            let diagnostics = diagnostic_summary(&verification["diagnostics"]);
+            if !diagnostics.is_empty() {
+                validation.push(diagnostics);
+            }
         }
         runtime_checks.extend(lines(&result["pendingRuntimeChecks"]));
         // The current step may advance before its progress snapshot is read.
@@ -533,6 +560,48 @@ pub fn clear(app: &App) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn oversized_resource_diagnostics_show_a_preview_without_changing_the_report() {
+        for diagnostics in [
+            json!(["回填后缺少文本单元 srp.pac:00_01:4:name；".repeat(32504)]),
+            json!(["逐项验收错误\n".repeat(1000)]),
+            json!(vec!["逐项验收错误"; 1000]),
+        ] {
+            let result = json!({"verification":{
+                "passed":false,"originalRoundtripPassed":true,"diagnostics":diagnostics
+            }});
+            let view = RecognitionView::new(&BTreeMap::new(), None, &Value::Null, &result);
+            assert!(
+                view.validation
+                    .starts_with("静态资源验收：未通过。\n原文字节回填：通过。\n")
+            );
+            assert!(view.validation.contains("adaptation-result.json"));
+            assert!(view.validation.chars().count() < 1000);
+            assert!(view.validation.lines().count() <= 11);
+            assert_eq!(result["verification"]["diagnostics"], diagnostics);
+        }
+    }
+
+    #[test]
+    fn short_resource_diagnostics_remain_complete() {
+        for message in [
+            "部分资源尚未验证".into(),
+            "中".repeat(800),
+            "一\n二\n三\n四\n五\n六\n七\n八".into(),
+        ] {
+            assert_eq!(diagnostic_summary(&json!(["", message])), message);
+        }
+    }
+
+    #[test]
+    fn legacy_failure_diagnostics_use_the_same_bounded_preview() {
+        let result = json!({"status":"Failed", "diagnostics":["验收错误；".repeat(10000)]});
+        let view = RecognitionView::new(&BTreeMap::new(), None, &Value::Null, &result);
+        assert!(view.failure.message.contains("adaptation-result.json"));
+        assert!(view.failure.message.chars().count() < 1000);
+        assert!(view.diagnostics.is_empty());
+    }
 
     #[test]
     fn pending_candidate_keeps_text_and_failure_without_formal_recognition() {

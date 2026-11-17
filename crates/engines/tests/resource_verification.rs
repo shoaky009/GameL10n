@@ -210,6 +210,57 @@ async fn independently_verifies_original_chinese_and_partial_rebuilding() {
 }
 
 #[tokio::test]
+async fn large_adapter_failures_keep_full_issues_and_bounded_diagnostics() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    let service = service(fixture.path().join("shared"));
+    assert!(
+        service.tools.python().is_file(),
+        "portable Python is required"
+    );
+    let game = fixture.path().join("game");
+    fs::create_dir_all(&game).unwrap();
+    fs::write(game.join("text.json"), r#"["one","two","three","four"]"#).unwrap();
+    let script = ADAPTER.replace(
+        "elif op=='validate':out['validation']={'passed':True,'issues':[],'runtimeStatus':'not-tested'}",
+        r#"elif op=='validate':
+ issues=[{'code':'missing-unit','message':'回填后缺少文本单元 unit-%d'%i,'unitId':'unit-%d'%i} for i in range(32504)]
+ out['validation']={'passed':False,'issues':issues,'runtimeStatus':'not-tested'}"#,
+    );
+    let entry = fixture.path().join("adapter.py");
+    fs::write(&entry, script).unwrap();
+    let adapter = AdapterHandle::Python {
+        entry,
+        package_directory: None,
+        id: "fixture".into(),
+        version: "1".into(),
+    };
+    let directory = fixture.path().join("verification");
+    let result = service
+        .verify(
+            &adapter,
+            &game,
+            &["text.json".into()],
+            &directory,
+            &[],
+            &CancellationToken::new(),
+            None,
+        )
+        .await
+        .expect("verification report");
+    assert!(!result.passed);
+    assert!(result.original_roundtrip_passed);
+    let diagnostics = result.diagnostics.join("\n");
+    assert!(diagnostics.contains("32504"), "{diagnostics}");
+    assert!(diagnostics.contains("unit-2"), "{diagnostics}");
+    assert!(!diagnostics.contains("unit-3"), "{diagnostics}");
+    assert!(diagnostics.chars().count() < 1000);
+    let report: serde_json::Value =
+        serde_json::from_slice(&fs::read(directory.join("verification.json")).unwrap()).unwrap();
+    assert_eq!(report["adapterIssues"].as_array().unwrap().len(), 32504);
+    assert_eq!(report["adapterIssues"][32503]["unitId"], "unit-32503");
+}
+
+#[tokio::test]
 async fn validation_context_reuses_real_extractions_and_still_rejects_output_mutation() {
     let fixture = tempfile::tempdir().expect("fixture");
     let service = service(fixture.path().join("shared"));
@@ -237,6 +288,8 @@ async fn validation_context_reuses_real_extractions_and_still_rejects_output_mut
  assert Path(context['outputDirectory']).resolve()==target.resolve()
  assert context['resourceFiles']==r['resourceFiles']==['text.json']
  assert set(context['outputFiles'])=={'text.json','encoding.map'}
+ assert r['buildMode']=='replace'
+ assert r['outputFiles']==context['outputFiles']
  assert (target/'encoding.map').read_text(encoding='utf8')=='generated companion'
  translations=json.loads(Path(r['translationsFile']).read_text(encoding='utf8'))
  original=context['originalUnits'];modified=context['outputUnits']

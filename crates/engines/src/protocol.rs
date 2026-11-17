@@ -193,14 +193,12 @@ impl BuildResult {
             }))
     }
     pub fn set_output_context(&self, request: &mut AdapterRequest) {
-        if self.mode == BuildMode::Overlay {
-            request
-                .extra
-                .insert("buildMode".into(), serde_json::json!(self.mode));
-            request
-                .extra
-                .insert("outputFiles".into(), serde_json::json!(self.files));
-        }
+        request
+            .extra
+            .insert("buildMode".into(), serde_json::json!(self.mode));
+        request
+            .extra
+            .insert("outputFiles".into(), serde_json::json!(self.files));
     }
 
     /// Reads the effective game without copying original archives into the patch directory.
@@ -300,6 +298,29 @@ impl AdapterResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validation_receives_outputs_in_both_build_modes() {
+        for (mode, files) in [
+            (BuildMode::Replace, vec!["text.dat", "encoding.json"]),
+            (BuildMode::Overlay, vec!["text.patch.dat"]),
+            (BuildMode::Overlay, vec![]),
+        ] {
+            let build = BuildResult {
+                files: files.into_iter().map(str::to_owned).collect(),
+                mode,
+                warnings: Vec::new(),
+                launch_executable: None,
+                launch: None,
+            };
+            let mut request = AdapterRequest::new("validate", "source");
+            request.resource_files = Some(vec!["text.dat".into()]);
+            build.set_output_context(&mut request);
+            assert_eq!(request.extra["buildMode"], serde_json::json!(mode));
+            assert_eq!(request.extra["outputFiles"], serde_json::json!(build.files));
+            assert_eq!(request.resource_files.unwrap(), ["text.dat"]);
+        }
+    }
 
     #[test]
     fn legacy_resource_errors_allow_fallback_without_hiding_infrastructure_or_protocol_failures() {

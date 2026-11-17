@@ -1652,12 +1652,7 @@ impl Application {
         if !validation.passed || !validation.issues.is_empty() {
             return Err(CoreError::InvalidData(format!(
                 "补丁结构验证失败：{}",
-                validation
-                    .issues
-                    .iter()
-                    .map(|i| i.message.as_str())
-                    .collect::<Vec<_>>()
-                    .join("；")
+                validation.issue_summary()
             )));
         }
         for (path, expected) in &hashes {

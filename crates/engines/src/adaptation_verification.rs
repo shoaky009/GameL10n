@@ -2,7 +2,7 @@
 use super::*;
 use crate::protocol::ProbeResult;
 
-pub(super) const VERIFIER_REVISION: u32 = 12;
+pub(super) const VERIFIER_REVISION: u32 = 13;
 
 fn verified_public_dependency(
     service: &EngineService,
@@ -1087,6 +1087,8 @@ pub(super) async fn test_adapter(
         verification.diagnostics.clone_from(&diagnostics);
         if let Some(directory) = &verification_directory {
             write_json(directory, verification).map_err(file_error)?;
+            // Full issue lists belong to the report rather than recurring session snapshots.
+            verification.adapter_issues.clear();
         }
         if trial.is_none() {
             state.verification = Some(verification.clone());
@@ -1293,7 +1295,7 @@ mod tests {
 
     #[tokio::test]
     async fn verification_retains_only_reports_after_success_failure_and_cancellation() {
-        for case in 0..3 {
+        for case in 0..4 {
             let root = tempfile::tempdir().unwrap();
             let (service, request, workspace, mut state) = fixture(root.path());
             if !service.tools.python().is_file() || !service.tools.vntextpatch().is_file() {
@@ -1314,6 +1316,13 @@ mod tests {
             if case == 1 {
                 let entry = workspace.join("src/adapter.py");
                 let code = fs::read_to_string(&entry).unwrap().replace("elif r['operation'] == 'extract':", "elif r['operation'] == 'extract':\n    raise ValueError('invalid resource layout')");
+                fs::write(entry, code).unwrap();
+            } else if case == 3 {
+                let entry = workspace.join("src/adapter.py");
+                let code = fs::read_to_string(&entry).unwrap().replace(
+                    "out['validation'] = dict(passed=True, issues=[], runtimeStatus='not-tested')",
+                    "out['validation'] = dict(passed=False, issues=[dict(code='invalid-structure',message='结构错误 %d'%i,unitId=str(i)) for i in range(1024)], runtimeStatus='not-tested')",
+                );
                 fs::write(entry, code).unwrap();
             }
             let callback = |event: EngineProgress| {
@@ -1339,7 +1348,15 @@ mod tests {
                 let report =
                     resolve_relative(&workspace, result["evidenceFile"].as_str().unwrap()).unwrap();
                 assert!(report.is_file());
-                assert_eq!(read_json::<Value>(&report).unwrap()["passed"], case == 0);
+                let report = read_json::<Value>(&report).unwrap();
+                assert_eq!(report["passed"], case == 0);
+                if case == 3 {
+                    assert_eq!(report["adapterIssues"].as_array().unwrap().len(), 1024);
+                    assert!(state.verification.as_ref().unwrap().adapter_issues.is_empty());
+                    assert!(
+                        state.extra["verificationCache"]["verification"]["adapterIssues"].is_null()
+                    );
+                }
             }
             assert_eq!(
                 fs::read(request.game_directory.join("text.json")).unwrap(),

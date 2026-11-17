@@ -64,6 +64,44 @@ pub struct ValidationResult {
     pub runtime_status: String,
 }
 
+impl ValidationResult {
+    /// Summarizes validation failures while retaining the complete issues in the report.
+    pub fn issue_summary(&self) -> String {
+        const SAMPLE_COUNT: usize = 3;
+        const MESSAGE_CHARS: usize = 240;
+        if self.issues.is_empty() {
+            return "未提供具体失败原因。".into();
+        }
+        let samples = self
+            .issues
+            .iter()
+            .take(SAMPLE_COUNT)
+            .map(|issue| {
+                let mut chars = issue.message.chars();
+                let mut sample: String = chars
+                    .by_ref()
+                    .take(MESSAGE_CHARS)
+                    .map(|c| if c.is_control() { ' ' } else { c })
+                    .collect();
+                if chars.next().is_some() {
+                    sample.push('…');
+                }
+                sample
+            })
+            .collect::<Vec<_>>()
+            .join("；");
+        format!(
+            "共 {} 项问题{}：{samples}",
+            self.issues.len(),
+            if self.issues.len() > SAMPLE_COUNT {
+                "（仅列前 3 项）"
+            } else {
+                ""
+            }
+        )
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum TextError {
     #[error("提取结果没有可处理的文本。")]
@@ -89,4 +127,38 @@ pub fn validate_units(units: &[TranslationUnit]) -> Result<(), TextError> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validation_issue_summary_bounds_individual_messages() {
+        let validation = ValidationResult {
+            passed: false,
+            issues: vec![ValidationIssue {
+                code: "invalid-data".into(),
+                message: "错误\n".repeat(10000),
+                unit_id: None,
+            }],
+            runtime_status: "not-tested".into(),
+        };
+        let summary = validation.issue_summary();
+        assert!(summary.starts_with("共 1 项问题："));
+        assert!(summary.ends_with('…'));
+        assert!(summary.chars().count() < 300);
+        assert_eq!(summary.lines().count(), 1);
+        assert_eq!(validation.issues[0].message.chars().count(), 30000);
+    }
+
+    #[test]
+    fn failed_validation_without_issues_has_a_reason() {
+        let validation = ValidationResult {
+            passed: false,
+            issues: Vec::new(),
+            runtime_status: "not-tested".into(),
+        };
+        assert_eq!(validation.issue_summary(), "未提供具体失败原因。");
+    }
 }

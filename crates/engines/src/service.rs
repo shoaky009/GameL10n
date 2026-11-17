@@ -95,6 +95,8 @@ pub struct VerificationResult {
     pub diagnostics: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub issues: Vec<crate::VerificationIssue>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub adapter_issues: Vec<gamel10n_translation::ValidationIssue>,
     pub units: usize,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extracted_sources: BTreeMap<String, usize>,
@@ -2271,14 +2273,9 @@ impl EngineService {
                     .ok_or_else(|| EngineError::Protocol("缺少适配器校验结果。".into()))?;
                 drop(validation_context);
                 if !validation.passed || !validation.issues.is_empty() {
-                    return Err(EngineError::Rejected(
-                        validation
-                            .issues
-                            .iter()
-                            .map(|issue| issue.message.as_str())
-                            .collect::<Vec<_>>()
-                            .join("；"),
-                    ));
+                    let summary = validation.issue_summary();
+                    result.adapter_issues = validation.issues;
+                    return Err(EngineError::Rejected(summary));
                 }
                 if !matches!(
                     adapter,

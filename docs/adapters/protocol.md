@@ -36,6 +36,8 @@ Empty or whitespace-only display slots and spacing literals are not translation 
 
 User-facing warnings, errors and validation issue messages use concise Chinese and give a concrete action when one is needed. Detailed disassembly and research belong in development notes.
 
+Validation receives `buildMode` and `outputFiles` from the build result in both replace and overlay modes. `resourceFiles` continues to identify the original inputs; `outputFiles` lists the generated files, including companions. Failed verification reports retain the complete adapter issues in `adapterIssues`; diagnostic summaries show the issue count and a few examples.
+
 A build response's `build` contains `files` (relative paths), `warnings`, and optional launch metadata. Building with a dictionary containing all original texts must reproduce every source resource byte for byte under its original path. Translated builds also retain every source resource path and preserve non-text bytes. Additional declared outputs are allowed, including a new launch EXE. Every output must exist and every output file must be declared. An EXE selected through `launchExecutable` must be among those files.
 
 `probe.launch` optionally declares the original game entry as `{executable, arguments, workingDirectory}`. Paths use `/` relative to the game root; `arguments` defaults to an empty Windows command-line tail and `workingDirectory` defaults to `.`. The declaration must follow established game/resource or launch-configuration evidence. Ambiguous entries are omitted for manual selection. This field does not require copying the EXE into source resources; EXE modification still requires `originalExecutable` and `requiredFiles`.

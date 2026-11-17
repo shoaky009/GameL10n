@@ -87,6 +87,7 @@ Write files only inside outputDirectory and declare all outputs. New paths inclu
 In replace mode, original-text build must reproduce every source resource byte for byte under its original path;
 translated builds must also preserve every source resource path.
 Declare generated companions (e.g. encoding maps) in build.files even when absent from original inputs.
+Validation receives buildMode and outputFiles from build.mode/files in both replace and overlay modes.
 Replace-mode verification re-extraction receives validated build.files as resourceFiles, with sourceDirectory set to the build output.
 Read companions from that directory and preserve original text resource paths/IDs. Original-input companions still belong in requiredFiles.
 Overlay mode is opt-in for Python adapters with established runtime mounting/override rules. Output only NEW paths with changed
