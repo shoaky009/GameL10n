@@ -193,7 +193,7 @@ Overlay build response and effective re-extraction request (only after confirmin
 ```
 validate request and response (inspect the supplied output, without modifying it):
 ```json
-{"protocolVersion":1,"operation":"validate","sourceDirectory":"C:/host/source","outputDirectory":"C:/host/output","resourceFiles":["scripts.dat"],"translations":{"scripts.dat:record:0":"译文"}}
+{"protocolVersion":1,"operation":"validate","sourceDirectory":"C:/host/source","outputDirectory":"C:/host/output","resourceFiles":["scripts.dat"],"buildMode":"replace","outputFiles":["scripts.dat"],"translations":{"scripts.dat:record:0":"译文"}}
 ```
 ```json
 {"protocolVersion":1,"success":true,"validation":{"passed":true,"issues":[],"runtimeStatus":"not-tested"}}

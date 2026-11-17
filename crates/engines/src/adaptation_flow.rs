@@ -280,6 +280,14 @@ fn failure_diagnostic(value: &Value) -> Option<&str> {
         .map(str::trim)
         .find(|text| !text.is_empty())
         .or_else(|| {
+            value["diagnostics"]
+                .as_array()?
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .find(|text| !text.is_empty())
+        })
+        .or_else(|| {
             value["stderr"]
                 .as_str()?
                 .lines()
@@ -1062,6 +1070,21 @@ mod tests {
                 .get("error")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn failed_verification_exposes_diagnostics_without_a_cli_error() {
+        let diagnostic = "[full-translation-re-extraction] 中文回填未保留文本：scripts.dat:7";
+        let value = json!({
+            "success":true,"passed":false,"stage":"verification",
+            "diagnostics":[" \n",null,diagnostic,"additional failure"],
+            "stderr":"unrelated process warning"
+        });
+        assert_eq!(failure_diagnostic(&value), Some(diagnostic));
+        let trace = result_trace(&value);
+        assert_eq!(trace["error"], diagnostic);
+        assert_eq!(trace["passed"], false);
+        assert!(trace.get("diagnostics").is_none());
     }
 
     fn fixture(root: &Path) -> (EngineService, AdaptationRequest<'static>, PathBuf, Session) {
