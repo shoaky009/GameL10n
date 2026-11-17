@@ -1,11 +1,14 @@
 """Temporary-directory API and cleanup contracts for isolated Python."""
 from pathlib import Path
+import ntpath
+import os
 import runpy
 import tempfile
 import unittest
 from unittest.mock import patch
 
-MKDTEMP = runpy.run_path(str(Path(__file__).with_name('isolation.py')))['inherited_mkdtemp']
+ISOLATION = runpy.run_path(str(Path(__file__).with_name('isolation.py')))
+MKDTEMP = ISOLATION['inherited_mkdtemp']
 
 
 class IsolatedTemporaryDirectoryTest(unittest.TestCase):
@@ -25,6 +28,21 @@ class IsolatedTemporaryDirectoryTest(unittest.TestCase):
             name = MKDTEMP(prefix=b'probe-', suffix=b'-output', dir=root.encode())
             self.assertIsInstance(name, bytes)
             self.assertTrue(Path(name.decode()).is_dir())
+
+
+class InputPathTest(unittest.TestCase):
+    def test_windows_input_paths_normalize_extended_prefixes_and_case(self):
+        normalize = ISOLATION['normalize_input_path']
+        for original, expected in [
+            (r'\\server\share\Game\script.ks', r'\\server\share\game\script.ks'),
+            (r'\\?\UNC\server\share\Game\script.ks', r'\\server\share\game\script.ks'),
+            (r'\\?\unc\SERVER\SHARE\Game\script.ks', r'\\server\share\game\script.ks'),
+            (r'\\?\C:\Game\script.ks', r'c:\game\script.ks'),
+            (r'C:\Game\script.ks', r'c:\game\script.ks'),
+        ]:
+            with self.subTest(path=original), patch.object(os, 'path', ntpath):
+                self.assertEqual(normalize(original), expected)
+                self.assertEqual(normalize(os.fsencode(original)), expected)
 
 
 if __name__ == '__main__':

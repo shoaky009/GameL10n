@@ -29,6 +29,15 @@ def configure_tempfiles(enabled):
         configure_input_handles()
 
 
+def normalize_input_path(path):
+    path = os.path.normcase(os.path.abspath(os.fsdecode(path)))
+    if path.startswith('\\\\?\\unc\\'):
+        return '\\\\' + path[8:]
+    if path.startswith('\\\\?\\'):
+        return path[4:]
+    return path
+
+
 def configure_input_handles():
     """Route authorized input reads to the host; all other I/O stays inside AppContainer."""
     import builtins
@@ -44,7 +53,7 @@ def configure_input_handles():
         return
     with io.open(configuration, encoding='utf8') as stream:
         settings = json.load(stream)
-    roots = [os.path.normcase(os.path.abspath(p)) for p in settings['roots']]
+    roots = [normalize_input_path(p) for p in settings['roots']]
     original_io_open = io.open
     original_os_open, original_stat = os.open, os.stat
     original_lstat, original_scandir, original_listdir = os.lstat, os.scandir, os.listdir
@@ -56,11 +65,7 @@ def configure_input_handles():
     def authorized(path):
         if not isinstance(path, (str, bytes, os.PathLike)):
             return False
-        path = os.path.normcase(os.path.abspath(os.fsdecode(path)))
-        if path.startswith('\\\\?\\UNC\\'):
-            path = '\\\\' + path[8:]
-        elif path.startswith('\\\\?\\'):
-            path = path[4:]
+        path = normalize_input_path(path)
         return any(path == root or path.startswith(root.rstrip('\\') + '\\') for root in roots)
 
     def query(op, path):

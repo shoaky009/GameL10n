@@ -1650,9 +1650,12 @@ impl Application {
             .validation
             .ok_or_else(|| CoreError::InvalidData("适配器未返回结构验证结果。".into()))?;
         if !validation.passed || !validation.issues.is_empty() {
+            let report = PathBuf::from("patches").join(format!("{fingerprint}.validation.json"));
+            write_json(&root.join(&report), &validation)?;
             return Err(CoreError::InvalidData(format!(
-                "补丁结构验证失败：{}",
-                validation.issue_summary()
+                "补丁结构验证失败：{}。完整校验报告：{}",
+                validation.issue_summary(),
+                report.display()
             )));
         }
         for (path, expected) in &hashes {
@@ -2647,6 +2650,85 @@ mod tests {
                 .patch_directory,
             patch
         );
+    }
+
+    #[tokio::test]
+    async fn failed_patch_validation_retains_complete_report_after_temporary_output_cleanup() {
+        let tools = crate::ToolPaths::development();
+        if !tools.python().is_file() {
+            return;
+        }
+        for issue_count in [0, 1024] {
+            let root = tempfile::tempdir().unwrap();
+            let game = root.path().join("game");
+            fs::create_dir(&game).unwrap();
+            let original = br#"["one","two"]"#;
+            fs::write(game.join("text.json"), original).unwrap();
+            let app = Application::open(root.path().join("data"), &tools)
+                .await
+                .unwrap();
+            let project = app.add_project(&game).await.unwrap();
+            let script = include_str!("../../engines/tests/fixtures/json_adapter.py").replace(
+                "out['validation'] = dict(passed=True, issues=[], runtimeStatus='not-tested')",
+                &format!("out['validation'] = dict(passed=False, issues=[dict(code='invalid-structure',message='structure error %d'%i,unitId=str(i)) for i in range({issue_count})], runtimeStatus='not-tested')"),
+            );
+            let package = register_json_adapter(&app, "fixture", &script);
+            let adapter = PackageManifest::load(&package)
+                .unwrap()
+                .handle(&package)
+                .unwrap();
+            let token = CancellationToken::new();
+            let probe = app
+                .engine_service()
+                .unwrap()
+                .execute(&adapter, &AdapterRequest::new("probe", &game), &token)
+                .await
+                .unwrap()
+                .probe
+                .unwrap();
+            app.extract_adapter(
+                &project.id,
+                adapter,
+                probe,
+                &token,
+                ExtractionCoverage::Confirmed,
+                false,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+            app.save_translation_edit(&project.id, "0", "译文".into(), true)
+                .await
+                .unwrap();
+
+            let error = app
+                .generate_patch(&project.id, None, false)
+                .await
+                .unwrap_err()
+                .to_string();
+            let files = fs::read_dir(app.project_directory(&project.id).unwrap().join("patches"))
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .collect::<Vec<_>>();
+            assert_eq!(files.len(), 1, "{files:?}");
+            let report = &files[0];
+            assert!(report.is_file());
+            assert!(report.to_string_lossy().ends_with(".validation.json"));
+            assert!(error.contains(report.file_name().unwrap().to_str().unwrap()));
+            assert!(error.chars().count() < 1000, "{error}");
+            let validation: gamel10n_translation::ValidationResult = read_json(report).unwrap();
+            assert!(!validation.passed);
+            assert_eq!(validation.issues.len(), issue_count);
+            if let Some(issue) = validation.issues.last() {
+                assert_eq!(issue.unit_id.as_deref(), Some("1023"));
+                assert_eq!(issue.code, "invalid-structure");
+                assert_eq!(issue.message, "structure error 1023");
+            }
+            assert!(app.latest_patch(&project.id).await.unwrap().is_none());
+            assert_eq!(fs::read(game.join("text.json")).unwrap(), original);
+        }
     }
 
     #[tokio::test]

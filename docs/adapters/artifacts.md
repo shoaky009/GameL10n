@@ -63,10 +63,10 @@ extensions/packages/<引擎或模板 ID>/<版本>/
 | `extensions/games/` | 当前与上一版本引用 |
 | `extensions/library-index.json` | 可重建的展示索引 |
 | `<应用目录>/tools/engine-tools/` | 发行包固定工具库 |
-| `extensions/engine-tools/` | 按哈希保留的共享原生工具与依赖 |
+| `extensions/engine-tools/` | 固定版本的共享引擎库与依赖 |
 | `extensions/downloads/` | 额外工具和资料缓存 |
 
-共享依赖属于运行条件，复制适配器包时也需提供相应版本。下载缓存可单独删除，已复制到工作区或包内的工具仍可使用。
+共享依赖属于运行条件，复制适配器包时也需提供相应版本。生成适配器的原生依赖须与当前发行版一致；依赖旧工具的包需要重新识别和验收。旧适配工作区保存在 `adaptation/obsolete-*/current/`，新会话仍使用 `adaptation/current/`；项目数据格式保持不变。下载缓存可单独删除，已复制到工作区或包内的工具仍可使用。
 
 ## 汉化运行文件与补丁记录
 
@@ -78,6 +78,7 @@ extensions/packages/<引擎或模板 ID>/<版本>/
 | `<构建标识>/patch-manifest.json` | 安装路径、哈希及构建模式 |
 | `<构建标识>/runtime-test.json` | 用户记录的游戏内验证结果 |
 | `<构建标识>.result.json` | 生成结果、限制与结构验证说明 |
+| `<构建标识>.validation.json` | 补丁结构验证失败时的完整校验结果，包含全部问题 |
 | `<构建标识>.texts.json` | 本次使用的译文快照 |
 
 “打开补丁文件”直接打开 `files/`。将其中的全部内容复制到游戏安装目录并覆盖即可手动安装，不要把 `files` 文件夹本身放入游戏目录。游戏运行不依赖清单、报告或 GameL10n；安装与原版恢复规则见[数据说明](../data-storage.md#保存与清理)。

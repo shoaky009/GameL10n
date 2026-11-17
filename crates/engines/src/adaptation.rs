@@ -417,6 +417,32 @@ pub(crate) fn tokens(usage: &TokenUsage) -> u64 {
     usage.input_tokens.saturating_add(usage.output_tokens)
 }
 impl EngineService {
+    fn archive_obsolete_workspace(&self, workspace: &Path) -> Result<Option<PathBuf>, EngineError> {
+        let pin_path = workspace.join("src/tools/vntextpatch-reference.json");
+        if !pin_path.is_file() {
+            return Ok(None);
+        }
+        let pin: Value = read_json(&pin_path).map_err(file_error)?;
+        match self.resolve_native_tools(&pin) {
+            Ok(_) => Ok(None),
+            Err(EngineError::Incompatible {
+                stage: "runtime", ..
+            }) => {
+                let parent = workspace
+                    .parent()
+                    .ok_or_else(|| EngineError::Protocol("智能适配工作区位置无效。".into()))?;
+                let archive = tempfile::Builder::new()
+                    .prefix("obsolete-")
+                    .tempdir_in(parent)?;
+                let destination = archive.path().join("current");
+                fs::rename(workspace, &destination)?;
+                let _ = archive.keep();
+                Ok(Some(destination))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     pub async fn adapt(
         &self,
         request: &AdaptationRequest<'_>,
@@ -434,13 +460,23 @@ impl EngineService {
             ));
         }
         let workspace = request.project_directory.join("adaptation/current");
+        let mut diagnostics = Vec::new();
+        if !cancellation.is_cancelled()
+            && let Some(archived) = self.archive_obsolete_workspace(&workspace)?
+        {
+            let message = format!(
+                "原生工具已更新，旧适配工作区已归档至 {}，正在使用当前工具重新识别。",
+                archived.display()
+            );
+            Self::report(progress, "重新建立适配会话", &message);
+            diagnostics.push(message);
+        }
         fs::create_dir_all(&workspace)?;
         for name in ["resources", "work"] {
             fs::create_dir_all(workspace.join(name))?;
         }
         let path = workspace.join("session.json");
         let continuing = path.is_file();
-        let mut diagnostics = Vec::new();
         let mut state: Session = if continuing {
             // Read errors must not be mistaken for corrupt JSON and overwrite a valid session.
             match load_session(&path) {
@@ -2327,6 +2363,11 @@ impl EngineService {
                 }
                 if manifest.manifest_version == 4 {
                     manifest.handle(directory)?;
+                    let native_pin = directory.join("tools/vntextpatch-reference.json");
+                    if native_pin.is_file() {
+                        let pin: Value = read_json(&native_pin).map_err(file_error)?;
+                        self.resolve_native_tools(&pin)?;
+                    }
                 }
                 let mut files = Vec::new();
                 for relative in manifest.package_files.keys() {
@@ -4514,7 +4555,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dependency_binding_preserves_an_available_old_native_pin_after_tool_upgrade() {
+    async fn obsolete_workspace_is_archived_without_changing_project_data_or_old_pins() {
         let root = tempfile::tempdir().expect("fixture");
         let assets = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         let paths = crate::ToolPaths::new(root.path().join("tools"));
@@ -4530,15 +4571,101 @@ mod tests {
         .expect("runtime");
         let service = EngineService::new(assets, paths);
         let pin = json!({"schemaVersion":2,"runtime":"native","files":{"GameL10n.VnTextPatch.exe":hash_file(&service.tools.vntextpatch()).expect("old hash")}});
-        service
-            .retain_native_tools(&native, &pin)
-            .expect("retain old");
         fs::write(service.tools.vntextpatch(), b"new native").expect("upgrade");
-        let workspace = root.path().join("workspace");
+        let project = root.path().join("project");
+        let workspace = project.join("adaptation/current");
         let pin_path = workspace.join("src/tools/vntextpatch-reference.json");
         write_json(&pin_path, &pin).expect("old workspace pin");
         let original = fs::read(&pin_path).expect("original pin");
+        for relative in [
+            "game.json",
+            "extraction/native.json",
+            "translation-edits.json",
+            "translation-edits.jsonl",
+        ] {
+            let path = project.join(relative);
+            fs::create_dir_all(path.parent().expect("parent")).expect("data directory");
+            fs::write(path, relative).expect("project data");
+        }
+        fs::write(workspace.join("session.json"), b"old session").expect("session");
+        fs::write(workspace.join("src/adapter.py"), b"old source").expect("source");
         let mut state = Session::default();
+        let error = service
+            .bind_reference(
+                &workspace,
+                &mut state,
+                Some(json!({"kind":"siglus","revision":"fixture"})),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect_err("obsolete dependency");
+        assert!(matches!(
+            error,
+            EngineError::Incompatible {
+                stage: "runtime",
+                ..
+            }
+        ));
+        assert_eq!(fs::read(&pin_path).expect("preserved pin"), original);
+        assert!(state.release_files.is_empty());
+        let archived = service
+            .archive_obsolete_workspace(&workspace)
+            .expect("archive")
+            .expect("obsolete workspace");
+        assert!(!workspace.exists());
+        assert_eq!(
+            fs::read(archived.join("src/tools/vntextpatch-reference.json")).expect("archived pin"),
+            original
+        );
+        assert_eq!(
+            fs::read(archived.join("src/adapter.py")).expect("archived source"),
+            b"old source"
+        );
+        assert_eq!(
+            fs::read(archived.join("session.json")).expect("archived session"),
+            b"old session"
+        );
+        let (_, mut request, _, _) = fixture(&root.path().join("reuse"));
+        let package = published_reuse_fixture(root.path());
+        fs::remove_file(package.join("src/text.py")).expect("unused source");
+        write_json(&package.join("tools/vntextpatch-reference.json"), &pin).expect("published pin");
+        write_json(&package.join("package.json"), &json!({
+            "id":"engine.reuse-fixture", "version":"1", "manifestVersion":4, "protocolVersion":1,
+            "packageFiles":{
+                "src/adapter.py":hash_file(&package.join("src/adapter.py")).expect("entry hash"),
+                "tools/vntextpatch-reference.json":hash_file(&package.join("tools/vntextpatch-reference.json")).expect("pin hash")
+            }
+        })).expect("published manifest");
+        request.package_directories.push(package);
+        let error = service
+            .copy_adapter(
+                &request,
+                &workspace,
+                &mut state,
+                &json!({"id":"engine.reuse-fixture","version":"1"}),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect_err("cannot copy obsolete runtime into a new workspace");
+        assert!(matches!(
+            error,
+            EngineError::Incompatible {
+                stage: "runtime",
+                ..
+            }
+        ));
+        assert!(!workspace.exists());
+        for relative in [
+            "game.json",
+            "extraction/native.json",
+            "translation-edits.json",
+            "translation-edits.jsonl",
+        ] {
+            assert_eq!(
+                fs::read(project.join(relative)).expect("unchanged data"),
+                relative.as_bytes()
+            );
+        }
         service
             .bind_reference(
                 &workspace,
@@ -4547,15 +4674,27 @@ mod tests {
                 &CancellationToken::new(),
             )
             .await
-            .expect("bind retained dependency");
-        assert_eq!(fs::read(pin_path).expect("preserved pin"), original);
+            .expect("bind current runtime");
+        let new_pin: Value = read_json(&pin_path).expect("new pin");
+        assert_ne!(new_pin, pin);
+        service
+            .resolve_native_tools(&new_pin)
+            .expect("supported runtime");
         assert!(
-            state
-                .release_files
-                .iter()
-                .any(|file| file.path == "tools/vntextpatch-reference.json")
+            service
+                .archive_obsolete_workspace(&workspace)
+                .expect("current workspace")
+                .is_none()
         );
-        assert!(workspace.join("src/tools/gamel10n_host.py").is_file());
+        fs::remove_file(service.tools.vntextpatch()).expect("missing tool");
+        assert!(matches!(
+            service.archive_obsolete_workspace(&workspace),
+            Err(EngineError::ToolMissing(_))
+        ));
+        assert_eq!(
+            read_json::<Value>(&pin_path).expect("current pin preserved"),
+            new_pin
+        );
     }
 
     #[tokio::test]
