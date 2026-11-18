@@ -22,7 +22,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -51,7 +51,7 @@ jobs:
           cargo fmt --manifest-path tools/GameL10n.ToolRunner/Cargo.toml -- --check
           if ($LASTEXITCODE -ne 0) { throw 'Tool runner formatting failed.' }
 
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: '10.0.x'
 
