@@ -2558,24 +2558,48 @@ mod tests {
     async fn run_tool_extra_arguments_cannot_expand_file_access() {
         let root = tempfile::tempdir().unwrap();
         let workspace = root.path().join("adaptation/current");
-        fs::create_dir_all(&workspace).unwrap();
+        let tools = ToolPaths::development();
+        let python = workspace.join("python");
+        fs::create_dir_all(&python).unwrap();
+        for entry in fs::read_dir(tools.python().parent().unwrap()).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_file() {
+                fs::copy(entry.path(), python.join(entry.file_name())).unwrap();
+            }
+        }
+        let allowed = root.path().join("allowed.txt");
         let private = root.path().join("private.txt");
+        fs::write(&allowed, "allowed").unwrap();
         fs::write(&private, "must not leak").unwrap();
-        let script = workspace.join("check.ps1");
-        fs::write(&script, format!(
-            "$ErrorActionPreference = 'Stop'\ntry {{ $null = [IO.File]::ReadAllText('{}'); exit 1 }} catch {{ Write-Output 'denied'; exit 0 }}\n",
-            private.display().to_string().replace('\'', "''")
-        )).unwrap();
-        let service = EngineService::new(root.path(), ToolPaths::development())
+        let script = format!(
+            "{}\n{}",
+            include_str!("../python/isolation.py"),
+            r#"from pathlib import Path
+configure_tempfiles(True)
+assert Path(sys.argv[1]).read_text(encoding='utf-8') == 'allowed'
+try:
+    Path(sys.argv[2]).read_text(encoding='utf-8')
+except PermissionError:
+    print('denied')
+else:
+    raise AssertionError('Private input was readable')
+"#,
+        );
+        let service = EngineService::new(root.path(), tools)
             .with_shared_directory(root.path().join("shared"));
         let result = service.helper(&json!({
             "operation":"run_tool", "workspace":workspace,
-            "executable":"powershell", "arguments":["-ExecutionPolicy", "Bypass", "-File", script],
-            "resourcePaths":{},
+            "executable":"python/python.exe",
+            "arguments":["-I", "-X", "utf8", "-c", script, "resources/allowed.txt", private],
+            "resourcePaths":{"allowed.txt":allowed},
             "library":root.path(), "resourceDirectory":root.path(),
         }), &CancellationToken::new()).await.unwrap();
-        assert_eq!(result["exitCode"], 0);
-        assert!(result["stdout"].as_str().unwrap().contains("denied"));
+        assert_eq!(result["exitCode"], 0, "{result}");
+        assert_eq!(
+            result["stdout"].as_str().unwrap().trim(),
+            "denied",
+            "{result}"
+        );
     }
 
     #[tokio::test]
