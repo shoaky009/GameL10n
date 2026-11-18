@@ -2334,71 +2334,70 @@ mod tests {
         package
     }
 
-    fn local_analysis_responses(
+    async fn local_analysis_responses(
         responses: Vec<(u16, Value)>,
-    ) -> (String, std::thread::JoinHandle<Vec<Value>>) {
-        use std::io::{Read, Write};
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.set_nonblocking(true).unwrap();
+    ) -> (String, impl Future<Output = Vec<Value>>) {
+        use tokio::{
+            io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+            net::TcpListener,
+            sync::oneshot,
+        };
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
-        let server = std::thread::spawn(move || {
+        let (stop, stopped) = oneshot::channel();
+        let server = tokio::spawn(async move {
             let mut requests = Vec::new();
-            for (status, response) in responses {
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-                let mut connection = loop {
-                    match listener.accept() {
-                        Ok((connection, _)) => break connection,
-                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                            assert!(
-                                std::time::Instant::now() < deadline,
-                                "missing model request"
-                            );
-                            std::thread::sleep(std::time::Duration::from_millis(10));
-                        }
-                        Err(error) => panic!("{error}"),
-                    }
-                };
-                connection.set_nonblocking(false).unwrap();
-                connection
-                    .set_read_timeout(Some(std::time::Duration::from_secs(5)))
-                    .unwrap();
-                let mut bytes = Vec::new();
-                let mut buffer = [0; 4096];
-                loop {
-                    let count = connection.read(&mut buffer).unwrap();
-                    assert!(count > 0);
-                    bytes.extend_from_slice(&buffer[..count]);
-                    if let Some(end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
-                        let headers = String::from_utf8_lossy(&bytes[..end]);
-                        let length = headers
-                            .lines()
-                            .find_map(|line| {
-                                line.to_lowercase()
-                                    .strip_prefix("content-length:")
-                                    .map(|length| length.trim().parse::<usize>().unwrap())
-                            })
-                            .unwrap();
-                        if bytes.len() >= end + 4 + length {
-                            requests.push(
-                                serde_json::from_slice(&bytes[end + 4..end + 4 + length]).unwrap(),
-                            );
+            let serve = async {
+                for (status, response) in responses {
+                    let (connection, _) = listener.accept().await.unwrap();
+                    let mut connection = BufReader::new(connection);
+                    let mut header = String::new();
+                    let mut length = None;
+                    loop {
+                        header.clear();
+                        assert!(connection.read_line(&mut header).await.unwrap() > 0);
+                        if header == "\r\n" {
                             break;
                         }
+                        if let Some((name, value)) = header.split_once(':')
+                            && name.eq_ignore_ascii_case("content-length")
+                        {
+                            length = Some(value.trim().parse().unwrap());
+                        }
                     }
+                    let mut bytes = vec![0; length.expect("request body length")];
+                    connection.read_exact(&mut bytes).await.unwrap();
+                    requests.push(serde_json::from_slice(&bytes).unwrap());
+                    let (content_type, body) = if status == 200 {
+                        (
+                            "text/event-stream",
+                            format!("data: {response}\n\ndata: [DONE]\n\n"),
+                        )
+                    } else {
+                        ("application/json", response.to_string())
+                    };
+                    let response = format!(
+                        "HTTP/1.1 {status} Test\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    connection
+                        .get_mut()
+                        .write_all(response.as_bytes())
+                        .await
+                        .unwrap();
                 }
-                let (content_type, body) = if status == 200 {
-                    (
-                        "text/event-stream",
-                        format!("data: {response}\n\ndata: [DONE]\n\n"),
-                    )
-                } else {
-                    ("application/json", response.to_string())
-                };
-                write!(connection, "HTTP/1.1 {status} Test\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            };
+            tokio::select! {
+                () = serve => {}
+                _ = stopped => {}
             }
             requests
         });
-        (endpoint, server)
+        (endpoint, async move {
+            let _ = stop.send(());
+            server.await.unwrap()
+        })
     }
 
     fn analysis_tool(name: &str, args: Value) -> (u16, Value) {
@@ -3538,14 +3537,15 @@ mod tests {
                 "checkpoint",
                 json!({"notes":"Main text sources still require analysis."}),
             ),
-        ]);
+        ])
+        .await;
         use_local_analysis(&app, endpoint).await;
         app.save_defaults(Some("local".into()), vec![], 1_000_000, 5)
             .await
             .unwrap();
         let result = app.recognize(&project.id).await.unwrap();
-        let requests = server.join().unwrap();
-        assert_eq!(requests.len(), 5);
+        let requests = server.await;
+        assert_eq!(requests.len(), 5, "{result:?}");
         assert!(
             requests[4]["messages"]
                 .to_string()
@@ -3600,10 +3600,10 @@ mod tests {
             "fixture",
             include_str!("../../engines/tests/fixtures/json_adapter.py"),
         );
-        let (endpoint, server) = local_analysis_responses(vec![]);
+        let (endpoint, server) = local_analysis_responses(vec![]).await;
         use_local_analysis(&app, endpoint).await;
         let result = app.adapt_project(&project.id, String::new()).await.unwrap();
-        assert!(server.join().unwrap().is_empty());
+        assert!(server.await.is_empty(), "{result:?}");
         assert_eq!(
             result.status,
             gamel10n_engines::AdaptationStatus::Incomplete
@@ -3685,14 +3685,15 @@ mod tests {
         let (endpoint, server) = local_analysis_responses(vec![(
             400,
             json!({"error":{"message":"Fixture API failure"}}),
-        )]);
+        )])
+        .await;
         use_local_analysis(&app, endpoint).await;
         let result = app.recognize(&project.id).await.unwrap();
         let RecognitionResult::Adapted(result) = result else {
             panic!("model analysis required")
         };
         assert_eq!(result.status, gamel10n_engines::AdaptationStatus::Failed);
-        assert_eq!(server.join().unwrap().len(), 1);
+        assert_eq!(server.await.len(), 1, "{result:?}");
         assert!(crate::projects::extraction_coverage_pending(
             &app.open_project(&project.id).await.unwrap().extra
         ));
@@ -3744,11 +3745,12 @@ mod tests {
                 "finish",
                 json!({"summary":"Small fixture coverage verified","smallGameEvidence":"text.json is the only game resource, with exactly two original entries; both are independently anchored."}),
             ),
-        ]);
+        ])
+        .await;
         use_local_analysis(&app, endpoint).await;
         let result = app.recognize(&project.id).await.unwrap();
-        let requests = server.join().unwrap();
-        assert_eq!(requests.len(), 5);
+        let requests = server.await;
+        assert_eq!(requests.len(), 5, "{result:?}");
         let RecognitionResult::Adapted(result) = result else {
             panic!("coverage confirmation result")
         };
