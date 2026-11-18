@@ -605,6 +605,7 @@ impl EngineService {
     }
 
     /// Supplies previously checked source and patch hashes to the adapter's integrity checks.
+    /// A passing validation rechecks the entire supplied source baseline.
     /// Callers must keep the checked inputs stable until execution starts.
     pub async fn execute_with_hashes(
         &self,
@@ -762,11 +763,20 @@ impl EngineService {
         {
             return response;
         }
-        if let Some(expected) = source_hashes
+        let validated_sources = expected_source_hashes.filter(|_| {
+            request.operation == "validate"
+                && response.as_ref().is_ok_and(|response| {
+                    response
+                        .validation
+                        .as_ref()
+                        .is_some_and(|validation| validation.passed && validation.issues.is_empty())
+                })
+        });
+        if let Some(expected) = validated_sources.or(source_hashes.as_ref())
             && hashes(
                 &request.source_directory,
                 &expected.keys().cloned().collect::<Vec<_>>(),
-            )? != expected
+            )? != *expected
         {
             return Err(EngineError::Rejected(
                 "适配器修改了只读源资源；操作未被接受。".into(),
@@ -2276,13 +2286,6 @@ impl EngineService {
                     let summary = validation.issue_summary();
                     result.adapter_issues = validation.issues;
                     return Err(EngineError::Rejected(summary));
-                }
-                if !matches!(
-                    adapter,
-                    AdapterHandle::Python { .. } | AdapterHandle::BuiltinKirikiriSmil
-                ) && hashes(source_directory, resources)? != before
-                {
-                    return Err(EngineError::Rejected("适配器修改了只读资源副本。".into()));
                 }
                 if stage == "原文回填" {
                     result.original_roundtrip_passed = true;

@@ -1658,13 +1658,6 @@ impl Application {
                 report.display()
             )));
         }
-        for (path, expected) in &hashes {
-            if hash_file(&resolve_relative(source, path)?)? != *expected {
-                return Err(CoreError::InvalidData(format!(
-                    "构建修改了原始资源：{path}"
-                )));
-            }
-        }
         let mut manifest = build_manifest(patch.path(), &hashes)?;
         manifest.launch = built.launch_target()?;
         if built.mode == BuildMode::Overlay {
