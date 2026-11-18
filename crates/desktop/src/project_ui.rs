@@ -309,6 +309,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
             ctx.update(move |ui| {
                 let app = ui.global::<App>();
                 app.set_force_intelligent(false);
+                app.set_automatic_workflow(false);
                 app.set_adaptation_objective(match objective {
                     AdaptationObjective::Develop => 0,
                     AdaptationObjective::Repair => 1,

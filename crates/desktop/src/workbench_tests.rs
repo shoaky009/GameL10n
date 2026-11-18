@@ -399,6 +399,11 @@ fn project_actions_keep_settings_selection_and_saved_edits_in_sync_across_tabs()
                 .is_empty()
         );
 
+        invoke_action(&ui, &ctx, "adapt-dialog", "").await;
+        assert_eq!(app.get_modal().as_str(), "adapt");
+        app.set_automatic_workflow(true);
+        app.set_modal("".into());
+
         app.set_text_query("line 100".into());
         invoke_action(&ui, &ctx, "texts", "0").await;
         app.set_editor_text("离开项目前保存".into());
@@ -408,6 +413,10 @@ fn project_actions_keep_settings_selection_and_saved_edits_in_sync_across_tabs()
         ctx.refresh_texts(&project.id);
         wait_for_actions(&ui, &ctx, "previous project refresh").await;
         assert_eq!(app.get_project_id().as_str(), other_project.id);
+        invoke_action(&ui, &ctx, "adapt-dialog", "").await;
+        assert_eq!(app.get_modal().as_str(), "adapt");
+        assert!(!app.get_automatic_workflow());
+        app.set_modal("".into());
         assert_eq!(app.get_texts().row_count(), 0);
         assert_eq!(app.get_selected_texts(), 0);
         assert!(app.get_editor_id().is_empty());
