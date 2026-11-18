@@ -2,16 +2,17 @@
 
 use serde_json::{Value, json};
 use std::{
+    fs::File,
     io::{BufRead, BufReader},
     path::Path,
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
 };
 use windows::Win32::{
-    Foundation::{CloseHandle, WAIT_OBJECT_0},
+    Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, WAIT_OBJECT_0},
     System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject},
 };
 
-fn launch(request: &Value) -> std::process::Child {
+fn launch(request: &Value) -> Child {
     let mut child = Command::new(env!("CARGO_BIN_EXE_gamel10n-tool-runner"))
         .env("GAMEL10N_ISOLATION_TEST_SECRET", "must-not-inherit")
         .stdin(Stdio::piped())
@@ -53,15 +54,27 @@ fn input(root: &Path) -> Value {
     })
 }
 
-fn exited(pid: u32) -> bool {
-    let Ok(process) = (unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid) }) else {
-        return true;
+fn launch_with_descendant(root: &Path, wait: bool) -> (File, Child) {
+    let path = root.join("work/descendant.lock");
+    let lock = File::create_new(&path).unwrap();
+    // The descendant stays alive until the job terminates it or the test drops the lock.
+    lock.lock().unwrap();
+    let runner = launch(&request(
+        root,
+        json!({"action":"spawn", "lockFile":path, "wait":wait}),
+    ));
+    (lock, runner)
+}
+
+fn assert_exited(pid: u32) {
+    let process = match unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid) } {
+        Ok(process) => process,
+        Err(error) if error.code() == ERROR_INVALID_PARAMETER.to_hresult() => return,
+        Err(error) => panic!("Cannot open process {pid}: {error}"),
     };
-    let result = unsafe { WaitForSingleObject(process, 5_000) } == WAIT_OBJECT_0;
-    unsafe {
-        let _ = CloseHandle(process);
-    }
-    result
+    let result = unsafe { WaitForSingleObject(process, 5_000) };
+    unsafe { CloseHandle(process) }.unwrap();
+    assert_eq!(result, WAIT_OBJECT_0, "Process {pid} did not exit");
 }
 
 #[test]
@@ -132,36 +145,39 @@ fn internet_and_private_network_capabilities_are_enabled() {
 #[test]
 fn successful_parent_does_not_leave_descendants_running() {
     let directory = fixture();
-    let output = launch(&request(directory.path(), json!({"action":"spawn"})))
-        .wait_with_output()
-        .unwrap();
+    let (_lock, runner) = launch_with_descendant(directory.path(), false);
+    let output = runner.wait_with_output().unwrap();
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
     let result: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(exited(result["childPid"].as_u64().unwrap() as u32));
+    assert_exited(result["childPid"].as_u64().unwrap() as u32);
 }
 
 #[test]
 fn killing_runner_terminates_the_entire_job() {
     let directory = fixture();
-    let mut runner = launch(&request(
-        directory.path(),
-        json!({"action":"spawn", "wait":true}),
-    ));
+    let (_lock, mut runner) = launch_with_descendant(directory.path(), true);
     let mut line = String::new();
-    BufReader::new(runner.stdout.take().unwrap())
+    if BufReader::new(runner.stdout.take().unwrap())
         .read_line(&mut line)
-        .unwrap();
-    let result: Value = serde_json::from_str(&line).unwrap();
+        .unwrap()
+        == 0
+    {
+        let output = runner.wait_with_output().unwrap();
+        panic!(
+            "Runner exited before reporting process IDs ({}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
     runner.kill().unwrap();
     runner.wait().unwrap();
-    assert!(
-        exited(result["processId"].as_u64().unwrap() as u32)
-            && exited(result["childPid"].as_u64().unwrap() as u32)
-    );
+    let result: Value = serde_json::from_str(&line).unwrap();
+    assert_exited(result["processId"].as_u64().unwrap() as u32);
+    assert_exited(result["childPid"].as_u64().unwrap() as u32);
 }
 
 #[test]

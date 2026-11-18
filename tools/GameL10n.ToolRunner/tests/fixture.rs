@@ -1,9 +1,9 @@
 use serde_json::{Value, json};
 use std::{
-    io::{self, Read, Write},
+    fs::{File, TryLockError},
+    io::{self, BufRead, BufReader, Read, Write},
     path::Path,
     process::{Command, Stdio},
-    time::Duration,
 };
 
 fn inspect(request: &Value) -> Value {
@@ -62,8 +62,16 @@ fn network_capabilities() -> Vec<bool> {
     reason = "The spawn fixture intentionally leaves a descendant for the runner's Job Object to terminate."
 )]
 fn main() {
-    if std::env::args().nth(1).as_deref() == Some("--linger") {
-        std::thread::sleep(Duration::from_secs(60));
+    let mut arguments = std::env::args_os().skip(1);
+    if arguments.next().as_deref() == Some("--linger".as_ref()) {
+        let lock = File::options()
+            .write(true)
+            .open(arguments.next().unwrap())
+            .unwrap();
+        assert!(matches!(lock.try_lock(), Err(TryLockError::WouldBlock)));
+        println!("ready");
+        io::stdout().flush().unwrap();
+        lock.lock().unwrap();
         return;
     }
     let mut bytes = Vec::new();
@@ -92,20 +100,37 @@ fn main() {
             print!("{}", String::from_utf8_lossy(&output.stdout));
         }
         Some("spawn") => {
-            let child = Command::new(std::env::current_exe().unwrap())
+            // AppContainer can create pipes even when it cannot open NUL.
+            let mut child = Command::new(std::env::current_exe().unwrap())
                 .arg("--linger")
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
+                .arg(request["lockFile"].as_str().unwrap())
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
                 .spawn()
                 .unwrap();
+            let mut ready = String::new();
+            if BufReader::new(child.stdout.take().unwrap())
+                .read_line(&mut ready)
+                .unwrap()
+                == 0
+            {
+                let output = child.wait_with_output().unwrap();
+                panic!(
+                    "Descendant exited before reporting readiness ({}): {}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            assert_eq!(ready.trim_end(), "ready");
             println!(
                 "{}",
                 json!({"childPid":child.id(),"processId":std::process::id()})
             );
             io::stdout().flush().unwrap();
             if request["wait"] == true {
-                std::thread::sleep(Duration::from_secs(60));
+                let status = child.wait().unwrap();
+                panic!("Descendant exited before the runner was terminated: {status}");
             }
         }
         _ => println!("{}", inspect(&request)),
