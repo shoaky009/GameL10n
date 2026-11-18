@@ -47,6 +47,43 @@ fn within(path: &Path, root: &Path) -> bool {
     Path::new(&display_path(path).to_lowercase()).starts_with(display_path(root).to_lowercase())
 }
 
+#[derive(Default)]
+struct InputRoots {
+    canonical: Vec<PathBuf>,
+    aliases: Vec<PathBuf>,
+}
+
+impl InputRoots {
+    fn new(paths: &[PathBuf]) -> Result<Self> {
+        let mut paths = paths.iter().collect::<Vec<_>>();
+        paths.sort_by_key(|path| path.components().count());
+        let mut roots = Self::default();
+        for path in paths {
+            let absolute = std::path::absolute(path)?;
+            if roots.spellings().any(|root| within(&absolute, root)) {
+                continue;
+            }
+            let canonical = checked_path(&absolute)?;
+            // Clients can keep the original Windows 8.3 spelling of an input root.
+            if !within(&absolute, &canonical) {
+                roots.aliases.push(absolute);
+            }
+            if !roots.contains_canonical(&canonical) {
+                roots.canonical.push(canonical);
+            }
+        }
+        Ok(roots)
+    }
+
+    fn spellings(&self) -> impl Iterator<Item = &PathBuf> {
+        self.canonical.iter().chain(&self.aliases)
+    }
+
+    fn contains_canonical(&self, path: &Path) -> bool {
+        self.canonical.iter().any(|root| within(path, root))
+    }
+}
+
 fn metadata(path: &Path) -> io::Result<Value> {
     let m = fs::symlink_metadata(path)?;
     if m.file_attributes() & 0x400 != 0 {
@@ -61,9 +98,9 @@ fn metadata(path: &Path) -> io::Result<Value> {
     )
 }
 
-fn answer(query: Query, roots: &[PathBuf], job: HANDLE) -> Result<Value> {
+fn answer(query: Query, roots: &InputRoots, job: HANDLE) -> Result<Value> {
     let requested = std::path::absolute(&query.path)?;
-    if !roots.iter().any(|root| within(&requested, root)) {
+    if !roots.spellings().any(|root| within(&requested, root)) {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "Input path is outside the authorized roots",
@@ -73,7 +110,7 @@ fn answer(query: Query, roots: &[PathBuf], job: HANDLE) -> Result<Value> {
     // Preserve missing-file errors for callers that probe optional companion files.
     fs::symlink_metadata(&query.path)?;
     let path = checked_path(&query.path)?;
-    if !roots.iter().any(|root| within(&path, root)) {
+    if !roots.contains_canonical(&path) {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "Input path is outside the authorized roots",
@@ -114,7 +151,7 @@ fn answer(query: Query, roots: &[PathBuf], job: HANDLE) -> Result<Value> {
                 return Err(io::Error::last_os_error().into());
             }
             let final_path = PathBuf::from(String::from_utf16(&final_path[..length])?);
-            if !roots.iter().any(|root| within(&final_path, root)) {
+            if !roots.contains_canonical(&final_path) {
                 return Err("Input handle is outside the authorized roots".into());
             }
             let process = Handle(unsafe {
@@ -156,15 +193,7 @@ pub(super) struct Inputs {
 
 impl Inputs {
     pub fn new(paths: &[PathBuf], temporary: &Path, job: HANDLE) -> Result<Self> {
-        let mut paths = paths.iter().collect::<Vec<_>>();
-        paths.sort_by_key(|path| path.components().count());
-        let mut roots: Vec<PathBuf> = Vec::new();
-        for path in paths {
-            let absolute = std::path::absolute(path)?;
-            if !roots.iter().any(|root| within(&absolute, root)) {
-                roots.push(checked_path(path)?);
-            }
-        }
+        let roots = InputRoots::new(paths)?;
         let (requests, write) = pipe()?;
         let (read, mut responses) = pipe()?;
         let write = inherit(HANDLE(write.as_raw_handle()))?;
@@ -172,7 +201,7 @@ impl Inputs {
         let lock = temporary.join("input.lock");
         fs::write(&lock, [0])?;
         let settings = json!({"request":write.0.0 as usize, "response":read.0.0 as usize,
-            "lock":lock, "roots":roots.iter().map(|p|display_path(p)).collect::<Vec<_>>()})
+            "lock":lock, "roots":roots.spellings().map(|p|display_path(p)).collect::<Vec<_>>()})
         .to_string();
         let configuration = temporary.join("input-handles.json");
         fs::write(&configuration, settings)?;
@@ -239,7 +268,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let file = root.path().join("input.bin");
         fs::write(&file, b"original").unwrap();
-        let roots = vec![root.path().canonicalize().unwrap()];
+        let roots = InputRoots::new(&[root.path().to_path_buf()]).unwrap();
         let job = Handle(unsafe { CreateJobObjectW(None, PCWSTR::null()).unwrap() });
         for (op, path) in [
             ("open", file.clone()),

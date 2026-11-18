@@ -173,6 +173,10 @@ mod tests {
         .unwrap();
         let mut request = AdapterRequest::new("validate", source.clone());
         request.output_directory = Some(workspace.join("output"));
+        request.extra.insert(
+            "canonicalSourceDirectory".into(),
+            serde_json::json!(source.canonicalize().unwrap()),
+        );
         request
             .extra
             .insert("outside".into(), serde_json::json!(outside));

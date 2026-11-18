@@ -12,6 +12,7 @@ request = json.load(sys.stdin)
 root = Path(request['sourceDirectory'])
 file = root / 'script.ks'
 original = file.read_bytes()
+assert (Path(request['canonicalSourceDirectory']) / file.name).read_bytes() == original
 assert root.is_dir() and root.exists() and file.is_file()
 assert {p.name for p in root.glob('*')} == {'script.ks', 'data.bin'}
 assert {p.name for p in root.iterdir()} == {'script.ks', 'data.bin'}
