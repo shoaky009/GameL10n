@@ -682,16 +682,16 @@ impl Drop for PendingAction {
 }
 
 async fn dispatch(ctx: &Context, action: &str, input: &UiInput) -> Result<(), CoreError> {
-    if action == "switch-directory" {
-        settings_ui::cancel_api_test(ctx);
-    }
-    if action == "confirm" {
-        let mut next = input.clone();
+    // Resolve the confirmation before awaiting a handler so it shares the same dispatcher frame.
+    let mut confirmed;
+    let (action, input) = if action == "confirm" {
+        confirmed = input.clone();
         let action = match input.argument.as_str() {
             "api" => "api-save",
             "launch" => {
                 if !input.launch_conflict_revision.is_empty() {
-                    next.launch_revision
+                    confirmed
+                        .launch_revision
                         .clone_from(&input.launch_conflict_revision);
                     if input.launch_conflict_action == "launch-reset" {
                         "launch-reset"
@@ -708,7 +708,7 @@ async fn dispatch(ctx: &Context, action: &str, input: &UiInput) -> Result<(), Co
             "patch" => "generate-patch",
             "directory" => "switch-directory",
             "retranslate" => {
-                next.argument = "retranslate".into();
+                confirmed.argument = "retranslate".into();
                 "translate"
             }
             "install" => "install",
@@ -719,7 +719,7 @@ async fn dispatch(ctx: &Context, action: &str, input: &UiInput) -> Result<(), Co
             "verify-version" => "verify-version-confirm",
             "bulk-review" => "bulk-review-confirm",
             "resume-translation" => {
-                next.argument = "resume".into();
+                confirmed.argument = "resume".into();
                 "translate"
             }
             _ => return Ok(()),
@@ -727,7 +727,12 @@ async fn dispatch(ctx: &Context, action: &str, input: &UiInput) -> Result<(), Co
         if !matches!(input.argument.as_str(), "launch" | "workflow-settings") {
             ctx.update(|ui| ui.global::<App>().set_modal("".into()));
         }
-        return Box::pin(dispatch(ctx, action, &next)).await;
+        (action, &confirmed)
+    } else {
+        (action, input)
+    };
+    if action == "switch-directory" {
+        settings_ui::cancel_api_test(ctx);
     }
     if metrics_ui::handle(ctx, action, input).await?
         || game_check_ui::handle(ctx, action, input).await?

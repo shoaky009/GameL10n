@@ -6,6 +6,7 @@
 | --- | --- |
 | 配置分析、翻译或本地模型 | [模型接口配置](model-providers.md) |
 | 识别游戏、试译、安装补丁和检查游戏画面 | [桌面操作](desktop.md) |
+| 查找 GameL10n 意外退出时的崩溃转储或系统日志 | [Windows 崩溃诊断](windows-crash-diagnostics.md) |
 | 自动完成试译检查和全量安装 | [全自动汉化流程](automatic-workflow.md) |
 | 处理不识别、漏译、乱码或字体问题 | [识别与智能适配](adapters/automatic-adaptation.md) |
 | 查找支持的格式和管理适配器版本 | [引擎库与格式支持](adapters/README.md#引擎与格式能力表) |
