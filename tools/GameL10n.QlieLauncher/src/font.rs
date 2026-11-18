@@ -48,10 +48,12 @@ fn verify_names(names: &[u8], expected: &str) -> Result<()> {
         let value = names
             .get(start..start + size)
             .ok_or("汉化字体名称数据越界。")?;
-        if !size.is_multiple_of(2)
-            || !value
-                .chunks_exact(2)
-                .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+        let (pairs, trailing) = value.as_chunks::<2>();
+        if !trailing.is_empty()
+            || !pairs
+                .iter()
+                .copied()
+                .map(u16::from_be_bytes)
                 .eq(expected.encode_utf16())
         {
             return Err(

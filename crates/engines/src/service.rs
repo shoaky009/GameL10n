@@ -2317,37 +2317,33 @@ impl EngineService {
             }
         }
         Self::report(progress, "复核验收资源", "正在复核原始资源的完整性。");
-        for (root, expected, description) in [(source_directory, &before, "原始资源")] {
-            match hashes(root, resources) {
-                Ok(actual) if &actual == expected => {}
-                Ok(_) => {
-                    result.passed = false;
-                    result.cacheable = false;
-                    result.issues.push(
-                        crate::VerificationIssue::new(
-                            crate::VerificationIssueCode::InputChanged,
-                            "original-resource-check",
-                        )
-                        .difference(description, "content changed"),
-                    );
-                    result
-                        .diagnostics
-                        .push(format!("验收期间{description}发生变化。"));
-                }
-                Err(error) => {
-                    result.passed = false;
-                    result.cacheable = false;
-                    result.issues.push(
-                        crate::VerificationIssue::new(
-                            crate::VerificationIssueCode::Storage,
-                            "original-resource-check",
-                        )
-                        .difference(description, &error.to_string()),
-                    );
-                    result
-                        .diagnostics
-                        .push(format!("{description}完整性复核失败：{error}"));
-                }
+        match hashes(source_directory, resources) {
+            Ok(actual) if actual == before => {}
+            Ok(_) => {
+                result.passed = false;
+                result.cacheable = false;
+                result.issues.push(
+                    crate::VerificationIssue::new(
+                        crate::VerificationIssueCode::InputChanged,
+                        "original-resource-check",
+                    )
+                    .difference("原始资源", "content changed"),
+                );
+                result.diagnostics.push("验收期间原始资源发生变化。".into());
+            }
+            Err(error) => {
+                result.passed = false;
+                result.cacheable = false;
+                result.issues.push(
+                    crate::VerificationIssue::new(
+                        crate::VerificationIssueCode::Storage,
+                        "original-resource-check",
+                    )
+                    .difference("原始资源", &error.to_string()),
+                );
+                result
+                    .diagnostics
+                    .push(format!("原始资源完整性复核失败：{error}"));
             }
         }
         record_verification_stage(

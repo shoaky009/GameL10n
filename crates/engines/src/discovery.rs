@@ -669,11 +669,11 @@ fn decode_hex(value: &str) -> Option<Vec<u8>> {
     if value.is_empty() || value.len() > 128 || !value.len().is_multiple_of(2) {
         return None;
     }
-    value
-        .as_bytes()
-        .chunks_exact(2)
-        .map(|pair| {
-            Some((char::from(pair[0]).to_digit(16)? * 16 + char::from(pair[1]).to_digit(16)?) as u8)
+    let (pairs, _) = value.as_bytes().as_chunks::<2>();
+    pairs
+        .iter()
+        .map(|&[high, low]| {
+            Some((char::from(high).to_digit(16)? * 16 + char::from(low).to_digit(16)?) as u8)
         })
         .collect()
 }

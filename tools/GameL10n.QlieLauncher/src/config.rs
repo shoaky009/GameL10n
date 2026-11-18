@@ -49,16 +49,17 @@ fn decode_xml(data: &[u8]) -> Result<String> {
         } else {
             data
         };
-        if !data.len().is_multiple_of(2) {
+        let (pairs, trailing) = data.as_chunks::<2>();
+        if !trailing.is_empty() {
             return Err("启动配置的 UTF-16 编码不完整。".into());
         }
-        let units: Vec<_> = data
-            .chunks_exact(2)
-            .map(|pair| {
+        let units: Vec<_> = pairs
+            .iter()
+            .map(|&pair| {
                 if big_endian {
-                    u16::from_be_bytes([pair[0], pair[1]])
+                    u16::from_be_bytes(pair)
                 } else {
-                    u16::from_le_bytes([pair[0], pair[1]])
+                    u16::from_le_bytes(pair)
                 }
             })
             .collect();
