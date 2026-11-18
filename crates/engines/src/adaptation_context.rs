@@ -13,6 +13,7 @@ use crate::{
     AdaptationRequest, CancellationToken, EngineError, EngineService, ProgressCallback,
     adaptation::Session,
     discovery::{is_documentation_file, is_link, resolve_relative},
+    vntextpatch::{BUILTIN_FORMATS, BuiltinFormat},
 };
 
 pub(crate) const DISCOVERY_REVISION: u64 = 9;
@@ -69,173 +70,13 @@ pub(crate) fn annotate_font_imports(result: &mut Value) {
     result["fontRendering"] = guidance;
 }
 
-pub(crate) struct BuiltinFormat {
-    pub key: &'static str,
-    pub name: &'static str,
-    pub extensions: &'static [&'static str],
-}
-
-// The same catalog supplies candidate aliases and the knowledge family's root identity.
-pub(crate) const BUILTIN_FORMATS: &[BuiltinFormat] = &[
-    BuiltinFormat {
-        key: "AdvHd",
-        name: "AdvHD / WS2",
-        extensions: &["ws2"],
-    },
-    BuiltinFormat {
-        key: "Age",
-        name: "ArcGameEngine / BIN",
-        extensions: &["bin"],
-    },
-    BuiltinFormat {
-        key: "ArtemisAsb",
-        name: "Artemis / ASB",
-        extensions: &["asb"],
-    },
-    BuiltinFormat {
-        key: "ArtemisAst",
-        name: "Artemis / AST",
-        extensions: &["ast"],
-    },
-    BuiltinFormat {
-        key: "ArtemisTxt",
-        name: "Artemis / text",
-        extensions: &["art", "txt"],
-    },
-    BuiltinFormat {
-        key: "CatSystem",
-        name: "CatSystem2 / CST",
-        extensions: &["cst"],
-    },
-    BuiltinFormat {
-        key: "CSystem",
-        name: "Cyberworks C,system / A0",
-        extensions: &["a0"],
-    },
-    BuiltinFormat {
-        key: "Ethornell",
-        name: "Ethornell / BGI",
-        extensions: &["bgi", ""],
-    },
-    BuiltinFormat {
-        key: "Kaguya",
-        name: "KaGuYa / message.dat",
-        extensions: &["dat"],
-    },
-    BuiltinFormat {
-        key: "KirikiriKs",
-        name: "Kirikiri / KS",
-        extensions: &["ks", "txt"],
-    },
-    BuiltinFormat {
-        key: "KirikiriSoc",
-        name: "Kirikiri / SOC",
-        extensions: &["soc"],
-    },
-    BuiltinFormat {
-        key: "KirikiriTjs",
-        name: "Kirikiri / compiled TJS",
-        extensions: &["tjs"],
-    },
-    BuiltinFormat {
-        key: "Majiro",
-        name: "Majiro / MJO",
-        extensions: &["mjo"],
-    },
-    BuiltinFormat {
-        key: "Musica",
-        name: "Musica / SC",
-        extensions: &["sc"],
-    },
-    BuiltinFormat {
-        key: "Mware",
-        name: "Mware / NUT",
-        extensions: &["nut"],
-    },
-    BuiltinFormat {
-        key: "Propeller",
-        name: "Propeller / Stuff Script Engine / MSC",
-        extensions: &["msc"],
-    },
-    BuiltinFormat {
-        key: "Qlie",
-        name: "QLIE / S",
-        extensions: &["s"],
-    },
-    BuiltinFormat {
-        key: "RealLive",
-        name: "RealLive / scenario",
-        extensions: &["rl", "txt"],
-    },
-    BuiltinFormat {
-        key: "Renpy",
-        name: "Ren'Py / RPY",
-        extensions: &["rpy"],
-    },
-    BuiltinFormat {
-        key: "ShSystem",
-        name: "ShSystem / HST",
-        extensions: &["hst"],
-    },
-    BuiltinFormat {
-        key: "SilkysMap",
-        name: "Silky's / AI6WIN / MAP",
-        extensions: &["map"],
-    },
-    BuiltinFormat {
-        key: "SilkysMes",
-        name: "Silky's / AI6WIN / MES",
-        extensions: &["mes"],
-    },
-    BuiltinFormat {
-        key: "Softpal",
-        name: "Softpal / SRC + DAT",
-        extensions: &["src"],
-    },
-    BuiltinFormat {
-        key: "SystemNnnDev",
-        name: "SystemNNN / NNN",
-        extensions: &["nnn"],
-    },
-    BuiltinFormat {
-        key: "SystemNnnRelease",
-        name: "SystemNNN / SPT",
-        extensions: &["spt"],
-    },
-    BuiltinFormat {
-        key: "TmrHiroAdvSystemCode",
-        name: "TmrHiroAdvSystem / SRP",
-        extensions: &["srp"],
-    },
-    BuiltinFormat {
-        key: "TmrHiroAdvSystemText",
-        name: "TmrHiroAdvSystem / text table",
-        extensions: &["", "dat", "txt"],
-    },
-    BuiltinFormat {
-        key: "Whale",
-        name: "Whale / text",
-        extensions: &["txt", ""],
-    },
-    BuiltinFormat {
-        key: "Yuris",
-        name: "YU-RIS / YBN",
-        extensions: &["ybn"],
-    },
-];
-
 fn adapter_id(format: &BuiltinFormat) -> String {
     format!("engine.vntextpatch-{}", format.key.to_ascii_lowercase())
 }
 
 pub(crate) fn builtin_catalog() -> Vec<Value> {
     BUILTIN_FORMATS.iter().map(|format| {
-        let companions: &[&str] = match format.key {
-            "Age" => &["CHINIT.BIN"],
-            "Softpal" => &["TEXT.DAT", "POINT.DAT"],
-            "Yuris" => &["ysc.ybn"],
-            _ => &[],
-        };
+        let companions = format.companions();
         let extensions: Vec<_> = format.extensions.iter().map(|extension| {
             if extension.is_empty() {String::new()} else {format!(".{extension}")}
         }).collect();

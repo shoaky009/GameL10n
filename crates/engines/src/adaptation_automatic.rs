@@ -1241,7 +1241,7 @@ fn supported(
     allow_archives: bool,
     allow_compiled: bool,
 ) -> Result<(), EngineError> {
-    let other: BTreeSet<_> = crate::adaptation_context::BUILTIN_FORMATS
+    let other: BTreeSet<_> = crate::vntextpatch::BUILTIN_FORMATS
         .iter()
         .flat_map(|format| format.extensions.iter().copied())
         .filter(|extension| !matches!(*extension, "" | "txt" | "bin" | "dat" | "map"))

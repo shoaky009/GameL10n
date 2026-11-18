@@ -19,7 +19,7 @@ use serde_json::{Value, json};
 
 use crate::{
     AdapterHandle, CancellationToken, EngineError, PackageManifest, ToolPaths, ToolProcess,
-    discovery::{Inventory, RecognitionStatus, native_formats_for, resolve_relative},
+    discovery::{Inventory, RecognitionStatus, native_candidates, resolve_relative},
     protocol::{AdapterRequest, AdapterResponse, BuildMode, ExtractionResult, ProbeResult},
     python::PythonAdapter,
     vntextpatch::VnTextPatch,
@@ -1396,12 +1396,19 @@ impl EngineService {
         {
             builtins.push(AdapterHandle::BuiltinSiglus);
         }
-        builtins.extend(native_formats_for(inventory).into_iter().map(|format| {
-            AdapterHandle::Native {
-                format: format.into(),
-            }
-        }));
-        for adapter in builtins {
+        let native = native_candidates(inventory).map(|(format, resources)| {
+            (
+                AdapterHandle::Native {
+                    format: format.into(),
+                },
+                Some(resources),
+            )
+        });
+        for (adapter, native_resources) in builtins
+            .into_iter()
+            .map(|adapter| (adapter, None))
+            .chain(native)
+        {
             let format = match &adapter {
                 AdapterHandle::Native { format } => Some(format.as_str()),
                 AdapterHandle::BuiltinSiglus => Some("Siglus"),
@@ -1422,8 +1429,9 @@ impl EngineService {
                 format!("正在检查 {}。", adapter.id()),
             );
             let mut request = AdapterRequest::new("probe", source);
-            if matches!(adapter, AdapterHandle::Native { .. }) {
-                request.resource_files = Some(inventory.candidate_resources()?);
+            if let Some(resources) = native_resources {
+                inventory.require_complete_native_inventory()?;
+                request.resource_files = Some(resources.into_iter().map(str::to_owned).collect());
             }
             match self.execute(&adapter, &request, cancellation).await {
                 Ok(response) => {
@@ -2943,9 +2951,26 @@ else:
         let script = "\u{feff}*start\nこれは物語の台詞です。[p]\n";
         fs::write(root.path().join("story.txt"), script).unwrap();
         fs::write(root.path().join("ReAdMe.TxT"), script).unwrap();
+        let audio = root.path().join("voice.ogg");
+        fs::write(&audio, b"audio").unwrap();
         let token = CancellationToken::new();
+        let inventory = Inventory::scan(root.path()).unwrap();
+        let adapter = AdapterHandle::Native {
+            format: "KirikiriKs".into(),
+        };
+        let original = service
+            .execute(
+                &adapter,
+                &AdapterRequest::new("extract", root.path()),
+                &token,
+            )
+            .await
+            .unwrap()
+            .extraction
+            .unwrap();
+        fs::remove_file(audio).unwrap();
         let result = service
-            .discover(root.path(), &[], &token, None)
+            .discover_with_inventory(root.path(), &[], &inventory, &token, None)
             .await
             .unwrap();
         assert_eq!(result.probe.as_ref().unwrap().required_files, ["story.txt"]);
@@ -2960,6 +2985,15 @@ else:
             .units;
         assert!(!units.is_empty());
         assert!(units.iter().all(|unit| unit.resource_path == "story.txt"));
+        assert!(
+            units
+                .iter()
+                .map(|unit| (&unit.id, &unit.source_text))
+                .eq(original
+                    .units
+                    .iter()
+                    .map(|unit| (&unit.id, &unit.source_text)))
+        );
     }
 
     #[tokio::test]

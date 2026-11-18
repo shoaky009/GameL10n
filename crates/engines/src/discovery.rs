@@ -1,7 +1,8 @@
 //! Bounded directory evidence and reusable adapter discovery.
 
 use std::{
-    collections::BTreeMap,
+    borrow::Cow,
+    collections::{BTreeMap, BTreeSet, HashMap},
     fs::{self, File},
     io::{Read, Seek, SeekFrom},
     path::{Component, Path, PathBuf},
@@ -12,7 +13,10 @@ use gamel10n_translation::files::{hash_file, read_json};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::EngineError;
+use crate::{
+    EngineError,
+    vntextpatch::{BUILTIN_FORMATS, FORMATS},
+};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "runtime", rename_all = "camelCase")]
@@ -322,17 +326,22 @@ struct SignatureCache {
 impl Inventory {
     /// Complete implicit resource selection; explicit adapter resources use their own contract.
     pub(crate) fn candidate_resources(&self) -> Result<Vec<String>, EngineError> {
-        if !self.complete {
-            return Err(EngineError::Rejected(
-                "资源目录扫描不完整，无法自动选择原生解析器资源；请明确指定资源范围。".into(),
-            ));
-        }
+        self.require_complete_native_inventory()?;
         Ok(self
             .files
             .iter()
             .filter(|file| !is_documentation_file(&file.path))
             .map(|file| file.path.clone())
             .collect())
+    }
+
+    pub(crate) fn require_complete_native_inventory(&self) -> Result<(), EngineError> {
+        if !self.complete {
+            return Err(EngineError::Rejected(
+                "资源目录扫描不完整，无法自动选择原生解析器资源；请明确指定资源范围。".into(),
+            ));
+        }
+        Ok(())
     }
 
     pub fn scan(root: &Path) -> Result<Self, EngineError> {
@@ -680,59 +689,86 @@ fn decode_hex(value: &str) -> Option<Vec<u8>> {
 
 /// Built-in format/resource selection follows the original parser catalog.
 pub fn native_formats_for(inventory: &Inventory) -> Vec<&'static str> {
-    const FORMATS: &[(&str, &[&str])] = &[
-        ("AdvHd", &["*.ws2"]),
-        ("ArtemisAsb", &["*.asb"]),
-        ("ArtemisAst", &["*.ast"]),
-        ("ArtemisTxt", &["*.art", "*.txt"]),
-        ("Age", &["*.bin"]),
-        ("CatSystem", &["*.cst"]),
-        ("CSystem", &["*.a0"]),
-        ("Ethornell", &["*.bgi", "<extensionless>"]),
-        ("Kaguya", &["*.dat"]),
-        ("KirikiriKs", &["*.ks", "*.txt"]),
-        ("KirikiriSoc", &["*.soc"]),
-        ("KirikiriTjs", &["*.tjs"]),
-        ("Majiro", &["*.mjo"]),
-        ("Musica", &["*.sc"]),
-        ("Mware", &["*.nut"]),
-        ("Propeller", &["*.msc"]),
-        ("Qlie", &["*.s"]),
-        ("RealLive", &["*.rl", "*.txt"]),
-        ("Renpy", &["*.rpy"]),
-        ("ShSystem", &["*.hst"]),
-        ("SilkysMap", &["*.map"]),
-        ("SilkysMes", &["*.mes"]),
-        ("Softpal", &["*.src"]),
-        ("SystemNnnDev", &["*.nnn"]),
-        ("SystemNnnRelease", &["*.spt"]),
-        ("TmrHiroAdvSystemCode", &["*.srp"]),
-        (
-            "TmrHiroAdvSystemText",
-            &["<extensionless>", "*.dat", "*.txt"],
-        ),
-        ("Whale", &["*.txt", "<extensionless>"]),
-        ("Yuris", &["*.ybn"]),
-    ];
-    FORMATS
-        .iter()
-        .filter(|(_, patterns)| {
-            inventory
-                .files
-                .iter()
-                .filter(|file| !is_documentation_file(&file.path))
-                .any(|file| {
-                    patterns.iter().any(|pattern| {
-                        if *pattern == "<extensionless>" {
-                            Path::new(&file.path).extension().is_none()
-                        } else {
-                            glob_match(pattern, file.path.rsplit('/').next().unwrap_or(&file.path))
-                        }
-                    })
-                })
-        })
-        .map(|(format, _)| *format)
+    native_candidates(inventory)
+        .map(|(format, _)| format)
         .collect()
+}
+
+fn split_file_path(path: &str) -> (&str, &str) {
+    path.rsplit_once('/').unwrap_or(("", path))
+}
+
+fn native_extension(path: &str) -> Cow<'_, str> {
+    let (_, name) = split_file_path(path);
+    // Match the worker's Path.GetExtension, including names such as ".txt".
+    let extension = name.rsplit_once('.').map_or("", |(_, extension)| extension);
+    if extension.bytes().any(|byte| byte.is_ascii_uppercase()) {
+        Cow::Owned(extension.to_ascii_lowercase())
+    } else {
+        Cow::Borrowed(extension)
+    }
+}
+
+pub(crate) fn native_candidates(
+    inventory: &Inventory,
+) -> impl Iterator<Item = (&'static str, Vec<&str>)> {
+    let mut files_by_extension: HashMap<_, Vec<_>> = BUILTIN_FORMATS
+        .iter()
+        .flat_map(|format| {
+            format
+                .extensions
+                .iter()
+                .map(|&extension| Cow::Borrowed(extension))
+                .chain(
+                    format
+                        .companions()
+                        .iter()
+                        .map(|name| native_extension(name)),
+                )
+        })
+        .map(|extension| (extension, Vec::new()))
+        .collect();
+    for file in &inventory.files {
+        if let Some(files) = files_by_extension.get_mut(native_extension(&file.path).as_ref())
+            && !is_documentation_file(&file.path)
+        {
+            files.push(file.path.as_str());
+        }
+    }
+
+    FORMATS.iter().filter_map(move |&key| {
+        let format = BUILTIN_FORMATS.iter().find(|format| format.key == key)?;
+        let mut resources: Vec<_> = format
+            .extensions
+            .iter()
+            .flat_map(|&extension| files_by_extension[extension].iter().copied())
+            .collect();
+        if resources.is_empty() {
+            return None;
+        }
+        if !format.companions().is_empty() {
+            let script_directories: BTreeSet<_> = resources
+                .iter()
+                .copied()
+                .map(|file| split_file_path(file).0)
+                .collect();
+            for companion in format.companions() {
+                resources.extend(
+                    files_by_extension[native_extension(companion).as_ref()]
+                        .iter()
+                        .copied()
+                        .filter(|path| {
+                            let (directory, name) = split_file_path(path);
+                            name.eq_ignore_ascii_case(companion)
+                                && script_directories.contains(directory)
+                        }),
+                );
+            }
+        }
+        resources.sort_unstable();
+        resources.dedup();
+        Some((key, resources))
+    })
 }
 
 /// Exact documentation names are excluded from automatic resource candidates only.
@@ -816,6 +852,61 @@ mod tests {
             inventory.candidate_resources(),
             Err(EngineError::Rejected(_))
         ));
+    }
+
+    #[test]
+    fn native_candidates_send_one_script_to_each_text_parser_in_catalog_order() {
+        let mut files: Vec<_> = (0..10_000)
+            .map(|index| InventoryFile {
+                path: format!("audio/{index:05}.ogg"),
+                length: 0,
+            })
+            .collect();
+        files.push(InventoryFile {
+            path: "story.txt".into(),
+            length: 0,
+        });
+        let inventory = Inventory {
+            files,
+            complete: true,
+            signatures: Arc::default(),
+        };
+        assert_eq!(
+            native_candidates(&inventory).collect::<Vec<_>>(),
+            [
+                ("ArtemisTxt", vec!["story.txt"]),
+                ("KirikiriKs", vec!["story.txt"]),
+                ("RealLive", vec!["story.txt"]),
+                ("TmrHiroAdvSystemText", vec!["story.txt"]),
+                ("Whale", vec!["story.txt"]),
+            ]
+        );
+    }
+
+    #[test]
+    fn native_candidates_keep_extensionless_scripts_and_same_directory_companions() {
+        let root = tempfile::tempdir().unwrap();
+        for name in [
+            "assets/POINT.DAT",
+            "script/point.dat",
+            "script/READMe",
+            "script/scene",
+            "script/story.SrC",
+            "script/TeXt.DaT",
+            "script/voice.ogg",
+        ] {
+            let path = root.path().join(name);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"resource").unwrap();
+        }
+        let inventory = Inventory::scan(root.path()).unwrap();
+        let candidates: BTreeMap<_, _> = native_candidates(&inventory).collect();
+        assert_eq!(candidates["Ethornell"], ["script/scene"]);
+        assert_eq!(candidates["Whale"], ["script/scene"]);
+        assert_eq!(
+            candidates["Softpal"],
+            ["script/TeXt.DaT", "script/point.dat", "script/story.SrC"]
+        );
     }
 
     #[test]

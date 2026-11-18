@@ -2,8 +2,9 @@
 use crate::{
     AdaptationRequest, CancellationToken, EngineError, EngineService,
     adaptation::{Session, text},
-    adaptation_context::{BSSCRIPT_GUIDANCE, BUILTIN_FORMATS, builtin_catalog},
+    adaptation_context::{BSSCRIPT_GUIDANCE, builtin_catalog},
     discovery::resolve_relative,
+    vntextpatch::BUILTIN_FORMATS,
 };
 use gamel10n_translation::files::hash_file;
 use serde_json::{Value, json};

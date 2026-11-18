@@ -10,7 +10,7 @@
 
 | 开销 | 当前实现与基线 | 可比较的改动 |
 | --- | --- | --- |
-| 本地探测 | 1 个普通 `story.txt` 和 10,000 个 `.ogg` 的合成目录，可产生 5 个内置候选。若全部未命中，会累计传递 50,005 个路径。原生工具逐项检查存在性后才按格式筛脚本。 | 从同一份目录清单为每个候选选择脚本和必要伴随文件。该样例只需传 5 个路径。另用无扩展名脚本、Softpal 的 `TEXT.DAT` 和 `POINT.DAT` 验证，比较最终资源和文本 ID，并在 Windows 计时。[候选清单](../crates/engines/src/discovery.rs) · [调用方](../crates/engines/src/service.rs) · [原生工具](../tools/GameL10n.VnTextPatch/Worker.cs) |
+| 本地探测 | 宿主按格式从同一份目录清单选择脚本和同目录伴随文件。含 1 个普通 `story.txt` 和 10,000 个 `.ogg` 的合成目录触发 5 个候选，均未命中时累计传入 5 个路径，旧清单为 50,005 个。 | 比较同一份目录的原生探测耗时及识别总耗时。核对无扩展名脚本、Softpal 的 `TEXT.DAT` 和 `POINT.DAT`，并比较最终资源和文本 ID。[候选清单](../crates/engines/src/discovery.rs) · [调用方](../crates/engines/src/service.rs) · [原生工具](../tools/GameL10n.VnTextPatch/Worker.cs) |
 | 模型输入 | 智能适配每轮发送 45 个工具定义。按宿主紧凑 JSON 计，定义占 45,462 字节，固定指令占 29,864 字节。首轮还附按路径排序的前 100 个文件，上述目录中这 100 项全是音频。 | 首轮优先给出候选脚本、封包和失败样本，同类媒体只报数量。固定指令里的专项操作说明可随相应工具结果提供，保持工具次序稳定。对比整次任务的请求数、未缓存输入和输出 Token，避免精简前缀后反而多花一轮查询。[请求构造](../crates/engines/src/adaptation_flow.rs) · [指令](../crates/engines/prompts/adaptation.md) |
 
 路径数和字节数描述工作量。磁盘缓存、模型的分词方式及供应商前缀缓存都会影响实际收益，不能直接换算成秒数、Token 或费用。
