@@ -166,7 +166,7 @@ fn project_actions_keep_settings_selection_and_saved_edits_in_sync_across_tabs()
     .unwrap();
 
     let ui = MainWindow::new().unwrap();
-    assert!(!ui.global::<App>().get_automatic_workflow());
+    assert_eq!(ui.global::<App>().get_adaptation_objective(), 0);
     let ctx = Context {
         host: Arc::new(RwLock::new(host)),
         window: ui.as_weak(),
@@ -399,9 +399,18 @@ fn project_actions_keep_settings_selection_and_saved_edits_in_sync_across_tabs()
                 .is_empty()
         );
 
+        invoke_action(&ui, &ctx, "workflow-settings", "").await;
+        assert_eq!(app.get_modal(), "workflow-settings");
+        assert_eq!(app.get_workflow_finish(), 2);
+        app.set_workflow_finish(1);
+        app.set_workflow_use_existing_text(true);
+        invoke_action(&ui, &ctx, "confirm", "workflow-settings").await;
+        assert_eq!(app.get_modal(), "");
         invoke_action(&ui, &ctx, "adapt-dialog", "").await;
         assert_eq!(app.get_modal().as_str(), "adapt");
-        app.set_automatic_workflow(true);
+        assert_eq!(app.get_workflow_finish(), 1);
+        assert!(app.get_workflow_use_existing_text());
+        app.set_adaptation_objective(3);
         app.set_modal("".into());
 
         app.set_text_query("line 100".into());
@@ -415,7 +424,9 @@ fn project_actions_keep_settings_selection_and_saved_edits_in_sync_across_tabs()
         assert_eq!(app.get_project_id().as_str(), other_project.id);
         invoke_action(&ui, &ctx, "adapt-dialog", "").await;
         assert_eq!(app.get_modal().as_str(), "adapt");
-        assert!(!app.get_automatic_workflow());
+        assert_ne!(app.get_adaptation_objective(), 3);
+        assert_eq!(app.get_workflow_finish(), 2);
+        assert!(!app.get_workflow_use_existing_text());
         app.set_modal("".into());
         assert_eq!(app.get_texts().row_count(), 0);
         assert_eq!(app.get_selected_texts(), 0);
@@ -612,14 +623,27 @@ fn project_actions_keep_settings_selection_and_saved_edits_in_sync_across_tabs()
         invoke_action(&ui, &ctx, "launch-reset", "").await;
         assert_eq!(app.get_launch_arguments(), "");
 
-        host.save_translation_edit(&project.id, "line-000", "运行检查测试译文".into(), false).await.unwrap();
-        ctx.set_selection(&project.id, vec!["line-000".into()]);
         invoke_action(&ui, &ctx, "game-check-dialog", "").await;
         assert_eq!(app.get_modal(), "game-check");
         assert_eq!(app.get_check_project_id(), project.id.as_str());
+        ctx.set_selection(&project.id, vec!["line-001".into()]);
         invoke_action(&ui, &ctx, "game-check-selection", "").await;
         assert_eq!(app.get_check_unit_ids().row_count(), 1);
+        assert!(!app.get_check_has_expected());
+        assert!(app.get_check_expected().starts_with("原文 · "));
+        invoke_action(&ui, &ctx, "game-check-selection", "clear").await;
+        assert_eq!(app.get_check_unit_ids().row_count(), 0);
+        host.save_translation_edit(&project.id, "line-000", "运行检查测试译文".into(), false).await.unwrap();
+        ctx.set_selection(&project.id, vec!["line-000".into()]);
+        invoke_action(&ui, &ctx, "game-check-selection", "").await;
+        assert_eq!(app.get_check_unit_ids().row_count(), 1);
+        assert!(app.get_check_has_expected());
         assert!(app.get_check_expected().contains("运行检查测试译文"));
+        app.set_check_scene(1);
+        invoke_action(&ui, &ctx, "game-check-save", "").await;
+        assert_eq!(app.get_check_scene(), 1);
+        assert_eq!(app.get_check_steps(), "按键 Enter");
+        app.set_check_scene(2);
         app.set_check_steps("等待 1000\n按键 Enter".into());
         app.set_check_timeout(7);
         invoke_action(&ui, &ctx, "game-check-save", "").await;

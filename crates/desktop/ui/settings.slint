@@ -1,4 +1,4 @@
-import { Button, LineEdit, TextEdit, ComboBox, SpinBox, ScrollView, ListView, ProgressIndicator } from "std-widgets.slint";
+import { Button, CheckBox, LineEdit, TextEdit, ComboBox, SpinBox, ScrollView, ListView, ProgressIndicator } from "std-widgets.slint";
 import { App, Theme, Label, Caption, TokenCaption, Heading, Divider, ReportText } from "state.slint";
 
 export component ApiTestControls inherits VerticalLayout {
@@ -59,12 +59,38 @@ component ApiSelection inherits VerticalLayout {
     }
 }
 
+export component WorkflowControls inherits VerticalLayout {
+    spacing: 8px;
+    Caption { text: "完成目标"; }
+    ComboBox {
+        model: App.workflow-has-custom
+            ? ["仅试译并验证", "验证后生成全量补丁", "验证后生成并安装全量补丁", "使用自定义流程"]
+            : ["仅试译并验证", "验证后生成全量补丁", "验证后生成并安装全量补丁"];
+        current-index <=> App.workflow-finish;
+    }
+    if App.workflow-finish != 3: CheckBox {
+        text: "使用已有提取文本";
+        checked <=> App.workflow-use-existing-text;
+        enabled: App.workflow-can-use-existing-text || self.checked;
+    }
+    if App.workflow-finish != 3 && App.workflow-use-existing-text && !App.workflow-can-use-existing-text: Caption {
+        text: "已有提取文本不可用，请取消勾选后运行。";
+    }
+    if App.workflow-finish == 1: Caption { text: "游戏中会保留试译补丁，全量补丁可稍后安装。"; }
+}
+
 export component ProjectSettings inherits ScrollView {
     VerticalLayout { padding: 16px; spacing: 16px;
         Heading { text: "游戏启动"; }
         Caption { text: App.launch-summary; }
         HorizontalLayout { Button { text: "配置启动入口…"; clicked => { App.action("launch-settings", ""); } } Rectangle { horizontal-stretch: 1; } }
-        HorizontalLayout { Button { text: "编辑自动流程配置…"; clicked => { App.action("workflow-config", ""); } } Rectangle { horizontal-stretch: 1; } }
+        Divider {}
+        Heading { text: "自动汉化"; }
+        HorizontalLayout { spacing: 8px;
+            Button { text: "配置自动汉化…"; enabled: !App.busy; clicked => { App.action("workflow-settings", ""); } }
+            Button { text: "运行检查…"; enabled: !App.busy; clicked => { App.action("game-check-dialog", ""); } }
+            Rectangle { horizontal-stretch: 1; }
+        }
         Divider {}
         HorizontalLayout { Button { text: "管理模型配置"; clicked => { App.action("navigate", "apis"); } } Rectangle { horizontal-stretch: 1; } }
         Caption { text: "未单独配置的项自动使用全局设置，修改后仅对当前项目生效。"; }

@@ -125,9 +125,11 @@ export global App {
     in-out property <int> check-top;
     in-out property <int> check-width: 100;
     in-out property <int> check-height: 100;
+    in-out property <int> check-scene;
     in-out property <string> check-steps;
     in-out property <[string]> check-unit-ids;
     in-out property <string> check-expected;
+    in-out property <bool> check-has-expected;
     in-out property <string> project-query;
     in-out property <bool> multi-projects;
     in-out property <int> selected-projects;
@@ -135,7 +137,10 @@ export global App {
     in-out property <bool> adding-game;
     in-out property <bool> loading;
     in-out property <bool> busy;
-    in-out property <bool> automatic-workflow: false;
+    in-out property <int> workflow-finish: 2;
+    in-out property <bool> workflow-use-existing-text;
+    in-out property <bool> workflow-has-custom;
+    out property <bool> workflow-can-use-existing-text: recognition-ready && !source-materials-cleared;
     in-out property <string> activity;
     in-out property <string> status: "选择或添加游戏";
     in-out property <string> counts;

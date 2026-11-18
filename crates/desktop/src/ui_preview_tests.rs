@@ -353,5 +353,22 @@ fn render_desktop_preview_fixtures() {
         app.set_text_total(12840);
         app.set_shown(5);
         app.set_selected_texts(1);
+        app.set_tab(3);
+        app.set_modal_title("自动汉化设置".into());
+        app.set_modal("workflow-settings".into());
+        app.set_workflow_finish(2);
+        capture(&format!("workflow-settings{suffix}"), 1120, 720);
+        app.set_tab(0);
+        app.set_modal_title("识别与适配".into());
+        app.set_modal("adapt".into());
+        app.set_adaptation_objective(3);
+        app.set_workflow_finish(1);
+        app.set_workflow_use_existing_text(true);
+        capture(&format!("workflow-run{suffix}"), 1120, 720);
+        app.set_tab(2);
+        app.set_modal("game-check".into());
+        app.set_check_scene(1);
+        capture(&format!("workflow-scene{suffix}"), 1120, 720);
+        app.set_modal("".into());
     }
 }

@@ -201,7 +201,8 @@ impl Context {
 
 #[derive(Clone, Default)]
 pub struct UiInput {
-    pub automatic_workflow: bool,
+    pub workflow_finish: i32,
+    pub workflow_use_existing_text: bool,
     pub check: game_check_ui::CheckInput,
     pub metrics: metrics_ui::MetricsInput,
     pub view_revision: u64,
@@ -399,7 +400,8 @@ impl UiInput {
             launch_executable: a.get_launch_executable().into(),
             launch_arguments: a.get_launch_arguments().into(),
             launch_directory: a.get_launch_directory().into(),
-            automatic_workflow: a.get_automatic_workflow(),
+            workflow_finish: a.get_workflow_finish(),
+            workflow_use_existing_text: a.get_workflow_use_existing_text(),
             launch_revision: a.get_launch_revision().into(),
             launch_conflict_revision: a.get_launch_conflict_revision().into(),
             launch_conflict_action: a.get_launch_conflict_action().into(),
@@ -701,6 +703,7 @@ async fn dispatch(ctx: &Context, action: &str, input: &UiInput) -> Result<(), Co
                 }
             }
             "adapt" => "adapt",
+            "workflow-settings" => "workflow-save",
             "remove" => "remove",
             "patch" => "generate-patch",
             "directory" => "switch-directory",
@@ -721,7 +724,7 @@ async fn dispatch(ctx: &Context, action: &str, input: &UiInput) -> Result<(), Co
             }
             _ => return Ok(()),
         };
-        if input.argument != "launch" {
+        if !matches!(input.argument.as_str(), "launch" | "workflow-settings") {
             ctx.update(|ui| ui.global::<App>().set_modal("".into()));
         }
         return Box::pin(dispatch(ctx, action, &next)).await;

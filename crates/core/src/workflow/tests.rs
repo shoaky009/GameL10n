@@ -26,6 +26,105 @@ fn definition(value: serde_json::Value) -> WorkflowDefinition {
 }
 
 #[test]
+fn preset_success_path_stops_at_the_requested_goal() {
+    for (finish, use_existing_text, expected) in [
+        (WorkflowFinish::Trial, true, "check"),
+        (WorkflowFinish::Build, true, "buildAll"),
+        (WorkflowFinish::Install, false, "installAll"),
+    ] {
+        let config = WorkflowDefinition::from_preset(WorkflowPreset {
+            finish,
+            use_existing_text,
+        });
+        config.validate().unwrap();
+        assert_eq!(
+            config.entry,
+            if use_existing_text {
+                "locate"
+            } else {
+                "recognize"
+            }
+        );
+        let mut success_path = config
+            .steps
+            .iter()
+            .skip_while(|step| step.id != config.entry);
+        assert_eq!(
+            success_path
+                .find(|step| step.on_success.as_deref() == Some("done"))
+                .unwrap()
+                .id,
+            expected
+        );
+    }
+}
+
+#[tokio::test]
+async fn project_preset_takes_effect_without_replacing_a_custom_definition() {
+    let (_root, app, id) = fixture().await;
+    let path = app.workflow_configuration(&id).await.unwrap();
+    let mut legacy = WorkflowDefinition::default();
+    legacy
+        .steps
+        .iter_mut()
+        .find(|step| step.id == "input")
+        .unwrap()
+        .message = LEGACY_WAIT_MESSAGE.into();
+    write_json(&path, &legacy).unwrap();
+    assert_eq!(
+        app.workflow_preferences(&id).await.unwrap(),
+        (WorkflowChoice::Preset(WorkflowPreset::default()), false)
+    );
+    let custom = definition(serde_json::json!({
+        "schemaVersion": 1,
+        "entry": "finish",
+        "steps": [{"id": "finish", "action": "complete"}]
+    }));
+    write_json(&path, &custom).unwrap();
+    assert_eq!(
+        app.workflow_preferences(&id).await.unwrap(),
+        (WorkflowChoice::Custom, true)
+    );
+
+    let preset = WorkflowChoice::Preset(WorkflowPreset {
+        use_existing_text: true,
+        finish: WorkflowFinish::Trial,
+    });
+    app.save_workflow_preferences(&id, preset).await.unwrap();
+    assert_eq!(app.workflow_preferences(&id).await.unwrap(), (preset, true));
+    let error = app
+        .run_workflow(&id, String::new(), RecognitionMode::Automatic)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("请先识别并提取游戏文本"));
+    app.run_workflow_with_choice(
+        &id,
+        String::new(),
+        RecognitionMode::Automatic,
+        WorkflowChoice::Custom,
+    )
+    .await
+    .unwrap();
+    assert_eq!(app.workflow_preferences(&id).await.unwrap(), (preset, true));
+    let saved: WorkflowDefinition = read_json(&path).unwrap();
+    assert_eq!(saved, custom);
+
+    app.save_workflow_preferences(&id, WorkflowChoice::Custom)
+        .await
+        .unwrap();
+    app.run_workflow(&id, String::new(), RecognitionMode::Automatic)
+        .await
+        .unwrap();
+    std::fs::remove_file(&path).unwrap();
+    assert!(
+        app.run_workflow(&id, String::new(), RecognitionMode::Automatic)
+            .await
+            .is_err()
+    );
+    assert!(!path.exists());
+}
+
+#[test]
 fn invalid_branches_and_ambiguous_text_require_correction() {
     let mut config = WorkflowDefinition::default();
     config.validate().unwrap();

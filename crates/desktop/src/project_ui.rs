@@ -3,6 +3,7 @@ use gamel10n_core::{
     CoreError,
     engine_tasks::{AdaptationObjective, RecognitionMode},
     patching::PatchInstaller,
+    workflow::{WorkflowChoice, WorkflowFinish, WorkflowPreset},
 };
 use serde_json::Value;
 use slint::{ComponentHandle, Model, ModelRc};
@@ -47,6 +48,37 @@ async fn confirm_game_directory(directory: PathBuf) -> Result<bool, CoreError> {
             == rfd::MessageDialogResult::Ok)
     })
     .await?
+}
+
+fn workflow_choice(input: &UiInput) -> Result<WorkflowChoice, CoreError> {
+    let finish = match input.workflow_finish {
+        0 => WorkflowFinish::Trial,
+        1 => WorkflowFinish::Build,
+        2 => WorkflowFinish::Install,
+        3 => return Ok(WorkflowChoice::Custom),
+        _ => return Err(CoreError::InvalidData("请选择自动汉化的完成目标。".into())),
+    };
+    Ok(WorkflowChoice::Preset(WorkflowPreset {
+        use_existing_text: input.workflow_use_existing_text,
+        finish,
+    }))
+}
+
+fn load_workflow_preferences(app: &App<'_>, choice: WorkflowChoice, has_custom: bool) {
+    let (finish, use_existing_text) = match choice {
+        WorkflowChoice::Preset(preset) => {
+            let finish = match preset.finish {
+                WorkflowFinish::Trial => 0,
+                WorkflowFinish::Build => 1,
+                WorkflowFinish::Install => 2,
+            };
+            (finish, preset.use_existing_text)
+        }
+        WorkflowChoice::Custom => (3, false),
+    };
+    app.set_workflow_has_custom(has_custom);
+    app.set_workflow_finish(finish);
+    app.set_workflow_use_existing_text(use_existing_text);
 }
 
 pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool, CoreError> {
@@ -301,27 +333,29 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
         }
         "adapt-dialog" => {
             settings_ui::refresh(ctx, Some(&input.project_id)).await?;
-            let objective = ctx
-                .app()
-                .await
-                .recognition_objective(&input.project_id)
-                .await?;
+            let host = ctx.app().await;
+            let objective = host.recognition_objective(&input.project_id).await?;
+            let (choice, has_custom) = host.workflow_preferences(&input.project_id).await?;
+            let id = input.project_id.clone();
+            let context = ctx.clone();
             ctx.update(move |ui| {
                 let app = ui.global::<App>();
+                if app.get_project_id().as_str() != id || !context.is_requested_project(&id) {
+                    return;
+                }
                 app.set_force_intelligent(false);
-                app.set_automatic_workflow(false);
+                load_workflow_preferences(&app, choice, has_custom);
                 app.set_adaptation_objective(match objective {
                     AdaptationObjective::Develop => 0,
                     AdaptationObjective::Repair => 1,
                     AdaptationObjective::ExpandCoverage => 2,
-                })
+                });
+                app.set_modal_title("识别与适配".into());
+                app.set_modal_message(
+                    "优先复用已有适配器，必要时继续智能适配。也可选择修复或补全已有结果。".into(),
+                );
+                app.set_modal("adapt".into());
             });
-            show_dialog(
-                ctx,
-                "adapt",
-                "识别与适配",
-                "优先复用已有适配器，必要时继续智能适配。也可选择修复或补全已有结果。".into(),
-            );
         }
         "adapt" => {
             let app = ctx.app().await;
@@ -330,33 +364,46 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                 ctx.update(|ui| ui.global::<App>().set_modal("adapt".into()));
                 return Ok(true);
             }
-            let saved = async {
-                let updates = settings_ui::adaptation_limit_updates(input)?;
-                ctx.app()
-                    .await
-                    .save_project_settings(&input.project_id, updates)
-                    .await
-            }
-            .await;
-            if let Err(error) = saved {
-                ctx.update(|ui| ui.global::<App>().set_modal("adapt".into()));
-                return Err(error);
-            }
             let objective = match input.adaptation_objective {
-                0 => AdaptationObjective::Develop,
+                0 | 3 => AdaptationObjective::Develop,
                 1 => AdaptationObjective::Repair,
                 2 => AdaptationObjective::ExpandCoverage,
                 _ => return Err(CoreError::InvalidData("请选择本次适配目标。".into())),
             };
+            let workflow = (input.adaptation_objective == 3)
+                .then(|| workflow_choice(input))
+                .transpose()?;
+            if !matches!(
+                workflow,
+                Some(WorkflowChoice::Preset(WorkflowPreset {
+                    use_existing_text: true,
+                    ..
+                }))
+            ) {
+                let saved = async {
+                    let updates = settings_ui::adaptation_limit_updates(input)?;
+                    app.save_project_settings(&input.project_id, updates).await
+                }
+                .await;
+                if let Err(error) = saved {
+                    ctx.update(|ui| ui.global::<App>().set_modal("adapt".into()));
+                    return Err(error);
+                }
+            }
             if objective == AdaptationObjective::Develop {
                 let mode = if input.force_intelligent {
                     RecognitionMode::Intelligent
                 } else {
                     RecognitionMode::Automatic
                 };
-                if input.automatic_workflow {
-                    app.run_workflow(&input.project_id, input.instruction.clone(), mode)
-                        .await?;
+                if let Some(choice) = workflow {
+                    app.run_workflow_with_choice(
+                        &input.project_id,
+                        input.instruction.clone(),
+                        mode,
+                        choice,
+                    )
+                    .await?;
                 } else {
                     app.recognize_with_mode(&input.project_id, input.instruction.clone(), mode)
                         .await?;
@@ -371,20 +418,51 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
             }
         }
         "adapt-cancel" => {
-            if let Ok(updates) = settings_ui::adaptation_limit_updates(input) {
+            let reuse_text = input.adaptation_objective == 3
+                && input.workflow_finish != 3
+                && input.workflow_use_existing_text;
+            if !reuse_text && let Ok(updates) = settings_ui::adaptation_limit_updates(input) {
                 ctx.app()
                     .await
                     .save_project_settings(&input.project_id, updates)
                     .await?;
             }
         }
-        "workflow-config" => {
-            let path = ctx
+        "workflow-settings" => {
+            let (choice, has_custom) = ctx
                 .app()
                 .await
-                .workflow_configuration(&input.project_id)
+                .workflow_preferences(&input.project_id)
                 .await?;
-            crate::open_path(path)?;
+            let id = input.project_id.clone();
+            let context = ctx.clone();
+            ctx.update(move |ui| {
+                let app = ui.global::<App>();
+                if app.get_project_id().as_str() != id || !context.is_requested_project(&id) {
+                    return;
+                }
+                load_workflow_preferences(&app, choice, has_custom);
+                app.set_error("".into());
+                app.set_modal_title("自动汉化设置".into());
+                app.set_modal_message("".into());
+                app.set_modal("workflow-settings".into());
+            });
+        }
+        "workflow-save" => {
+            let choice = workflow_choice(input)?;
+            ctx.app()
+                .await
+                .save_workflow_preferences(&input.project_id, choice)
+                .await?;
+            let id = input.project_id.clone();
+            ctx.update(move |ui| {
+                let app = ui.global::<App>();
+                if app.get_project_id().as_str() == id && app.get_modal() == "workflow-settings" {
+                    app.set_modal("".into());
+                    app.set_status("已保存自动汉化设置".into());
+                    app.set_error("".into());
+                }
+            });
         }
         "review" => {
             ctx.app().await.review_engine(&input.project_id).await?;

@@ -1,17 +1,46 @@
 //! Configurable project-owned translation and runtime verification workflow.
 
 use crate::{
-    Application, CancellationToken, CoreError,
+    Application, CancellationToken, CoreError, GameProject,
     engine_tasks::{RecognitionMode, RecognitionResult},
     game_check::{CheckMode, CheckResult, CheckSettings, CheckStatus, protocol::normalize_text},
 };
 use gamel10n_translation::{
     TranslationUnit,
     execution::TranslationOptions,
-    files::{read_json, write_json},
+    files::{io_error, read_json, write_json},
 };
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeSet, path::PathBuf};
+use std::{
+    collections::BTreeSet,
+    path::{Path, PathBuf},
+};
+
+const WORKFLOW_KEY: &str = "automaticWorkflow";
+const LEGACY_WAIT_MESSAGE: &str = "未能确定开场文本。请在运行检查中选择一条目标文本并设置进入场景的操作，或编辑 workflow.json 的定位步骤，然后重新开始。";
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum WorkflowFinish {
+    Trial,
+    Build,
+    #[default]
+    Install,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowPreset {
+    pub use_existing_text: bool,
+    pub finish: WorkflowFinish,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum WorkflowChoice {
+    Preset(WorkflowPreset),
+    Custom,
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -53,7 +82,7 @@ fn target_scope(scope: &WorkflowScope) -> bool {
     *scope == WorkflowScope::Target
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkflowStep {
     pub id: String,
@@ -76,7 +105,7 @@ pub struct WorkflowStep {
     pub on_unavailable: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkflowDefinition {
     pub schema_version: u32,
@@ -86,7 +115,18 @@ pub struct WorkflowDefinition {
 
 impl Default for WorkflowDefinition {
     fn default() -> Self {
+        Self::from_preset(WorkflowPreset::default())
+    }
+}
+
+impl WorkflowDefinition {
+    fn from_preset(preset: WorkflowPreset) -> Self {
         use WorkflowAction::*;
+        let last_step = match preset.finish {
+            WorkflowFinish::Trial => "check",
+            WorkflowFinish::Build => "buildAll",
+            WorkflowFinish::Install => "installAll",
+        };
         let steps = [
             ("recognize", Recognize),
             ("locate", LocateText),
@@ -112,25 +152,24 @@ impl Default for WorkflowDefinition {
             unit_id: String::new(),
             settings: None,
             instruction: String::new(),
-            message: if action == WaitForInput {
-                "未能确定开场文本。请在运行检查中选择一条目标文本并设置进入场景的操作，或编辑 workflow.json 的定位步骤，然后重新开始。".into()
-            } else {
-                String::new()
-            },
-            on_success: (id == "installAll").then(|| "done".into()),
+            message: String::new(),
+            on_success: (id == last_step || id == "installAll").then(|| "done".into()),
             on_failure: None,
             on_unavailable: (id == "locate").then(|| "input".into()),
         })
         .collect();
         Self {
             schema_version: 1,
-            entry: "recognize".into(),
+            entry: if preset.use_existing_text {
+                "locate"
+            } else {
+                "recognize"
+            }
+            .into(),
             steps,
         }
     }
-}
 
-impl WorkflowDefinition {
     pub fn validate(&self) -> Result<(), CoreError> {
         let invalid =
             |message: &str| CoreError::InvalidData(format!("自动流程配置无效：{message}"));
@@ -166,6 +205,36 @@ impl WorkflowDefinition {
     }
 }
 
+fn saved_workflow_choice(project: &GameProject) -> Result<Option<WorkflowChoice>, CoreError> {
+    project
+        .extra
+        .get(WORKFLOW_KEY)
+        .map(WorkflowChoice::deserialize)
+        .transpose()
+        .map_err(|error| CoreError::InvalidData(format!("自动汉化设置无效：{error}")))
+}
+
+fn read_definition(path: &Path) -> Result<WorkflowDefinition, CoreError> {
+    if path
+        .metadata()
+        .map_err(|error| io_error(path, error))?
+        .len()
+        > 256 * 1024
+    {
+        return Err(CoreError::InvalidData(
+            "自动流程配置不能超过 256 KiB。".into(),
+        ));
+    }
+    let mut definition: WorkflowDefinition = read_json(path)?;
+    for step in &mut definition.steps {
+        if step.action == WorkflowAction::WaitForInput && step.message == LEGACY_WAIT_MESSAGE {
+            step.message.clear();
+        }
+    }
+    definition.validate()?;
+    Ok(definition)
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum WorkflowStatus {
@@ -196,6 +265,42 @@ struct RunContext {
 }
 
 impl Application {
+    /// Returns the project default and whether to offer the custom workflow choice.
+    pub async fn workflow_preferences(
+        &self,
+        id: &str,
+    ) -> Result<(WorkflowChoice, bool), CoreError> {
+        let project = self.store.get(id).await?;
+        let path = self.project_directory(id)?.join("workflow.json");
+        let has_custom = path.try_exists()?
+            && !read_definition(&path)
+                .is_ok_and(|definition| definition == WorkflowDefinition::default());
+        let choice = saved_workflow_choice(&project)?.unwrap_or_else(|| {
+            if has_custom {
+                WorkflowChoice::Custom
+            } else {
+                WorkflowChoice::Preset(WorkflowPreset::default())
+            }
+        });
+        Ok((choice, has_custom || choice == WorkflowChoice::Custom))
+    }
+
+    /// Saves the project default independently of its custom workflow definition.
+    pub async fn save_workflow_preferences(
+        &self,
+        id: &str,
+        choice: WorkflowChoice,
+    ) -> Result<(), CoreError> {
+        let _project = self.lock_project(id).await?;
+        self.ensure_writable().await?;
+        let mut project = self.store.get(id).await?;
+        let value = serde_json::to_value(choice)
+            .map_err(|error| CoreError::InvalidData(error.to_string()))?;
+        project.extra.insert(WORKFLOW_KEY.into(), value);
+        self.store.save(&project).await?;
+        Ok(())
+    }
+
     /// Creates a project-local configuration once; subsequent runs read this file afresh.
     pub async fn workflow_configuration(&self, id: &str) -> Result<PathBuf, CoreError> {
         let _project = self.lock_project(id).await?;
@@ -214,14 +319,31 @@ impl Application {
         instruction: String,
         mode: RecognitionMode,
     ) -> Result<(), CoreError> {
-        let path = self.workflow_configuration(id).await?;
-        if std::fs::metadata(&path)?.len() > 256 * 1024 {
-            return Err(CoreError::InvalidData(
-                "自动流程配置不能超过 256 KiB。".into(),
-            ));
-        }
-        let definition: WorkflowDefinition = read_json(&path)?;
-        definition.validate()?;
+        let choice = match saved_workflow_choice(&self.store.get(id).await?)? {
+            Some(choice) => choice,
+            None => {
+                self.workflow_configuration(id).await?;
+                WorkflowChoice::Custom
+            }
+        };
+        self.run_workflow_with_choice(id, instruction, mode, choice)
+            .await
+    }
+
+    /// Runs a one-time workflow selection without updating the project default.
+    pub async fn run_workflow_with_choice(
+        &self,
+        id: &str,
+        instruction: String,
+        mode: RecognitionMode,
+        choice: WorkflowChoice,
+    ) -> Result<(), CoreError> {
+        let definition = match choice {
+            WorkflowChoice::Preset(preset) => WorkflowDefinition::from_preset(preset),
+            WorkflowChoice::Custom => {
+                read_definition(&self.project_directory(id)?.join("workflow.json"))?
+            }
+        };
         let cancellation = self
             .begin(id, "workflow", "正在开始全自动汉化流程。")
             .await?;
@@ -294,6 +416,10 @@ impl Application {
             .map(|()| {
                 if context.installed_all {
                     "全自动汉化完成，全量补丁已安装。".into()
+                } else if matches!(context.built, Some((_, WorkflowScope::All))) {
+                    "全量补丁已生成。".into()
+                } else if context.verified.is_some() {
+                    "试译补丁已安装，游戏显示检查已通过。".into()
                 } else {
                     "配置的自动流程已完成。".into()
                 }
@@ -480,7 +606,8 @@ impl Application {
             }
             WorkflowAction::WaitForInput => {
                 return Err(CoreError::WorkflowInput(if step.message.is_empty() {
-                    "请补充目标文本和进入场景的操作，再重新开始自动流程。".into()
+                    "未能定位验证文本。请在运行检查中调整进入场景的操作，或选择一条目标文本后重试。"
+                        .into()
                 } else {
                     step.message.clone()
                 }));

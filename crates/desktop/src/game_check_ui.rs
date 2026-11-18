@@ -2,8 +2,8 @@ use crate::{Context, UiInput, view::App};
 use gamel10n_core::{
     CancellationToken, CoreError,
     game_check::{
-        CheckMode, CheckResult, CheckSettings, CheckStatus, Observation, TextRegion, format_steps,
-        parse_steps,
+        CheckMode, CheckResult, CheckSettings, CheckStatus, Observation, SceneStep, TextRegion,
+        format_steps, parse_steps,
     },
 };
 use slint::{ComponentHandle, ModelRc, VecModel};
@@ -77,11 +77,24 @@ pub async fn refresh(ctx: &Context, id: &str) -> Result<(), CoreError> {
         Ok(settings) => (settings, String::new()),
         Err(error) => (CheckSettings::default(), error.to_string()),
     };
-    let preview = host
-        .game_check_expected(id, &settings.unit_ids)
-        .await
-        .map(|text| text.join("\n"))
-        .unwrap_or_else(|e| e.to_string());
+    let (preview, has_expected) = if settings.unit_ids.is_empty() {
+        (String::new(), false)
+    } else {
+        match host.game_check_expected(id, &settings.unit_ids).await {
+            Ok(text) => (text.join("\n"), true),
+            Err(error) => {
+                let preview = if let [unit_id] = settings.unit_ids.as_slice() {
+                    host.workbench_row(id, unit_id)
+                        .await
+                        .map(|row| format!("原文 · {}", row.unit.source_text))
+                        .unwrap_or_else(|_| error.to_string())
+                } else {
+                    error.to_string()
+                };
+                (preview, false)
+            }
+        }
+    };
     let result = ctx
         .session
         .lock()
@@ -108,6 +121,11 @@ pub async fn refresh(ctx: &Context, id: &str) -> Result<(), CoreError> {
         app.set_check_top(settings.region.top as i32);
         app.set_check_width(settings.region.width as i32);
         app.set_check_height(settings.region.height as i32);
+        app.set_check_scene(match settings.steps.as_slice() {
+            [] => 0,
+            [SceneStep::Key { key }] if key == "Enter" => 1,
+            _ => 2,
+        });
         app.set_check_steps(format_steps(&settings.steps).into());
         app.set_check_unit_ids(ModelRc::new(VecModel::from(
             settings
@@ -117,16 +135,14 @@ pub async fn refresh(ctx: &Context, id: &str) -> Result<(), CoreError> {
                 .collect::<Vec<_>>(),
         )));
         app.set_check_expected(preview.chars().take(800).collect::<String>().into());
+        app.set_check_has_expected(has_expected);
         app.set_check_message(error.into());
     });
     display(ctx, id, result);
     Ok(())
 }
 
-fn settings(
-    input: &UiInput,
-    steps: Vec<gamel10n_core::game_check::SceneStep>,
-) -> Result<CheckSettings, CoreError> {
+fn settings(input: &UiInput, steps: Vec<SceneStep>) -> Result<CheckSettings, CoreError> {
     let value = CheckSettings {
         timeout_seconds: input.check.timeout_seconds as u32,
         language: ["zh-Hans", "zh-Hant", "ja", "en"]
@@ -155,6 +171,7 @@ pub struct CheckInput {
     pub top: i32,
     pub width: i32,
     pub height: i32,
+    pub scene: i32,
     pub steps: String,
     pub unit_ids: Vec<String>,
 }
@@ -169,6 +186,7 @@ impl CheckInput {
             top: app.get_check_top(),
             width: app.get_check_width(),
             height: app.get_check_height(),
+            scene: app.get_check_scene(),
             steps: app.get_check_steps().into(),
             unit_ids: app.get_check_unit_ids().iter().map(Into::into).collect(),
         }
@@ -241,17 +259,32 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
             let steps = if requested_mode == Some(CheckMode::Text) {
                 previous.steps
             } else {
-                parse_steps(&input.check.steps)?
+                match input.check.scene {
+                    0 => Vec::new(),
+                    1 => vec![SceneStep::Key {
+                        key: "Enter".into(),
+                    }],
+                    2 => parse_steps(&input.check.steps)?,
+                    _ => return Err(CoreError::InvalidData("请选择验证场景。".into())),
+                }
             };
             settings(input, steps)?
         };
         if action == "game-check-selection" {
-            settings.unit_ids = ctx.selection(&input.project_id);
-            if settings.unit_ids.is_empty() && !input.editor_id.is_empty() {
-                settings.unit_ids.push(input.editor_id.clone());
+            if input.argument == "clear" {
+                settings.unit_ids.clear();
+            } else {
+                settings.unit_ids = ctx.selection(&input.project_id);
+                if settings.unit_ids.is_empty() && !input.editor_id.is_empty() {
+                    settings.unit_ids.push(input.editor_id.clone());
+                }
+                if let [unit_id] = settings.unit_ids.as_slice() {
+                    host.workbench_row(&input.project_id, unit_id).await?;
+                } else {
+                    host.game_check_expected(&input.project_id, &settings.unit_ids)
+                        .await?;
+                }
             }
-            host.game_check_expected(&input.project_id, &settings.unit_ids)
-                .await?;
         }
         host.save_game_check_settings(&input.project_id, settings)
             .await?;
