@@ -352,6 +352,8 @@ fn verification_summary(state: &Session, key: &str) -> Option<Value> {
         "trialBytes",
         "diagnostics",
         "issues",
+        "coveragePending",
+        "extractedSources",
         "nextAction",
     ] {
         if let Some(value) = result.get(key) {

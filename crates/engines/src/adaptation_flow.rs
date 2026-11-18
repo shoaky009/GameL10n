@@ -309,6 +309,10 @@ fn result_trace(value: &Value) -> Value {
         "stage",
         "phase",
         "passed",
+        "coveragePending",
+        "units",
+        "extractedSourceCount",
+        "extractedSources",
         "timedOut",
         "exitCode",
         "executionSucceeded",
@@ -1904,6 +1908,113 @@ mod tests {
                 assert!(state.verified_package.is_some());
             }
         }
+    }
+
+    #[tokio::test]
+    async fn coverage_review_skips_automatic_rechecks_of_unconfirmed_scope() {
+        let paths = crate::ToolPaths::development();
+        if !paths.python().is_file() || !paths.vntextpatch().is_file() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let (_, mut request, workspace, mut state) = fixture(root.path());
+        let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let service =
+            EngineService::new(assets, paths).with_shared_directory(root.path().join("shared"));
+        let token = CancellationToken::new();
+        fs::write(request.game_directory.join("text.json"), r#"["auxiliary"]"#).unwrap();
+        fs::write(
+            request.game_directory.join("main.json"),
+            r#"["主文","台词","选项"]"#,
+        )
+        .unwrap();
+        resources::stage(
+            &request,
+            &workspace,
+            &mut state,
+            &["text.json".into(), "main.json".into()],
+            false,
+            &token,
+            None,
+        )
+        .unwrap();
+        let auxiliary = include_str!("../tests/fixtures/json_adapter.py");
+        fs::create_dir_all(workspace.join("src")).unwrap();
+        fs::write(workspace.join("src/adapter.py"), auxiliary).unwrap();
+        register_python(&mut state, "src/adapter.py").unwrap();
+
+        let main = auxiliary.replace("text.json", "main.json");
+        let tool_response = |id: &str, name: &str, args: Value| {
+            json!({"id":id,"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","tool_calls":[
+                {"id":id,"type":"function","function":{"name":name,"arguments":args.to_string()}}
+            ]}}],"usage":{"prompt_tokens":100,"completion_tokens":20}})
+        };
+        let (provider, server) = model(vec![
+            tool_response(
+                "auxiliary",
+                "test_adapter",
+                json!({"kind":"engine","key":"fixture","name":"Fixture","resourcePatterns":["text.json"]}),
+            ),
+            tool_response(
+                "edit",
+                "write_file",
+                json!({"path":"src/adapter.py","content":main}),
+            ),
+            tool_response(
+                "main",
+                "test_adapter",
+                json!({"kind":"engine","key":"fixture","name":"Fixture","resourcePatterns":["main.json"],
+                    "coverageSamples":[{"resourcePath":"main.json","locator":"0","sourceText":"主文"}]}),
+            ),
+            tool_response(
+                "edit-confirmed-scope",
+                "write_file",
+                json!({"path":"src/adapter.py","content":format!("{main}\n# Confirmed main text.\n")}),
+            ),
+        ]);
+        request.limits.maximum_turns = 4;
+        let events = std::sync::Mutex::new(Vec::new());
+        let progress = std::sync::Mutex::new(Vec::new());
+        run(
+            &service,
+            &request,
+            &provider,
+            &workspace,
+            &workspace.join("session.json"),
+            &mut state,
+            "Include the main text.".into(),
+            &token,
+            Some(&|event| progress.lock().unwrap().push(event)),
+            &|event| {
+                events.lock().unwrap().push(event);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(server.join().unwrap().len(), 4);
+        let events = events.into_inner().unwrap();
+        let first_result = &events
+            .iter()
+            .find(|event| event["operation"] == "tool-end" && event["call"]["id"] == "auxiliary")
+            .unwrap()["result"];
+        assert_eq!(first_result["passed"], true);
+        assert_eq!(first_result["coveragePending"], true);
+        assert_eq!(first_result["extractedSources"], json!({"text.json":1}));
+        assert!(progress.into_inner().unwrap().iter().any(|event| {
+            event.stage == "资源验证进展" && event.message.contains("主要文字覆盖仍待确认")
+        }));
+        let host_steps: Vec<_> = events
+            .iter()
+            .filter(|event| event["operation"] == "host-step-end")
+            .collect();
+        assert_eq!(host_steps.len(), 1, "{host_steps:?}");
+        assert_eq!(host_steps[0]["turn"], 4);
+        assert_eq!(host_steps[0]["passed"], true);
+        assert_eq!(
+            host_steps[0]["result"]["extractedSources"],
+            json!({"main.json":3})
+        );
     }
 
     #[cfg(unix)]

@@ -136,13 +136,24 @@ fn progress(state: &mut Session, milestone: u32) {
 
 fn report_verification_progress(
     state: &mut Session,
-    stage: &str,
-    passed: bool,
+    result: &Value,
     original_roundtrip_passed: bool,
     callback: ProgressCallback<'_>,
 ) {
+    let stage = result["stage"].as_str().unwrap_or_default();
+    let passed = result["passed"] == true;
     let message = match (stage, passed) {
         ("discovery", true) => "已确认适配器能识别当前游戏资源；提取和中文回填尚未验收。",
+        ("finish-ready", true) if result["coveragePending"] == true => {
+            "当前选中资源的回填验收已通过，主要文字覆盖仍待确认。"
+        }
+        ("finish-ready", true)
+            if result["pendingCoverage"]
+                .as_array()
+                .is_some_and(|items| !items.is_empty()) =>
+        {
+            "当前选中资源的回填验收已通过，仍有已登记的文字遗漏。"
+        }
         ("finish-ready", true) => {
             "原文回填、中文回填和局部试译的资源验收已通过；游戏启动与显示仍需实际验证。"
         }
@@ -1097,15 +1108,6 @@ pub(super) async fn test_adapter(
     if passed && stage == "finish-ready" && !reused {
         progress(state, 4);
     }
-    report_verification_progress(
-        state,
-        stage,
-        passed,
-        verification
-            .as_ref()
-            .is_some_and(|result| result.original_roundtrip_passed),
-        callback,
-    );
     let selected = trial
         .as_ref()
         .or_else(|| probe.as_ref().map(|probe| &probe.required_files))
@@ -1173,10 +1175,18 @@ pub(super) async fn test_adapter(
     result["coveragePending"] = json!(coverage_pending);
     if coverage_pending {
         result["nextAction"] = json!(format!(
-            "资源往返验收通过，但仅提取 {} 条文本（少于 {SMALL_EXTRACTION_THRESHOLD} 条），主要文本覆盖待确认。检查 extractedSources，继续调查主要脚本和封包，不能用 allowPartial 跳过。若确为小体量游戏，提供独立 coverageSamples 并通过完整验收，再在 finish 的 smallGameEvidence 中说明主要文本资源、规模及排除遗漏的依据；有已知文字遗漏时仍不能完成。",
+            "当前资源仅提取 {} 条文本（少于 {SMALL_EXTRACTION_THRESHOLD} 条），主要文字覆盖待确认。核对 extractedSources 与主要脚本和封包。若发现未纳入的主文本资源，在下次 test_adapter 更新 resourcePatterns 并提交独立 coverageSamples。若确为小体量游戏，提供独立样本并通过完整验收，再在 finish 的 smallGameEvidence 中说明主要文本资源、规模和排除遗漏的依据。仍有已知遗漏时不能发布。",
             verification.as_ref().map_or(0, |result| result.units)
         ));
     }
+    report_verification_progress(
+        state,
+        &result,
+        verification
+            .as_ref()
+            .is_some_and(|result| result.original_roundtrip_passed),
+        callback,
+    );
     result["compileMs"] = json!(compile_ms);
     stats.apply(&mut result);
     if cacheable && input.is_some() {

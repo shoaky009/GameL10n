@@ -70,6 +70,25 @@ fn sample_time_is_a_measured_subset_of_parent_time_and_builds_are_comparable() {
 }
 
 #[test]
+fn verification_summary_keeps_coverage_and_source_scope() {
+    let result = analyze(
+        &[
+            json!({"operation":"run-start","softwareVersion":"0.1.0","buildGitHash":"fixture-build"}),
+            json!({"operation":"tool-end","call":{"id":"verification","name":"test_adapter","selectors":{}},"success":true,"result":{
+                "passed":true,"stage":"finish-ready","coveragePending":true,
+                "units":70,"extractedSourceCount":1,"extractedSources":{"aux.json":70}}}),
+        ],
+        false,
+    );
+    let last = &result["milestones"]["lastFullVerification"];
+    assert_eq!(last["passed"], true);
+    assert_eq!(last["coveragePending"], true);
+    assert_eq!(last["units"], 70);
+    assert_eq!(last["extractedSourceCount"], 1);
+    assert_eq!(last["extractedSources"], json!({"aux.json":70}));
+}
+
+#[test]
 fn legacy_and_mixed_logs_keep_unmeasured_categories_unknown() {
     for measured_scope in [None, Some("local-preparation"), Some("tool-end")] {
         let mut entries = vec![

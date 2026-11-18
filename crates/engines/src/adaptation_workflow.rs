@@ -20,7 +20,7 @@ pub(super) struct Step {
 }
 
 fn key(state: &Session, workspace: &Path, args: &Value) -> Result<String, EngineError> {
-    Ok(hash_text(&json!({"implementation":workspace_fingerprint(workspace,state)?,"inputs":repair::input_key(state),"arguments":args}).to_string()))
+    Ok(hash_text(&json!({"implementation":workspace_fingerprint(workspace,state)?,"inputs":repair::input_key(state),"arguments":args,"coverageSamples":state.text_coverage["samples"]}).to_string()))
 }
 
 pub(super) fn register(state: &mut Session, arguments: Value) {
@@ -66,7 +66,22 @@ pub(super) fn observe(
         } else {
             state.workflow.needs_verification = false;
         }
-        state.workflow.verification_args = Some(normalized);
+        // Source edits alone do not establish which of the staged files hold the main text.
+        let needs_scope_confirmation = result["coveragePending"] == true
+            && state.text_coverage["samples"]
+                .as_array()
+                .is_none_or(Vec::is_empty)
+            && state.extra["resourceHashes"]
+                .as_object()
+                .is_some_and(|staged| {
+                    staged.keys().any(|path| {
+                        !state
+                            .resource_patterns
+                            .iter()
+                            .any(|pattern| crate::discovery::glob_match(pattern, path))
+                    })
+                });
+        state.workflow.verification_args = (!needs_scope_confirmation).then_some(normalized);
     } else if success
         && result["changed"] == true
         && matches!(name, "write_file" | "replace_text" | "remove_file")
@@ -220,6 +235,28 @@ mod tests {
             &mut state,
             root.path(),
             "replace_text",
+            &json!({"path":"src/adapter.py"}),
+            &json!({"success":true,"changed":true}),
+        );
+        assert!(next(&mut state, root.path()).unwrap().is_some());
+    }
+
+    #[test]
+    fn coverage_review_keeps_rechecks_when_all_staged_resources_are_selected() {
+        let root = tempfile::tempdir().unwrap();
+        let mut state = fixture(root.path());
+        observe(
+            &mut state,
+            root.path(),
+            "test_adapter",
+            &json!({"resourcePatterns":["*.json"]}),
+            &json!({"passed":true,"stage":"finish-ready","coveragePending":true}),
+        );
+        fs::write(root.path().join("src/adapter.py"), "# fixed parser").unwrap();
+        observe(
+            &mut state,
+            root.path(),
+            "write_file",
             &json!({"path":"src/adapter.py"}),
             &json!({"success":true,"changed":true}),
         );

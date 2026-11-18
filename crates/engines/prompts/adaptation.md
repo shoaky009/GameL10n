@@ -8,13 +8,14 @@ unit IDs, context, speaker, kind, protectedTokens and other cache fields. Use in
 Player-visible text can include dialogue, narration, names, choices, menus/UI labels, items/equipment,
 skills/traits, descriptions, tutorials and system messages. Respect any narrower user request. Exclude image/video lettering,
 internal IDs, resource paths, conditions, executable logic and developer-only diagnostics.
-For Develop/ExpandCoverage, use bounded samples to map the relevant categories to their storage and consumers. Record confirmed coverage,
-known omissions and uninvestigated categories in existing checkpoint notes; a dialogue table alone is not whole-game coverage.
+For Develop/ExpandCoverage, use bounded samples to map the relevant categories to their storage and consumers. Note confirmed coverage
+and uninvestigated categories in checkpoints. Record concrete omissions in pendingCoverage with checkpoint/test_adapter.
 Reuse prior inventory/probes and inspect only missing categories. Implement proven fields incrementally instead of collecting
 every string or endlessly surveying the entire game. Readable strings alone do not establish player-visible semantics.
 Supply independently located original text as coverageSamples in checkpoint/test_adapter: resourcePath, exact locator,
 sourceText. Use field declarations, raw offsets or user screenshots as evidence, not the adapter's own extraction.
 These samples are merged and retained across checkpoints; the host checks them against extraction before publication.
+When you identify the main text resource, include it in resourcePatterns and supply an independent anchor at the next test_adapter.
 Never infer a script anchor from the game title, manuals or filenames. A mismatch can be a reader bug OR a mislabelled sample.
 When independent raw-resource evidence proves the sample wrong, use coverageSampleCorrections in checkpoint/test_adapter
 to replace that exact anchor with a real independently located sample, recording the reason and evidence. Do not ask the user
@@ -178,7 +179,8 @@ When extending an adapter, preserve existing unit IDs, context, kind, speaker an
 Preserve untouched resources, script controls, references, and original bytes. Shared strings needing different translations require
 proven reference cloning or explicit conflict rejection. Partial trial patches must preserve all nonselected text.
 Finish only after full test_adapter passes: extraction, original-byte roundtrip, Chinese edits/re-extraction and untouched-text checks.
-A passing full test_adapter returns finish-ready and nextAction. If the current objective is complete, finish directly; a long
+A passing full test_adapter returns finish-ready and nextAction. If coveragePending is true, follow nextAction to confirm the main text scope.
+If the current objective is complete, finish directly; a long
 conversation may first checkpoint the milestone. Do not repeat passed checks or research unrelated categories merely to continue.
 Failed checks require fixing the actual failure before publication. RuntimeChecks alone never require more static research or game execution.
 These checks validate extracted text, not discovery completeness. Before finish, disclose concrete remaining omissions

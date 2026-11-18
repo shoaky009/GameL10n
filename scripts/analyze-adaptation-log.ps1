@@ -228,7 +228,7 @@ function Tool-Reference($row) {
         if ($null -ne $row.entry.result.$field) { $item[$field] = $row.entry.result.$field }
     }
     if ($row.entry.tool -eq 'test_adapter') {
-        foreach ($field in @('reused', 'compileMs', 'discoveryMs', 'verificationMs', 'fingerprintMs', 'fingerprintStats', 'verificationStagesMs')) {
+        foreach ($field in @('reused', 'coveragePending', 'units', 'extractedSourceCount', 'extractedSources', 'compileMs', 'discoveryMs', 'verificationMs', 'fingerprintMs', 'fingerprintStats', 'verificationStagesMs')) {
             if ($null -ne $row.entry.result.$field) { $item[$field] = $row.entry.result.$field }
         }
     }
