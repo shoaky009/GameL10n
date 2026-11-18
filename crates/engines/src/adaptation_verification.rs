@@ -145,14 +145,14 @@ fn report_verification_progress(
     let message = match (stage, passed) {
         ("discovery", true) => "已确认适配器能识别当前游戏资源；提取和中文回填尚未验收。",
         ("finish-ready", true) if result["coveragePending"] == true => {
-            "当前选中资源的回填验收已通过，主要文字覆盖仍待确认。"
+            "当前选中资源验收已通过，主要文字覆盖仍待确认。"
         }
         ("finish-ready", true)
             if result["pendingCoverage"]
                 .as_array()
                 .is_some_and(|items| !items.is_empty()) =>
         {
-            "当前选中资源的回填验收已通过，仍有已登记的文字遗漏。"
+            "当前选中资源验收已通过，仍有已登记的文字遗漏。"
         }
         ("finish-ready", true) => {
             "原文回填、中文回填和局部试译的资源验收已通过；游戏启动与显示仍需实际验证。"
