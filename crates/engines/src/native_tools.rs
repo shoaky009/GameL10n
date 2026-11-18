@@ -174,12 +174,14 @@ mod tests {
             .tool_paths(Some(&package), &CancellationToken::new())
             .await
             .expect("current runtime");
-        assert_eq!(paths["vnTextPatch"], json!(service.tools.vntextpatch()));
-        assert_eq!(
-            paths["vnTextPatchCommand"],
-            json!([service.tools.vntextpatch()])
-        );
-        assert_eq!(paths["hostCommand"], json!([service.tools.vntextpatch()]));
+        let executable = service.tools.vntextpatch();
+        let path: PathBuf =
+            serde_json::from_value(paths["vnTextPatch"].clone()).expect("runtime path");
+        assert_eq!(path, executable);
+        for key in ["vnTextPatchCommand", "hostCommand"] {
+            let [program]: [PathBuf; 1] = serde_json::from_value(paths[key].clone()).expect(key);
+            assert_eq!(program, executable);
+        }
         retained_runtime(&service, &pin);
         native_runtime(&source, b"new executable");
         let error = service
@@ -196,7 +198,7 @@ mod tests {
         let new_pin = service.create_native_pin().expect("current pin");
         assert_eq!(
             service.resolve_native_tools(&new_pin).expect("new runtime"),
-            service.tools.vntextpatch()
+            executable
         );
     }
 
