@@ -655,43 +655,33 @@ impl Application {
         let query = filter.query.to_lowercase();
         let source = filter.source_query.to_lowercase();
         let translation = filter.translation_query.to_lowercase();
-        let matches: Vec<_> = units
-            .iter()
-            .enumerate()
-            .filter(|(_, unit)| {
-                workbench.rows.get(&unit.id).is_some_and(|row| {
-                    matches_filter(
-                        unit,
-                        row,
-                        filter,
-                        &query,
-                        &source,
-                        &translation,
-                        selected.as_ref(),
-                    )
-                })
-            })
-            .collect();
-        if matches.is_empty() {
-            return Ok(None);
-        }
-        let current_position = units.iter().position(|unit| unit.id == current);
-        let next = if let Some(position) = matches.iter().position(|(_, unit)| unit.id == current) {
-            if direction < 0 {
-                position.saturating_sub(1)
-            } else {
-                (position + 1).min(matches.len() - 1)
+        let current_index = workbench.rows.get(current).map(|row| row.index);
+        let previous = direction < 0;
+        let matches = units.iter().filter_map(|unit| {
+            let row = workbench.rows.get(&unit.id)?;
+            matches_filter(
+                unit,
+                row,
+                filter,
+                &query,
+                &source,
+                &translation,
+                selected.as_ref(),
+            )
+            .then_some((row.index, unit))
+        });
+        let mut adjacent = None;
+        for (rank, (index, unit)) in matches.enumerate() {
+            if previous && current_index.is_none_or(|current| index >= current) {
+                adjacent.get_or_insert((unit, rank));
+                break;
             }
-        } else if direction < 0 {
-            current_position
-                .and_then(|current| matches.iter().rposition(|(index, _)| *index < current))
-                .unwrap_or(0)
-        } else {
-            current_position
-                .and_then(|current| matches.iter().position(|(index, _)| *index > current))
-                .unwrap_or(matches.len() - 1)
-        };
-        Ok(Some((matches[next].1.id.clone(), next)))
+            adjacent = Some((unit, rank));
+            if !previous && current_index.is_some_and(|current| index > current) {
+                break;
+            }
+        }
+        Ok(adjacent.map(|(unit, rank)| (unit.id.clone(), rank)))
     }
     pub async fn workbench_context(&self, id: &str, unit_id: &str) -> Result<String, CoreError> {
         let analysis = self
