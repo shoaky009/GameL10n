@@ -1,35 +1,22 @@
-# 文档
+# GameL10n 文档
 
-## 总览与开发
+## 使用 GameL10n
 
-| 主题 | 文档 |
+| 你想做什么 | 从这里开始 |
 | --- | --- |
-| 模块与依赖 | [架构与模块边界](architecture.md) |
-| 环境、构建与发布 | [开发与构建](development.md) |
-| 使用边界与版权联系 | [免责声明与版权投诉](../DISCLAIMER.md) |
+| 配置分析、翻译或本地模型 | [模型接口配置](model-providers.md) |
+| 识别游戏、试译、安装补丁和检查游戏画面 | [桌面操作](desktop.md) |
+| 自动完成试译检查和全量安装 | [全自动汉化流程](automatic-workflow.md) |
+| 处理不识别、漏译、乱码或字体问题 | [识别与智能适配](adapters/automatic-adaptation.md) |
+| 查找支持的格式和管理适配器版本 | [引擎库与格式支持](adapters/README.md#引擎与格式能力表) |
+| 迁移数据、恢复原版或清理文件 | [数据目录与迁移](data-storage.md) |
+| 比较模型或版本的 Token 与耗时 | [消耗指标](consumption-metrics.md) |
 
-## 功能与流程
+使用范围和版权联系见 [免责声明](../DISCLAIMER.md)。
 
-| 主题 | 文档 |
-| --- | --- |
-| 项目、校对、日志与导航 | [桌面交互](desktop.md) |
-| 试译、游戏检查与全量安装编排 | [全自动汉化流程](automatic-workflow.md) |
-| 版本与模型的 Token、耗时趋势 | [消耗指标](consumption-metrics.md) |
-| API、翻译链与失败重试 | [模型接口配置](model-providers.md) |
-| 保存位置、恢复与清理 | [数据目录与迁移](data-storage.md) |
-| 适配目标、费用与验证 | [识别与智能适配](adapters/automatic-adaptation.md) |
-| 工具、缓存与会话 | [执行与恢复机制](adapters/adaptation-internals.md) |
-| Windows 文件访问与执行限制 | [LLM 执行隔离](adapters/execution-isolation.md) |
-| 候选筛选与识别声明 | [引擎识别](adapters/recognition.md) |
-| 源码、补丁与工作资料 | [产物与目录约定](adapters/artifacts.md) |
+## 开发与维护
 
-## 组件与协议
-
-- [适配器 CLI 协议](adapters/protocol.md)
-- [编码与运行组件](adapters/components.md)
-- [封包组件](adapters/engine-components.md)
-- [组件组合模板](adapters/templates.md)
-
-## 引擎与资源格式
-
-[引擎能力表](adapters/README.md#引擎与格式能力表)索引各引擎专篇，说明格式、运行条件与限制。
+- [开发环境、构建与发布](development.md)
+- [架构与模块边界](architecture.md)
+- [适配器协议](adapters/protocol.md) · [识别声明](adapters/recognition.md) · [适配与补丁产物](adapters/artifacts.md)
+- [执行隔离](adapters/execution-isolation.md) · [文本与运行组件](adapters/components.md) · [封包与模板](adapters/templates.md)

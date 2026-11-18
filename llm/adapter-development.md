@@ -20,7 +20,7 @@
 
 ## 封包组件
 
-先用 `inspect_engine_component` 确认支持范围与预算；`list_adapters.engineComponents` 也可查看目录。仅在当前资源符合限制时使用固定组件。详见[封包组件支持范围](../docs/adapters/engine-components.md)。
+先用 `inspect_engine_component` 确认支持范围与预算；`list_adapters.engineComponents` 也可查看目录。仅在当前资源符合限制时使用固定组件。详见[封包组件支持范围](../docs/adapters/templates.md#封包组件)。
 
 先 `stage_resources`，然后调用 `run_engine_component`，不必生成 Python 脚本：
 
@@ -74,7 +74,7 @@ RPYC2 编译脚本优先使用 `loose-renpy-rpyc` 或 `rpa3-renpy-rpyc`，直接
 
 未命中时可继续查询格式目录和上游注册清单。`fetch_url` 支持 `query` 关键词定位及 `offset` / `length` 字符分页，大型目录在本地搜索，只将相关片段交给模型；读取完整条目后再判断能力。GitHub 仓库搜索只查仓库元数据，不查源码正文。Bishop 的 GSC 资料与 BSScript Rev.6 等不同格式不能因厂商相同而直接混用。
 
-先复用发行包与项目固定的依赖。额外工具使用 `download_tool`，默认复用共享缓存；只有确需更新时才显式传 `refresh=true`，更新后重新验收。修改过的本地文件不会被默认覆盖。资料用 `fetch_url` 分页读取，并核对返回的获取时间与 `stale`；缓存和限制见[共享下载缓存](../docs/adapters/adaptation-internals.md#共享下载缓存)。
+先复用发行包与项目固定的依赖。额外工具使用 `download_tool`，默认复用共享缓存；只有确需更新时才显式传 `refresh=true`，更新后重新验收。修改过的本地文件不会被默认覆盖。资料用 `fetch_url` 分页读取，并核对返回的获取时间与 `stale`；缓存位置见[共享下载缓存](../docs/adapters/artifacts.md#共享下载缓存)。
 
 按容器、解码、文本语义、回填、重封包和运行显示定位实际缺口。未找到现成工具不能作为无法适配的唯一依据。读取当前固定版本的指南与源码，核对许可并保留必要声明。
 

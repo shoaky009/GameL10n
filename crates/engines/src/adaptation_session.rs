@@ -64,6 +64,8 @@ pub(super) async fn save(path: &Path, state: &mut Session) -> Result<(), EngineE
             serde_json::to_writer(&mut bytes, message)?;
             bytes.push(b'\n');
         }
+        // The snapshot commits the history boundary after the append succeeds. Recovery reads
+        // up to that boundary even if an interrupted save left more bytes in the archive.
         let end = if !bytes.is_empty() {
             append_bytes(&history_file, previous.bytes, &bytes).map_err(file_error)?
         } else {

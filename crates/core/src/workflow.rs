@@ -490,6 +490,7 @@ impl Application {
         Ok(())
     }
 
+    // Custom branches can enter full-scope steps directly. Check the trial and its inputs there.
     async fn require_workflow_verification(
         &self,
         id: &str,

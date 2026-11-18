@@ -1,4 +1,8 @@
 //! Native window, launcher and OCR acceptance fixtures.
+//!
+//! Build the `game_fixture` example and set `GAMEL10N_GAME_CHECK_FIXTURE` to its EXE path.
+//! On an interactive Windows desktop with English OCR, run this crate's tests with
+//! `cargo test --test runtime -- --ignored --test-threads=1` so the fixtures share the desktop in turn.
 #![cfg(windows)]
 use serde_json::{Value, json};
 use std::{

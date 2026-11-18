@@ -201,6 +201,7 @@ def inspect_font(gdi, spec, characters, gdip=None):
         raise ValueError("face must contain 1..31 UTF-16 code units")
     lf = LOGFONT()
     lf.faceName = face
+    # Positive heights include internal leading. Negative heights request the character height.
     lf.height = integer(spec, "height", -24, -512, 512)
     if not lf.height:
         raise ValueError("height must not be zero; use the engine's signed height request")

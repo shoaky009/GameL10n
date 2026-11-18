@@ -442,6 +442,7 @@ fn record_tool(state: &mut Session, call: &ToolCall, args: &Value, value: &Value
     }
 }
 
+// Compare local requests within the same segment. Provider cache usage is reported separately.
 fn request_prefix(
     state: &mut Session,
     messages: &[Value],
@@ -496,6 +497,7 @@ pub(super) async fn run(
     state.next_action.clear();
     decision::bootstrap(state);
     let initial_usage = tokens(&state.usage);
+    // Keep the full registry in order across turns and resumes for a stable request prefix.
     let all = tool_definitions()?;
     let known_tools: Vec<String> = all
         .iter()
@@ -820,6 +822,7 @@ pub(super) async fn run(
             .map(visible_json_bytes)
             .sum::<usize>();
         let process_bytes_saved = decision_context.replay.process_bytes_saved;
+        // Full process output remains in the archive. Its omitted bytes need no extra compaction.
         let checkpoint_bytes = retained.saturating_sub(process_bytes_saved);
         if visible > 192 * 1024 || checkpoint_bytes > 768 * 1024 {
             compact_history(state, &service.disabled_families)?;

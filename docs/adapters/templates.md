@@ -1,33 +1,30 @@
-# 组件组合模板
+# 封包组件与组合模板
 
-模板提供适配器协议入口、资源发现、解析器连接与发布依赖。
+选择模板前，先确认封包布局、过滤器和脚本类型。模板生成协议入口与依赖配置，当前资源仍需完整验收。
 
-| 模板 ID | 封包组件 | 脚本解析器 | 资源规则 |
-| --- | --- | --- | --- |
-| `loose-renpy` | 无 | Renpy / `.rpy` | `**/*.rpy` |
-| `loose-kirikiri-ks` | 无 | KirikiriKs / `.ks` | `**/*.ks` |
-| `rpa3-renpy` | `archive.rpa3` / 2 | Renpy / `.rpy` | `**/*.rpa` |
-| `loose-renpy-rpyc` | 无 | RPYC2 惰性 AST | `**/*.rpyc` |
-| `rpa3-renpy-rpyc` | `archive.rpa3` / 2 | RPYC2 惰性 AST | `**/*.rpa` |
-| `renpy-mixed` | `archive.rpa3` / 2（有封包时） | Renpy 源码 + RPYC2 | `.rpy`、`.rpyc`、`.rpa` |
-| `xp3-kirikiri-ks` | `archive.xp3` / 1 | KirikiriKs / `.ks` | `**/*.xp3` |
+## 封包组件
 
-模板检查目标冲突后写入 `src/`，配置位于 `src/tools/adapter-template.json`；相同内容复用，不同内容保留并报错。依赖使用固定共享组件。
+| 组件 | 适用条件 |
+| --- | --- |
+| `archive.rpa3` | 单分块 RPA/ARC 3.0，使用纯数据 Pickle 索引。未知混淆或多分块需另行适配。 |
+| `archive.xp3` | 标准 XP3 v1，需先独立确认无过滤器并声明 `filter: "none"`。带加密、私有过滤器或内嵌 EXE 的封包需另行适配。 |
 
-生成模板后仍需完整资源验收。首次新建适配可自动完成前六种组合的准备、验收与发布，条件见[首次自动组合](adaptation-internals.md#首次自动组合)。XP3 须独立确认过滤器并声明 `filter: "none"`。
+两者支持 `inspect`、`extract` 和 `rebuild`，按成员名或扩展名选择提取。重建按精确成员名替换，并核对未修改成员。RPA 索引读取和选中成员提取可分开执行，需要校验全部成员时用 `verifyContents: true`。[封包接口与预算](../../adapters/components/engine_archive.py)
+
+## 组合模板
+
+| 模板 ID | 资源 |
+| --- | --- |
+| `loose-renpy` | 松散 `.rpy` |
+| `loose-kirikiri-ks` | 松散 `.ks` |
+| `rpa3-renpy` | RPA3 中的 `.rpy` |
+| `loose-renpy-rpyc` | 松散 RPYC2 |
+| `rpa3-renpy-rpyc` | RPA3 中的 RPYC2 |
+| `renpy-mixed` | 同一加载根下的 `.rpy`、RPYC2 与 RPA3 |
+| `xp3-kirikiri-ks` | 无过滤器 XP3 中的 `.ks` |
+
+用 `compose_adapter_template` 准备源码和固定依赖。首次识别可自动尝试前六种组合，资源布局或验收不满足条件时进入后续调查。XP3 需要先确认过滤器再接入。[模板注册](../../crates/engines/src/adaptation_assets.rs) · [生成和验收流程](automatic-adaptation.md)
 
 ## Ren’Py 混合资源
 
-`renpy-mixed` 读取完整封包索引和松散文件路径，要求封包处于同一加载根，松散脚本位于根内。同名 `.rpy` / `.rpyc`、不同包的重复脚本路径、未知加载根或模块均停止自动处理。
-
-不同章节可分别使用源码和编译脚本。纯媒体包只查索引，构建保留原字节，验收核对全部成员。格式限制见[RPYC2](engines/renpy-rpyc.md)，封包预算见[封包组件](engine-components.md)。
-
-## 连接行为
-
-探测只读取受限头部，完整解析在提取、构建和验证阶段执行。只解包所选脚本，其他成员保留在原包中。
-
-`resourcePath` 指向外层封包，`locator` 保留内层脚本与解析器位置；ID 由外层路径和稳定解析器身份构成，不依赖译文长度。RPYC2 身份来自节点、行号、文本角色和选项位置，不使用 Pickle 字节偏移。
-
-构建先校验 ID，再移除与原文相同的译文。无修改资源复制原字节，有修改资源重建并比较全部成员。支持的模板可通过[校验上下文](components.md#固定解析器与校验上下文)复用本次提取结果，同时保留格式专用检查。
-
-Ren’Py 保留 UTF-8/BOM 策略，Kirikiri KS 按解析器规则写回 UTF-16。字体、转区、过滤器和加载顺序按当前游戏验证；运行状态在实机确认前为 `not-tested`。
+封包和松散脚本须处于同一加载根。同名源码和编译脚本、跨包重复路径、自定义模块或未知加载关系需要单独调查。纯媒体包保留原内容。[RPYC2 范围](engines/renpy-rpyc.md)

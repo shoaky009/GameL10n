@@ -272,6 +272,7 @@ impl Application {
         let Some(run) = metrics.active.get_mut(id) else {
             return;
         };
+        // Save enough progress for crash recovery without writing on every task update.
         if run.last_saved.elapsed().as_secs() < 60 {
             return;
         }
