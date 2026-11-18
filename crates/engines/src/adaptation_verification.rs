@@ -1352,7 +1352,14 @@ mod tests {
                 assert_eq!(report["passed"], case == 0);
                 if case == 3 {
                     assert_eq!(report["adapterIssues"].as_array().unwrap().len(), 1024);
-                    assert!(state.verification.as_ref().unwrap().adapter_issues.is_empty());
+                    assert!(
+                        state
+                            .verification
+                            .as_ref()
+                            .unwrap()
+                            .adapter_issues
+                            .is_empty()
+                    );
                     assert!(
                         state.extra["verificationCache"]["verification"]["adapterIssues"].is_null()
                     );
