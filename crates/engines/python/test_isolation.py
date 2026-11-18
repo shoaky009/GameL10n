@@ -17,7 +17,9 @@ class IsolatedTemporaryDirectoryTest(unittest.TestCase):
             with patch.object(tempfile, 'mkdtemp', MKDTEMP), self.assertRaisesRegex(ValueError, 'failed'):
                 with tempfile.TemporaryDirectory(prefix='probe-', suffix='-output', dir=Path(root)) as name:
                     directory = Path(name)
-                    self.assertEqual(directory.parent, Path(root).resolve())
+                    self.assertTrue(directory.is_absolute(), directory)
+                    self.assertTrue(directory.parent.samefile(root),
+                                    f'Expected parent directory {root}, got {directory.parent}')
                     self.assertTrue(directory.name.startswith('probe-') and directory.name.endswith('-output'))
                     (directory / 'sample.bin').write_bytes(b'sample')
                     raise ValueError('failed')
