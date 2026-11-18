@@ -41,4 +41,4 @@ cargo run -p gamel10n-core -- --data-directory 'D:\GameL10n Data' audit
 
 ## GitHub 发布
 
-在 [CHANGELOG.md](../CHANGELOG.md) 整理对应版本的条目，顶部保留 `[Unreleased]`。提交后推送 `vX.Y.Z` tag。发布流程打包 Windows x64 ZIP，并读取对应版本的变更条目。[发布流程](../.github/workflows/release.yml)
+在 [CHANGELOG.md](../CHANGELOG.md) 整理 `[X.Y.Z]` 的变更条目。提交后推送 `vX.Y.Z` 发布正式版，推送 `vX.Y.Z-rcN` 发布候选版。发布流程将变更条目和 Windows x64 ZIP 放到 GitHub Releases。[发布流程](../.github/workflows/release.yml)

@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-rc[0-9]+'
 
 permissions:
   contents: read
@@ -23,14 +24,16 @@ jobs:
 
       - name: Read release notes
         run: |
-          if ($env:GITHUB_REF_NAME -notmatch '^v\d+\.\d+\.\d+$') {
-              throw 'Release tags must use vMAJOR.MINOR.PATCH, for example v1.0.0.'
+          $tag = [regex]::Match($env:GITHUB_REF_NAME, '^v(?<version>\d+\.\d+\.\d+)(?:-rc\d+)?$')
+          if (-not $tag.Success) {
+              throw 'Release tags must use vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-rcN.'
           }
-          $version = [regex]::Escape($env:GITHUB_REF_NAME.Substring(1))
+          $version = $tag.Groups['version'].Value
+          $versionPattern = [regex]::Escape($version)
           $changelog = Get-Content -LiteralPath CHANGELOG.md -Raw
-          $sections = [regex]::Matches($changelog, "(?ms)^## \[$version\][^\r\n]*\r?\n(?<notes>.*?)(?=^## |\z)")
+          $sections = [regex]::Matches($changelog, "(?ms)^## \[$versionPattern\][^\r\n]*\r?\n(?<notes>.*?)(?=^## |\z)")
           if ($sections.Count -ne 1 -or [string]::IsNullOrWhiteSpace($sections[0].Groups['notes'].Value)) {
-              throw "CHANGELOG.md must contain one nonempty section for [$($env:GITHUB_REF_NAME.Substring(1))]."
+              throw "CHANGELOG.md must contain one nonempty section for [$version]."
           }
           [IO.File]::WriteAllText((Join-Path $env:RUNNER_TEMP 'release-notes.md'), $sections[0].Groups['notes'].Value.Trim())
 
@@ -62,6 +65,7 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           name: ${{ github.ref_name }}
+          prerelease: ${{ contains(github.ref_name, '-rc') }}
           body_path: ${{ runner.temp }}/release-notes.md
           files: artifacts/GameL10n-${{ github.ref_name }}-win-x64.zip
           fail_on_unmatched_files: true
