@@ -49,6 +49,23 @@ mod tests {
         )
         .await
         .unwrap();
+        let units = ["Hello", "Goodbye"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, text)| {
+                let line = index + 1;
+                crate::TranslationUnit {
+                    id: format!("line-{line}"),
+                    resource_path: "story.txt".into(),
+                    locator: line.to_string(),
+                    source_text: text.into(),
+                    context: "opening".into(),
+                    speaker: None,
+                    kind: "dialogue".into(),
+                    protected_tokens: None,
+                }
+            })
+            .collect();
         write_json(
             &app.project_directory(&project.id)
                 .unwrap()
@@ -61,21 +78,12 @@ mod tests {
                 resource_files: vec!["story.txt".into()],
                 source_hashes: std::collections::BTreeMap::from([(
                     "story.txt".into(),
-                    hash_text("Hello"),
+                    hash_text("Hello\nGoodbye"),
                 )]),
                 adapter: None,
                 probe: None,
                 extraction: gamel10n_engines::protocol::ExtractionResult {
-                    units: vec![crate::TranslationUnit {
-                        id: "line-1".into(),
-                        resource_path: "story.txt".into(),
-                        locator: "1".into(),
-                        source_text: "Hello".into(),
-                        context: "opening".into(),
-                        speaker: None,
-                        kind: "dialogue".into(),
-                        protected_tokens: None,
-                    }],
+                    units,
                     warnings: vec![],
                 },
             },
@@ -164,6 +172,44 @@ mod tests {
         let resumed = app.resume_translation(&id, true).await.unwrap();
         assert_eq!((resumed.completed, resumed.cache_hits), (1, 1));
         assert_eq!(resumed.translations["line-1"], "你好");
+    }
+
+    #[tokio::test]
+    async fn partial_trial_marks_task_failed_and_preserves_the_translation_scope() {
+        let (_root, app, id, mut options) = trial_fixture().await;
+        let directory = app.project_directory(&id).unwrap();
+        let unit = app.workbench_row(&id, "line-2").await.unwrap().unit;
+        let policy = crate::workbench::policy(&app.open_project(&id).await.unwrap().settings);
+        let memory_key = gamel10n_translation::storage::memory_key(&unit, &policy);
+        // A previous request was interrupted before its outcome was saved.
+        gamel10n_translation::files::write_json(
+            &directory.join("translation-execution.json"),
+            &serde_json::json!({"pending": {"interrupted": {"request": {
+                "requestKey": "interrupted", "provider": "unused", "sentAt": "2026-01-01T00:00:00Z",
+                "units": [{"id": unit.id, "memoryKey": memory_key}]
+            }}}}),
+        )
+        .unwrap();
+        options.unit_ids = Some(vec!["line-1".into(), "line-2".into()]);
+        options.retry_uncertain_requests = false;
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            app.translate_project(&id, options.clone()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!((result.completed, result.failed), (1, 1));
+        assert_eq!(result.translations["line-1"], "你好");
+        let state = app.task_state(&id).await.unwrap();
+        assert!(!state.running);
+        assert_eq!(state.operation, "translate");
+        assert_eq!(state.succeeded, Some(false));
+        let scope = app.translation_scope(&id).await.unwrap().unwrap();
+        assert!(!scope.completed && scope.build_patch_after);
+        assert_eq!(scope.unit_ids, options.unit_ids);
+        assert!(!directory.join("patches").exists());
     }
 
     #[tokio::test]
@@ -504,24 +550,22 @@ impl Application {
             Ok::<_, CoreError>(result)
         }
         .await;
-        self.finish(
-            id,
-            final_operation,
-            result
-                .as_ref()
-                .map(|result| {
-                    if let Some(path) = &patch {
-                        format!("补丁已生成：{}。尚未验证游戏内显示。", path.display())
-                    } else {
-                        format!(
-                            "翻译完成：成功 {} 条，失败 {} 条。",
-                            result.completed, result.failed
-                        )
-                    }
-                })
-                .map_err(ToString::to_string),
-        )
-        .await?;
+        let outcome = match &result {
+            Ok(result) if result.failed > 0 => Err(format!(
+                "翻译未全部完成。成功 {} 条，失败 {} 条。",
+                result.completed, result.failed
+            )),
+            Ok(result) => Ok(if let Some(path) = &patch {
+                format!("补丁已生成：{}。尚未验证游戏内显示。", path.display())
+            } else {
+                format!(
+                    "翻译完成：成功 {} 条，失败 {} 条。",
+                    result.completed, result.failed
+                )
+            }),
+            Err(error) => Err(error.to_string()),
+        };
+        self.finish(id, final_operation, outcome).await?;
         result
     }
 
