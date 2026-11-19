@@ -19,7 +19,8 @@ use crate::{
     AdaptationLimits, CancellationToken, EngineError, EngineProgress, EngineService,
     ProgressCallback,
     adaptation::{
-        Session, add_usage, definition, file_error, page_text, read_tool_result, text, tokens,
+        Session, add_usage, completion_usage, definition, file_error, page_text, read_tool_result,
+        text, tokens,
     },
     discovery::{Inventory, InventoryFile, resolve_relative},
 };
@@ -278,7 +279,8 @@ impl EngineService {
         let mut usage = TokenUsage::default();
         let requests_before = provider.request_count();
         let mut inspected = BTreeMap::new();
-        for turn in 0..limits.maximum_turns {
+        let mut turn = 0;
+        loop {
             if cancellation.is_cancelled() {
                 return Err(EngineError::Cancelled);
             }
@@ -288,16 +290,15 @@ impl EngineService {
                 + 1;
             let remaining = limits.maximum_tokens.saturating_sub(tokens(&usage));
             if remaining < estimated + 128 {
-                return Err(EngineError::Rejected(
-                    "总结已达到本次 Token 预算，未改动已有全局经验。".into(),
-                ));
+                break;
             }
+            turn += 1;
             if let Some(progress) = progress {
                 progress(EngineProgress {
                     stage: "总结引擎经验".into(),
                     message: "正在核对可复用结论。".into(),
                     usage: usage.clone(),
-                    turn: turn + 1,
+                    turn,
                     api_requests: Some(provider.request_count().saturating_sub(requests_before)),
                     tool_name: None,
                     status_only: true,
@@ -315,7 +316,10 @@ impl EngineService {
                 )
                 .await
                 .map_err(|error| EngineError::Api(Box::new(error)))?;
-            add_usage(&mut usage, &completion.usage);
+            add_usage(&mut usage, &completion_usage(&completion, estimated)?);
+            if tokens(&usage) > limits.maximum_tokens {
+                break;
+            }
             if completion.output_items.is_empty() {
                 messages.push(json!({"role":"assistant","content":completion.text,"tool_calls":completion.tool_calls.iter().map(|call|json!({"id":call.id,"type":"function","function":{"name":call.name,"arguments":call.arguments}})).collect::<Vec<_>>()}));
             } else {
@@ -334,7 +338,7 @@ impl EngineService {
                         message: crate::tool_activity::message(&call.name, &args),
                         tool_name: Some(call.name.clone()),
                         usage: usage.clone(),
-                        turn: turn + 1,
+                        turn,
                         api_requests: Some(
                             provider.request_count().saturating_sub(requests_before),
                         ),
@@ -463,9 +467,7 @@ impl EngineService {
                 .map_err(file_error)?;
             }
         }
-        Err(EngineError::Rejected(
-            "总结已达到本次轮数上限，已有全局经验保留。".into(),
-        ))
+        Err(EngineError::Rejected("本次总结的 Token 预算不足。".into()))
     }
 }
 

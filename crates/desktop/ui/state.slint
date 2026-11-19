@@ -223,10 +223,8 @@ export global App {
     in-out property <int> loaded-analysis-index: -1;
     in-out property <string> budget: "1000000";
     in-out property <string> loaded-budget: "1000000";
-    in-out property <int> loaded-turns: 60;
     out property <TokenDisplay> budget-preview: format-token-budget(budget);
     pure callback format-token-budget(string) -> TokenDisplay;
-    in-out property <int> turns: 60;
     in-out property <string> language: "简体中文";
     in-out property <string> style: "自然流畅，保留人物语气、情绪和原文含义。";
     in-out property <string> terminology;

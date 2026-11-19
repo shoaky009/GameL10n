@@ -269,7 +269,9 @@ $runs = @($rows | Where-Object { $_.runId } | Group-Object runId | ForEach-Objec
     if ($start) {
         $item.model = if ($modelStart) { $modelStart.entry.model } else { $start.entry.model }
         $item.maximumTokens = $start.entry.maximumTokens
-        $item.maximumTurns = $start.entry.maximumTurns
+        if ($null -ne $start.entry.maximumTurns) {
+            $item.maximumTurns = $start.entry.maximumTurns
+        }
         $item.fixedInstructionBytes = $start.entry.fixedInstructionBytes
         $item.registeredToolCount = $start.entry.registeredToolCount
         foreach ($field in @('softwareVersion', 'buildGitHash', 'maximumOutputTokens', 'analysisRequestTimeoutMs', 'analysisStreaming', 'analysisFirstResponseTimeoutMs', 'analysisStreamIdleTimeoutMs')) {

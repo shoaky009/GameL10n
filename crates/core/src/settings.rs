@@ -75,7 +75,6 @@ pub struct GlobalSettings {
     pub last_game_id: Option<String>,
     pub maximum_translations: usize,
     pub adaptation_token_budget: u64,
-    pub adaptation_maximum_turns: u32,
     pub isolate_llm_execution: bool,
     pub api_configuration: ApiConfiguration,
     #[serde(flatten)]
@@ -88,7 +87,6 @@ impl Default for GlobalSettings {
             last_game_id: None,
             maximum_translations: 2,
             adaptation_token_budget: 1_000_000,
-            adaptation_maximum_turns: 60,
             isolate_llm_execution: cfg!(windows),
             api_configuration: ApiConfiguration::default(),
             extra: BTreeMap::new(),
@@ -224,16 +222,14 @@ impl Application {
         analysis: Option<String>,
         chain: Vec<String>,
         budget: u64,
-        turns: u32,
     ) -> Result<(), CoreError> {
-        validate_limits(budget, turns)?;
+        validate_token_budget(budget)?;
         self.update_settings(|s| {
             validate_profiles(&s.api_configuration, analysis.as_deref(), &chain)?;
             s.api_configuration.analysis_profile_id = analysis;
             s.api_configuration.translation_profile_id = chain.first().cloned();
             s.api_configuration.translation_profile_ids = Some(chain);
             s.adaptation_token_budget = budget;
-            s.adaptation_maximum_turns = turns;
             Ok(())
         })
         .await?;
@@ -449,13 +445,10 @@ impl Application {
             return Err(CoreError::InvalidData("每批文本数应为 1–80。".into()));
         }
         let defaults = self.settings().await?;
-        validate_limits(
+        validate_token_budget(
             s.get("adaptationTokenBudget")
                 .and_then(Value::as_u64)
                 .unwrap_or(defaults.adaptation_token_budget),
-            s.get("adaptationMaximumTurns")
-                .and_then(Value::as_u64)
-                .unwrap_or(defaults.adaptation_maximum_turns.into()) as u32,
         )?;
         if project.settings == previous_settings {
             return Ok(());
@@ -522,10 +515,10 @@ impl Application {
     }
 }
 
-fn validate_limits(budget: u64, turns: u32) -> Result<(), CoreError> {
-    if !(1_000..=20_000_000).contains(&budget) || !(1..=400).contains(&turns) {
+fn validate_token_budget(budget: u64) -> Result<(), CoreError> {
+    if !(1_000..=20_000_000).contains(&budget) {
         return Err(CoreError::InvalidData(
-            "Token 预算应为 1,000–20,000,000，轮数应为 1–400。".into(),
+            "Token 预算应为 1,000–20,000,000。".into(),
         ));
     }
     Ok(())

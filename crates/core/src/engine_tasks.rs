@@ -307,12 +307,6 @@ impl Application {
                 .get("adaptationTokenBudget")
                 .and_then(Value::as_u64)
                 .unwrap_or(settings.adaptation_token_budget),
-            maximum_turns: project
-                .settings
-                .get("adaptationMaximumTurns")
-                .and_then(Value::as_u64)
-                .unwrap_or(settings.adaptation_maximum_turns.into())
-                as u32,
         };
         Ok((provider, limits))
     }
@@ -2385,8 +2379,10 @@ mod tests {
                     }
                     let mut bytes = vec![0; length.expect("request body length")];
                     connection.read_exact(&mut bytes).await.unwrap();
-                    requests.push(serde_json::from_slice(&bytes).unwrap());
-                    let (content_type, body) = if status == 200 {
+                    let request: Value = serde_json::from_slice(&bytes).unwrap();
+                    let streaming = request["stream"] == true;
+                    requests.push(request);
+                    let (content_type, body) = if status == 200 && streaming {
                         (
                             "text/event-stream",
                             format!("data: {response}\n\ndata: [DONE]\n\n"),
@@ -2446,6 +2442,59 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn engine_review_estimates_zero_usage_and_rejects_an_over_budget_finish() {
+        const BUDGET: u64 = 100_000;
+        let root = tempfile::tempdir().unwrap();
+        let game = root.path().join("game");
+        fs::create_dir(&game).unwrap();
+        let app = Application::open(root.path().join("data"), &crate::ToolPaths::new("missing"))
+            .await
+            .unwrap();
+        let project = app.add_project(&game).await.unwrap();
+        let directory = app.project_directory(&project.id).unwrap();
+        write_json(
+            &directory.join("adaptation/current/session.json"),
+            &json!({}),
+        )
+        .unwrap();
+
+        let response = |name: &str, arguments: Value, input_tokens: u64, output_tokens: u64| {
+            (
+                200,
+                json!({
+                    "choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","tool_calls":[{
+                        "id":name,"type":"function","function":{"name":name,"arguments":arguments.to_string()}
+                    }]}}],
+                    "usage":{"prompt_tokens":input_tokens,"completion_tokens":output_tokens}
+                }),
+            )
+        };
+        let (endpoint, server) = local_analysis_responses(vec![
+            response("read_evidence", json!({"path":"overview"}), 0, 0),
+            response(
+                "finish_review",
+                json!({"summary":"Review summary","improvement":null,"mainProgramSuggestions":[]}),
+                BUDGET - 20,
+                20,
+            ),
+        ])
+        .await;
+        use_local_analysis(&app, endpoint).await;
+        app.save_defaults(Some("local".into()), vec![], BUDGET)
+            .await
+            .unwrap();
+
+        let error = app.review_engine(&project.id).await.unwrap_err();
+        assert!(error.to_string().contains("Token 预算不足"), "{error}");
+        assert_eq!(server.await.len(), 2);
+        let draft: Value = read_json(&directory.join("logs/engine-review-session.json")).unwrap();
+        assert_eq!(draft["usage"]["estimated"], true);
+        assert!(draft["usage"]["inputTokens"].as_u64().unwrap() > 0);
+        assert!(draft["usage"]["outputTokens"].as_u64().unwrap() > 0);
+        assert!(!directory.join("engine-review.json").exists());
     }
 
     #[tokio::test]
@@ -3539,7 +3588,7 @@ mod tests {
             "fixture",
             include_str!("../../engines/tests/fixtures/json_adapter.py"),
         );
-        let (endpoint, server) = local_analysis_responses(vec![
+        let mut responses = vec![
             analysis_tool("stage_resources", json!({"files":["text.json"]})),
             analysis_tool("copy_adapter", json!({"id":"engine.fixture","version":"1"})),
             analysis_tool(
@@ -3554,10 +3603,13 @@ mod tests {
                 "checkpoint",
                 json!({"notes":"Main text sources still require analysis."}),
             ),
-        ])
-        .await;
+        ];
+        for (_, response) in &mut responses {
+            response["usage"]["prompt_tokens"] = json!(99_980);
+        }
+        let (endpoint, server) = local_analysis_responses(responses).await;
         use_local_analysis(&app, endpoint).await;
-        app.save_defaults(Some("local".into()), vec![], 1_000_000, 5)
+        app.save_defaults(Some("local".into()), vec![], 500_000)
             .await
             .unwrap();
         let result = app.recognize(&project.id).await.unwrap();

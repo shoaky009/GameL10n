@@ -178,11 +178,14 @@ async fn unmatched_recognition_uses_the_configured_api_and_resumes_its_session()
     use serde_json::{Value, json};
     use std::io::{BufRead, Read, Write};
 
+    const RUN_BUDGET: u64 = 200_000;
+    const REPLY_OUTPUT_TOKENS: u64 = 20;
+    const REPLY_INPUT_TOKENS: u64 = RUN_BUDGET / 2 - REPLY_OUTPUT_TOKENS;
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
     let server = std::thread::spawn(move || {
         let mut requests = Vec::<Value>::new();
-        for _ in 0..2 {
+        for index in 0..4 {
             let (mut stream, _) = listener.accept().unwrap();
             stream
                 .set_read_timeout(Some(std::time::Duration::from_secs(15)))
@@ -202,11 +205,23 @@ async fn unmatched_recognition_uses_the_configured_api_and_resumes_its_session()
             let mut body = vec![0; length];
             reader.read_exact(&mut body).unwrap();
             requests.push(serde_json::from_slice(&body).unwrap());
+            let (finish_reason, delta) = if index % 2 == 0 {
+                (
+                    "tool_calls",
+                    json!({"role":"assistant","tool_calls":[{
+                        "index":0,"id":format!("protocol-{index}"),"type":"function",
+                        "function":{"name":"adapter_protocol","arguments":"{}"}
+                    }]}),
+                )
+            } else {
+                (
+                    "stop",
+                    json!({"role":"assistant","content":"仍在探索：正在核对资源结构。"}),
+                )
+            };
             let response = json!({
-                "choices": [{"index":0,"finish_reason":"stop", "delta":{
-                    "role":"assistant", "content":"仍在探索：正在核对资源结构。"
-                }}],
-                "usage":{"prompt_tokens":100,"completion_tokens":20}
+                "choices":[{"index":0,"finish_reason":finish_reason,"delta":delta}],
+                "usage":{"prompt_tokens":REPLY_INPUT_TOKENS,"completion_tokens":REPLY_OUTPUT_TOKENS}
             })
             .to_string();
             let response = format!("data: {response}\n\ndata: [DONE]\n\n");
@@ -238,14 +253,17 @@ async fn unmatched_recognition_uses_the_configured_api_and_resumes_its_session()
     )
     .await
     .unwrap();
-    app.save_project_settings(&project.id, json!({"adaptationMaximumTurns":1}))
-        .await
-        .unwrap();
+    app.save_project_settings(
+        &project.id,
+        json!({"adaptationMaximumTurns":1,"adaptationTokenBudget":RUN_BUDGET}),
+    )
+    .await
+    .unwrap();
     let session_path = app
         .project_directory(&project.id)
         .unwrap()
         .join("adaptation/current/session.json");
-    for turn in 1..=2 {
+    for run in 1..=2 {
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(30),
             app.recognize(&project.id),
@@ -260,18 +278,22 @@ async fn unmatched_recognition_uses_the_configured_api_and_resumes_its_session()
             result.status,
             gamel10n_engines::AdaptationStatus::BudgetExhausted
         );
-        assert_eq!(result.api_requests, Some(turn));
+        let total_turns = run * 2;
+        assert_eq!(result.api_requests, Some(total_turns));
         let session: Value = read_json(&session_path).unwrap();
-        assert_eq!(session["totalTurns"], turn);
-        assert_eq!(session["usage"]["inputTokens"], turn * 100);
+        assert_eq!(session["totalTurns"], total_turns);
+        assert_eq!(
+            session["usage"]["inputTokens"],
+            total_turns * REPLY_INPUT_TOKENS
+        );
         let history = app.consumption_history().await.unwrap();
-        assert_eq!(history.records.len(), turn as usize);
-        assert!(history.records.iter().all(|record| record.api.requests == 1
-            && record.api.input_tokens == 100
-            && record.api.output_tokens == 20));
+        assert_eq!(history.records.len(), run as usize);
+        assert!(history.records.iter().all(|record| record.api.requests == 2
+            && record.api.input_tokens == 2 * REPLY_INPUT_TOKENS
+            && record.api.output_tokens == 2 * REPLY_OUTPUT_TOKENS));
         assert_eq!(
             history.records[0].mode,
-            if turn == 1 { "new" } else { "continued" }
+            if run == 1 { "new" } else { "continued" }
         );
         assert_eq!(history.records[0].model.as_deref(), Some("fixture"));
         assert_eq!(
@@ -286,7 +308,7 @@ async fn unmatched_recognition_uses_the_configured_api_and_resumes_its_session()
             && request["stream_options"]["include_usage"] == true)
     );
     assert!(
-        requests[1]["messages"]
+        requests[2]["messages"]
             .as_array()
             .unwrap()
             .iter()

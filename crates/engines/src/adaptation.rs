@@ -13,7 +13,7 @@ use std::{
 use gamel10n_translation::{
     TokenUsage, TranslationUnit,
     files::{hash_file, hash_text, read_json, write_json},
-    provider::{OpenAiProvider, ToolCall},
+    provider::{Completion, OpenAiProvider, ToolCall},
 };
 use serde::{Deserialize, Serialize, Serializer, ser::SerializeMap};
 use serde_json::{Value, json};
@@ -65,14 +65,12 @@ use crate::{
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AdaptationLimits {
-    pub maximum_turns: u32,
     pub maximum_tokens: u64,
     pub maximum_output_tokens: u32,
 }
 impl Default for AdaptationLimits {
     fn default() -> Self {
         Self {
-            maximum_turns: 60,
             maximum_tokens: 1_000_000,
             maximum_output_tokens: Self::DEFAULT_OUTPUT_TOKENS,
         }
@@ -85,8 +83,7 @@ impl AdaptationLimits {
     pub const MAX_OUTPUT_TOKENS: u32 = 128_000;
 
     pub(crate) fn validate(&self) -> Result<(), EngineError> {
-        if !(1..=400).contains(&self.maximum_turns)
-            || !(1000..=20_000_000).contains(&self.maximum_tokens)
+        if !(1_000..=20_000_000).contains(&self.maximum_tokens)
             || !(128..=Self::MAX_OUTPUT_TOKENS).contains(&self.maximum_output_tokens)
         {
             return Err(EngineError::Protocol("智能适配预算无效。".into()));
@@ -405,6 +402,30 @@ fn visible_json_bytes(value: &Value) -> usize {
     }
 }
 
+pub(crate) fn completion_usage(
+    response: &Completion,
+    estimated_input: u64,
+) -> Result<TokenUsage, EngineError> {
+    let mut usage = response.usage.clone();
+    if usage.input_tokens == 0 {
+        usage.input_tokens = estimated_input;
+        usage.estimated = true;
+    }
+    if usage.output_tokens == 0 {
+        usage.output_tokens = (serde_json::to_vec(&response.output_items)?.len()
+            + response.text.len()
+            + response
+                .tool_calls
+                .iter()
+                .map(|call| call.arguments.len())
+                .sum::<usize>()) as u64
+            / 3
+            + 1;
+        usage.estimated = true;
+    }
+    Ok(usage)
+}
+
 pub(crate) fn add_usage(total: &mut TokenUsage, usage: &TokenUsage) {
     total.input_tokens = total.input_tokens.saturating_add(usage.input_tokens);
     total.output_tokens = total.output_tokens.saturating_add(usage.output_tokens);
@@ -580,7 +601,7 @@ impl EngineService {
             Ok(())
         };
         trace_run(
-            json!({"operation":"run-start","continuing":continuing,"model":provider.model(),"modelIdentity":provider.identity(),"maximumTurns":request.limits.maximum_turns,"maximumTokens":request.limits.maximum_tokens,
+            json!({"operation":"run-start","continuing":continuing,"model":provider.model(),"modelIdentity":provider.identity(),"maximumTokens":request.limits.maximum_tokens,
                 "softwareVersion":self.build_identity.as_ref().map(|identity| &identity.0),"buildGitHash":self.build_identity.as_ref().map(|identity| &identity.1),
                 "maximumOutputTokens":request.limits.maximum_output_tokens,"analysisFirstResponseTimeoutMs":provider.analysis_first_response_timeout().as_millis(),"analysisStreamIdleTimeoutMs":provider.analysis_stream_idle_timeout().as_millis(),"analysisStreaming":true}),
         )?;

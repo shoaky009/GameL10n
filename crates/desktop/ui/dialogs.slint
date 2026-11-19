@@ -1,4 +1,4 @@
-import { Button, LineEdit, TextEdit, ComboBox, CheckBox, SpinBox, ScrollView, ProgressIndicator } from "std-widgets.slint";
+import { Button, LineEdit, TextEdit, ComboBox, CheckBox, ScrollView, ProgressIndicator } from "std-widgets.slint";
 import { App, Theme, Label, Caption, TokenCaption, Heading, ReportText, Link } from "state.slint";
 import { ApiTestControls, WorkflowControls } from "settings.slint";
 import { GameCheckControls } from "game-check.slint";
@@ -77,9 +77,7 @@ export component DialogLayer inherits Rectangle {
                         LineEdit { text <=> App.budget; input-type: number; horizontal-stretch: 1; }
                         TokenCaption { value: App.budget-preview; min-width: 100px; vertical-alignment: center; }
                     }
-                    Caption { text: "本次智能适配最多模型轮数"; }
-                    SpinBox { value <=> App.turns; minimum: 1; maximum: 400; }
-                    Caption { text: "达到 Token 或轮数上限时暂停并保存进度。未单独配置的项自动使用全局设置；修改后记为当前项目设置。"; }
+                    Caption { text: "Token 预算不足时暂停并保存进度。未单独配置时使用全局预算，修改后保存为当前项目预算。"; }
                 }
               }
             }

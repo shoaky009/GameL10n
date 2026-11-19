@@ -520,7 +520,6 @@ pub(super) async fn run(
         .extra
         .insert("matchedKnowledge".into(), json!(knowledge.entries));
     let mut continuation = Some(continuation);
-    let mut turns = 0;
     let output_limit = request.limits.maximum_output_tokens;
     let mut recovering_output = false;
     let mut tool_call_retries = 0;
@@ -859,11 +858,11 @@ pub(super) async fn run(
             .limits
             .maximum_tokens
             .saturating_sub(tokens(&state.usage).saturating_sub(initial_usage));
-        if turns >= request.limits.maximum_turns || remaining < estimated + 256 {
+        if remaining < estimated + 256 {
             save_session(path, state).await?;
             return Ok((
                 AdaptationStatus::BudgetExhausted,
-                "已达到本次分析预算，源码和进度已保存，可继续适配。".into(),
+                "本次适配的 Token 预算不足，源码和进度已保存，可继续适配。".into(),
                 None,
             ));
         }
@@ -904,7 +903,6 @@ pub(super) async fn run(
             });
         }
         let started = Instant::now();
-        turns += 1;
         repair::analyzing(state);
         let requests_before = provider.request_count();
         let metrics_before = provider.request_metrics();
@@ -973,23 +971,7 @@ pub(super) async fn run(
         tool_call_retries = 0;
         state.workflow.last_decision = decision_key;
         state.total_turns += 1;
-        let mut usage = response.usage.clone();
-        if usage.input_tokens == 0 {
-            usage.input_tokens = estimated;
-            usage.estimated = true;
-        }
-        if usage.output_tokens == 0 {
-            usage.output_tokens = (serde_json::to_vec(&response.output_items)?.len()
-                + response.text.len()
-                + response
-                    .tool_calls
-                    .iter()
-                    .map(|c| c.arguments.len())
-                    .sum::<usize>()) as u64
-                / 3
-                + 1;
-            usage.estimated = true;
-        }
+        let usage = completion_usage(&response, estimated)?;
         add_usage(&mut state.usage, &usage);
         trace_model(
             json!({"operation":"model","status":"completed","turn":state.total_turns,"elapsedMs":started.elapsed().as_millis(),"usage":usage,"requestId":response.request_id,"tools":response.tool_calls.iter().map(|c|&c.name).collect::<Vec<_>>(),"visibleHistoryBytes":visible,"retainedHistoryBytes":retained,"omittedToolResults":decision_context.replay.omitted,"decisionHistoryStart":decision_context.selected_start,"decisionEvidenceCount":decision_context.evidence_count,"problemId":state.decision.current_problem.as_ref().map(|p|&p.id),"toolDefinitionBytes":tools_bytes,"toolDefinitionFingerprint":tool_fingerprint,"instructionBytes":instructions.len(),"instructionFingerprint":instruction_fingerprint,"availableToolCount":all.len(),"maximumOutputTokens":requested,"contextComponents":decision_context.components,"verificationConfigured":state.workflow.verification_args.is_some()}),
@@ -1014,7 +996,7 @@ pub(super) async fn run(
         if tokens(&state.usage).saturating_sub(initial_usage) > request.limits.maximum_tokens {
             return Ok((
                 AdaptationStatus::BudgetExhausted,
-                "本次适配预算已用完，模型结果已保存，继续后执行剩余步骤。".into(),
+                "本次适配的 Token 预算已用完，模型结果已保存，继续后执行剩余步骤。".into(),
                 None,
             ));
         }
@@ -1170,7 +1152,7 @@ mod tests {
             for write in [false, true] {
                 let root = tempfile::tempdir().unwrap();
                 let (_, mut request, workspace, mut state) = fixture(root.path());
-                request.limits.maximum_turns = 1;
+                request.limits.maximum_tokens = RESPONSE_TOKENS;
                 let private = root.path().join("private.txt");
                 fs::write(&private, "must not leak").unwrap();
                 let args = if name == "run_engine_python" {
@@ -1213,12 +1195,12 @@ mod tests {
                     Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
                     crate::ToolPaths::development(),
                 );
-                let (provider, server) = model(vec![file_response(
+                let (provider, server) = model(vec![budgeted_response(file_response(
                     ApiProtocol::ChatCompletions,
                     "recovered",
                     "work/recovered.py",
                     false,
-                )]);
+                ))]);
                 let progress = std::sync::Mutex::new(Vec::new());
                 let trace = std::sync::Mutex::new(Vec::new());
                 let result = run(
@@ -1386,6 +1368,19 @@ mod tests {
         json!({"id":"fixture","choices":[{"finish_reason":reason,"message":{"role":"assistant","content":"仍在探索：正在核对资源结构。"}}],"usage":{"prompt_tokens":100,"completion_tokens":20,"prompt_tokens_details":{"cached_tokens":50}}})
     }
 
+    const RESPONSE_TOKENS: u64 = 100_000;
+
+    fn budgeted_response(mut response: Value) -> Value {
+        let usage = &mut response["usage"];
+        let (input, output) = if usage.get("prompt_tokens").is_some() {
+            ("prompt_tokens", "completion_tokens")
+        } else {
+            ("input_tokens", "output_tokens")
+        };
+        usage[input] = json!(RESPONSE_TOKENS - usage[output].as_u64().unwrap());
+        response
+    }
+
     fn file_response(protocol: ApiProtocol, id: &str, path: &str, malformed: bool) -> Value {
         let mut calls = vec![(
             id.to_owned(),
@@ -1413,17 +1408,20 @@ mod tests {
         for protocol in [ApiProtocol::ChatCompletions, ApiProtocol::Responses] {
             let root = tempfile::tempdir().unwrap();
             let (service, mut request, workspace, mut state) = fixture(root.path());
-            request.limits.maximum_turns = 6;
+            request.limits.maximum_tokens = 6 * RESPONSE_TOKENS;
             let malformed = file_response(protocol, "rejected", "work/rejected.py", true);
             let (provider, server) = model_with_protocol(
-                vec![
+                [
                     malformed.clone(),
                     malformed.clone(),
                     file_response(protocol, "first", "work/first.py", false),
                     malformed.clone(),
                     malformed,
                     file_response(protocol, "second", "work/second.py", false),
-                ],
+                ]
+                .into_iter()
+                .map(budgeted_response)
+                .collect(),
                 protocol,
             );
             let events = std::sync::Mutex::new(Vec::new());
@@ -1462,7 +1460,7 @@ mod tests {
             );
             assert_eq!(state.total_turns, 2);
             assert_eq!(state.api_requests(), 6);
-            assert_eq!(state.usage.input_tokens, 600);
+            assert_eq!(state.usage.input_tokens, 6 * (RESPONSE_TOKENS - 20));
             assert_eq!(state.usage.output_tokens, 120);
             assert_eq!(state.usage.cached_tokens, Some(300));
             let events = events.into_inner().unwrap();
@@ -1541,17 +1539,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_call_format_retry_obeys_cancellation_and_turn_budget() {
+    async fn tool_call_format_retry_obeys_cancellation_and_token_budget() {
         for cancel in [false, true] {
             let root = tempfile::tempdir().unwrap();
             let (service, mut request, workspace, mut state) = fixture(root.path());
-            request.limits.maximum_turns = 1;
-            let (provider, server) = model(vec![file_response(
+            request.limits.maximum_tokens = RESPONSE_TOKENS;
+            let (provider, server) = model(vec![budgeted_response(file_response(
                 ApiProtocol::ChatCompletions,
                 "rejected",
                 "work/rejected.py",
                 true,
-            )]);
+            ))]);
             let cancellation = CancellationToken::new();
             let result = run(
                 &service,
@@ -1619,6 +1617,7 @@ mod tests {
             .unwrap()["entry"];
         assert_eq!(start["softwareVersion"], "0.1.0");
         assert_eq!(start["buildGitHash"], "fixture-build");
+        assert_eq!(start["maximumTokens"], request.limits.maximum_tokens);
         assert_eq!(start["maximumOutputTokens"], 2048);
         assert_eq!(start["analysisFirstResponseTimeoutMs"], 180000);
         assert_eq!(start["analysisStreamIdleTimeoutMs"], 300000);
@@ -1632,10 +1631,10 @@ mod tests {
 
     #[tokio::test]
     async fn hundred_turn_sessions_preserve_wire_prefixes_across_resume_and_capacity_boundaries() {
+        const FIRST_RUN_TURNS: usize = 61;
         for protocol in [ApiProtocol::ChatCompletions, ApiProtocol::Responses] {
             let root = tempfile::tempdir().unwrap();
             let (service, mut request, workspace, mut state) = fixture(root.path());
-            request.limits.maximum_turns = 50;
             let responses = (1..=100).map(|turn| {
                 let (name,args) = match turn {
                     1 => ("adapter_protocol", json!({})),
@@ -1657,7 +1656,7 @@ mod tests {
                         json!({"id":format!("response-{turn}"),"status":"completed","output":output,"usage":{"input_tokens":100,"output_tokens":20,"input_tokens_details":{"cached_tokens":50}}})
                     }
                 }
-            }).collect::<Vec<_>>();
+            }).map(budgeted_response).collect::<Vec<_>>();
             let original_responses = responses.clone();
             let (provider, server) = model_with_protocol(responses, protocol);
             recover(&mut state, &request, provider.identity());
@@ -1667,7 +1666,11 @@ mod tests {
                 Ok(())
             };
             let path = workspace.join("session.json");
-            for half in 0..2 {
+            for (index, replies) in [FIRST_RUN_TURNS, 100 - FIRST_RUN_TURNS]
+                .into_iter()
+                .enumerate()
+            {
+                request.limits.maximum_tokens = replies as u64 * RESPONSE_TOKENS;
                 let result = run(
                     &service,
                     &request,
@@ -1683,7 +1686,8 @@ mod tests {
                 .await
                 .unwrap();
                 assert_eq!(result.0, AdaptationStatus::BudgetExhausted);
-                if half == 0 {
+                if index == 0 {
+                    assert_eq!(state.total_turns as usize, FIRST_RUN_TURNS);
                     state = load_session(&path).unwrap();
                     request.objective = "Repair".into();
                     request.user_instruction = "保留文本 ID，仅修正字段定位。".into();
@@ -1784,7 +1788,7 @@ mod tests {
                 "{protocol:?}: {preserved} preserved requests"
             );
             assert_eq!(
-                turns[50]["contextComponents"]["requestPrefix"]["preserved"],
+                turns[FIRST_RUN_TURNS]["contextComponents"]["requestPrefix"]["preserved"],
                 true
             );
             assert_eq!(
@@ -1850,7 +1854,7 @@ mod tests {
                 ),
             )
             .unwrap();
-            request.limits.maximum_turns = 1;
+            request.limits.maximum_tokens = RESPONSE_TOKENS;
             let mut helper = json!({"path":"src/helper.py","content":"VALUE = 1\n"});
             if fail_edit {
                 helper["releaseRole"] = json!("runtime");
@@ -1860,7 +1864,7 @@ mod tests {
                 {"id":"entry","type":"function","function":{"name":"write_file","arguments":json!({"path":"src/adapter.py","copyFrom":"work/entry.py","testArguments":{"kind":"engine","key":"fixture","name":"Fixture","resourcePatterns":["*.json"]}}).to_string()}},
                 {"id":"helper","type":"function","function":{"name":"write_file","arguments":helper.to_string()}}
             ]}}],"usage":{"prompt_tokens":100,"completion_tokens":20}});
-            let (provider, server) = model(vec![response]);
+            let (provider, server) = model(vec![budgeted_response(response)]);
             let events = std::sync::Mutex::new(Vec::new());
             run(
                 &service,
@@ -1951,7 +1955,7 @@ mod tests {
                 {"id":id,"type":"function","function":{"name":name,"arguments":args.to_string()}}
             ]}}],"usage":{"prompt_tokens":100,"completion_tokens":20}})
         };
-        let (provider, server) = model(vec![
+        let (provider, server) = model([
             tool_response(
                 "auxiliary",
                 "test_adapter",
@@ -1973,8 +1977,11 @@ mod tests {
                 "write_file",
                 json!({"path":"src/adapter.py","content":format!("{main}\n# Confirmed main text.\n")}),
             ),
-        ]);
-        request.limits.maximum_turns = 4;
+        ]
+        .into_iter()
+        .map(budgeted_response)
+        .collect());
+        request.limits.maximum_tokens = 4 * RESPONSE_TOKENS;
         let events = std::sync::Mutex::new(Vec::new());
         let progress = std::sync::Mutex::new(Vec::new());
         run(
@@ -2023,7 +2030,7 @@ mod tests {
     #[tokio::test]
     async fn host_promotes_trial_to_full_before_the_next_model_request() {
         let root = tempfile::tempdir().unwrap();
-        let (_, mut request, workspace, mut state) = fixture(root.path());
+        let (_, request, workspace, mut state) = fixture(root.path());
         let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let tools = crate::ToolPaths::new(root.path().join("tools"));
         fs::create_dir_all(tools.python().parent().unwrap()).unwrap();
@@ -2078,7 +2085,6 @@ mod tests {
             json!({"text.json":hash_file(&request.game_directory.join("text.json")).unwrap()}),
         );
         register_python(&mut state, "src/adapter.py").unwrap();
-        request.limits.maximum_turns = 3;
         let tool_response = |id: &str, name: &str, args: Value| json!({"id":id,"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","tool_calls":[{"id":id,"type":"function","function":{"name":name,"arguments":args.to_string()}}]}}],"usage":{"prompt_tokens":100,"completion_tokens":20}});
         let (provider, server) = model(vec![
             tool_response(
@@ -2234,8 +2240,7 @@ mod tests {
     #[tokio::test]
     async fn identical_failed_verification_defers_a_third_model_decision() {
         let root = tempfile::tempdir().unwrap();
-        let (service, mut request, workspace, mut state) = fixture(root.path());
-        request.limits.maximum_turns = 5;
+        let (service, request, workspace, mut state) = fixture(root.path());
         let response = |id: &str| json!({"id":id,"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","tool_calls":[{"id":id,"type":"function","function":{"name":"test_adapter","arguments":json!({"kind":"engine","key":"fixture","name":"Fixture","resourcePatterns":["*.json"]}).to_string()}}]}}],"usage":{"prompt_tokens":100,"completion_tokens":20}});
         let (provider, server) = model(vec![response("first"), response("same")]);
         let result = run(
@@ -2878,7 +2883,7 @@ mod tests {
         for invalid in [false, true] {
             let root = tempfile::tempdir().unwrap();
             let (service, mut request, workspace, mut state) = fixture(root.path());
-            request.limits.maximum_turns = 1;
+            request.limits.maximum_tokens = RESPONSE_TOKENS;
             let mut edit = json!({"path":"src/adapter.py","content":"def main(): pass\n"});
             if invalid {
                 edit["releaseRole"] = json!("runtime");
@@ -2888,7 +2893,7 @@ mod tests {
                 {"id":"edit","type":"function","function":{"name":"write_file","arguments":edit.to_string()}},
                 {"id":"verify","type":"function","function":{"name":"test_adapter","arguments":json!({"kind":"engine","key":"fixture","name":"Fixture","resourcePatterns":["*.json"]}).to_string()}}
             ]}}],"usage":{"prompt_tokens":100,"completion_tokens":20}});
-            let (provider, server) = model(vec![response]);
+            let (provider, server) = model(vec![budgeted_response(response)]);
             let starts = std::sync::Mutex::new(Vec::new());
             let trace = |entry: Value| {
                 if entry["operation"] == "tool-start" {

@@ -208,13 +208,7 @@ pub async fn refresh(ctx: &Context, project_id: Option<&str>) -> Result<(), Core
                 .to_string()
                 .into(),
         );
-        a.set_turns(
-            ps.get("adaptationMaximumTurns")
-                .and_then(Value::as_i64)
-                .unwrap_or(settings.adaptation_maximum_turns.into()) as i32,
-        );
         a.set_loaded_budget(a.get_budget());
-        a.set_loaded_turns(a.get_turns());
         a.set_concurrency(settings.maximum_translations as i32);
         a.set_isolation_supported(cfg!(windows));
         a.set_isolate_llm_execution(cfg!(windows) && settings.isolate_llm_execution);
@@ -241,24 +235,21 @@ pub async fn refresh(ctx: &Context, project_id: Option<&str>) -> Result<(), Core
     Ok(())
 }
 
-pub fn adaptation_limit_updates(input: &UiInput) -> Result<Value, CoreError> {
+pub fn adaptation_budget_updates(input: &UiInput) -> Result<Value, CoreError> {
     let budget = input
         .budget
         .trim()
         .parse::<u64>()
         .map_err(|_| CoreError::InvalidData("Token 预算应为整数。".into()))?;
-    if !(1_000..=20_000_000).contains(&budget) || !(1..=400).contains(&input.turns) {
+    if !(1_000..=20_000_000).contains(&budget) {
         return Err(CoreError::InvalidData(
-            "Token 预算应为 1,000–20,000,000，轮数应为 1–400。".into(),
+            "Token 预算应为 1,000–20,000,000。".into(),
         ));
     }
-    // Compare with the displayed values so saving unrelated settings does not pin defaults.
+    // Only an edited budget becomes a project override.
     let mut updates = json!({});
     if input.loaded_budget.trim().parse::<u64>().ok() != Some(budget) {
         updates["adaptationTokenBudget"] = json!(budget);
-    }
-    if input.turns != input.loaded_turns {
-        updates["adaptationMaximumTurns"] = json!(input.turns);
     }
     Ok(updates)
 }
@@ -278,7 +269,7 @@ fn project_settings_updates(
             updates["translationProfileIds"] = json!(chain);
         }
         "save-project-settings" => {
-            updates = adaptation_limit_updates(input)?;
+            updates = adaptation_budget_updates(input)?;
             updates["targetLanguage"] = json!(input.language);
             updates["style"] = json!(input.style);
             updates["terminology"] = json!(input.terminology);
@@ -542,8 +533,8 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                 .profiles
                 .get(input.analysis_index as usize)
                 .map(|p| p.id.clone());
-            let edits_limits = action == "save-defaults" || action == "save-project-settings";
-            let budget = if edits_limits && input.page == 1 {
+            let edits_budget = action == "save-defaults" || action == "save-project-settings";
+            let budget = if edits_budget && input.page == 1 {
                 input
                     .budget
                     .trim()
@@ -553,17 +544,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                 settings.adaptation_token_budget
             };
             if input.page == 1 {
-                host.save_defaults(
-                    analysis,
-                    chain,
-                    budget,
-                    if action == "save-defaults" {
-                        input.turns.max(0) as u32
-                    } else {
-                        settings.adaptation_maximum_turns
-                    },
-                )
-                .await?;
+                host.save_defaults(analysis, chain, budget).await?;
                 refresh(ctx, None).await?;
             } else {
                 let updates = project_settings_updates(action, input, analysis, chain)?;
@@ -584,11 +565,9 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                     a.set_style(original.style.into());
                     a.set_terminology(original.terminology.into());
                     a.set_batch_size(original.batch_size);
-                    if !edits_limits {
+                    if !edits_budget {
                         a.set_budget(original.budget.into());
-                        a.set_turns(original.turns);
                         a.set_loaded_budget(original.loaded_budget.into());
-                        a.set_loaded_turns(original.loaded_turns);
                     }
                 });
             }
@@ -633,8 +612,6 @@ mod tests {
             chain: vec!["translation-default".into()],
             budget: "1000000".into(),
             loaded_budget: "1000000".into(),
-            turns: 60,
-            loaded_turns: 60,
             language: "简体中文".into(),
             batch_size: 24,
             ..UiInput::default()
@@ -665,18 +642,16 @@ mod tests {
     }
 
     #[test]
-    fn editing_one_limit_preserves_the_other_settings_source() {
-        for (budget, turns, expected) in [
-            ("2000000", 60, json!({"adaptationTokenBudget": 2_000_000})),
-            ("1000000", 80, json!({"adaptationMaximumTurns": 80})),
-            ("01000000", 60, json!({})),
+    fn budget_updates_only_save_changed_values() {
+        for (budget, expected) in [
+            ("2000000", json!({"adaptationTokenBudget": 2_000_000})),
+            ("01000000", json!({})),
         ] {
             let input = UiInput {
                 budget: budget.into(),
-                turns,
                 ..loaded_input()
             };
-            assert_eq!(adaptation_limit_updates(&input).unwrap(), expected);
+            assert_eq!(adaptation_budget_updates(&input).unwrap(), expected);
         }
     }
 

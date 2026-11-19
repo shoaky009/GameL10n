@@ -383,7 +383,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                 }))
             ) {
                 let saved = async {
-                    let updates = settings_ui::adaptation_limit_updates(input)?;
+                    let updates = settings_ui::adaptation_budget_updates(input)?;
                     app.save_project_settings(&input.project_id, updates).await
                 }
                 .await;
@@ -423,7 +423,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
             let reuse_text = input.adaptation_objective == 3
                 && input.workflow_finish != 3
                 && input.workflow_use_existing_text;
-            if !reuse_text && let Ok(updates) = settings_ui::adaptation_limit_updates(input) {
+            if !reuse_text && let Ok(updates) = settings_ui::adaptation_budget_updates(input) {
                 ctx.app()
                     .await
                     .save_project_settings(&input.project_id, updates)

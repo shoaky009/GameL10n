@@ -47,15 +47,12 @@ component ApiSelection inherits VerticalLayout {
         Button { text: "添加到链末尾"; enabled: App.candidate-api-index >= 0; clicked => { App.action("chain-add", ""); } }
     }
     Divider {} Label { text: "智能适配预算"; font-weight: 600; }
-    HorizontalLayout {
-        VerticalLayout { spacing: 5px;
-            Caption { text: "每次适配 Token 预算（最多 20M）"; }
-            HorizontalLayout { spacing: 10px;
-                LineEdit { text <=> App.budget; input-type: number; horizontal-stretch: 1; }
-                TokenCaption { value: App.budget-preview; min-width: 100px; vertical-alignment: center; }
-            }
+    VerticalLayout { spacing: 5px;
+        Caption { text: "每次运行的 Token 预算（最多 20M）"; }
+        HorizontalLayout { spacing: 10px;
+            LineEdit { text <=> App.budget; input-type: number; horizontal-stretch: 1; }
+            TokenCaption { value: App.budget-preview; min-width: 100px; vertical-alignment: center; }
         }
-        VerticalLayout { spacing: 5px; Caption { text: "每次最多模型轮数"; } SpinBox { value <=> App.turns; minimum: 1; maximum: 400; } }
     }
 }
 
@@ -126,7 +123,7 @@ export component GlobalApis inherits VerticalLayout {
         if App.apis.length == 0: Caption { text: "尚未添加模型配置。第一份配置同时用作分析和翻译的全局默认。"; }
         ApiTestControls {}
         ApiSelection {}
-        HorizontalLayout { Button { text: "保存默认预算与轮数"; primary: true; clicked => { App.action("save-defaults", ""); } } Rectangle { horizontal-stretch: 1; } }
+        HorizontalLayout { Button { text: "保存默认预算"; primary: true; clicked => { App.action("save-defaults", ""); } } Rectangle { horizontal-stretch: 1; } }
         Caption { text: "项目未单独配置的项自动使用这里的全局设置。修改后用于后续任务，无需重启。"; }
     } }
 }
