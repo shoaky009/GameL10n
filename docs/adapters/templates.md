@@ -26,8 +26,11 @@ RPA、BGI、KIF、YPF 482 和 PFS v8 可以只读索引，再按成员名或扩�
 | `rpa3-renpy-rpyc` | RPA3 中的 RPYC2 |
 | `renpy-mixed` | 同一加载根下的 `.rpy`、RPYC2 与 RPA3 |
 | `xp3-kirikiri-ks` | 无过滤器 XP3 中的 `.ks` |
+| `artemis-pfs8-ast` | PFS v8 中无跨卷路径冲突的 UTF-8 AST 2.0 |
 
-用 `compose_adapter_template` 准备源码和固定依赖。首次识别可自动尝试前六种组合，资源布局或验收不满足条件时进入后续调查。XP3 需要先确认过滤器再接入。[模板注册](../../crates/engines/src/adaptation_assets.rs) · [生成和验收流程](automatic-adaptation.md)
+用 `compose_adapter_template` 准备源码和固定依赖。首次识别可自动尝试 Ren’Py、松散 KS 和 Artemis PFS 组合，资源布局或验收不满足条件时进入后续调查。XP3 需要先确认过滤器。[模板注册](../../crates/engines/src/adaptation_assets.rs) · [生成和验收流程](automatic-adaptation.md)
+
+封包模板在注册项中声明候选证据、资源模式和固定模块。模块的 `probe` 返回完整验收需要的资源和已检查索引的指纹。宿主按同一套验收与发布流程处理，并在发布前复查索引。
 
 ## Ren’Py 混合资源
 

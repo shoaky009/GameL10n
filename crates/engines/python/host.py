@@ -986,6 +986,14 @@ def archive_component(request):
     return dict(report, entries=report.get('entries', [])[:12])
 
 
+def archive_template_probe(request):
+    from importlib import import_module
+    sys.path[:0] = [str(Path(request['components']).parent), request['library']]
+    adapter = import_module('components.' + request['module'])
+    return adapter.execute(dict(operation='probe', sourceDirectory=request['root'],
+                                resourceFiles=request['files']))
+
+
 def archive_samples(request):
     sys.path.insert(0, request['library'])
     maximum_member = 2 << 20
@@ -1195,6 +1203,7 @@ def execute(request):
     operation = request['operation']
     if operation == 'list_files': return list_files(request)
     if operation == 'archive_component': return archive_component(request)
+    if operation == 'archive_template_probe': return archive_template_probe(request)
     if operation == 'archive_samples': return archive_samples(request)
     if operation == 'inspect_game_launch': return inspect_game_launch(request)
     if operation == 'decode_reference_html': return decode_reference_html(request)

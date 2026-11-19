@@ -2637,77 +2637,66 @@ impl EngineService {
         cancellation: &CancellationToken,
     ) -> Result<Value, EngineError> {
         let id = text(args, "id")?;
-        let (format, archive, extensions, patterns) = match id {
-            "loose-renpy" => ("Renpy", None, vec![".rpy"], vec!["**/*.rpy"]),
-            "loose-kirikiri-ks" => ("KirikiriKs", None, vec![".ks"], vec!["**/*.ks"]),
-            "rpa3-renpy" => (
-                "Renpy",
-                Some("archive.rpa3"),
-                vec![".rpy"],
-                vec!["**/*.rpa"],
-            ),
-            "loose-renpy-rpyc" => ("Renpy", None, vec![".rpyc"], vec!["**/*.rpyc"]),
-            "rpa3-renpy-rpyc" => (
-                "Renpy",
-                Some("archive.rpa3"),
-                vec![".rpyc"],
-                vec!["**/*.rpa"],
-            ),
-            "renpy-mixed" => (
-                "Renpy",
-                Some("archive.rpa3"),
-                vec![".rpy", ".rpyc"],
-                vec!["**/*.rpy", "**/*.rpyc", "**/*.rpa"],
-            ),
-            "xp3-kirikiri-ks" => (
-                "KirikiriKs",
-                Some("archive.xp3"),
-                vec![".ks"],
-                vec!["**/*.xp3"],
-            ),
-            _ => return Err(EngineError::Protocol("未知组合模板。".into())),
-        };
-        if archive == Some("archive.xp3")
+        let template = crate::adaptation_assets::template_catalog()
+            .into_iter()
+            .find(|template| template["id"] == id)
+            .ok_or_else(|| EngineError::Protocol("未知组合模板。".into()))?;
+        if template["archiveComponent"] == "archive.xp3"
             && args.get("filter").and_then(Value::as_str) != Some("none")
         {
             return Err(EngineError::Rejected(
                 "XP3 模板要求已独立确认 filter=none。".into(),
             ));
         }
-        self.bind_reference(workspace, state, None, true, cancellation)?;
+        let archive_template = crate::adaptation_assets::ARCHIVE_TEMPLATES
+            .iter()
+            .find(|template| template.id == id);
+        self.bind_reference(
+            workspace,
+            state,
+            None,
+            archive_template.is_none(),
+            cancellation,
+        )?;
         let patterns = args
             .get("resourcePatterns")
             .cloned()
-            .unwrap_or(json!(patterns));
-        let config = json!({"schemaVersion":1,"templateId":id,"templateVersion":1,"format":format,"archiveComponent":archive,"filter":args.get("filter"),"scriptExtensions":extensions,"resourcePatterns":patterns});
-        write_json(&workspace.join("src/tools/adapter-template.json"), &config)
-            .map_err(file_error)?;
-        register_release(
-            state,
-            ReleaseFile {
-                path: "tools/adapter-template.json".into(),
-                role: "runtime".into(),
-                purpose: "固定资源、容器与脚本组合模板。".into(),
-            },
-        )?;
-        let module = if id == "renpy-mixed" {
+            .unwrap_or_else(|| template["resourcePatterns"].clone());
+        if archive_template.is_none() {
+            let config = json!({"schemaVersion":1,"templateId":id,"templateVersion":1,"format":template["format"],"archiveComponent":template["archiveComponent"],"filter":args.get("filter"),"scriptExtensions":template["scriptExtensions"],"resourcePatterns":patterns});
+            write_json(&workspace.join("src/tools/adapter-template.json"), &config)
+                .map_err(file_error)?;
+            register_release(
+                state,
+                ReleaseFile {
+                    path: "tools/adapter-template.json".into(),
+                    role: "runtime".into(),
+                    purpose: "固定资源、容器与脚本组合模板。".into(),
+                },
+            )?;
+        }
+        let module = if let Some(template) = archive_template {
+            template.module
+        } else if id == "renpy-mixed" {
             "renpy_mixed_adapter"
         } else if id.contains("rpyc") {
             "renpy_rpyc_adapter"
         } else {
             "script_template"
         };
-        for file in [
-            "engine_archive.py",
-            "renpy_rpyc_adapter.py",
-            "renpy_mixed_adapter.py",
-        ] {
-            if module == "script_template" && file != "engine_archive.py" {
-                continue;
-            }
+        let mut components = vec!["engine_archive.py".to_owned()];
+        if archive_template.is_some() {
+            components.push(format!("{module}.py"));
+        } else if module != "script_template" {
+            components.extend([
+                "renpy_rpyc_adapter.py".into(),
+                "renpy_mixed_adapter.py".into(),
+            ]);
+        }
+        for file in components {
             copy_unmodified(
-                &self.asset_root.join("adapters/components").join(file),
-                &workspace.join("src/tools").join(file),
+                &self.asset_root.join("adapters/components").join(&file),
+                &workspace.join("src/tools").join(&file),
             )?;
             register_release(
                 state,
@@ -2736,13 +2725,17 @@ impl EngineService {
         write_unmodified(&workspace.join("src/adapter.py"), &entry)?;
         register_python(state, "src/adapter.py")?;
         state.resource_patterns = serde_json::from_value(patterns)?;
-        let template = crate::adaptation_assets::template_catalog()
-            .into_iter()
-            .find(|template| template["id"] == id)
-            .ok_or_else(|| EngineError::Protocol("未知组合模板。".into()))?;
-        Ok(
-            json!({"success":true,"template":template,"files":state.release_files.iter().map(|file|format!("src/{}",file.path)).collect::<Vec<_>>(),"releaseFiles":state.release_files,"testArguments":{"kind":"template","key":id,"name":template["family"]["name"],"resourcePatterns":state.resource_patterns},"limitations":"只连接已声明的脚本与封包组件。RPYC2 保留非文本对象及源码摘要；其他脚本编码沿用解析器。不生成未经当前游戏验证的字体、转区或运行时补丁。","nextAction":"暂存与规则匹配的真实资源，用返回的 testArguments 调用完整 test_adapter。模板生成不代表已验证，也不会发布。"}),
-        )
+        let limitations = archive_template.map_or(
+            "只连接已声明的脚本与封包组件。RPYC2 保留非文本对象及源码摘要；其他脚本编码沿用解析器。不生成未经当前游戏验证的字体、转区或运行时补丁。",
+            |template| template.limitations,
+        );
+        Ok(json!({
+            "success":true,"template":template,
+            "files":state.release_files.iter().map(|file|format!("src/{}",file.path)).collect::<Vec<_>>(),
+            "releaseFiles":state.release_files,
+            "testArguments":{"kind":"template","key":id,"name":template["family"]["name"],"resourcePatterns":state.resource_patterns},
+            "limitations":limitations,"nextAction":"暂存与规则匹配的真实资源，用返回的 testArguments 调用完整 test_adapter"
+        }))
     }
 
     async fn test_adapter(

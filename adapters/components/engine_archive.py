@@ -9,7 +9,9 @@ import json
 import os
 from pathlib import Path
 import pickle
+import shutil
 import stat
+import struct
 import sys
 import unicodedata
 import zlib
@@ -186,9 +188,7 @@ def open_index(component, stream):
         version = 482
     elif component == "archive.pfs8":
         from python.archives import pfs
-        index = pfs.read_index(stream, **limits)
-        if index.version != 8:
-            raise ValueError(f"unsupported PFS version: {index.version}")
+        index = pfs8_index(stream)
 
         def read(entry, maximum):
             return pfs.read_member(stream, index, entry, max_stored_size=maximum).data
@@ -196,8 +196,105 @@ def open_index(component, stream):
         version, entries = index.version, index.entries
     else:
         raise ValueError("unknown indexed archive component")
-    validate_names(entries)
+    if component != "archive.pfs8":
+        validate_names(entries)
     return version, entries, read
+
+
+def pfs8_index(stream):
+    from python.archives import pfs
+    index = pfs.read_index(stream, max_entries=MAX_ENTRIES, max_index_size=MAX_INDEX)
+    if index.version != 8:
+        raise ValueError(f"unsupported PFS version: {index.version}")
+    validate_names(index.entries)
+    return index
+
+
+def xor_pfs(data, key, offset=0):
+    phase = offset % len(key)
+    key = key[phase:] + key[:phase]
+    mask = (key * ((len(data) + len(key) - 1) // len(key)))[:len(data)]
+    return (int.from_bytes(data, "little") ^ int.from_bytes(mask, "little")).to_bytes(len(data), "little")
+
+
+def rebuild_pfs8(source, destination, replacements):
+    """Replace decoded payloads while preserving the index layout and streaming other members."""
+    destination = checked_path(destination)
+    source = checked_path(source)
+    separate(source, destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with source.open("rb") as stream:
+        index = pfs8_index(stream)
+        if replacements.keys() - {entry.name for entry in index.entries}:
+            raise ValueError("unknown PFS replacement member")
+        if not replacements:
+            stream.seek(0)
+            with destination.open("xb") as target:
+                shutil.copyfileobj(stream, target, 1 << 20)
+            return
+        physical = sorted(index.entries, key=lambda entry: (entry.offset, entry.ordinal))
+        old_end = index.index_end
+        shift, records = 0, {}
+        for entry in physical:
+            if entry.offset < old_end:
+                raise ValueError("overlapping PFS members cannot be rebuilt")
+            old_end = entry.offset + entry.size
+            size = len(replacements[entry.name]) if entry.name in replacements else entry.size
+            records[entry.ordinal] = (entry.offset + shift, size)
+            shift += size - entry.size
+        if index.archive_size + shift > 0xFFFFFFFF:
+            raise ValueError("rebuilt PFS exceeds the 32-bit address space")
+        stream.seek(0)
+        header = stream.read(7)
+        table = bytearray(stream.read(index.index_end - 7))
+        if hashlib.sha1(table, usedforsecurity=False).digest() != index.key:
+            raise ValueError("PFS index changed during rebuild")
+        position = 4
+        for entry in index.entries:
+            # Record header and opaque padding stay in their original byte positions.
+            position += 4 + len(entry.name_bytes) + len(entry.padding)
+            struct.pack_into("<II", table, position, *records[entry.ordinal])
+            position += 8
+        key = hashlib.sha1(table, usedforsecurity=False).digest()
+        delta = bytes(left ^ right for left, right in zip(index.key, key))
+        with destination.open("xb") as target:
+            target.write(header)
+            target.write(table)
+            cursor = index.index_end
+            for entry in physical:
+                copy_range(stream, target, cursor, entry.offset - cursor)
+                if entry.name in replacements:
+                    target.write(xor_pfs(replacements[entry.name], key))
+                elif key == index.key:
+                    copy_range(stream, target, entry.offset, entry.size)
+                else:
+                    offset = 0
+                    for stored in chunks(stream, entry.offset, entry.size):
+                        target.write(xor_pfs(stored, delta, offset))
+                        offset += len(stored)
+                cursor = entry.offset + entry.size
+            copy_range(stream, target, cursor, index.archive_size - cursor)
+
+
+def check_pfs8_replacement(source, output, changed):
+    """Check every unmodified member without materializing media in memory."""
+    with source.open("rb") as original, output.open("rb") as modified:
+        before, after = pfs8_index(original), pfs8_index(modified)
+        if before.trailing != after.trailing or len(before.entries) != len(after.entries):
+            raise ValueError("PFS index metadata changed")
+        delta = bytes(left ^ right for left, right in zip(before.key, after.key))
+        for old, new in zip(before.entries, after.entries):
+            if (old.name_bytes, old.padding) != (new.name_bytes, new.padding):
+                raise ValueError(f"PFS member identity changed: {old.name}")
+            if old.name in changed:
+                continue
+            if old.size != new.size:
+                raise ValueError(f"unmodified PFS member size changed: {old.name}")
+            offset = 0
+            for left, right in zip(chunks(original, old.offset, old.size), chunks(modified, new.offset, new.size)):
+                if (left if before.key == after.key else xor_pfs(left, delta, offset)) != right:
+                    raise ValueError(f"unmodified PFS member bytes changed: {old.name}")
+                offset += len(left)
 
 
 def execute_indexed(request, source):

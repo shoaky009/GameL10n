@@ -22,17 +22,103 @@ const YURIS_REFERENCE: &str = include_str!("../references/Yuris_text_encoding.md
 const ARTEMIS_REFERENCE: &str = include_str!("../references/Artemis_pfs_overlay.md");
 const KAGUYA_WARNING: &str = "KaGuYa MESSAGE v4.0 内置适配器只提供 CP932 脚本提取和回填；可提取不代表已支持中文运行。CP932 无法表示的译文会报错，中文编码、字节遍历和字体绘制仍需验证。";
 const GRAPHICS_SHA256: &str = "E1292E3D47D1C65F4AE52A30B1159A476137422BD7A9272A5A2E0129F3CB0684";
+pub(crate) const ARTEMIS_PFS_TEMPLATE: &str = "artemis-pfs8-ast";
+
+/// An archive-specific adapter can qualify its own input before common verification.
+pub(crate) struct ArchiveTemplate {
+    pub(crate) id: &'static str,
+    pub(crate) format: &'static str,
+    pub(crate) component: &'static str,
+    pub(crate) extensions: &'static [&'static str],
+    pub(crate) patterns: &'static [&'static str],
+    pub(crate) name: &'static str,
+    pub(crate) module: &'static str,
+    pub(crate) discovery_key: &'static str,
+    pub(crate) limitations: &'static str,
+}
+
+pub(crate) const ARCHIVE_TEMPLATES: &[ArchiveTemplate] = &[ArchiveTemplate {
+    id: ARTEMIS_PFS_TEMPLATE,
+    format: "ArtemisAst",
+    component: "archive.pfs8",
+    extensions: &[".ast"],
+    patterns: &["**/*.pfs", "**/*.pfs.*"],
+    name: "Artemis PFS v8 + AST 2.0",
+    module: "artemis_pfs_adapter",
+    discovery_key: "pfsArchives",
+    limitations: "UTF-8 AST 2.0 的日文显示字段，完整重建含脚本的 PFS v8 卷。存在重名脚本、未知布局或需覆盖其他脚本时继续调查。游戏内加载与显示需要试译确认",
+}];
 
 pub(crate) fn template_catalog() -> Vec<Value> {
-    [
-        ("loose-renpy", "Renpy", None, vec![".rpy"], vec!["**/*.rpy"], "Ren’Py 源脚本"),
-        ("loose-kirikiri-ks", "KirikiriKs", None, vec![".ks"], vec!["**/*.ks"], "Kirikiri KS 源脚本"),
-        ("rpa3-renpy", "Renpy", Some("archive.rpa3"), vec![".rpy"], vec!["**/*.rpa"], "RPA3 + Ren’Py 源脚本"),
-        ("loose-renpy-rpyc", "Renpy", None, vec![".rpyc"], vec!["**/*.rpyc"], "Ren’Py RPYC2 编译脚本"),
-        ("rpa3-renpy-rpyc", "Renpy", Some("archive.rpa3"), vec![".rpyc"], vec!["**/*.rpa"], "RPA3 + Ren’Py RPYC2 编译脚本"),
-        ("renpy-mixed", "Renpy", Some("archive.rpa3"), vec![".rpy", ".rpyc"], vec!["**/*.rpy", "**/*.rpyc", "**/*.rpa"], "Ren’Py 无冲突混合资源"),
-        ("xp3-kirikiri-ks", "KirikiriKs", Some("archive.xp3"), vec![".ks"], vec!["**/*.xp3"], "无过滤器 XP3 + Kirikiri KS"),
-    ].into_iter().map(|(id,format,archive,extensions,patterns,name)|json!({"id":id,"version":1,"format":format,"archiveComponent":archive,"scriptExtensions":extensions,"resourcePatterns":patterns,"family":{"kind":"template","key":id,"name":name,"adapterId":format!("template.{id}")}})).collect()
+    let bundled = [
+        (
+            "loose-renpy",
+            "Renpy",
+            None,
+            vec![".rpy"],
+            vec!["**/*.rpy"],
+            "Ren’Py 源脚本",
+        ),
+        (
+            "loose-kirikiri-ks",
+            "KirikiriKs",
+            None,
+            vec![".ks"],
+            vec!["**/*.ks"],
+            "Kirikiri KS 源脚本",
+        ),
+        (
+            "rpa3-renpy",
+            "Renpy",
+            Some("archive.rpa3"),
+            vec![".rpy"],
+            vec!["**/*.rpa"],
+            "RPA3 + Ren’Py 源脚本",
+        ),
+        (
+            "loose-renpy-rpyc",
+            "Renpy",
+            None,
+            vec![".rpyc"],
+            vec!["**/*.rpyc"],
+            "Ren’Py RPYC2 编译脚本",
+        ),
+        (
+            "rpa3-renpy-rpyc",
+            "Renpy",
+            Some("archive.rpa3"),
+            vec![".rpyc"],
+            vec!["**/*.rpa"],
+            "RPA3 + Ren’Py RPYC2 编译脚本",
+        ),
+        (
+            "renpy-mixed",
+            "Renpy",
+            Some("archive.rpa3"),
+            vec![".rpy", ".rpyc"],
+            vec!["**/*.rpy", "**/*.rpyc", "**/*.rpa"],
+            "Ren’Py 无冲突混合资源",
+        ),
+        (
+            "xp3-kirikiri-ks",
+            "KirikiriKs",
+            Some("archive.xp3"),
+            vec![".ks"],
+            vec!["**/*.xp3"],
+            "无过滤器 XP3 + Kirikiri KS",
+        ),
+    ];
+    let archives = ARCHIVE_TEMPLATES.iter().map(|template| {
+        (
+            template.id,
+            template.format,
+            Some(template.component),
+            template.extensions.to_vec(),
+            template.patterns.to_vec(),
+            template.name,
+        )
+    });
+    bundled.into_iter().chain(archives).map(|(id,format,archive,extensions,patterns,name)|json!({"id":id,"version":1,"format":format,"archiveComponent":archive,"scriptExtensions":extensions,"resourcePatterns":patterns,"family":{"kind":"template","key":id,"name":name,"adapterId":format!("template.{id}")}})).collect()
 }
 
 pub(crate) fn engine_components() -> Vec<Value> {

@@ -80,6 +80,18 @@
 - 静态工具读取宿主授权的输入。支持只读句柄的读包器可直接做随机访问。仅支持文件路径的外部工具使用受限的工作副本，并把复制成本纳入试验。输出写入工作区，校验成员路径、输出大小、退出状态和生成文件，沿用超时和取消。可选调查工具缺失时返回原因并沿用现有调查路径，正式适配器的依赖或访问失败按现有协议处理。[执行隔离](../docs/adapters/execution-isolation.md) · [错误语义](../docs/adapters/protocol.md#请求与结果)
 - 新接入的无界面工具在 Windows SSH 下验证静态读写和失败处理。需要桌面组件的端到端检查及游戏显示、代理和补丁加载在交互式环境验收。发布包登记相应适配器实际使用的模块、工具及许可。[开发校验](../docs/development.md#检查)
 
+## 已接入能力
+
+| 来源 | 当前入口与边界 |
+| --- | --- |
+| GARbro | 通过固定工具库的格式实现复用 BGI、普通 KIF、YPF 482 和 PFS v8 的按成员能力。封包组件由索引确认布局，其他变体由现有调查入口处理。 |
+| msg-tool、SExtractor | 通过固定工具库复用 AST 2.0 文本和命令布局。PFS 模板直接提取、试写及回填，按 AST 字面量保留原布局。 |
+| KirikiriTools | 现有 VNTextPatch 和 SMIL 组件覆盖已确认的 KS、XP3 脚本路径。其他过滤器与覆盖加载方式按版本确认。 |
+| VNTextProxy | 现有固定 x86 代理及 SJIS 隧道组件，按具体适配器配置和运行验证调用。 |
+| UniversalInjectorFramework | 字体、转区及加载问题的参考资料。独立运行库的采用取决于分发许可与游戏端证据。 |
+
+[封包与模板](../docs/adapters/templates.md) · [Artemis 适用范围](../docs/adapters/engines/artemis-pfs.md) · [代理组件](../docs/adapters/components/vntextproxy-runtime.md)
+
 ## 完成条件
 
 在同一次交付内先固定覆盖和验收样本，再打通共用流程、补齐选定的读写缺口，并验收以下结果。

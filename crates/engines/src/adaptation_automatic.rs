@@ -1,12 +1,13 @@
 //! Bounded parser trials and first-turn composition of complete resource templates.
 use super::*;
+use crate::adaptation_assets::{ARCHIVE_TEMPLATES, ArchiveTemplate};
 use crate::discovery::{glob_match, is_link};
 use sha2::{Digest, Sha256};
 use std::{io::Read, time::Duration};
 
 const TRIAL_BYTES: u64 = 64 * 1024 * 1024;
 const TEMPLATE_BYTES: u64 = 256 * 1024 * 1024;
-const RPA_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const PACKED_TEMPLATE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const RUNTIME_CHECK: &str = "游戏启动、中文显示、字体及排版尚未实机验证。";
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -1191,6 +1192,17 @@ pub(super) async fn inspect_archives(
             let samples: Vec<Value> = serde_json::from_value(
                 report.as_object_mut().and_then(|report| report.remove("samples")).unwrap_or(json!([])),
             )?;
+            if !samples.is_empty()
+                && let Some(template) = ARCHIVE_TEMPLATES.iter().find(|template| {
+                    template.format == format && !service.disabled_families.contains(&format!("template.{}", template.id))
+                })
+            {
+                report["templateId"] = json!(template.id);
+                report["nextAction"] = json!(format!(
+                    "可用 compose_adapter_template 复用 {}，按模板条件检查当前资源后验收",
+                    template.name
+                ));
+            }
             let mut trials = Vec::new();
             for sample in samples {
                 let member = text(&sample, "member")?;
@@ -1468,6 +1480,39 @@ fn supported(
     }
 }
 
+async fn probe_archive_template(
+    service: &EngineService,
+    request: &AdaptationRequest<'_>,
+    workspace: &Path,
+    state: &Session,
+    template: &ArchiveTemplate,
+    volumes: &[String],
+    cancellation: &CancellationToken,
+) -> Result<Value, EngineError> {
+    let originals = volumes
+        .iter()
+        .map(|relative| {
+            Ok((
+                relative.clone(),
+                request.inputs.file(&request.game_directory, relative)?,
+            ))
+        })
+        .collect::<Result<BTreeMap<_, _>, EngineError>>()?;
+    let _inputs = crate::source::lock_inputs(&originals, cancellation)?;
+    let reference = service.adaptation_reference(workspace, state)?;
+    let library = service.reference_library(&reference)?;
+    service
+        .helper(
+            &json!({
+                "operation":"archive_template_probe","root":request.game_directory,"module":template.module,
+                "files":volumes,"library":library,"components":service.asset_root.join("adapters/components"),
+                "timeoutSeconds":10
+            }),
+            cancellation,
+        )
+        .await
+}
+
 pub(super) async fn run_template(
     service: &EngineService,
     request: &AdaptationRequest<'_>,
@@ -1477,14 +1522,23 @@ pub(super) async fn run_template(
     cancellation: &CancellationToken,
     progress: ProgressCallback<'_>,
 ) -> Result<Option<AdapterHandle>, EngineError> {
+    let archive_template = ARCHIVE_TEMPLATES.iter().find(|template| {
+        state.extra["builtinDiscovery"][template.discovery_key]
+            .as_array()
+            .is_some_and(|archives| !archives.is_empty())
+            && !service
+                .disabled_families
+                .contains(&format!("template.{}", template.id))
+    });
     if !fresh(request, workspace, state)?
         || !state.messages.is_empty()
         || !request.user_instruction.trim().is_empty()
         || !state.user_instruction.trim().is_empty()
         || state.extra.contains_key("automaticTemplate")
-        || !candidates(state)
-            .iter()
-            .any(|candidate| matches!(candidate["format"].as_str(), Some("Renpy" | "KirikiriKs")))
+        || archive_template.is_none()
+            && !candidates(state).iter().any(|candidate| {
+                matches!(candidate["format"].as_str(), Some("Renpy" | "KirikiriKs"))
+            })
     {
         return Ok(None);
     }
@@ -1498,20 +1552,53 @@ pub(super) async fn run_template(
         let archives=by_extension("rpa");let renpy=by_extension("rpy");let compiled=by_extension("rpyc");let kirikiri=by_extension("ks");
         if !kirikiri.is_empty()&&(!archives.is_empty()||!renpy.is_empty()||!compiled.is_empty()){return Err(reject("发现不同引擎的资源混用，需先确认加载范围。"));}
         let mixed=!renpy.is_empty()&&!compiled.is_empty()||!archives.is_empty()&&(!renpy.is_empty()||!compiled.is_empty());
-        let id=if mixed{"renpy-mixed"}else if !archives.is_empty(){"rpa3-renpy"}else if !compiled.is_empty(){"loose-renpy-rpyc"}else if !renpy.is_empty(){"loose-renpy"}else{"loose-kirikiri-ks"};
+        let id=if let Some(template)=archive_template{template.id}else if mixed{"renpy-mixed"}else if !archives.is_empty(){"rpa3-renpy"}else if !compiled.is_empty(){"loose-renpy-rpyc"}else if !renpy.is_empty(){"loose-renpy"}else{"loose-kirikiri-ks"};
         let mut template=crate::adaptation_assets::template_catalog().into_iter().find(|template|template["id"]==id).unwrap();report["templateId"]=json!(id);
         let format=text(&template,"format")?;let parser_id=format!("engine.vntextpatch-{}",format.to_ascii_lowercase());
-        if archives.is_empty()&&service.disabled_families.contains(&format!("template.{id}"))||service.disabled_families.contains(&parser_id){return Err(reject(format!("模板或其内置解析器已禁用，未自动组合：{id}")));}
+        if archives.is_empty()&&service.disabled_families.contains(&format!("template.{id}"))||
+            archive_template.is_none() && service.disabled_families.contains(&parser_id)
+        {return Err(reject(format!("模板或其内置解析器已禁用，未自动组合：{id}")));}
         let patterns:Vec<String>=serde_json::from_value(template["resourcePatterns"].clone())?;
-        let lengths:BTreeMap<_,_>=paths.iter().filter(|(path,_)|patterns.iter().any(|pattern|glob_match(pattern,path))).map(|(path,length)|(path.clone(),*length)).collect();
+        let template_archive = |path: &str| archive_template.is_some()
+            && patterns.iter().any(|pattern| glob_match(pattern, path));
+        let volumes: Vec<_> = paths.keys().filter(|path| template_archive(path)).cloned().collect();
+        if volumes.len() > 64 {
+            return Err(reject("自动组合的待检查封包超过 64 项"));
+        }
+        supported(paths.keys().filter(|path| !template_archive(path)),&template,
+            template["archiveComponent"] == "archive.rpa3",false)?;
+        let lengths: BTreeMap<_, _> = if let Some(profile) = archive_template {
+            report["stage"] = json!("archive-inspection");
+            let evidence = probe_archive_template(service, request, workspace, state, profile, &volumes, token).await?;
+            let selected: Vec<String> = serde_json::from_value(
+                evidence["probe"]["requiredFiles"].clone()
+            ).map_err(|_| reject(evidence["diagnostic"].as_str().unwrap_or("封包与脚本布局不符合组合模板")))?;
+            if !evidence["indexFingerprints"].as_object().is_some_and(|indices| !indices.is_empty()) {
+                return Err(reject("封包模板未返回已检查索引的指纹"));
+            }
+            report["archiveIndexFingerprints"] = evidence["indexFingerprints"].clone();
+            report["mediaOnlyArchives"] = evidence["mediaOnlyArchives"].clone();
+            report["archiveReadBytes"] = evidence["indexBytes"].clone();
+            report["archivedScripts"] = evidence["scriptCount"].clone();
+            report["selectedBytes"] = evidence["scriptBytes"].clone();
+            selected.into_iter().map(|relative| {
+                let length = paths.get(&relative).ok_or_else(|| reject("模板返回了清单以外的封包"))?;
+                Ok((relative, *length))
+            }).collect::<Result<_, EngineError>>()?
+        } else {
+            paths.iter().filter(|(path,_)|patterns.iter().any(|pattern|glob_match(pattern,path)))
+                .map(|(path,length)|(path.clone(),*length)).collect()
+        };
         if lengths.is_empty()||lengths.len()>1024||archives.len()>16{return Err(reject("自动组合需要 1～1,024 个资源，且最多 16 个封包；当前资源数量超出范围。"));}
-        supported(paths.keys(),&template,template["archiveComponent"].is_string(),false)?;
         if let Some(other)=candidates(state).into_iter().find(|candidate|candidate["format"]!=format&&matches!(candidate["evidenceKind"].as_str(),Some("script-signature"|"container-signature"|"format-signature"|"container-header"))){return Err(reject(format!("另有未被模板覆盖的格式证据：{}；{}",other["format"],other["evidence"])));}
         if let Some(launch)=state.extra.get("launchInspection")&& (launch["partial"]==true||["localeProfiles","launchScripts","errorLogs"].iter().any(|field|launch[*field].as_array().is_some_and(|items|!items.is_empty()))){return Err(reject("存在尚需解释的启动配置、启动脚本、错误日志或不完整启动检查；先交给模型核对。"));}
         if !coverage_list(state,"pending").is_empty()||!coverage_list(state,"runtimeChecks").is_empty(){return Err(reject("已有覆盖或运行待办需要继续处理，未自动完成任务。"));}
         let resource_bytes=lengths.values().try_fold(0_u64,|sum,length|sum.checked_add(*length)).ok_or_else(||reject("完整资源超过输入预算。"))?;
-        let mut selected_bytes=lengths.iter().filter(|(path,_)|extension(path)!="rpa").map(|(_,length)|*length).sum::<u64>();let input_budget=if archives.is_empty(){TEMPLATE_BYTES}else{RPA_BYTES};
-        report["resourceBytes"]=json!(resource_bytes);report["selectedBytes"]=json!(selected_bytes);report["looseScripts"]=json!(renpy.len()+compiled.len()+kirikiri.len());report["archivedScripts"]=json!(0);report["mediaOnlyArchives"]=json!(0);
+        let mut selected_bytes=lengths.iter().filter(|(path,_)|archive_template.is_none()&&extension(path)!="rpa").map(|(_,length)|*length).sum::<u64>();let input_budget=if archives.is_empty()&&archive_template.is_none(){TEMPLATE_BYTES}else{PACKED_TEMPLATE_BYTES};
+        report["resourceBytes"]=json!(resource_bytes);report["looseScripts"]=json!(renpy.len()+compiled.len()+kirikiri.len());
+        if archive_template.is_none() {
+            report["selectedBytes"]=json!(selected_bytes);report["archivedScripts"]=json!(0);report["mediaOnlyArchives"]=json!(0);
+        }
         if selected_bytes>TEMPLATE_BYTES{return Err(reject("松散脚本合计超过自动组合的 256 MiB 脚本预算。"));}
         if resource_bytes>input_budget||lengths.values().any(|length|*length>input_budget){return Err(reject(format!("完整资源超过自动组合的 {} MiB 输入预算，未缩小为少量样本发布。",input_budget/(1024*1024))));}
         let hashes=sample_hashes(&request.game_directory,&lengths,token)?;report["stage"]=json!("stage");record(state,path,"automaticTemplate",report.clone()).await?;
@@ -1546,7 +1633,14 @@ pub(super) async fn run_template(
         let tested=service.test_adapter(request,workspace,state,&composed["testArguments"],token,progress).await?;report["diagnostics"]=tested["diagnostics"].clone();
         if tested["passed"]!=true||tested["stage"]!="finish-ready"||tested["coveragePending"]==true{return Ok(None);}
         report["stage"]=json!("scope-recheck");record(state,path,"automaticTemplate",report.clone()).await?;
-        let current=scan(&request.game_directory,token)?;if paths.keys().ne(current.keys()){state.verified_package=None;state.verified_fingerprint=None;return Err(reject("自动组合期间游戏目录发生变化或未完整读取，需重新确认模板适用范围；未自动发布。"));}
+        let current=scan(&request.game_directory,token)?;
+        let same_indices = if let Some(profile) = archive_template {
+            probe_archive_template(service, request, workspace, state, profile, &volumes, token)
+                .await?["indexFingerprints"] == report["archiveIndexFingerprints"]
+        } else {
+            true
+        };
+        if paths.keys().ne(current.keys()) || !same_indices {state.verified_package=None;state.verified_fingerprint=None;return Err(reject("自动组合期间游戏资源范围发生变化，需重新确认模板适用范围；未自动发布"));}
         report["stage"]=json!("publish");record(state,path,"automaticTemplate",report.clone()).await?;
         let summary=format!("已自动组合 {}，全部匹配资源已通过提取、原字节往返、少量中文试写及全量中文回填验收。支持范围仅为此模板选中的脚本文本；独立文字覆盖{}，不代表整款游戏文字已完整覆盖。",template["family"]["name"].as_str().unwrap_or(""),if state.text_coverage["samples"].as_array().is_none_or(Vec::is_empty){"尚未评估"}else{"仅核对已保留样本"});
         let published=service.finish_adapter(request,workspace,state,&json!({"summary":summary}),token).await?;

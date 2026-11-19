@@ -16,7 +16,7 @@
 | [Unity SerializedFile](engines/unity-serialized-text.md) | 容器组件 | Unity 2022 小端 v22，TextAsset 文本布局另行确认 |
 | [QLIE 字体与启动](engines/qlie-filepack3-systemfont.md) | 字体和启动组件 | 已确认的字体枚举和启动链 |
 | [System4 FNL 补字](engines/system4-ain14-msg1-fnl.md) | 字形组件 | 参考字形尺寸的位图生成，AIN、FNL 及运行补丁需单独适配 |
-| [Artemis PFS](engines/artemis-pfs.md) | 覆盖卷构建参考 | 运行时确实加载数字卷，并提供可核对的覆盖顺序 |
+| [Artemis PFS](engines/artemis-pfs.md) | AST 组合模板与覆盖卷参考 | PFS v8、UTF-8 AST 2.0，覆盖加载按游戏确认 |
 | [Valkyria DAT / SDT](engines/valkyria.md) | 参考解析 | 完整语义、变长跳转和运行支持由当前适配器验证 |
 
 ## 引擎库管理
