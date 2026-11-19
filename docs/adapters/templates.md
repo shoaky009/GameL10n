@@ -13,6 +13,7 @@
 | `archive.ypf482` | `inspect`、`extract` | YPF 482，成员名使用 Murmur2 校验和 FF 异或。 |
 | `archive.pfs8` | `inspect`、`extract` | Artemis PFS v8，使用索引派生的密钥读取成员。 |
 | `archive.nekopack4a` | `inspect`、`extract` | NEKOPACK4A，按索引读取选定成员并验证 zlib 解压长度。 |
+| `archive.whale-dat` | `inspect`、`extract`、`rebuild` | Whale DAT v2，脚本解码使用 `gameTitle`，媒体成员使用 `filenameManifest` 匹配 CRC64。重建适用于纯脚本卷。 |
 
 索引组件可以只读索引，再按成员名或扩展名提取。清单中的 `length` 为封包中的长度，已读取成员的 SHA-256 取解码后的字节。需要校验全部成员时用 `verifyContents: true`，适用组件的读取和解码预算。支持重建的组件按原成员名替换，并核对未修改成员。[封包接口与预算](../../adapters/components/engine_archive.py)
 

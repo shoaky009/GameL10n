@@ -149,6 +149,7 @@ pub(crate) fn engine_components() -> Vec<Value> {
         json!({"id":"archive.ypf482","version":1,"format":"YU-RIS YPF 482 with Murmur2 and FF name XOR","module":"python.archives.yuris_482","operations":["inspect","extract"],"limitations":["Use a proven scheme for other YPF versions or layouts.", "Pass YSTB scripts with their same-directory ysc.ybn; encrypted YBN needs separate evidence."]}),
         json!({"id":"archive.pfs8","version":1,"format":"Artemis PFS v8","module":"python.archives.pfs","operations":["inspect","extract"],"limitations":["Member reads use the index-derived key; verify the script layout and load order separately."]}),
         json!({"id":"archive.nekopack4a","version":1,"format":"NekoSDK NEKOPACK4A","module":"engine_archive","operations":["inspect","extract"],"limitations":["Inspect reads only the index. Select .txt members and verify ADVSCRIPT2 with nekosdk-script. Combine with the nekopack4a-advscript2 template for CP932 script replacement."]}),
+        json!({"id":"archive.whale-dat","version":1,"format":"Whale DAT v2 with CRC64 index","module":"whale_dat","operations":["inspect","extract","rebuild"],"limitations":["Provide exact gameTitle for compressed scripts. Extracted scripts can produce filenameManifest, a candidate list for matching asset hashes in other DAT volumes. Unresolved names are counted in inspection. Rebuild supports script-only DAT volumes."]}),
     ]
 }
 

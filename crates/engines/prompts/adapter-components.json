@@ -33,6 +33,31 @@
     "engineFamilies": ["ai5v", "silv", "elf"]
   },
   {
+    "id": "whale-script",
+    "name": "Whale 脚本文本和资源引用",
+    "scope": "已解压的 CP932 脚本。沿用固定库的对白、姓名、SELECT 与 [n] 规则。可从已知语音、背景、音频及立绘指令收集资源文件名候选。",
+    "origin": "复用 python.engines.whale 的文本读写，独立实现 Whale 资源引用规则。",
+    "api": "tools.whale_script.asset_names(script) 返回相对文件名候选。对白读写使用 python.engines.whale.extract / patch。封包成员定位采用原始 CRC64 与文本段标识。",
+    "example": "try_builtin_adapter(format=\"whale-script\", directory=\"work/unpacked/files\", files=[\"0123456789abcdef.script\"])",
+    "sampleCheck": "whale_script.py",
+    "files": [{"name": "whale_script.py", "path": "src/tools/whale_script.py", "binary": false}],
+    "engineFamilies": ["whale"]
+  },
+  {
+    "id": "whale-dat",
+    "name": "Whale DAT v2 封包",
+    "scope": "CRC64 索引。已确认 gameTitle 可读写纯脚本卷。按文件名清单只读取对应哈希的媒体成员。",
+    "origin": "依据 Whale DAT v2 字段布局及 CRC-64/WE 独立实现。",
+    "api": "tools.engine_archive.execute(request) 支持 archive.whale-dat 的 inspect、extract、rebuild。索引只读，可按成员选择。脚本提取输出的 filenames.json 可作为后续媒体包调用的 filenameManifest。替换脚本按原成员名提交完整 CP932 文件。",
+    "example": "run_engine_component(id=\"archive.whale-dat\", operation=\"extract\", archive=\"resources/script.dat\", output=\"work/whale\", gameTitle=\"<confirmed original title>\")\nrun_engine_component(id=\"archive.whale-dat\", operation=\"inspect\", archive=\"resources/arc0.dat\", output=\"work/whale-assets\", filenameManifest=\"work/whale/filenames.json\")",
+    "files": [
+      {"name": "engine_archive.py", "path": "src/tools/engine_archive.py", "binary": false},
+      {"name": "whale_dat.py", "path": "src/tools/whale_dat.py", "binary": false},
+      {"name": "whale_script.py", "path": "src/tools/whale_script.py", "binary": false}
+    ],
+    "engineFamilies": ["whale"]
+  },
+  {
     "id": "unity-serialized-file",
     "name": "Unity SerializedFile 与 TextAsset 读写",
     "scope": "Unity 2022 小端 SerializedFile v22；保留类型表、path ID、引用和未修改对象，支持 TextAsset 原始字节读取及变长回填。不支持 UnityFS 封包，不解释脚本语法或 MonoBehaviour 字段，也不确认字体与运行显示。",

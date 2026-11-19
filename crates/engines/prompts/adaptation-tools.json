@@ -1014,7 +1014,7 @@
       "type": "function",
       "function": {
         "name": "run_engine_component",
-        "description": "Use a fixed component's inspect/extract/rebuild operations on resources/ or work/ inputs. Provide a new work/ output directory. inspect_engine_component lists component operations. RPA, BGI, plain KIF, YPF 482 and PFS v8 inspect the index and extract only selected members or extensions. Check the manifest for the full index, read bytes and member hashes. verifyContents hashes all members within the component budget. Supported rebuild operations map exact member names to replacement work/ files. XP3 requires independently confirmed filter=none. Call alone.",
+        "description": "Use a fixed component's inspect/extract/rebuild operations on resources/ or work/ inputs. Provide a new work/ output directory. inspect_engine_component lists operations and format parameters. Indexed components can inspect indexes and extract selected members or extensions. verifyContents hashes all members within the component budget. Rebuild maps exact member names to replacement work/ files. XP3 requires confirmed filter=none. Whale DAT v2 uses gameTitle for scripts and filenameManifest for mapping asset hashes. Call alone.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -1057,6 +1057,14 @@
             },
             "verifyContents": {
               "type": "boolean"
+            },
+            "gameTitle": {
+              "type": "string",
+              "description": "Whale DAT v2 only. Exact original title for the compressed script members."
+            },
+            "filenameManifest": {
+              "type": "string",
+              "description": "Whale DAT v2 only. A work/ JSON filename list, such as the manifest returned from script extraction."
             },
             "replacements": {
               "type": "object",

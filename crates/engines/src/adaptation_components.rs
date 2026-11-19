@@ -164,6 +164,13 @@ fn source(name: &str) -> Result<&'static [u8], EngineError> {
             "../../../adapters/components/nekosdk_script.py"
         )),
         "ai5v_mes.py" => Ok(include_bytes!("../../../adapters/components/ai5v_mes.py")),
+        "engine_archive.py" => Ok(include_bytes!(
+            "../../../adapters/components/engine_archive.py"
+        )),
+        "whale_dat.py" => Ok(include_bytes!("../../../adapters/components/whale_dat.py")),
+        "whale_script.py" => Ok(include_bytes!(
+            "../../../adapters/components/whale_script.py"
+        )),
         "unity_serialized_file.py" => {
             Ok(include_bytes!("../../../adapters/unity/serialized_file.py"))
         }
@@ -448,14 +455,17 @@ mod tests {
     }
 
     #[test]
-    fn component_metadata_preserves_the_original_catalog_and_search_fields() {
+    fn component_catalog_returns_unique_ids_and_preserves_search_fields() {
         let root = tempfile::tempdir().expect("fixture");
         let service = service(root.path());
         let components = list("").expect("catalog");
-        assert_eq!(components.len(), 15);
+        let mut ids = BTreeSet::new();
         assert!(components.iter().all(|component| {
             component.as_object().expect("metadata").len() == 4
                 && component["version"] == VERSION
+                && component["id"]
+                    .as_str()
+                    .is_some_and(|id| !id.is_empty() && ids.insert(id))
                 && component["name"]
                     .as_str()
                     .is_some_and(|name| !name.is_empty())

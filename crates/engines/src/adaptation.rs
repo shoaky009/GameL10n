@@ -2536,10 +2536,7 @@ impl EngineService {
             return Err(EngineError::Protocol("组件输入必须是已暂存资源。".into()));
         }
         let archive_path = resources::file(workspace, state, &archive)?;
-        let _input_handles = crate::source::lock_inputs(
-            &BTreeMap::from([(archive.clone(), archive_path.clone())]),
-            cancellation,
-        )?;
+        let mut component_inputs = BTreeMap::from([(archive, archive_path.clone())]);
         let maximum = match component {
             "archive.rpa3" => 2_u64 << 30,
             "archive.xp3" => 512 << 20,
@@ -2577,6 +2574,25 @@ impl EngineService {
             )
         );
         payload["verifyContents"] = json!(boolean(args, "verifyContents", false)?);
+        if args.get("filenameManifest").is_some() {
+            if component != "archive.whale-dat" {
+                return Err(EngineError::Protocol(
+                    "filenameManifest 仅用于 Whale DAT。".into(),
+                ));
+            }
+            let relative = text(args, "filenameManifest")?.replace('\\', "/");
+            if !relative.starts_with("work/") {
+                return Err(EngineError::Protocol("文件名清单必须位于 work/。".into()));
+            }
+            let path = resources::file(workspace, state, &relative)?;
+            if path.starts_with(&output) {
+                return Err(EngineError::Protocol(
+                    "文件名清单不能位于组件输出目录。".into(),
+                ));
+            }
+            payload["filenameManifest"] = json!(path);
+            component_inputs.insert(relative, path);
+        }
         if let Some(replacements) = payload
             .get_mut("replacements")
             .and_then(Value::as_object_mut)
@@ -2602,6 +2618,7 @@ impl EngineService {
                 *value = json!(path);
             }
         }
+        let _input_handles = crate::source::lock_inputs(&component_inputs, cancellation)?;
         let reference = self.adaptation_reference(workspace, state)?;
         let library = self.reference_library(&reference)?;
         let mut response=self.helper(&json!({"operation":"archive_component","request":payload,"components":self.asset_root.join("adapters/components"),"library":library}),cancellation).await?;
@@ -2616,6 +2633,10 @@ impl EngineService {
         response["runtimeStatus"] = json!("not-tested");
         if response["success"] == true && operation == "extract" {
             response["extractedDirectory"] = json!(format!("{output_relative}/files"));
+            if component == "archive.whale-dat" && response["filenameManifest"] == "filenames.json"
+            {
+                response["filenameManifest"] = json!(format!("{output_relative}/filenames.json"));
+            }
         }
         if response["success"] == true && operation == "rebuild" {
             response["rebuiltArchive"] = json!(format!(
@@ -3536,8 +3557,8 @@ fn describe_engine_components(args: &Value) -> Result<Value, EngineError> {
         "components":components,
         "dependencies":["Shared Python 3.14.10","Hash-pinned shared GalTransl library; standard library only, no pip or runtime downloads."],
         "limits":{"rpaArchiveMiB":2048,"xp3ArchiveMiB":512,"indexedArchiveIndexMiB":8,"selectedMemberMiB":64,"selectedTotalMiB":256,"entries":10000,"memberNamesMiB":2},
-        "input":"run_engine_component: id, operation, archive (resources/ or work/), output (new work/ directory). Optional members or lowercase extensions select extraction; rebuild replacements map exact member names to work/ files. XP3 requires filter=none.",
-        "output":"Bounded summary plus work/<output>/manifest.json containing member names and lengths. RPA, BGI, KIF, YPF 482 and PFS v8 inspect by index and extract selected members. Unread member SHA256 is null. verifyContents=true hashes members within the component's limits. readBytes records actual source reads for index-based operations. extract writes files/; supported rebuild operations write rebuilt/<original filename> and verify all members.",
+        "input":"run_engine_component: id, operation, archive (resources/ or work/), output (new work/ directory). Optional members or lowercase extensions select extraction. Rebuild replacements map exact member names to work/ files. XP3 requires filter=none. Whale DAT v2 accepts gameTitle for scripts and filenameManifest under work/ for assets.",
+        "output":"Bounded summary plus work/<output>/manifest.json with resolved member names and lengths. Indexed components read only the index for inspection. Unread member SHA256 is null. verifyContents=true hashes members within the component's limits. readBytes records actual source reads. Extract writes files/. Supported rebuilds write rebuilt/<original filename> and verify member contents.",
         "usage":"Stage a real archive, then call the component directly; no Python wrapper or model-generated parser is needed. Use try_builtin_adapter on extracted scripts. Component success is structural evidence, not runtime or adapter acceptance."
     }))
 }

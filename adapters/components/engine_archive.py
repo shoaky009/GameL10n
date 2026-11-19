@@ -5,6 +5,7 @@ in python.archives; this file supplies bounded file I/O, rebuilds and IPC.
 """
 import hashlib
 import importlib
+from dataclasses import replace
 import json
 import os
 from pathlib import Path
@@ -615,6 +616,180 @@ def execute_rpa(request, source):
         return report
 
 
+def whale_read_names(path):
+    if path is None:
+        return []
+    names = json.loads(read_file(path, 2 << 20).decode("utf-8-sig"))
+    if not isinstance(names, list) or len(names) > MAX_ENTRIES:
+        raise ValueError("Whale filename manifest must be a bounded JSON list")
+    for name in names:
+        member_name(name)
+    return names
+
+
+def whale_rebuild(request, source, stream, whale, index, game_key):
+    if index.missing or any(entry.kind != whale.SCRIPT for entry in index.entries):
+        raise ValueError("Whale DAT rebuild requires a script-only v2 volume")
+    if game_key is None:
+        raise ValueError("Whale DAT rebuild requires gameTitle")
+    if index.length > MAX_ARCHIVE:
+        raise ValueError("Whale script archive exceeds the rebuild budget")
+    output = checked_path(request["outputFile"])
+    separate(source, output)
+    by_name = {entry.name: entry for entry in index.entries}
+    replacements = request.get("replacements") or {}
+    if not isinstance(replacements, dict) or len(replacements) > 128 or replacements.keys() - by_name.keys():
+        raise ValueError("invalid Whale script replacement mapping")
+    changes, budget = {}, MAX_TOTAL
+    for name, path in replacements.items():
+        replacement = checked_path(path)
+        separate(replacement, output)
+        data = read_file(replacement, min(budget, MAX_FILE))
+        budget -= len(data)
+        if whale.read_member(stream, by_name[name], MAX_FILE, game_key) != data:
+            changes[name] = data
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    created = False
+    try:
+        with output.open("x+b") as target:
+            created = True
+            if not changes:
+                copy_range(stream, target, 0, index.length)
+            else:
+                target.write(bytes(index.data_start))
+                before, updated = index.data_start, {}
+                for entry in sorted(index.entries, key=lambda entry: entry.offset):
+                    copy_range(stream, target, before, entry.offset - before)
+                    offset = target.tell()
+                    if entry.name in changes:
+                        data = changes[entry.name]
+                        stored = whale.encode_script(data, entry, game_key)
+                        target.write(stored)
+                        updated[entry.key] = replace(entry, offset=offset, size=len(stored), decoded_size=len(data))
+                    else:
+                        copy_range(stream, target, entry.offset, entry.size)
+                        updated[entry.key] = replace(entry, offset=offset)
+                    before = entry.offset + entry.size
+                    if target.tell() > MAX_ARCHIVE:
+                        raise ValueError("rebuilt Whale DAT exceeds the output budget")
+                copy_range(stream, target, before, index.length - before)
+                if target.tell() > MAX_ARCHIVE:
+                    raise ValueError("rebuilt Whale DAT exceeds the output budget")
+                whale.write_script_index(target, [updated[entry.key] for entry in index.entries])
+                result = whale.read_index(target, (), MAX_ENTRIES)
+                if [entry.key for entry in result.entries] != [entry.key for entry in index.entries]:
+                    raise ValueError("Whale DAT member identities changed")
+                before_by_hash = {entry.key: entry for entry in index.entries}
+                for entry in result.entries:
+                    old = before_by_hash[entry.key]
+                    if old.name in changes:
+                        if whale.read_member(target, entry, MAX_FILE, game_key) != changes[old.name]:
+                            raise ValueError("rebuilt Whale script differs from its replacement")
+                    elif (entry.decoded_size != old.decoded_size or entry.size != old.size
+                          or hash_range(target, entry.offset, entry.size) != hash_range(stream, old.offset, old.size)):
+                        raise ValueError("rebuilt Whale DAT changed an untouched member")
+            return dict(changedCount=len(changes), byteIdentical=not changes)
+    except BaseException:
+        if created:
+            output.unlink(missing_ok=True)
+        raise
+
+
+def execute_whale(request, source):
+    package = f"{__package__}." if __package__ else ""
+    whale = importlib.import_module(package + "whale_dat")
+    names = whale_read_names(request.get("filenameManifest"))
+    key = whale.title_key(request["gameTitle"]) if request.get("gameTitle") is not None else None
+    operation = request["operation"]
+    verify = request.get("verifyContents", False)
+    if not isinstance(verify, bool):
+        raise ValueError("verifyContents must be a boolean")
+    with source.open("rb") as raw:
+        before = os.fstat(raw.fileno())
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError("component input must be a regular file")
+        stream = ArchiveInput(raw)
+        index = whale.read_index(stream, names, MAX_ENTRIES)
+        validate_names(index.entries)
+        index_bytes = stream.bytes_read
+        if verify and index.missing:
+            raise ValueError("Whale DAT has unresolved filenames; supply a matching filename manifest")
+        selected = select_entries(request, index.entries)
+        report = dict(protocolVersion=VERSION, success=True, component="archive.whale-dat",
+                      operation=operation, formatVersion=2, inputBytes=before.st_size, indexBytes=index_bytes,
+                      entryCount=len(index.entries) + len(index.missing), resolvedCount=len(index.entries),
+                      unresolvedCount=len(index.missing), selectedCount=len(selected),
+                      selectedBytes=sum(entry.size for entry in selected))
+        hashes, extracted = {}, {}
+        total = 0
+        if operation == "extract" or verify:
+            to_read = index.entries if verify else selected
+            if sum(entry.size for entry in to_read) > MAX_TOTAL:
+                raise ValueError("Whale DAT stored members exceed the total read budget")
+            selected_names = {entry.name for entry in selected}
+            for entry in to_read:
+                try:
+                    data = whale.read_member(stream, entry, min(MAX_FILE, MAX_TOTAL - total), key)
+                except zlib.error as error:
+                    raise ValueError("Whale script zlib stream is invalid; confirm gameTitle and archive version") from error
+                total += len(data)
+                hashes[entry.name] = digest(data)
+                if operation == "extract" and entry.name in selected_names:
+                    extracted[entry] = data
+        if operation == "rebuild":
+            report.update(whale_rebuild(request, source, stream, whale, index, key))
+        after = os.fstat(raw.fileno())
+        if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+            raise ValueError("Whale DAT changed during component operation")
+        report.update(readBytes=stream.bytes_read, decodedBytes=total, verifiedEntries=len(hashes),
+                      allContentsVerified=len(hashes) == report["entryCount"],
+                      entries=[dict(name=entry.name, length=entry.size, hash=f"{entry.key:016x}",
+                                    sha256=hashes.get(entry.name)) for entry in index.entries])
+    if operation == "extract":
+        whale_script = importlib.import_module(package + "whale_script")
+        output = checked_path(request["outputDirectory"])
+        separate(source, output)
+        if output.exists() and (not output.is_dir() or any(output.iterdir())):
+            raise ValueError("extraction output must be a new or empty directory")
+        assets, truncated = set(), False
+        for entry, data in extracted.items():
+            if entry.kind == whale.SCRIPT:
+                try:
+                    for name in sorted(whale_script.asset_names(data.decode("cp932"))):
+                        try:
+                            normalized = member_name(name)
+                        except ValueError:
+                            continue
+                        if len(assets) < MAX_ENTRIES or normalized in assets:
+                            assets.add(normalized)
+                        else:
+                            truncated = True
+                except UnicodeDecodeError:
+                    pass
+        manifest = checked_path(output.parent / "filenames.json")
+        separate(source, manifest)
+        encoded_names = json.dumps(sorted(assets), ensure_ascii=False).encode("utf-8")
+        if len(encoded_names) > 2 << 20:
+            raise ValueError("Whale filename candidates exceed the manifest budget")
+        if assets and manifest.exists():
+            raise ValueError("Whale filename manifest already exists")
+        report["extractedFiles"] = []
+        for entry, data in extracted.items():
+            name = member_name(entry.name)
+            path = checked_path(output / name)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("xb") as target:
+                target.write(data)
+            report["extractedFiles"].append(name)
+        report.update(filenameCandidates=len(assets), filenameCandidatesTruncated=truncated)
+        if assets:
+            with manifest.open("xb") as target:
+                target.write(encoded_names)
+            report["filenameManifest"] = manifest.name
+    return report
+
+
 def execute(request):
     if request.get("protocolVersion") != VERSION:
         raise ValueError("unsupported archive component protocol")
@@ -624,6 +799,8 @@ def execute(request):
     source = checked_path(request["archive"])
     if component == "archive.rpa3":
         return execute_rpa(request, source)
+    if component == "archive.whale-dat":
+        return execute_whale(request, source)
     if component in INDEXED_COMPONENTS:
         return execute_indexed(request, source)
     data = read_file(source, MAX_ARCHIVE)

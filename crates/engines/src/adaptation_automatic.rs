@@ -2766,6 +2766,74 @@ pathlib.Path(sys.argv[2]).write_bytes(build_pak({'scene.txt': script, 'image.bin
     }
 
     #[tokio::test]
+    async fn whale_archive_tool_reuses_generated_names_for_selective_asset_extraction() {
+        let root = tempfile::tempdir().unwrap();
+        let (service, request, workspace, mut state) = fixture(root.path(), "Whale", "script.dat");
+        let service = service.with_execution_isolation(false);
+        if !service.tools.python().is_file() {
+            return;
+        }
+        let script = r#"
+import pathlib, sys
+sys.path.insert(0, sys.argv[1])
+from test_whale_dat import dat
+work = pathlib.Path(sys.argv[2])
+text = 'BG school\n【花子】「こんにちは」\n'.encode('cp932')
+(work / 'script.dat').write_bytes(dat([('scene', 2, text)]))
+(work / 'images.dat').write_bytes(dat([('bg/school.tlg', 0, b'expected asset')]))
+"#;
+        assert!(
+            std::process::Command::new(service.tools.python())
+                .args(["-I", "-B", "-X", "utf8", "-c", script])
+                .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("python"))
+                .arg(workspace.join("work"))
+                .status()
+                .unwrap()
+                .success()
+        );
+        let cancellation = CancellationToken::new();
+        let result = service
+            .adaptation_tool(
+                &request,
+                &workspace,
+                &mut state,
+                "run_engine_component",
+                &json!({"id":"archive.whale-dat","operation":"extract","archive":"work/script.dat",
+                    "output":"work/whale-scripts","gameTitle":"Fixture"}),
+                &cancellation,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result["filenameManifest"], "work/whale-scripts/filenames.json",
+            "{result}"
+        );
+        assert_eq!(
+            result["builtinSamples"]["trials"][0]["unitCount"], 2,
+            "{result}"
+        );
+        let assets = service
+            .adaptation_tool(
+                &request,
+                &workspace,
+                &mut state,
+                "run_engine_component",
+                &json!({"id":"archive.whale-dat","operation":"extract","archive":"work/images.dat",
+                    "output":"work/whale-media","filenameManifest":result["filenameManifest"]}),
+                &cancellation,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(assets["resolvedCount"], 1, "{assets}");
+        assert_eq!(
+            fs::read(workspace.join("work/whale-media/files/bg/school.tlg")).unwrap(),
+            b"expected asset"
+        );
+    }
+
+    #[tokio::test]
     async fn complete_archive_template_inspects_all_members_before_publication() {
         let root = tempfile::tempdir().unwrap();
         let (service, request, workspace, mut state) = fixture(root.path(), "Renpy", "scripts.rpa");

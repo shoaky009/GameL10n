@@ -16,7 +16,7 @@ use crate::{
     vntextpatch::{BUILTIN_FORMATS, BuiltinFormat},
 };
 
-pub(crate) const DISCOVERY_REVISION: u64 = 14;
+pub(crate) const DISCOVERY_REVISION: u64 = 15;
 const CONTAINERS: &[&str] = &[
     "xp3", "rpa", "rpyc", "pack", "pak", "arc", "ypf", "int", "pfs",
 ];
@@ -120,6 +120,16 @@ fn ai5v_dictionary_header(head: &[u8]) -> bool {
                 && matches!(pair[1], 0x40..=0x7e | 0x80..=0xfc)
         })
     })
+}
+
+fn whale_dat_header(head: &[u8]) -> bool {
+    let Some(count) = head
+        .first_chunk::<4>()
+        .map(|raw| u32::from_le_bytes(*raw) ^ 0x26ac_a46e)
+    else {
+        return false;
+    };
+    (1..=10_000).contains(&count) && head.len() >= 25 && (head[12] ^ head[4]) <= 2
 }
 
 fn diagnostic(error: impl std::fmt::Display) -> String {
@@ -546,7 +556,7 @@ fn inspect_builtin_files(
                     continue;
                 }
                 let ext = extension(&name);
-                if matches!(ext.as_str(), "scn" | "psb")
+                if matches!(ext.as_str(), "scn" | "psb" | "script")
                     || name == "scpack.idx"
                     || name.rsplit_once(".pfs.").is_some_and(|(_, suffix)| {
                         suffix.len() == 3 && suffix.bytes().all(|byte| byte.is_ascii_digit())
@@ -608,6 +618,8 @@ fn inspect_builtin_files(
     let mut neko = Vec::new();
     let mut nekosdk_scripts = Vec::new();
     let mut ai5v_samples = Vec::new();
+    let mut whale_archives = Vec::new();
+    let mut whale_scripts = Vec::new();
     let mut bsscript = Vec::new();
     let mut scn = Vec::new();
     let mut pfs_archives = Vec::new();
@@ -619,7 +631,7 @@ fn inspect_builtin_files(
         let read = || -> Result<(Vec<u8>, Vec<u8>), EngineError> {
             let mut stream = File::open(inputs.file(root, path)?)?;
             let length = stream.metadata()?.len();
-            let mut head = vec![0; length.min(256) as usize];
+            let mut head = vec![0; length.min(258) as usize];
             stream.read_exact(&mut head)?;
             let mut tail = vec![0; length.min(64) as usize];
             stream.seek(SeekFrom::End(-(tail.len() as i64)))?;
@@ -682,6 +694,23 @@ fn inspect_builtin_files(
         }
         if ai5v_samples.len() < 2 && extension(path) == "mes" && ai5v_dictionary_header(&head) {
             ai5v_samples.push(path.clone());
+        }
+        if whale_archives.len() < 4 && extension(path) == "dat" && whale_dat_header(&head) {
+            whale_archives.push(path.clone());
+            identified.insert(path.to_lowercase());
+        }
+        if whale_scripts.len() < 2
+            && extension(path) == "script"
+            && !head.is_empty()
+            && !head.contains(&0)
+            && Path::new(path)
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .is_some_and(|stem| {
+                    stem.len() == 16 && stem.bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
+        {
+            whale_scripts.push(path.clone());
         }
         if let Some((key, detail, container)) = identify(&head, &tail) {
             add(
@@ -809,6 +838,12 @@ fn inspect_builtin_files(
         result.insert(0,json!({"format":"BSScriptRev6","adapterId":"reference.bsscript-rev6","name":"BSScript Rev.6","evidenceKind":"script-signature",
             "evidence":["文件头匹配 BSScript Rev.6；这是格式线索，尚未内置完整适配器。",BSSCRIPT_GUIDANCE],"sampleFiles":bsscript,"missingCapabilities":["指令引用分类、变长回填和中文运行支持仍需验证。"]}));
     }
+    if !whale_archives.is_empty() {
+        result.insert(0,json!({"format":"Whale","adapterId":"reference.whale","name":"Whale DAT v2",
+            "evidenceKind":"container-header","evidence":["DAT 的成员计数与首项类型符合 CRC64 索引布局，请用 archive.whale-dat 验证索引。"],
+            "sampleFiles":whale_archives,"archiveComponent":"archive.whale-dat","scriptComponent":"whale-script",
+            "missingCapabilities":["用确认的原始 gameTitle 试解压脚本。提取产生的 filenameManifest 可用于后续资产封包哈希匹配。"]}));
+    }
     if selected.is_none() && root.join("Scene.pck").is_file() && root.join("Gameexe.dat").is_file()
     {
         let read = || -> Result<bool, EngineError> {
@@ -848,6 +883,11 @@ fn inspect_builtin_files(
         components.push(json!({"id":"ai5v-mes","sampleFiles":ai5v_samples,
             "evidence":"MES 头部符合 CP932 字表布局，请用完整字节码和往返确认 AI5V 方言。",
             "inspectCall":{"tool":"inspect_adapter_component","arguments":{"id":"ai5v-mes"}}}));
+    }
+    if !whale_scripts.is_empty() {
+        components.push(json!({"id":"whale-script","sampleFiles":whale_scripts,
+            "evidence":"完整的哈希命名脚本可试用 Whale CP932 文本解析。",
+            "inspectCall":{"tool":"inspect_adapter_component","arguments":{"id":"whale-script"}}}));
     }
     Ok(
         json!({"revision":DISCOVERY_REVISION,"filesScanned":scanned,"partial":partial,"candidates":result,"components":components,"pfsArchives":pfs_archives,"scriptArchives":script_archives,"warnings":warnings}),
