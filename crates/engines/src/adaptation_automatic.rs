@@ -1132,19 +1132,36 @@ pub(super) async fn inspect_archives(
                 .as_array()
                 .into_iter()
                 .flatten()
-                .filter_map(|path| Some(("ArtemisAst", path.as_str()?, None)))
-                .filter(|_| {
-                    !service
-                        .disabled_families
-                        .contains("engine.vntextpatch-artemisast")
+                .filter_map(|path| Some(("ArtemisAst", path.as_str()?, None))),
+        )
+        .chain(
+            state.extra["builtinDiscovery"]["scriptArchives"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|candidate| {
+                    Some((
+                        candidate["format"].as_str()?,
+                        candidate["archive"].as_str()?,
+                        None,
+                    ))
                 }),
         )
-        .filter(|(_, archive, index)| {
-            !request.inputs.excludes(archive)
+        .filter(|(format, archive, index)| {
+            !service.disabled_families.contains(&format!(
+                "engine.vntextpatch-{}",
+                format.to_ascii_lowercase()
+            )) && !request.inputs.excludes(archive)
                 && index.is_none_or(|path| !request.inputs.excludes(path))
         })
         .take(3)
-        .map(|(format, archive, index)| (format, archive.to_owned(), index.map(str::to_owned)))
+        .map(|(format, archive, index)| {
+            (
+                format.to_owned(),
+                archive.to_owned(),
+                index.map(str::to_owned),
+            )
+        })
         .collect();
     state.extra.remove("automaticArchiveTrials");
     if archives.is_empty() {
@@ -1154,6 +1171,7 @@ pub(super) async fn inspect_archives(
     let token = &budget.token;
     let mut reports = Vec::new();
     for (format, archive, index) in archives {
+        let format = format.as_str();
         let result = async {
             let paths = std::iter::once(("archive", archive.as_str()))
                 .chain(index.as_deref().map(|index| ("index", index)))
@@ -1166,6 +1184,7 @@ pub(super) async fn inspect_archives(
             let mut report = service.helper(
                 &json!({"operation":"archive_samples","format":format,"archive":paths["archive"],
                     "index":paths.get("index"),"directory":scratch.path(),"library":library,
+                    "components":service.asset_root.join("adapters/components"),
                     "timeoutSeconds":10}),
                 token,
             ).await?;
@@ -1175,35 +1194,58 @@ pub(super) async fn inspect_archives(
             let mut trials = Vec::new();
             for sample in samples {
                 let member = text(&sample, "member")?;
-                let name = if format == "ArtemisAst" { "sample.ast" } else { "sample.dat" };
                 let source = resolve_relative(scratch.path(), text(&sample, "path")?)?;
-                let size = source.metadata()?.len();
-                let hash = checked_hash(&source, size, token)?;
-                let identity = hash_text(&json!([archive, member, hash]).to_string());
+                let (files, paths) = if let Some(files) = sample.get("files") {
+                    let files: Vec<String> = serde_json::from_value(files.clone())?;
+                    let paths = files.iter().map(|file| Ok((file.clone(), resolve_relative(&source, file)?)))
+                        .collect::<Result<BTreeMap<_, _>, EngineError>>()?;
+                    (files, paths)
+                } else {
+                    let name = if format == "ArtemisAst" { "sample.ast" } else { "sample.dat" }.to_owned();
+                    (vec![name.clone()], BTreeMap::from([(name, source)]))
+                };
+                let mut hashes = BTreeMap::new();
+                let mut size = 0;
+                for (file, path) in &paths {
+                    let length = path.metadata()?.len();
+                    size += length;
+                    hashes.insert(file, (length, checked_hash(path, length, token)?));
+                }
+                let sample_fingerprint = if sample.get("files").is_some() {
+                    json!(hashes)
+                } else {
+                    json!(hashes[&files[0]].1)
+                };
+                let identity = hash_text(&json!([archive, member, sample_fingerprint]).to_string());
                 let directory = format!("work/archive-samples/{identity}");
-                let relative = format!("{directory}/{name}");
-                let target = resolve_relative(workspace, &relative)?;
-                if !target.is_file() {
-                    fs::create_dir_all(resolve_relative(workspace, &directory)?)?;
-                    let mut temporary = tempfile::NamedTempFile::new_in(workspace.join(&directory))?;
-                    std::io::copy(&mut fs::File::open(&source)?, &mut temporary)?;
-                    match temporary.persist_noclobber(&target) {
-                        Ok(_) => {}
-                        Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {}
-                        Err(error) => return Err(error.error.into()),
+                for (file, path) in &paths {
+                    let target = resolve_relative(workspace, &format!("{directory}/{file}"))?;
+                    if !target.is_file() {
+                        let parent = target.parent().ok_or_else(|| reject("封包样本路径无效"))?;
+                        fs::create_dir_all(parent)?;
+                        let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+                        std::io::copy(&mut fs::File::open(path)?, &mut temporary)?;
+                        match temporary.persist_noclobber(&target) {
+                            Ok(_) => {}
+                            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                            Err(error) => return Err(error.error.into()),
+                        }
+                    }
+                    let (length, hash) = &hashes[file];
+                    if &checked_hash(&target, *length, token)? != hash {
+                        return Err(reject("封包样本副本发生变化"));
                     }
                 }
-                if checked_hash(&target, size, token)? != hash {
-                    return Err(reject("封包样本副本发生变化。"));
-                }
-                let outcome = if format == "ArtemisAst" {
-                    try_cached_sample(service, workspace, state, format, &directory, &[name.into()], token).await?
-                } else {
+                let relative = format!("{directory}/{}", files.first().ok_or_else(|| reject("封包未返回样本"))?);
+                let outcome = if format == "eagls-script" {
                     try_component_sample(service, workspace, state, format, &relative, (true, true), token).await?
+                } else {
+                    try_cached_sample(service, workspace, state, format, &directory, &files, token).await?
                 };
                 let has_text = outcome["parseStatus"] == "passed"
                     && outcome["unitCount"].as_u64().is_some_and(|count| count > 0);
                 trials.push(json!({"member":member,"sample":relative,"bytes":size,
+                    "files":files.iter().skip(1).map(|file|format!("{directory}/{file}")).collect::<Vec<_>>(),
                     "parseStatus":outcome["parseStatus"],"roundtripStatus":outcome["roundtripStatus"],
                     "translationStatus":outcome["translationStatus"],"unitCount":outcome["unitCount"],
                     "errorType":outcome["diagnostic"]["errorType"],"error":outcome["error"].as_str().map(|error|limit(error,240)),

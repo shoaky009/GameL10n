@@ -4,12 +4,16 @@
 
 ## 封包组件
 
-| 组件 | 适用条件 |
-| --- | --- |
-| `archive.rpa3` | 单分块 RPA/ARC 3.0，使用纯数据 Pickle 索引。未知混淆或多分块需另行适配。 |
-| `archive.xp3` | 标准 XP3 v1，需先独立确认无过滤器并声明 `filter: "none"`。带加密、私有过滤器或内嵌 EXE 的封包需另行适配。 |
+| 组件 | 操作 | 适用条件 |
+| --- | --- | --- |
+| `archive.rpa3` | `inspect`、`extract`、`rebuild` | 单分块 RPA/ARC 3.0，使用纯数据 Pickle 索引。 |
+| `archive.xp3` | `inspect`、`extract`、`rebuild` | 标准 XP3 v1，需先独立确认无过滤器并声明 `filter: "none"`。 |
+| `archive.bgi` | `inspect`、`extract` | PackFile 与 BURIKO ARC20，支持原始成员和 DSC 解码。 |
+| `archive.kif` | `inspect`、`extract` | CatSystem2 普通 KIF，独立确认加密命名方案后可用固定 INT API 调查加密变体。 |
+| `archive.ypf482` | `inspect`、`extract` | YPF 482，成员名使用 Murmur2 校验和 FF 异或。 |
+| `archive.pfs8` | `inspect`、`extract` | Artemis PFS v8，使用索引派生的密钥读取成员。 |
 
-两者支持 `inspect`、`extract` 和 `rebuild`，按成员名或扩展名选择提取。重建按精确成员名替换，并核对未修改成员。RPA 索引读取和选中成员提取可分开执行，需要校验全部成员时用 `verifyContents: true`。[封包接口与预算](../../adapters/components/engine_archive.py)
+RPA、BGI、KIF、YPF 482 和 PFS v8 可以只读索引，再按成员名或扩展名提取。清单中的 `length` 为封包中的长度，已读取成员的 SHA-256 取解码后的字节。需要校验全部成员时用 `verifyContents: true`，适用组件的读取和解码预算。支持重建的组件按原成员名替换，并核对未修改成员。[封包接口与预算](../../adapters/components/engine_archive.py)
 
 ## 组合模板
 

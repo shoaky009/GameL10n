@@ -20,6 +20,8 @@ MAX_FILE = 64 << 20
 MAX_TOTAL = 256 << 20
 MAX_ENTRIES = 10_000
 RPA_MAX_ARCHIVE = 2 << 30
+MAX_INDEX = 8 << 20
+INDEXED_COMPONENTS = ("archive.bgi", "archive.kif", "archive.ypf482", "archive.pfs8")
 
 
 class ArchiveInput:
@@ -147,6 +149,160 @@ def hash_range(stream, offset, length, prefix=b""):
 def copy_range(stream, output, offset, length):
     for data in chunks(stream, offset, length):
         output.write(data)
+
+
+def open_index(component, stream):
+    """Return the format revision, index entries, and a bounded member reader."""
+    limits = dict(max_index_size=MAX_INDEX, max_entries=MAX_ENTRIES)
+    if component == "archive.bgi":
+        from python.archives import bgi
+        index = bgi.read_index(stream, **limits)
+
+        def read(entry, maximum):
+            member = bgi.read_member(stream, index, entry, max_stored_size=maximum)
+            return bgi.decode_member(member, max_output_size=maximum, max_symbols=maximum)
+
+        version, entries = index.version, index.entries
+    elif component == "archive.kif":
+        from python.archives import catsystem2_int as kif
+        if kif.probe_int(stream, **limits).encrypted:
+            raise ValueError("encrypted KIF requires a confirmed filename scheme; use the pinned INT API with explicit parameters")
+        index = kif.read_int(stream, **limits)
+
+        def read(entry, maximum):
+            return kif.read_member(stream, entry, max_member=maximum)
+
+        version, entries = "plain", index.entries
+    elif component == "archive.ypf482":
+        from python.archives import yuris_482 as ypf
+        _, entries, _ = ypf.read_index(stream, **limits)
+
+        def read(entry, maximum):
+            if entry.size > maximum:
+                raise ValueError("YPF stored member exceeds the read budget")
+            return ypf.decode_member(b"".join(chunks(stream, entry.offset, entry.size)),
+                                     entry, max_output=maximum)
+
+        version = 482
+    elif component == "archive.pfs8":
+        from python.archives import pfs
+        index = pfs.read_index(stream, **limits)
+        if index.version != 8:
+            raise ValueError(f"unsupported PFS version: {index.version}")
+
+        def read(entry, maximum):
+            return pfs.read_member(stream, index, entry, max_stored_size=maximum).data
+
+        version, entries = index.version, index.entries
+    else:
+        raise ValueError("unknown indexed archive component")
+    validate_names(entries)
+    return version, entries, read
+
+
+def execute_indexed(request, source):
+    operation, component = request["operation"], request["component"]
+    if operation == "rebuild":
+        raise ValueError("this archive component supports inspect and extract")
+    verify = request.get("verifyContents", False)
+    if not isinstance(verify, bool):
+        raise ValueError("verifyContents must be a boolean")
+    with source.open("rb") as raw:
+        before = os.fstat(raw.fileno())
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError("component input must be a regular file")
+        stream = ArchiveInput(raw)
+        version, entries, read = open_index(component, stream)
+        index_bytes = stream.bytes_read
+        selected = select_entries(request, entries)
+        hashes, extracted, decoded = {}, [], 0
+        output = None
+        if operation == "extract":
+            output = checked_path(request["outputDirectory"])
+            separate(source, output)
+            if output.exists() and (not output.is_dir() or any(output.iterdir())):
+                raise ValueError("extraction output must be a new or empty directory")
+        selected_names = {entry.name for entry in selected}
+        to_read = entries if verify else selected if output is not None else ()
+        if sum(entry.size for entry in to_read) > MAX_TOTAL:
+            raise ValueError("selected stored bytes exceed the read budget")
+        for entry in to_read:
+            data = read(entry, min(MAX_FILE, MAX_TOTAL - decoded))
+            decoded += len(data)
+            hashes[entry.name] = digest(data)
+            if output is not None and entry.name in selected_names:
+                name = member_name(entry.name)
+                destination = checked_path(output / name)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                with destination.open("xb") as target:
+                    target.write(data)
+                extracted.append(name)
+        after = os.fstat(raw.fileno())
+        if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+            raise ValueError("archive changed during component operation")
+    report = dict(protocolVersion=VERSION, success=True, component=component,
+                  operation=operation, formatVersion=version, inputBytes=before.st_size,
+                  indexBytes=index_bytes, readBytes=stream.bytes_read, decodedBytes=decoded,
+                  entryCount=len(entries), selectedCount=len(selected),
+                  selectedBytes=sum(entry.size for entry in selected),
+                  entries=[dict(name=entry.name, length=entry.size, sha256=hashes.get(entry.name))
+                           for entry in entries], verifiedEntries=len(hashes),
+                  allContentsVerified=len(hashes) == len(entries))
+    if output is not None:
+        report["extractedFiles"] = extracted
+    return report
+
+
+def script_samples(format_name, source, output):
+    component, extensions = {
+        "Ethornell": ("archive.bgi", {".bgi", ""}),
+        "CatSystem": ("archive.kif", {".cst"}),
+        "Yuris": ("archive.ypf482", {".ybn"}),
+    }[format_name]
+    maximum = 2 << 20
+    samples, errors = [], []
+    with checked_path(source).open("rb") as raw:
+        stream = ArchiveInput(raw)
+        version, entries, read = open_index(component, stream)
+        index_bytes = stream.bytes_read
+        by_name = {member_name(entry.name).casefold(): entry for entry in entries}
+        eligible = [entry for entry in entries if 0 < entry.size <= maximum
+                    and Path(member_name(entry.name)).suffix.lower() in extensions
+                    and Path(member_name(entry.name)).name.lower() != "ysc.ybn"]
+        eligible.sort(key=lambda entry: (abs(entry.size - (64 << 10)), entry.name))
+        for entry in eligible[:6 if format_name == "Ethornell" else 3]:
+            name = member_name(entry.name)
+            try:
+                data = read(entry, maximum)
+                if (format_name == "Ethornell" and Path(name).suffix.lower() != ".bgi"
+                        and not data.startswith(b"BurikoCompiledScriptVer1.00\0")):
+                    continue
+                if format_name == "CatSystem" and not data.startswith(b"CatScene"):
+                    continue
+                members = {name: data}
+                if format_name == "Yuris":
+                    if not data.startswith(b"YSTB"):
+                        continue
+                    command_table = Path(name).with_name("ysc.ybn").as_posix()
+                    companion = by_name.get(command_table.casefold())
+                    if companion is None:
+                        raise ValueError("YU-RIS command table ysc.ybn is missing next to the script")
+                    members[command_table] = read(companion, maximum)
+            except (ValueError, OSError) as error:
+                errors.append(str(error)[:160])
+                continue
+            directory = output / str(len(samples))
+            for relative, payload in members.items():
+                destination = directory / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                with destination.open("xb") as target:
+                    target.write(payload)
+            samples.append(dict(member=entry.name, path=str(len(samples)), files=list(members)))
+            if len(samples) == 3:
+                break
+    status = "sampled" if samples else "sample-unavailable" if errors else "no-script-member"
+    return dict(status=status, version=version, indexBytes=index_bytes, samples=samples,
+                memberBytesRead=stream.bytes_read - index_bytes, diagnostics=errors[:3])
 
 
 def rpa_index(module, stream):
@@ -305,6 +461,8 @@ def execute(request):
     source = checked_path(request["archive"])
     if component == "archive.rpa3":
         return execute_rpa(request, source)
+    if component in INDEXED_COMPONENTS:
+        return execute_indexed(request, source)
     data = read_file(source, MAX_ARCHIVE)
     module, entries = load_archive(component, data, request.get("filter"))
     report = dict(protocolVersion=VERSION, success=True, component=component,

@@ -16,7 +16,7 @@ use crate::{
     vntextpatch::{BUILTIN_FORMATS, BuiltinFormat},
 };
 
-pub(crate) const DISCOVERY_REVISION: u64 = 10;
+pub(crate) const DISCOVERY_REVISION: u64 = 11;
 const CONTAINERS: &[&str] = &[
     "xp3", "rpa", "rpyc", "pack", "pak", "arc", "ypf", "int", "pfs",
 ];
@@ -281,6 +281,13 @@ fn identify(head: &[u8], tail: &[u8]) -> Option<(&'static str, String, bool)> {
         ),
         (b"YPF\0", "Yuris", "文件头匹配 YPF 封包签名", true, 8),
         (b"KIF\0", "CatSystem", "文件头匹配 KIF 封包签名", true, 8),
+        (
+            b"PackFile    ",
+            "Ethornell",
+            "文件头匹配 PackFile 封包签名",
+            true,
+            0,
+        ),
         (
             b"BURIKO ARC20",
             "Ethornell",
@@ -586,6 +593,7 @@ fn inspect_builtin_files(
     let mut bsscript = Vec::new();
     let mut scn = Vec::new();
     let mut pfs_archives = Vec::new();
+    let mut script_archives = Vec::new();
     for (_, path) in samples {
         if cancellation.is_cancelled() {
             return Err(EngineError::Cancelled);
@@ -613,6 +621,21 @@ fn inspect_builtin_files(
         };
         if head.starts_with(b"pf8") && pfs_archives.len() < 2 {
             pfs_archives.push(path.clone());
+        }
+        let archive_format =
+            if head.starts_with(b"PackFile    ") || head.starts_with(b"BURIKO ARC20") {
+                Some("Ethornell")
+            } else if head.starts_with(b"KIF\0") {
+                Some("CatSystem")
+            } else if head.starts_with(b"YPF\0") && head.get(4..8) == Some(&482_u32.to_le_bytes()) {
+                Some("Yuris")
+            } else {
+                None
+            };
+        if let Some(format) = archive_format
+            && script_archives.len() < 12
+        {
+            script_archives.push(json!({"format":format,"archive":path}));
         }
         if head.starts_with(b"PSB\0") {
             scn.push(path.clone());
@@ -790,7 +813,7 @@ fn inspect_builtin_files(
         ]
     };
     Ok(
-        json!({"revision":DISCOVERY_REVISION,"filesScanned":scanned,"partial":partial,"candidates":result,"components":components,"pfsArchives":pfs_archives,"warnings":warnings}),
+        json!({"revision":DISCOVERY_REVISION,"filesScanned":scanned,"partial":partial,"candidates":result,"components":components,"pfsArchives":pfs_archives,"scriptArchives":script_archives,"warnings":warnings}),
     )
 }
 

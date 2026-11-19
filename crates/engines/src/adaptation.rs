@@ -2513,11 +2513,17 @@ impl EngineService {
         cancellation: &CancellationToken,
     ) -> Result<Value, EngineError> {
         let component = text(args, "id")?;
-        if !matches!(component, "archive.rpa3" | "archive.xp3") {
-            return Err(EngineError::Protocol("未知封包组件。".into()));
-        }
+        let definition = crate::adaptation_assets::engine_components()
+            .into_iter()
+            .find(|entry| entry["id"] == component)
+            .ok_or_else(|| EngineError::Protocol("未知封包组件。".into()))?;
         let operation = text(args, "operation")?;
-        if !matches!(operation, "inspect" | "extract" | "rebuild") {
+        if !definition["operations"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|supported| supported == operation)
+        {
             return Err(EngineError::Protocol("不支持的封包组件操作。".into()));
         }
         if component == "archive.xp3" && args["filter"].as_str() != Some("none") {
@@ -2534,10 +2540,10 @@ impl EngineService {
             &BTreeMap::from([(archive.clone(), archive_path.clone())]),
             cancellation,
         )?;
-        let maximum = if component == "archive.rpa3" {
-            2_u64 * 1024 * 1024 * 1024
-        } else {
-            512 * 1024 * 1024
+        let maximum = match component {
+            "archive.rpa3" => 2_u64 << 30,
+            "archive.xp3" => 512 << 20,
+            _ => u64::MAX,
         };
         if archive_path.metadata()?.len() > maximum {
             return Err(EngineError::Rejected("封包超过组件输入大小限制。".into()));
@@ -2604,7 +2610,7 @@ impl EngineService {
         } else {
             "failed"
         });
-        response["version"] = json!(if component == "archive.rpa3" { 2 } else { 1 });
+        response["version"] = definition["version"].clone();
         response["revision"] = reference["revision"].clone();
         response["manifest"] = json!(format!("{output_relative}/manifest.json"));
         response["runtimeStatus"] = json!("not-tested");
@@ -3530,9 +3536,9 @@ fn describe_engine_components(args: &Value) -> Result<Value, EngineError> {
     Ok(json!({
         "components":components,
         "dependencies":["Shared Python 3.14.10","Hash-pinned shared GalTransl library; standard library only, no pip or runtime downloads."],
-        "limits":{"rpaArchiveMiB":2048,"rpaSelectedMemberMiB":64,"rpaSelectedTotalMiB":256,"xp3ArchiveMiB":512,"xp3MemberMiB":64,"xp3TotalDecodedMiB":256,"entries":10000,"memberNamesMiB":2},
+        "limits":{"rpaArchiveMiB":2048,"xp3ArchiveMiB":512,"indexedArchiveIndexMiB":8,"selectedMemberMiB":64,"selectedTotalMiB":256,"entries":10000,"memberNamesMiB":2},
         "input":"run_engine_component: id, operation, archive (resources/ or work/), output (new work/ directory). Optional members or lowercase extensions select extraction; rebuild replacements map exact member names to work/ files. XP3 requires filter=none.",
-        "output":"Bounded summary plus work/<output>/manifest.json containing every member's name and length. RPA inspect reads only the index; extract reads selected payloads. Unread member SHA256 is null. verifyContents=true hashes every member with bounded buffers. readBytes records actual source reads. extract writes files/; rebuild writes rebuilt/<original filename>, verifies all members, and preserves original bytes when unchanged.",
+        "output":"Bounded summary plus work/<output>/manifest.json containing member names and lengths. RPA, BGI, KIF, YPF 482 and PFS v8 inspect by index and extract selected members. Unread member SHA256 is null. verifyContents=true hashes members within the component's limits. readBytes records actual source reads for index-based operations. extract writes files/; supported rebuild operations write rebuilt/<original filename> and verify all members.",
         "usage":"Stage a real archive, then call the component directly; no Python wrapper or model-generated parser is needed. Use try_builtin_adapter on extracted scripts. Component success is structural evidence, not runtime or adapter acceptance."
     }))
 }

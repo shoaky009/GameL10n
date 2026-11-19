@@ -993,6 +993,10 @@ def archive_samples(request):
     archive = Path(request['archive'])
     output = Path(request['directory'])
     requested = request.get('members')
+    if format_name in ('Ethornell', 'CatSystem', 'Yuris') and requested is None:
+        sys.path.insert(0, request['components'])
+        import engine_archive
+        return engine_archive.script_samples(format_name, archive, output)
     with archive.open('rb') as stream:
         if format_name == 'ArtemisAst':
             from python.archives import pfs

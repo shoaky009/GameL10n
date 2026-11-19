@@ -1014,7 +1014,7 @@
       "type": "function",
       "function": {
         "name": "run_engine_component",
-        "description": "Directly inspect/extract/rebuild a staged archive using a fixed component, without writing code. Input under resources/ or work/; output is a NEW work/ directory. Returns bounded entries plus full manifest.json. Optional members/extensions select extraction. RPA inspect reads only the index; extract reads selected payloads (unread SHA256=null). verifyContents=true hashes all members. Rebuild replacements map exact archive names to work/ files; untouched members are verified. Uses pinned local shared Python/library, no pip/download. XP3 requires independently confirmed filter=none. Call alone.",
+        "description": "Use a fixed component's inspect/extract/rebuild operations on resources/ or work/ inputs. Provide a new work/ output directory. inspect_engine_component lists component operations. RPA, BGI, plain KIF, YPF 482 and PFS v8 inspect the index and extract only selected members or extensions. Check the manifest for the full index, read bytes and member hashes. verifyContents hashes all members within the component budget. Supported rebuild operations map exact member names to replacement work/ files. XP3 requires independently confirmed filter=none. Call alone.",
         "parameters": {
           "type": "object",
           "properties": {
