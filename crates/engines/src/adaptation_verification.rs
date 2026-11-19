@@ -4,6 +4,19 @@ use crate::protocol::{BuildMode, ProbeResult};
 
 pub(super) const VERIFIER_REVISION: u32 = 13;
 
+fn legacy_exit_only_failure(cache: &Value) -> bool {
+    cache["readsAdapterFailureResponse"] != true
+        && cache["result"]["passed"] == false
+        && cache["result"]["issues"].as_array().is_some_and(|issues| {
+            issues.iter().any(|issue| {
+                issue["code"] == "adapter-operation"
+                    && issue["actual"]
+                        .as_str()
+                        .is_some_and(|actual| actual.starts_with("适配器处理失败：工具退出："))
+            })
+        })
+}
+
 fn verified_public_dependency(
     service: &EngineService,
     state: &Session,
@@ -1088,6 +1101,7 @@ pub(super) async fn test_adapter(
                     .as_ref()
                     .is_some_and(|input| cached["fingerprint"] == *input)
                 && cached["result"].is_object()
+                && !legacy_exit_only_failure(cached)
         }) {
             reused = true;
             if !discovery_only {
@@ -1367,7 +1381,7 @@ pub(super) async fn test_adapter(
     result["compileMs"] = json!(compile_ms);
     stats.apply(&mut result);
     if cacheable && input.is_some() {
-        state.extra.insert(cache_key.into(),json!({"fingerprint":input,"implementation":implementation,"revision":VERIFIER_REVISION,"package":package_info,"verification":verification,"result":result}));
+        state.extra.insert(cache_key.into(),json!({"fingerprint":input,"implementation":implementation,"revision":VERIFIER_REVISION,"readsAdapterFailureResponse":true,"package":package_info,"verification":verification,"result":result}));
     }
     Ok(result)
 }
@@ -1424,6 +1438,76 @@ mod tests {
 
     fn arguments() -> Value {
         json!({"kind":"engine","key":"fixture","name":"Fixture","resourcePatterns":["*.json","*.bin"]})
+    }
+
+    #[tokio::test]
+    async fn verification_refreshes_cached_exit_code_with_the_adapter_failure_response() {
+        let root = tempfile::tempdir().unwrap();
+        let (service, request, workspace, mut state) = fixture(root.path());
+        if !service.tools.python().is_file() {
+            return;
+        }
+        let entry = workspace.join("src/adapter.py");
+        let source = fs::read_to_string(&entry).unwrap().replace(
+            "    (output / 'text.json').write_bytes",
+            concat!(
+                "    try:\n",
+                "        for value in changed:\n",
+                "            value.encode('cp932')\n",
+                "    except UnicodeEncodeError as error:\n",
+                "        failure = dict(protocolVersion=1, success=False, errorKind='incompatible', error=str(error))\n",
+                "        Path(r['responseFile']).write_text(json.dumps(failure), encoding='utf8')\n",
+                "        sys.exit(1)\n",
+                "    (output / 'text.json').write_bytes",
+            ),
+        );
+        fs::write(&entry, source).unwrap();
+        let args = arguments();
+        let cancellation = CancellationToken::new();
+        let mut first = service
+            .test_adapter(&request, &workspace, &mut state, &args, &cancellation, None)
+            .await
+            .unwrap();
+        assert_eq!(first["passed"], false);
+        assert_eq!(first["issues"][0]["stage"], "partial-translation-build");
+        assert!(
+            first["issues"][0]["actual"]
+                .as_str()
+                .unwrap()
+                .contains("'cp932' codec can't encode")
+        );
+
+        let cache = state.extra.get_mut("verificationCache").unwrap();
+        cache
+            .as_object_mut()
+            .unwrap()
+            .remove("readsAdapterFailureResponse");
+        let generic = "适配器处理失败：工具退出：exit code: 1";
+        first["issues"][0]["actual"] = json!(generic);
+        first["diagnostics"] = json!([format!("[partial-translation-build] {generic}")]);
+        cache["verification"]["issues"] = first["issues"].clone();
+        cache["verification"]["diagnostics"] = first["diagnostics"].clone();
+        cache["result"] = first;
+
+        for reused in [false, true] {
+            let checked = service
+                .test_adapter(&request, &workspace, &mut state, &args, &cancellation, None)
+                .await
+                .unwrap();
+            assert_eq!(checked["reused"], reused);
+            assert_eq!(checked["passed"], false);
+            assert!(
+                checked["diagnostics"][0]
+                    .as_str()
+                    .unwrap()
+                    .contains("'cp932' codec can't encode")
+            );
+            assert!(
+                repair::packet(&state)
+                    .to_string()
+                    .contains("'cp932' codec can't encode")
+            );
+        }
     }
 
     #[tokio::test]

@@ -3192,17 +3192,16 @@ fn result(
         {
             (state.next_action.as_str(), true)
         }
-        AdaptationStatus::Incomplete
-            if state
+        AdaptationStatus::Incomplete if !state.next_action.is_empty() => (
+            state.next_action.as_str(),
+            state
                 .extra
                 .get("blocker")
-                .is_some_and(|blocker| blocker["workRemaining"] == true) =>
-        {
-            (state.next_action.as_str(), true)
-        }
+                .is_some_and(|blocker| blocker["workRemaining"] == true),
+        ),
         AdaptationStatus::Unavailable => ("使用带工具链的完整发行包，再继续适配。", false),
         AdaptationStatus::Incomplete => (
-            "点击“继续适配”处理剩余问题，可补充具体要求；若模型反复只给总结，可在项目设置中更换分析 API 后继续。",
+            "点击“继续适配”沿用现有源码和调查结果，可补充具体要求",
             false,
         ),
         AdaptationStatus::Failed => (

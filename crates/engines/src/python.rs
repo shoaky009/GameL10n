@@ -140,6 +140,7 @@ impl PythonAdapter {
         }
         let response = process
             .with_response_file(response_file)
+            .with_failure_response()
             .execute::<_, AdapterResponse>(&request, cancellation)
             .await?;
         response.checked_for_operation(&request.operation)

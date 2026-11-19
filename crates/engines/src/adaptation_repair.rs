@@ -200,9 +200,19 @@ pub(super) fn approach(
     Ok(Some((index, approach.into())))
 }
 
+pub(super) fn pending<'a>(
+    state: &'a Session,
+    input: &'a str,
+) -> impl DoubleEndedIterator<Item = &'a Ticket> {
+    state
+        .repairs
+        .iter()
+        .filter(move |ticket| ticket.input_fingerprint == input && ticket.status != Status::Passed)
+}
+
 pub(super) fn packet(state: &Session) -> Value {
     let input = input_key(state);
-    json!(state.repairs.iter().rev().filter(|ticket| ticket.input_fingerprint == input && ticket.status != Status::Passed).take(8)
+    json!(pending(state, &input).rev().take(8)
         .map(|ticket| json!({"ticket":ticket,"noNewVerificationEvidence":ticket.last_analysis.as_ref()==Some(&ticket.evidence),"constraint":"Preserve IDs, unchanged data and protected tokens. Trial success is not full acceptance; runtime remains untested.","expectedResult":"Existing host verification passes for the required scope."})).collect::<Vec<_>>())
 }
 

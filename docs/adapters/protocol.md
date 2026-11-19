@@ -17,6 +17,8 @@ Python 适配器入口为 `src/adapter.py`。从标准输入读取一份 UTF-8 J
 
 常规识别时，资源操作的 `errorKind: "incompatible"` 或旧式未分类失败可尝试下一候选。依赖或 I/O 故障使用 `"dependency"` 或 `"io"`，宿主会停止并报告 `error`。
 
+适配器可在 `responseFile` 中写入 `success: false`、`error` 和适用的 `errorKind` 后以非零状态退出。宿主按协议检查并保留错误详情。
+
 ## 探测与提取
 
 `probeFiles` 提供候选路径、文件长度和可用头部字节数。读取头部以外的内容时，可先在响应中提交 `probeReads: [{path, offset, length}]`，随后从 `probeRanges[].dataPath` 的起点读取相应片段。根据请求中的 `probeReadLimits` 选择范围，完成后返回最终的 `probe`。[识别规则](recognition.md) · [完整字段](../../crates/engines/prompts/adapter-protocol.md)

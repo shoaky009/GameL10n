@@ -160,12 +160,7 @@ pub(super) fn decision_key(
     workspace: &Path,
 ) -> Result<Option<String>, EngineError> {
     let input = repair::input_key(state);
-    let tickets: Vec<_> = state
-        .repairs
-        .iter()
-        .filter(|ticket| {
-            ticket.input_fingerprint == input && ticket.status != repair::Status::Passed
-        })
+    let tickets: Vec<_> = repair::pending(state, &input)
         .map(|ticket| json!({"id":ticket.id,"evidence":ticket.evidence,"approach":ticket.approach}))
         .collect();
     if tickets.is_empty() {

@@ -249,6 +249,13 @@ pub(super) fn continuation(
         context.push_str(&format!("\n分析此游戏并实现可复用的引擎解析与回填。游戏目录：{}\n资源清单：{}",state.game_directory.display(),json!({"files":inventory.files.iter().take(100).collect::<Vec<_>>(),"fileCount":inventory.files.len(),"inventoryComplete":inventory.complete,"baselineUnits":baseline})));
     } else {
         context.push_str("\n继续完成当前目标。先解决最近的验证失败和未完成步骤，复用现有代码及调查结论。编码、字体和回填问题属于适配工作；继续调查和验证可行方案。只有确实缺少用户信息或已有证据表明无法支持时，调用 report_blocker 说明具体原因和下一步。");
+        let input = repair::input_key(state);
+        if let Some(ticket) = repair::pending(state, &input).next_back() {
+            context.push_str(&format!(
+                "\n优先处理 repairTickets 中的 {}，对应验收阶段 {}。沿用已有小样和失败详情，直接修正已确定的实现问题。仍有关键假设待确认时，优先在受影响资源上做一次能决定实现方案的小样试验，再做完整验收",
+                ticket.id, ticket.issue.stage,
+            ));
+        }
         if matches!(
             state.last_status,
             AdaptationStatus::Activated | AdaptationStatus::Reused
@@ -839,12 +846,20 @@ pub(super) async fn run(
             trace_run(
                 json!({"operation":"decision-deferred","reason":"no-new-repair-evidence","turn":state.total_turns,"fingerprint":decision_key}),
             )?;
-            state.next_action = "相同修复任务没有新增证据或实现变化，已暂停重复分析。可补充新线索或点击继续，显式重试一次。".into();
-            return Ok((
-                AdaptationStatus::Incomplete,
-                state.next_action.clone(),
-                None,
-            ));
+            let input = repair::input_key(state);
+            let mut summary = "没有新增证据或实现变化，已暂停重复分析".to_owned();
+            if let Some(ticket) = repair::pending(state, &input).next_back() {
+                let issue = &ticket.issue;
+                let detail = issue.actual.lines().next().unwrap_or_default().trim();
+                let detail = detail.chars().take(256).collect::<String>();
+                summary.push_str(&format!(
+                    "\n待修的验收问题 [{}] {}",
+                    issue.stage,
+                    detail.trim_end_matches(['。', '.']),
+                ));
+            }
+            state.next_action = "点击“继续适配”，从待修的验收问题继续，可补充具体线索".into();
+            return Ok((AdaptationStatus::Incomplete, summary, None));
         }
         let mut decision_context = decision::build(state, workspace, &service.disabled_families)?;
         let mut retained = state.messages[state.history_start..]
@@ -1027,6 +1042,7 @@ pub(super) async fn run(
         if state.pending_calls.is_empty() {
             summaries += 1;
             if summaries >= 2 {
+                state.next_action = "点击“继续适配”沿用现有工作。若模型持续只返回总结，可在项目设置中更换分析 API 后继续".into();
                 return Ok((
                     AdaptationStatus::Incomplete,
                     format!(
@@ -2341,7 +2357,7 @@ mod tests {
         let (service, request, workspace, mut state) = fixture(root.path());
         let response = |id: &str| json!({"id":id,"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","tool_calls":[{"id":id,"type":"function","function":{"name":"test_adapter","arguments":json!({"kind":"engine","key":"fixture","name":"Fixture","resourcePatterns":["*.json"]}).to_string()}}]}}],"usage":{"prompt_tokens":100,"completion_tokens":20}});
         let (provider, server) = model(vec![response("first"), response("same")]);
-        let result = run(
+        let (status, summary, _) = run(
             &service,
             &request,
             &provider,
@@ -2356,9 +2372,19 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(server.join().unwrap().len(), 2);
-        assert_eq!(result.0, AdaptationStatus::Incomplete);
-        assert!(result.1.contains("没有新增证据"));
+        assert_eq!(status, AdaptationStatus::Incomplete);
+        assert!(summary.contains("没有新增证据"));
         assert_eq!(state.repairs.len(), 1);
+        let issue = &state.repairs[0].issue;
+        assert!(summary.contains(&issue.stage));
+        assert!(summary.contains(issue.actual.trim_end_matches(['。', '.'])));
+        let completed = result(&mut state, status, &summary, vec![]);
+        assert!(completed.next_action.contains("待修的验收问题"));
+        assert!(!completed.next_action_from_model);
+
+        let inventory = Inventory::scan(&request.game_directory).unwrap();
+        let resume = continuation(&state, &workspace, &inventory, 0, &BTreeSet::new()).unwrap();
+        assert!(resume.contains(&state.repairs[0].id));
     }
 
     #[test]
