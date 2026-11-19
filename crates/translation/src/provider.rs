@@ -493,10 +493,11 @@ impl OpenAiProvider {
                     mode,
                 )
                 .await;
+            // Translation batches have their own retries and journal in the executor.
             if let Err(error) = &result
                 && tools.is_some()
                 && !matches!(mode, CompletionMode::ConnectionTest)
-                && error.status_code == Some(429)
+                && matches!(error.status_code, Some(429 | 500..=599))
                 && retries < 2
             {
                 let delay = error
@@ -1738,7 +1739,7 @@ mod tests {
         std::sync::mpsc::Receiver<Value>,
         std::thread::JoinHandle<()>,
     ) {
-        mock_agent_status(responses.into_iter().map(|body| (200, body)).collect())
+        mock_agent_status(responses.into_iter().map(|body| (200, body)).collect(), 0)
     }
 
     pub(super) fn read_mock_request(stream: &mut std::net::TcpStream) -> Value {
@@ -1774,6 +1775,7 @@ mod tests {
 
     fn mock_agent_status(
         responses: Vec<(u16, Value)>,
+        retry_after_seconds: u64,
     ) -> (
         String,
         std::sync::mpsc::Receiver<Value>,
@@ -1807,7 +1809,7 @@ mod tests {
                 } else {
                     "application/json"
                 };
-                write!(stream, "HTTP/1.1 {status} Test\r\nContent-Type: {content_type}\r\nRetry-After: 0\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+                write!(stream, "HTTP/1.1 {status} Test\r\nContent-Type: {content_type}\r\nRetry-After: {retry_after_seconds}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
             }
         });
         (format!("http://{address}/v1"), receiver, handle)
@@ -2170,12 +2172,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connection_tests_do_not_retry_authentication_or_rate_limit_failures() {
-        for status in [401, 429] {
-            let (endpoint, requests, server) = mock_agent_status(vec![(
-                status,
-                json!({"error":{"message":"fixture failure"}}),
-            )]);
+    async fn connection_tests_return_the_first_http_error() {
+        for status in [401, 429, 503] {
+            let (endpoint, requests, server) = mock_agent_status(
+                vec![(status, json!({"error":{"message":"fixture failure"}}))],
+                0,
+            );
             let provider = local_agent(endpoint, ApiProtocol::ChatCompletions);
             let error = provider
                 .test_connection(ConnectionTestKind::Analysis, &CancellationToken::new())
@@ -2244,14 +2246,17 @@ mod tests {
 
     #[tokio::test]
     async fn request_count_includes_rate_limit_retries_but_not_cancelled_queue_entries() {
-        let server = mock_agent_status(vec![
-            (429, json!({})),
-            (429, json!({})),
-            (
-                200,
-                json!({"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"公开说明"}}]}),
-            ),
-        ]);
+        let server = mock_agent_status(
+            vec![
+                (429, json!({})),
+                (429, json!({})),
+                (
+                    200,
+                    json!({"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"公开说明"}}]}),
+                ),
+            ],
+            0,
+        );
         let provider = local_agent(server.0, ApiProtocol::ChatCompletions);
         provider
             .complete_agent(
@@ -2283,6 +2288,99 @@ mod tests {
         );
         assert_eq!(provider.request_count(), 3);
         server.2.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn tool_requests_retry_http_server_errors_with_the_original_payload() {
+        for protocol in [ApiProtocol::ChatCompletions, ApiProtocol::Responses] {
+            let reply = match protocol {
+                ApiProtocol::ChatCompletions => {
+                    json!({"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"Ready"}}]})
+                }
+                ApiProtocol::Responses => {
+                    json!({"status":"completed","output":[{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"Ready"}]}]})
+                }
+            };
+            for streaming in [true, false] {
+                let (endpoint, requests, server) = mock_agent_status(
+                    vec![(502, json!({})), (503, json!({})), (200, reply.clone())],
+                    0,
+                );
+                let provider = local_agent(endpoint, protocol);
+                let messages = agent_messages();
+                let tools = agent_tools();
+                let cancellation = CancellationToken::new();
+                let completion = if streaming {
+                    provider
+                        .complete_agent(&messages, &tools, &[], 128, &cancellation)
+                        .await
+                } else {
+                    provider
+                        .complete(&messages, Some(&tools), 128, &cancellation)
+                        .await
+                }
+                .unwrap();
+                assert_eq!(completion.text, "Ready");
+                server.join().unwrap();
+                let requests: Vec<_> = requests.try_iter().collect();
+                assert_eq!(requests.len(), 3);
+                assert_eq!(requests[0]["stream"], streaming);
+                assert_eq!(requests[0], requests[1]);
+                assert_eq!(requests[1], requests[2]);
+                let metrics = provider.request_metrics();
+                assert_eq!((metrics.requests, metrics.failed_requests), (3, 2));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_requests_return_the_last_http_error_when_retries_are_exhausted() {
+        let (endpoint, _requests, server) = mock_agent_status(
+            vec![(500, json!({})), (429, json!({})), (504, json!({}))],
+            0,
+        );
+        let provider = local_agent(endpoint, ApiProtocol::ChatCompletions);
+        let error = provider
+            .complete_agent(
+                &agent_messages(),
+                &agent_tools(),
+                &[],
+                128,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.status_code, Some(504));
+        assert!(error.outcome_unknown);
+        let metrics = provider.request_metrics();
+        assert_eq!((metrics.requests, metrics.failed_requests), (3, 3));
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn analysis_cancellation_interrupts_http_server_error_backoff() {
+        let (endpoint, _requests, server) = mock_agent_status(vec![(503, json!({}))], 30);
+        let provider = local_agent(endpoint, ApiProtocol::ChatCompletions);
+        let cancellation = CancellationToken::new();
+        let cancel_during_backoff = async {
+            while provider.request_metrics().failed_requests == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            cancellation.cancel();
+        };
+        let messages = agent_messages();
+        let tools = agent_tools();
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(
+                provider.complete_agent(&messages, &tools, &[], 128, &cancellation),
+                cancel_during_backoff
+            )
+        })
+        .await
+        .unwrap();
+        assert!(result.unwrap_err().is_cancelled());
+        assert_eq!(provider.request_count(), 1);
+        server.join().unwrap();
     }
 
     #[tokio::test]
