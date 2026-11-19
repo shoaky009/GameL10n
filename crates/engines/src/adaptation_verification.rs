@@ -1,6 +1,6 @@
 //! Packaging and verification shared by model-driven adapter tools.
 use super::*;
-use crate::protocol::ProbeResult;
+use crate::protocol::{BuildMode, ProbeResult};
 
 pub(super) const VERIFIER_REVISION: u32 = 13;
 
@@ -684,6 +684,115 @@ impl TestArguments {
     }
 }
 
+async fn replay_archive_member(
+    service: &EngineService,
+    workspace: &Path,
+    state: &Session,
+    adapter: &AdapterHandle,
+    previous: &VerificationResult,
+    cancellation: &CancellationToken,
+) -> Result<bool, EngineError> {
+    let (Some(retry), Some(issue)) = (&previous.archive_member_retry, previous.issues.first())
+    else {
+        return Ok(false);
+    };
+    let Some(unit_id) = issue.unit_id.as_deref() else {
+        return Ok(false);
+    };
+    if !matches!(adapter, AdapterHandle::Python { .. })
+        || !retry.resource.to_ascii_lowercase().ends_with(".pfs")
+        || retry.members.is_empty()
+        || retry.members.len() > 3
+        || retry.translations.is_empty()
+        || retry.translations.len() > 2
+    {
+        return Ok(false);
+    }
+    let archive = resources::file(workspace, state, &format!("resources/{}", retry.resource))?;
+    let _locked = crate::source::lock_inputs(
+        &BTreeMap::from([(retry.resource.clone(), archive.clone())]),
+        cancellation,
+    )?;
+    let scratch = tempfile::Builder::new()
+        .prefix("member-retest-")
+        .tempdir()?;
+    let reference = service.adaptation_reference(workspace, state)?;
+    let library = service.reference_library(&reference)?;
+    let sample = service.helper(
+        &json!({"operation":"archive_samples","format":"ArtemisAst","archive":archive,
+            "members":retry.members,"directory":scratch.path(),"library":library,"timeoutSeconds":10}),
+        cancellation,
+    ).await?;
+    if sample["status"] != "sampled" {
+        return Ok(false);
+    }
+    let source = scratch.path().join("source");
+    let target = resolve_relative(&source, &retry.resource)?;
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::rename(scratch.path().join("fixture.pfs"), target)?;
+    let resources = vec![retry.resource.clone()];
+    let mut extract = AdapterRequest::new("extract", &source);
+    extract.resource_files = Some(resources.clone());
+    let Some(original) = service
+        .execute(adapter, &extract, cancellation)
+        .await?
+        .extraction
+    else {
+        return Ok(false);
+    };
+    let Some(unit) = original.units.iter().find(|unit| unit.id == unit_id) else {
+        return Ok(false);
+    };
+    let expected_speaker = serde_json::from_str::<Option<String>>(&issue.expected).ok();
+    if expected_speaker.as_ref() != Some(&unit.speaker)
+        || unit.resource_path != retry.resource
+        || !retry
+            .translations
+            .keys()
+            .all(|id| original.units.iter().any(|unit| &unit.id == id))
+    {
+        return Ok(false);
+    }
+    let output = scratch.path().join("output");
+    fs::create_dir(&output)?;
+    let mut build = AdapterRequest::new("build", &source);
+    build.resource_files = Some(resources.clone());
+    build.output_directory = Some(output.clone());
+    build.translations = Some(Arc::new(retry.translations.clone()));
+    let Some(built) = service.execute(adapter, &build, cancellation).await?.build else {
+        return Ok(false);
+    };
+    if built.mode != BuildMode::Replace {
+        return Ok(false);
+    }
+    let extract = built.extraction_request(&source, &output, &resources);
+    let Some(rebuilt) = service
+        .execute(adapter, &extract, cancellation)
+        .await?
+        .extraction
+    else {
+        return Ok(false);
+    };
+    let Some(actual) = rebuilt.units.iter().find(|unit| unit.id == unit_id) else {
+        return Ok(false);
+    };
+    let expected = retry.translations.get(unit_id).unwrap_or(&unit.source_text);
+    let difference =
+        crate::VerificationIssue::new(crate::VerificationIssueCode::IdentityMismatch, &issue.stage)
+            .unit_difference(unit, Some(actual), expected, false, true);
+    let actual_speaker = serde_json::from_str::<Option<String>>(&issue.actual).ok();
+    Ok(actual_speaker.as_ref() == Some(&actual.speaker)
+        && difference.field_differences == issue.field_differences
+        && retry.translations.iter().all(|(id, translation)| {
+            rebuilt
+                .units
+                .iter()
+                .any(|unit| &unit.id == id && &unit.source_text == translation)
+        }))
+}
+
 pub(super) async fn test_adapter(
     service: &EngineService,
     request: &AdaptationRequest<'_>,
@@ -762,6 +871,16 @@ pub(super) async fn test_adapter(
             }
         }
     }
+    let mut previous_member_failure =
+        if !discovery_only && trial.is_none() && state.workflow.running.is_some() {
+            state
+                .verification
+                .as_ref()
+                .filter(|previous| !previous.passed && previous.archive_member_retry.is_some())
+                .cloned()
+        } else {
+            None
+        };
     let previous_full_verification = if !discovery_only && trial.is_none() {
         state
             .verification
@@ -793,9 +912,7 @@ pub(super) async fn test_adapter(
         require_launch_resources(state, &request.inputs)?;
     }
     let preparation_started = Instant::now();
-    service
-        .bind_reference(workspace, state, None, cancellation)
-        .await?;
+    service.bind_reference(workspace, state, None, false, cancellation)?;
     state.release_files = validate_release_selection(&state.release_files)?;
     if state
         .extra
@@ -995,6 +1112,50 @@ pub(super) async fn test_adapter(
         } else {
             "verification"
         };
+        if let Some(mut previous) = previous_member_failure.take()
+            && previous.resource_hashes.len() == resources.len()
+            && resources.iter().all(|resource| {
+                previous
+                    .resource_hashes
+                    .get(resource)
+                    .is_some_and(|hash| fingerprint.staged_hashes.get(resource) == Some(hash))
+            })
+        {
+            let started = Instant::now();
+            let budget = automatic::Budget::new(cancellation, std::time::Duration::from_secs(15));
+            match replay_archive_member(
+                service,
+                workspace,
+                state,
+                &handle,
+                &previous,
+                &budget.token,
+            )
+            .await
+            {
+                Ok(true) => {
+                    stage = "member-retest";
+                    cacheable = false;
+                    verification_ms = started.elapsed().as_millis();
+                    previous.original_roundtrip_passed = false;
+                    previous.units = 0;
+                    previous.extracted_sources.clear();
+                    previous.stage_timings_ms =
+                        BTreeMap::from([(stage.into(), verification_ms as u64)]);
+                    previous.diagnostics.truncate(1);
+                    previous
+                        .diagnostics
+                        .push("封包成员复测重现了相同的说话人差异。修正后继续完整验收。".into());
+                    verification = Some(previous);
+                    return Ok(false);
+                }
+                Err(EngineError::Cancelled) if cancellation.is_cancelled() => {
+                    return Err(EngineError::Cancelled);
+                }
+                Err(error @ EngineError::Isolation(_)) => return Err(error),
+                Ok(false) | Err(_) => {}
+            }
+        }
         let (coverage, baseline) = evidence(request, state, trial.as_deref());
         let output = tempfile::Builder::new()
             .prefix("verification-")

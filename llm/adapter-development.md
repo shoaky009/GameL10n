@@ -70,7 +70,7 @@ RPYC2 编译脚本优先使用 `loose-renpy-rpyc` 或 `rpa3-renpy-rpyc`，直接
 
 `inspect_engine_reference` 按精确引擎 ID 读取指南，支持按路径、关键词和字符范围读取所需 API。发行包附带固定 commit 的工具库，将 Python 源码、目录、指南和许可文件保留在一个共享 ZIP 中。`run_engine_python` 自动提供便携 Python，直接运行 `work/*.py` 或 `src/tools/*.py` 连接脚本，复用 `python.archives` / `python.engines`，无需将已有算法重新实现为 C#。不同引擎和版本的函数接口不统一，仍需按指南选择并用样本验证。
 
-`use_engine_reference` 将固定依赖记录与 Python 辅助模块写入适配器源码。实现 `src/adapter.py` 的 JSON 协议、资源选择及确实缺失的版本处理，再执行 `test_adapter`。内置解析器通过 `parser(request, format)` 调用预编译组件；发布后的适配器使用相同共享库，常规提取与回填不调用模型。继续适配保留所用源码版本，已安装的库可离线使用；工具缺失时需恢复对应版本的完整发行包或共享工具，内容改变会明确报错，不自动替换成新版。
+`use_engine_reference` 将固定依赖记录与 Python 辅助模块写入适配器源码。通过 `parser(request, format)` 或 `component(...)` 直接调用预编译宿主时，使用 `nativeTools: true` 固定 VNTextPatch。内置模板和复制的组件会登记所需工具。实现 `src/adapter.py` 的 JSON 协议、资源选择及确实缺失的版本处理，再执行 `test_adapter`。发布后的适配器使用固定依赖，常规提取与回填无需模型。继续适配保留现有源码，VNTextPatch 更新后可按已有验收配置复验。缺失工具应从完整发行包或共享工具恢复。
 
 未命中时可继续查询格式目录和上游注册清单。`fetch_url` 支持 `query` 关键词定位及 `offset` / `length` 字符分页，大型目录在本地搜索，只将相关片段交给模型；读取完整条目后再判断能力。GitHub 仓库搜索只查仓库元数据，不查源码正文。Bishop 的 GSC 资料与 BSScript Rev.6 等不同格式不能因厂商相同而直接混用。
 

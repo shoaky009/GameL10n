@@ -188,6 +188,7 @@
   },
   {
     "id": "cp932-glyph-map",
+    "nativeTools": true,
     "name": "CP932 字形映射",
     "scope": "确定性分配、保留原文码位、已有映射复用、严格编解码；不修改 EXE 或字体。调用者必须确认允许码位能被原引擎遍历、查字和显示。",
     "origin": "基于现有 QLIE / System4 适配器的映射流程整理；增加全补丁保留文本及严格往返检查。",
@@ -204,6 +205,7 @@
   },
   {
     "id": "qlie-sfnt-font",
+    "nativeTools": true,
     "name": "QLIE SFNT 字体模板",
     "scope": "仅适用于已确认的 QLIE system 字体列表、MS Gothic/Mincho 字高与半角宽度策略。支持原模板使用的单字体 SFNT、cmap 4/12；不是 TTC/WOFF 通用字体工具。保留轮廓，调整映射、名称和该模板的度量。",
     "origin": "tools/GameL10n.VnTextPatch/Components/QlieFont.cs；用于 QLIE system 字体布局，其他布局需另行验证。",
@@ -220,6 +222,7 @@
   },
   {
     "id": "system4-fnl-glyph",
+    "nativeTools": true,
     "name": "System4 FNL 位图字形模板",
     "scope": "Windows GDI / SimSun / BMP 字符；输出底朝上、每行按 4 字节对齐的单色位图，按原字形包围框缩放。适用于已确认的 FNL 位图布局，不提供 FNL 封包或运行时码位修补。",
     "origin": "tools/GameL10n.VnTextPatch/Components/GlyphRasterizer.cs；检查字体替换及非空字形。",

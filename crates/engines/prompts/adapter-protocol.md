@@ -15,8 +15,9 @@ Request: {protocolVersion:1,operation:"probe"|"extract"|"build"|"validate",sourc
   resourceFiles:[relativePath],buildHints,buildMode,outputFiles:[relativePath],probeFiles:[{path,length,headerBytes}],probeRanges:[{path,offset,length,dataPath}],
   probeReadLimits,responseFile,translationsFile,translations,validationContextFile,toolPaths,adapterDirectory}.
 tools/engine-reference.json pins the shared Python source library and interpreter; test_adapter prepares it automatically.
-use_engine_reference also supplies tools/gamel10n_host.py. toolPaths:{python,engineLibrary,vnTextPatch,hostCommand}
-contains host-resolved local paths and the precompiled component command array.
+use_engine_reference also supplies tools/gamel10n_host.py. For direct NativeAOT calls pass nativeTools=true.
+Built-in templates and copied components declare their own dependencies. The native pin supplies
+vnTextPatch, vnTextPatchCommand and hostCommand in toolPaths.
 Python can call existing python.engines/python.archives modules without rewriting their algorithms.
 from tools.gamel10n_host import parser, component accesses pinned parsers and precompiled font/encoding components.
 Implement bounded probe in Python; full-file parsers must never run against truncated probe input.

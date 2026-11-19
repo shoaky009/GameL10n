@@ -8,6 +8,8 @@
 
 原文件引用由 `stage_resources` 登记，分析脚本用 `resource_paths[相对路径]` 读取。实验结果写到 `work/`，正式依赖放在 `src/tools/`。清理开发资料会失去该次会话和证据。[清理影响](../data-storage.md#项目完工后清理)
 
+当前 VNTextPatch 文件更新时，智能适配保留现有工作区和会话。绑定该工具的工作区会更新依赖记录，已有验收配置可直接复验当前源码。通过验收后可发布新版本。
+
 ## 正式适配器
 
 发布包位于 `extensions/packages/<适配器 ID>/<版本>/`。Manifest v4 使用 CLI v1。宿主从 `family` 的 `kind` 与 `key` 生成 `<kind>.<key>` 标识，按发布内容固定版本。
@@ -23,7 +25,7 @@
 
 工作区 `src/tools/` 发布到包内 `tools/`。选入全部间接依赖及适用许可。包只发布通用实现和必要运行素材，游戏原件与修改后的游戏文件分别作为资源输入和补丁输出。
 
-`verification.json` 记录资源验收结果，可选的 `capability-profile.json` 提供复用与复验资料。以新版本发布修改后的源码或依赖，已有项目保留其固定版本。固定的 VNTextPatch 须与当前发行版匹配，使用旧工具的包需重新识别和验收。[发布实现](../../crates/engines/src/adaptation_verification.rs)
+`verification.json` 记录资源验收结果，可选的 `capability-profile.json` 提供复用与复验资料。以新版本发布修改后的源码或依赖，已有项目保留其固定版本。声明 VNTextPatch 依赖的包须使用匹配的工具版本。纯 Python 适配器可以只声明 Python 和共享库依赖。[发布实现](../../crates/engines/src/adaptation_verification.rs)
 
 引擎库中的“验证发布包…”可用空闲项目的原文和提取基线单独验收某个版本。结果可在版本详情或项目任务中查看。[引擎库管理](README.md#引擎库管理)
 

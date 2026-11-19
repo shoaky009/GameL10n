@@ -158,7 +158,7 @@ fn approved(state: &Session) -> Result<BTreeMap<String, String>, EngineError> {
     )?)
 }
 
-fn invalidate(state: &mut Session) {
+pub(super) fn invalidate(state: &mut Session) {
     state.verified_package = None;
     state.verified_fingerprint = None;
     state.verification = None;

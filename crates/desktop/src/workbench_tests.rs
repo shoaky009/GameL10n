@@ -117,6 +117,149 @@ async fn wait_for_actions(ui: &MainWindow, ctx: &Context, action: &str) {
 }
 
 #[test]
+#[ignore = "Requires prepared NativeAOT and portable Python tools."]
+fn confirmed_adaptation_rechecks_source_on_a_small_worker_stack() {
+    use serde_json::{Value, json};
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+    i_slint_backend_testing::init_integration_test_with_system_time();
+    let root = tempfile::tempdir().unwrap();
+    let game = root.path().join("game");
+    std::fs::create_dir(&game).unwrap();
+    std::fs::write(game.join("text.json"), br#"["Original line"]"#).unwrap();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .thread_stack_size(1536 * 1024)
+        .enable_all()
+        .build()
+        .unwrap();
+    let tools = ToolPaths::development();
+    let host = runtime
+        .block_on(Application::open(root.path().join("data"), &tools))
+        .unwrap();
+    let project = runtime.block_on(host.add_project(&game)).unwrap();
+    let directory = host.project_directory(&project.id).unwrap();
+    let listener = runtime
+        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+        .unwrap();
+    let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+    runtime
+        .block_on(host.save_api_profile(
+            ApiProfile {
+                id: "fixture".into(),
+                name: "Fixture".into(),
+                endpoint,
+                model: "fixture".into(),
+                protocol: "ChatCompletions".into(),
+                ..ApiProfile::default()
+            },
+            None,
+            false,
+        ))
+        .unwrap();
+    let server = runtime.spawn(async move {
+        let recipe = json!({"kind":"engine","key":"fixture","name":"Fixture","resourcePatterns":["*.json"]});
+        let replies = [
+            ("stage_resources", json!({"files":["text.json"]})),
+            ("write_file", json!({
+                "path":"src/adapter.py",
+                "content":include_str!("../../engines/tests/fixtures/json_adapter.py"),
+                "testArguments":recipe
+            })),
+            ("test_adapter", recipe),
+        ];
+        for (name, args) in replies {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut stream = BufReader::new(stream);
+            let mut length = None;
+            loop {
+                let mut line = String::new();
+                assert!(stream.read_line(&mut line).await.unwrap() > 0);
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some((name, value)) = line.split_once(':')
+                    && name.eq_ignore_ascii_case("content-length")
+                {
+                    length = Some(value.trim().parse().unwrap());
+                }
+            }
+            stream.read_exact(&mut vec![0; length.unwrap()]).await.unwrap();
+            let reply = json!({
+                "choices":[{"index":0,"finish_reason":"tool_calls","delta":{
+                    "role":"assistant","tool_calls":[{"index":0,"id":name,"type":"function",
+                        "function":{"name":name,"arguments":args.to_string()}}]
+                }}],
+                "usage":{"prompt_tokens":99_980,"completion_tokens":20}
+            });
+            let body = format!("data: {reply}\n\ndata: [DONE]\n\n");
+            stream.get_mut().write_all(format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            ).as_bytes()).await.unwrap();
+        }
+    });
+    let ui = MainWindow::new().unwrap();
+    let ctx = Context {
+        host: Arc::new(RwLock::new(host)),
+        window: ui.as_weak(),
+        session: Arc::new(Mutex::new(UiSession {
+            requested_project: project.id.clone(),
+            ..Default::default()
+        })),
+        catalog: Arc::new(Mutex::new(None)),
+        generation: Arc::new(AtomicU64::new(0)),
+        edit_generation: Arc::new(AtomicU64::new(0)),
+        root_generation: Arc::new(AtomicU64::new(0)),
+        log_generation: Arc::new(AtomicU64::new(0)),
+        switching: Arc::new(AtomicBool::new(false)),
+        active_actions: Arc::new(AtomicUsize::new(0)),
+        runtime: runtime.handle().clone(),
+        tools,
+    };
+    install_actions(&ui, &ctx);
+    let app = ui.global::<App>();
+    app.set_project_id(project.id.into());
+    app.set_force_intelligent(true);
+    app.set_budget("300000".into());
+    let _runtime_guard = runtime.enter();
+    slint::spawn_local(async move {
+        invoke_action(&ui, &ctx, "confirm", "adapt").await;
+        tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap();
+        let log = std::fs::read_dir(directory.join("logs"))
+            .unwrap()
+            .map(Result::unwrap)
+            .find(|file| {
+                file.file_name()
+                    .to_string_lossy()
+                    .starts_with("adaptation-")
+            })
+            .unwrap();
+        let text = std::fs::read_to_string(log.path()).unwrap();
+        let events: Vec<Value> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert!(events.iter().any(|row| {
+            let event = &row["entry"];
+            event["operation"] == "host-step-end" && event["passed"] == true
+        }));
+        assert!(events.iter().any(|row| {
+            let event = &row["entry"];
+            event["operation"] == "tool-end"
+                && event["call"]["name"] == "test_adapter"
+                && event["result"]["passed"] == true
+        }));
+        slint::quit_event_loop().unwrap();
+    })
+    .unwrap();
+    slint::run_event_loop().unwrap();
+}
+
+#[test]
 fn project_actions_keep_settings_selection_and_saved_edits_in_sync_across_tabs() {
     i_slint_backend_testing::init_integration_test_with_system_time();
     let root = tempfile::tempdir().unwrap();

@@ -1113,10 +1113,15 @@
       "type": "function",
       "function": {
         "name": "use_engine_reference",
-        "description": "Bind the shared Python toolkit into src: writes a pinned dependency and tools/gamel10n_host.py helper without copying the toolkit into each project. Implement src/adapter.py using the returned Python example. Published adapters use the same library and precompiled components without LLM calls or C# compilation. test_adapter remains required. Call alone.",
+        "description": "Bind the shared Python toolkit and tools/gamel10n_host.py in src. Set nativeTools=true when calling the NativeAOT parser or component host directly. Built-in templates and copied components declare their own dependencies. test_adapter remains required. Call alone.",
         "parameters": {
           "type": "object",
-          "properties": {},
+          "properties": {
+            "nativeTools": {
+              "type": "boolean",
+              "description": "Declare a runtime dependency on the bundled NativeAOT parser or component host."
+            }
+          },
           "required": [],
           "additionalProperties": false
         }

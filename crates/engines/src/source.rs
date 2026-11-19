@@ -76,7 +76,7 @@ impl ReadOnlySource {
         // Renamed backups and inputs from different roots need the adapter's logical layout.
         // The temporary directory is removed on success, failure, and cancellation.
         let temporary = tempfile::tempdir()?;
-        let mut buffer = [0_u8; 128 * 1024];
+        let mut buffer = vec![0_u8; 128 * 1024];
         for ((relative, _), input) in files.iter().zip(&mut handles) {
             let output = resolve_relative(temporary.path(), relative)?;
             if let Some(parent) = output.parent() {

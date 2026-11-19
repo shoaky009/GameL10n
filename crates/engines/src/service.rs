@@ -109,9 +109,56 @@ pub struct VerificationResult {
     pub cacheable: bool,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub stage_timings_ms: BTreeMap<String, u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive_member_retry: Option<ArchiveMemberRetry>,
     /// Only the current invocation can hand off extracted text to the project.
     #[serde(skip)]
     pub verified_extraction: Option<Arc<VerifiedExtraction>>,
+}
+
+/// Inputs for reproducing a partial translation failure in a small PFS fixture.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveMemberRetry {
+    pub resource: String,
+    pub members: BTreeSet<String>,
+    pub translations: BTreeMap<String, String>,
+}
+
+impl ArchiveMemberRetry {
+    fn for_speaker_difference(
+        issue: &crate::VerificationIssue,
+        unit: &TranslationUnit,
+        units: &[TranslationUnit],
+        translations: &BTreeMap<String, String>,
+    ) -> Option<Self> {
+        if !unit.resource_path.to_ascii_lowercase().ends_with(".pfs")
+            || issue.code != crate::VerificationIssueCode::IdentityMismatch
+            || issue.field_differences.len() != 1
+            || issue.field_differences[0].field != "speaker"
+            || translations.is_empty()
+            || translations.len() > 2
+            || translations.values().any(|value| value.len() > 4096)
+        {
+            return None;
+        }
+        let member = |unit: &TranslationUnit| {
+            let (member, _) = unit.locator.rsplit_once(":block:")?;
+            (unit.resource_path == issue.resource_path.as_deref()?
+                && member.to_ascii_lowercase().ends_with(".ast"))
+            .then(|| member.to_owned())
+        };
+        let mut members = BTreeSet::from([member(unit)?]);
+        for id in translations.keys() {
+            let translated = units.iter().find(|unit| unit.id == *id)?;
+            members.insert(member(translated)?);
+        }
+        Some(Self {
+            resource: unit.resource_path.clone(),
+            members,
+            translations: translations.clone(),
+        })
+    }
 }
 
 /// A successful verification's original text, bound to its package and resource bytes.
@@ -535,21 +582,23 @@ impl EngineService {
         package: Option<&Path>,
         cancellation: &CancellationToken,
     ) -> Result<Value, EngineError> {
-        let mut paths = json!({"python":self.tools.python(),"vnTextPatch":self.tools.vntextpatch(),"vnTextPatchCommand":[self.tools.vntextpatch()],"hostCommand":[self.tools.vntextpatch()]});
+        let mut paths = json!({"python":self.tools.python()});
+        let mut native = Some(self.tools.vntextpatch());
         if let Some(package) = package {
-            let native_pin = package.join("tools/vntextpatch-reference.json");
-            if native_pin.is_file() {
+            let native_pin = package.join(crate::native_tools::PIN_PATH);
+            let has_native_pin = native_pin.is_file();
+            if has_native_pin {
                 let pin: Value = read_json(&native_pin)
                     .map_err(|error| EngineError::Protocol(error.to_string()))?;
-                let executable = self.resolve_native_tools(&pin)?;
-                paths["vnTextPatch"] = json!(executable);
-                paths["vnTextPatchCommand"] = json!([executable]);
-                paths["hostCommand"] = json!([executable]);
+                native = Some(self.resolve_native_tools(&pin)?);
             }
             let dependency = package.join("tools/engine-reference.json");
             if dependency.is_file() {
                 let pin: Value = read_json(&dependency)
                     .map_err(|error| EngineError::Protocol(error.to_string()))?;
+                if pin["nativePinRequired"] == true && !has_native_pin {
+                    native = None;
+                }
                 let runtime: Value = read_json(&self.tools.root.join("python/runtime.json"))
                     .map_err(|error| EngineError::Protocol(error.to_string()))?;
                 if pin.get("pythonSha256").and_then(Value::as_str)
@@ -593,6 +642,11 @@ impl EngineService {
                 };
                 paths["engineLibrary"] = json!(library);
             }
+        }
+        if let Some(executable) = native {
+            paths["vnTextPatch"] = json!(executable);
+            paths["vnTextPatchCommand"] = json!([executable]);
+            paths["hostCommand"] = json!([executable]);
         }
         Ok(paths)
     }
@@ -2239,6 +2293,11 @@ impl EngineService {
                         let mismatch = crate::VerificationIssue::new(code, phase)
                             .at(&unit.resource_path, Some(&unit.id))
                             .unit_difference(unit, Some(actual), &expected, overlay, !builtin_sfa);
+                        if phase == "partial-translation-re-extraction" && !overlay {
+                            result.archive_member_retry = ArchiveMemberRetry::for_speaker_difference(
+                                &mismatch, unit, &units, &translations,
+                            );
+                        }
                         let fields = mismatch.field_names();
                         issue = Some(mismatch);
                         return Err(EngineError::Rejected(format!(
@@ -2570,14 +2629,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let workspace = root.path().join("adaptation/current");
         let tools = ToolPaths::development();
-        let python = workspace.join("python");
-        fs::create_dir_all(&python).unwrap();
-        for entry in fs::read_dir(tools.python().parent().unwrap()).unwrap() {
-            let entry = entry.unwrap();
-            if entry.file_type().unwrap().is_file() {
-                fs::copy(entry.path(), python.join(entry.file_name())).unwrap();
-            }
-        }
+        crate::python::copy_python_runtime(&tools, &workspace.join("python")).unwrap();
         let allowed = root.path().join("allowed.txt");
         let private = root.path().join("private.txt");
         fs::write(&allowed, "allowed").unwrap();

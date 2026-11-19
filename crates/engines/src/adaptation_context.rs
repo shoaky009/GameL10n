@@ -16,7 +16,7 @@ use crate::{
     vntextpatch::{BUILTIN_FORMATS, BuiltinFormat},
 };
 
-pub(crate) const DISCOVERY_REVISION: u64 = 9;
+pub(crate) const DISCOVERY_REVISION: u64 = 10;
 const CONTAINERS: &[&str] = &[
     "xp3", "rpa", "rpyc", "pack", "pak", "arc", "ypf", "int", "pfs",
 ];
@@ -525,6 +525,9 @@ fn inspect_builtin_files(
                 let ext = extension(&name);
                 if matches!(ext.as_str(), "scn" | "psb")
                     || name == "scpack.idx"
+                    || name.rsplit_once(".pfs.").is_some_and(|(_, suffix)| {
+                        suffix.len() == 3 && suffix.bytes().all(|byte| byte.is_ascii_digit())
+                    })
                     || CONTAINERS.contains(&ext.as_str())
                     || BUILTIN_FORMATS
                         .iter()
@@ -582,6 +585,7 @@ fn inspect_builtin_files(
     let mut neko = Vec::new();
     let mut bsscript = Vec::new();
     let mut scn = Vec::new();
+    let mut pfs_archives = Vec::new();
     for (_, path) in samples {
         if cancellation.is_cancelled() {
             return Err(EngineError::Cancelled);
@@ -607,6 +611,9 @@ fn inspect_builtin_files(
                 continue;
             }
         };
+        if head.starts_with(b"pf8") && pfs_archives.len() < 2 {
+            pfs_archives.push(path.clone());
+        }
         if head.starts_with(b"PSB\0") {
             scn.push(path.clone());
             identified.insert(path.to_lowercase());
@@ -738,7 +745,7 @@ fn inspect_builtin_files(
         result.insert(0,json!({"format":"Eagls","adapterId":"reference.eagls","name":"EAGLS / ALIS SCPACK",
             "evidenceKind":"container-pair","evidence":["同目录存在 SCPACK.idx 与 SCPACK.pak；仅为配对线索，须校验索引、成员边界及脚本参数。"],
             "archivePairs":eagls_pairs,"scriptComponent":"eagls-script",
-            "missingCapabilities":["用固定 python.archives.eagls 读取索引并选取少量完整脚本，try_builtin_adapter(format=eagls-script) 分别验证解析、原文往返与中文回填。","resourcePath 指外层 PAK，成员身份放入 locator/context；界面文字、姓名引用与运行编码须单独确认。"]}));
+            "missingCapabilities":["优先复用 automaticArchiveTrials 的索引、成员和脚本试验结果。","resourcePath 指外层 PAK，成员身份放入 locator/context；界面文字、姓名引用与运行编码须单独确认。"]}));
     }
     if !neko.is_empty() {
         neko.sort_by_key(|path| (priority(path), path.to_lowercase()));
@@ -783,7 +790,7 @@ fn inspect_builtin_files(
         ]
     };
     Ok(
-        json!({"revision":DISCOVERY_REVISION,"filesScanned":scanned,"partial":partial,"candidates":result,"components":components,"warnings":warnings}),
+        json!({"revision":DISCOVERY_REVISION,"filesScanned":scanned,"partial":partial,"candidates":result,"components":components,"pfsArchives":pfs_archives,"warnings":warnings}),
     )
 }
 

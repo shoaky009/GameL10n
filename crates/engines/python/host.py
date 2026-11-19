@@ -986,6 +986,86 @@ def archive_component(request):
     return dict(report, entries=report.get('entries', [])[:12])
 
 
+def archive_samples(request):
+    sys.path.insert(0, request['library'])
+    maximum_member = 2 << 20
+    format_name = request['format']
+    archive = Path(request['archive'])
+    output = Path(request['directory'])
+    requested = request.get('members')
+    with archive.open('rb') as stream:
+        if format_name == 'ArtemisAst':
+            from python.archives import pfs
+            index = pfs.read_index(stream, max_index_size=8 << 20)
+            if index.version != 8:
+                return dict(status='unsupported-version', version=index.version)
+            entries = index.entries
+            suffix = '.ast'
+            target_size = 128 << 10
+            version = index.version
+            index_bytes = index.index_end + 4
+        elif format_name == 'eagls-script' and requested is None:
+            from python.archives import eagls
+            from python.common.safety import Limits
+            index_path = Path(request['index'])
+            with index_path.open('rb') as source:
+                index_data = source.read((2 << 20) + 1)
+            if len(index_data) > 2 << 20:
+                return dict(status='index-too-large')
+            limits = Limits(max_entries=20_000)
+            package_size = os.fstat(stream.fileno()).st_size
+            layouts = []
+            for long_offsets in (False, True):
+                try:
+                    _, members = eagls.read_index(
+                        index_data, package_size, key=eagls.DEFAULT_INDEX_KEY,
+                        long_offsets=long_offsets, limits=limits)
+                    layouts.append((long_offsets, members))
+                except ValueError:
+                    continue
+            if len(layouts) != 1:
+                return dict(status='index-layout-unconfirmed')
+            long_offsets, entries = layouts[0]
+            suffix = '.dat'
+            target_size = 32 << 10
+            version = '64-bit-offsets' if long_offsets else '32-bit-offsets'
+            index_bytes = len(index_data)
+        else:
+            raise ValueError('unsupported archive sample request')
+
+        eligible = [entry for entry in entries
+                    if entry.name.lower().endswith(suffix) and 0 < entry.size <= maximum_member]
+        if requested is not None:
+            # Preserve the archive name and entry names for adapter IDs during a repair.
+            selected = {entry.name: entry for entry in eligible if entry.name in requested}
+            if len(selected) != len(requested):
+                return dict(status='member-unavailable')
+            payloads = [(name, pfs.read_member(stream, index, selected[name],
+                                             max_stored_size=maximum_member).data)
+                        for name in requested]
+            with (output / 'fixture.pfs').open('xb') as destination:
+                destination.write(pfs.build(payloads, version=index.version,
+                                            name_encoding=index.name_encoding))
+            return dict(status='sampled')
+        eligible.sort(key=lambda entry: (abs(entry.size - target_size), entry.name))
+        samples = []
+        for entry in eligible[:3]:
+            if format_name == 'ArtemisAst':
+                data = pfs.read_member(stream, index, entry, max_stored_size=maximum_member).data
+            else:
+                stream.seek(entry.offset)
+                data = stream.read(entry.size)
+                if len(data) != entry.size:
+                    raise ValueError('SCPACK member is truncated')
+            path = f'{len(samples)}{suffix}'
+            with (output / path).open('xb') as destination:
+                destination.write(data)
+            samples.append(dict(member=entry.name, path=path, bytes=len(data)))
+    return dict(status='sampled' if samples else 'no-script-member',
+                version=version, indexBytes=index_bytes, samples=samples,
+                memberBytesRead=sum(sample['bytes'] for sample in samples))
+
+
 def system_ansi_code_page():
     if os.name != 'nt':
         return None
@@ -1111,6 +1191,7 @@ def execute(request):
     operation = request['operation']
     if operation == 'list_files': return list_files(request)
     if operation == 'archive_component': return archive_component(request)
+    if operation == 'archive_samples': return archive_samples(request)
     if operation == 'inspect_game_launch': return inspect_game_launch(request)
     if operation == 'decode_reference_html': return decode_reference_html(request)
     if operation == 'builtin_sources': return builtin_sources(request)

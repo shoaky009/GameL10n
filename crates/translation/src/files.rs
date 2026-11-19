@@ -177,7 +177,7 @@ pub fn hash_bytes(bytes: &[u8]) -> String {
 pub fn hash_file(path: &Path) -> Result<String, FileError> {
     let mut stream = File::open(path).map_err(|error| io_error(path, error))?;
     let mut hash = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
+    let mut buffer = vec![0_u8; 64 * 1024];
     loop {
         let size = stream
             .read(&mut buffer)

@@ -7,7 +7,7 @@ use gamel10n_core::{
 };
 use serde_json::Value;
 use slint::{ComponentHandle, Model, ModelRc};
-use std::{path::PathBuf, sync::atomic::Ordering};
+use std::{future::Future, path::PathBuf, pin::Pin, sync::atomic::Ordering};
 
 fn file_size(bytes: u64) -> String {
     let units = ["B", "KB", "MB", "GB", "TB"];
@@ -81,7 +81,86 @@ fn load_workflow_preferences(app: &App<'_>, choice: WorkflowChoice, has_custom: 
     app.set_workflow_use_existing_text(use_existing_text);
 }
 
-pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool, CoreError> {
+// Choose the future before polling so adaptation skips the other project action frames.
+pub fn handle<'a>(
+    ctx: &'a Context,
+    action: &'a str,
+    input: &'a UiInput,
+) -> Pin<Box<dyn Future<Output = Result<bool, CoreError>> + Send + 'a>> {
+    if action == "adapt" {
+        Box::pin(adapt(ctx, input))
+    } else {
+        Box::pin(handle_project_action(ctx, action, input))
+    }
+}
+
+async fn adapt(ctx: &Context, input: &UiInput) -> Result<bool, CoreError> {
+    let app = ctx.app().await;
+    let project = app.open_project(&input.project_id).await?;
+    if !confirm_game_directory(project.game_directory).await? {
+        ctx.update(|ui| ui.global::<App>().set_modal("adapt".into()));
+        return Ok(true);
+    }
+    let objective = match input.adaptation_objective {
+        0 | 3 => AdaptationObjective::Develop,
+        1 => AdaptationObjective::Repair,
+        2 => AdaptationObjective::ExpandCoverage,
+        _ => return Err(CoreError::InvalidData("请选择本次适配目标。".into())),
+    };
+    let workflow = (input.adaptation_objective == 3)
+        .then(|| workflow_choice(input))
+        .transpose()?;
+    if !matches!(
+        workflow,
+        Some(WorkflowChoice::Preset(WorkflowPreset {
+            use_existing_text: true,
+            ..
+        }))
+    ) {
+        let saved = async {
+            let updates = settings_ui::adaptation_budget_updates(input)?;
+            app.save_project_settings(&input.project_id, updates).await
+        }
+        .await;
+        if let Err(error) = saved {
+            ctx.update(|ui| ui.global::<App>().set_modal("adapt".into()));
+            return Err(error);
+        }
+    }
+    if objective == AdaptationObjective::Develop {
+        let mode = if input.force_intelligent {
+            RecognitionMode::Intelligent
+        } else {
+            RecognitionMode::Automatic
+        };
+        if let Some(choice) = workflow {
+            app.run_workflow_with_choice(
+                &input.project_id,
+                input.instruction.clone(),
+                mode,
+                choice,
+            )
+            .await?;
+        } else {
+            app.recognize_with_mode(&input.project_id, input.instruction.clone(), mode)
+                .await?;
+        }
+    } else {
+        app.adapt_project_with_objective(
+            &input.project_id,
+            input.instruction.clone(),
+            Some(objective),
+        )
+        .await?;
+    }
+    Ok(true)
+}
+
+async fn handle_project_action(
+    ctx: &Context,
+    action: &str,
+    input: &UiInput,
+) -> Result<bool, CoreError> {
     match action {
         "project-link" => {
             let path = match input.argument.as_str() {
@@ -358,66 +437,6 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                 );
                 app.set_modal("adapt".into());
             });
-        }
-        "adapt" => {
-            let app = ctx.app().await;
-            let project = app.open_project(&input.project_id).await?;
-            if !confirm_game_directory(project.game_directory).await? {
-                ctx.update(|ui| ui.global::<App>().set_modal("adapt".into()));
-                return Ok(true);
-            }
-            let objective = match input.adaptation_objective {
-                0 | 3 => AdaptationObjective::Develop,
-                1 => AdaptationObjective::Repair,
-                2 => AdaptationObjective::ExpandCoverage,
-                _ => return Err(CoreError::InvalidData("请选择本次适配目标。".into())),
-            };
-            let workflow = (input.adaptation_objective == 3)
-                .then(|| workflow_choice(input))
-                .transpose()?;
-            if !matches!(
-                workflow,
-                Some(WorkflowChoice::Preset(WorkflowPreset {
-                    use_existing_text: true,
-                    ..
-                }))
-            ) {
-                let saved = async {
-                    let updates = settings_ui::adaptation_budget_updates(input)?;
-                    app.save_project_settings(&input.project_id, updates).await
-                }
-                .await;
-                if let Err(error) = saved {
-                    ctx.update(|ui| ui.global::<App>().set_modal("adapt".into()));
-                    return Err(error);
-                }
-            }
-            if objective == AdaptationObjective::Develop {
-                let mode = if input.force_intelligent {
-                    RecognitionMode::Intelligent
-                } else {
-                    RecognitionMode::Automatic
-                };
-                if let Some(choice) = workflow {
-                    app.run_workflow_with_choice(
-                        &input.project_id,
-                        input.instruction.clone(),
-                        mode,
-                        choice,
-                    )
-                    .await?;
-                } else {
-                    app.recognize_with_mode(&input.project_id, input.instruction.clone(), mode)
-                        .await?;
-                }
-            } else {
-                app.adapt_project_with_objective(
-                    &input.project_id,
-                    input.instruction.clone(),
-                    Some(objective),
-                )
-                .await?;
-            }
         }
         "adapt-cancel" => {
             let reuse_text = input.adaptation_objective == 3

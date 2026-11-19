@@ -45,12 +45,12 @@ impl SampleCheckMetrics {
     }
 }
 
-struct Budget {
-    token: CancellationToken,
+pub(super) struct Budget {
+    pub token: CancellationToken,
     timer: tokio::task::JoinHandle<()>,
 }
 impl Budget {
-    fn new(parent: &CancellationToken, duration: Duration) -> Self {
+    pub(super) fn new(parent: &CancellationToken, duration: Duration) -> Self {
         let token = parent.child_token();
         let deadline = token.clone();
         let timer = tokio::spawn(async move {
@@ -139,7 +139,7 @@ fn checked_hash(
         return Err(reject("自动试用样本大小发生变化。"));
     }
     let mut digest = Sha256::new();
-    let mut buffer = [0_u8; 128 * 1024];
+    let mut buffer = vec![0_u8; 128 * 1024];
     let mut total = 0_u64;
     loop {
         cancelled(token)?;
@@ -1101,6 +1101,148 @@ pub(super) async fn inspect_workspace(
     } else {
         state.extra.remove("workspaceSamples");
     }
+    Ok(())
+}
+
+pub(super) async fn inspect_archives(
+    service: &EngineService,
+    request: &AdaptationRequest<'_>,
+    workspace: &Path,
+    state: &mut Session,
+    cancellation: &CancellationToken,
+) -> Result<(), EngineError> {
+    if state.total_turns != 0 || !state.pending_calls.is_empty() {
+        return Ok(());
+    }
+    let eagls = candidates(state)
+        .into_iter()
+        .find(|candidate| candidate["format"] == "Eagls");
+    let archives: Vec<_> = eagls
+        .iter()
+        .flat_map(|candidate| candidate["archivePairs"].as_array().into_iter().flatten())
+        .filter_map(|pair| {
+            Some((
+                "eagls-script",
+                pair["archive"].as_str()?,
+                Some(pair["index"].as_str()?),
+            ))
+        })
+        .chain(
+            state.extra["builtinDiscovery"]["pfsArchives"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|path| Some(("ArtemisAst", path.as_str()?, None)))
+                .filter(|_| {
+                    !service
+                        .disabled_families
+                        .contains("engine.vntextpatch-artemisast")
+                }),
+        )
+        .filter(|(_, archive, index)| {
+            !request.inputs.excludes(archive)
+                && index.is_none_or(|path| !request.inputs.excludes(path))
+        })
+        .take(3)
+        .map(|(format, archive, index)| (format, archive.to_owned(), index.map(str::to_owned)))
+        .collect();
+    state.extra.remove("automaticArchiveTrials");
+    if archives.is_empty() {
+        return Ok(());
+    }
+    let budget = Budget::new(cancellation, Duration::from_secs(20));
+    let token = &budget.token;
+    let mut reports = Vec::new();
+    for (format, archive, index) in archives {
+        let result = async {
+            let paths = std::iter::once(("archive", archive.as_str()))
+                .chain(index.as_deref().map(|index| ("index", index)))
+                .map(|(role, path)| Ok((role.to_owned(), request.inputs.file(&request.game_directory, path)?)))
+                .collect::<Result<BTreeMap<_, _>, EngineError>>()?;
+            let _inputs = crate::source::lock_inputs(&paths, token)?;
+            let reference = service.adaptation_reference(workspace, state)?;
+            let library = service.reference_library(&reference)?;
+            let scratch = tempfile::Builder::new().prefix("archive-samples-").tempdir()?;
+            let mut report = service.helper(
+                &json!({"operation":"archive_samples","format":format,"archive":paths["archive"],
+                    "index":paths.get("index"),"directory":scratch.path(),"library":library,
+                    "timeoutSeconds":10}),
+                token,
+            ).await?;
+            let samples: Vec<Value> = serde_json::from_value(
+                report.as_object_mut().and_then(|report| report.remove("samples")).unwrap_or(json!([])),
+            )?;
+            let mut trials = Vec::new();
+            for sample in samples {
+                let member = text(&sample, "member")?;
+                let name = if format == "ArtemisAst" { "sample.ast" } else { "sample.dat" };
+                let source = resolve_relative(scratch.path(), text(&sample, "path")?)?;
+                let size = source.metadata()?.len();
+                let hash = checked_hash(&source, size, token)?;
+                let identity = hash_text(&json!([archive, member, hash]).to_string());
+                let directory = format!("work/archive-samples/{identity}");
+                let relative = format!("{directory}/{name}");
+                let target = resolve_relative(workspace, &relative)?;
+                if !target.is_file() {
+                    fs::create_dir_all(resolve_relative(workspace, &directory)?)?;
+                    let mut temporary = tempfile::NamedTempFile::new_in(workspace.join(&directory))?;
+                    std::io::copy(&mut fs::File::open(&source)?, &mut temporary)?;
+                    match temporary.persist_noclobber(&target) {
+                        Ok(_) => {}
+                        Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                        Err(error) => return Err(error.error.into()),
+                    }
+                }
+                if checked_hash(&target, size, token)? != hash {
+                    return Err(reject("封包样本副本发生变化。"));
+                }
+                let outcome = if format == "ArtemisAst" {
+                    try_cached_sample(service, workspace, state, format, &directory, &[name.into()], token).await?
+                } else {
+                    try_component_sample(service, workspace, state, format, &relative, (true, true), token).await?
+                };
+                let has_text = outcome["parseStatus"] == "passed"
+                    && outcome["unitCount"].as_u64().is_some_and(|count| count > 0);
+                trials.push(json!({"member":member,"sample":relative,"bytes":size,
+                    "parseStatus":outcome["parseStatus"],"roundtripStatus":outcome["roundtripStatus"],
+                    "translationStatus":outcome["translationStatus"],"unitCount":outcome["unitCount"],
+                    "errorType":outcome["diagnostic"]["errorType"],"error":outcome["error"].as_str().map(|error|limit(error,240)),
+                }));
+                if has_text {
+                    if outcome["roundtripStatus"] == "passed"
+                        && outcome["diagnostic"]["errorType"] == "UnicodeEncodeError"
+                    {
+                        report["nextAction"] = json!("索引、脚本提取和原字节往返已通过。复用已有解析组件实现适配器入口，定向确认译文编码与游戏端解码、字体。");
+                    }
+                    break;
+                }
+            }
+            report["trials"] = json!(trials);
+            Ok::<_, EngineError>(report)
+        }.await;
+        let mut report = match result {
+            Ok(report) => report,
+            Err(EngineError::Cancelled) if cancellation.is_cancelled() => {
+                return Err(EngineError::Cancelled);
+            }
+            Err(EngineError::Isolation(error)) => return Err(EngineError::Isolation(error)),
+            Err(EngineError::Cancelled | EngineError::Timeout) => json!({"status":"timed-out"}),
+            Err(error) => json!({"status":"unavailable","error":limit(&error.to_string(),240)}),
+        };
+        report["format"] = json!(format);
+        report["archive"] = json!(archive);
+        report["runtimeStatus"] = json!("not-tested");
+        if let Some(index) = index {
+            report["index"] = json!(index);
+        }
+        reports.push(report);
+        if token.is_cancelled() {
+            break;
+        }
+    }
+    state
+        .extra
+        .insert("automaticArchiveTrials".into(), json!(reports));
     Ok(())
 }
 
@@ -2353,6 +2495,7 @@ Path('work/result.json').write_text('{}', encoding='utf8')
     async fn small_template_retains_verification_for_model_coverage_review() {
         let root = tempfile::tempdir().unwrap();
         let (service, request, workspace, mut state) = fixture(root.path(), "Renpy", "script.rpy");
+        let service = service.with_execution_isolation(false);
         if !service.tools.vntextpatch().is_file() || !service.tools.python().is_file() {
             return;
         }
@@ -2385,6 +2528,7 @@ Path('work/result.json').write_text('{}', encoding='utf8')
     async fn complete_loose_template_verifies_and_publishes_without_model() {
         let root = tempfile::tempdir().unwrap();
         let (service, request, workspace, mut state) = fixture(root.path(), "Renpy", "script.rpy");
+        let service = service.with_execution_isolation(false);
         if !service.tools.vntextpatch().is_file() || !service.tools.python().is_file() {
             return;
         }
@@ -2410,6 +2554,13 @@ Path('work/result.json').write_text('{}', encoding='utf8')
         .unwrap();
         assert!(adapter.is_some(), "{}", state.extra["automaticTemplate"]);
         assert_eq!(state.extra["automaticTemplate"]["status"], "activated");
+        assert_eq!(
+            state.extra["automaticTemplate"]["templateId"],
+            "loose-renpy"
+        );
+        let verification = state.verification.as_ref().unwrap();
+        assert!(verification.passed);
+        assert_eq!(verification.units, SMALL_EXTRACTION_THRESHOLD);
         assert_eq!(state.usage.input_tokens, 0);
         assert_eq!(state.usage.output_tokens, 0);
         assert_eq!(
@@ -2423,6 +2574,7 @@ Path('work/result.json').write_text('{}', encoding='utf8')
     async fn complete_archive_template_inspects_all_members_before_publication() {
         let root = tempfile::tempdir().unwrap();
         let (service, request, workspace, mut state) = fixture(root.path(), "Renpy", "scripts.rpa");
+        let service = service.with_execution_isolation(false);
         if !service.tools.vntextpatch().is_file() || !service.tools.python().is_file() {
             return;
         }

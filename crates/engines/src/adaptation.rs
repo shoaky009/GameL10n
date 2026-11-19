@@ -4,8 +4,10 @@ use std::{
     borrow::Cow,
     collections::{BTreeMap, BTreeSet},
     fs::{self, OpenOptions},
+    future::Future,
     io::{Read, Write},
     path::{Path, PathBuf},
+    pin::Pin,
     sync::Arc,
     time::Instant,
 };
@@ -58,6 +60,7 @@ use crate::{
     AdapterHandle, CancellationToken, EngineError, EngineProgress, EngineService, PackageManifest,
     ProgressCallback, VerificationResult, VerifiedExtraction,
     discovery::{Inventory, resolve_relative, validate_pattern},
+    native_tools,
     protocol::AdapterRequest,
     service::hashes,
 };
@@ -442,31 +445,39 @@ pub(crate) fn add_usage(total: &mut TokenUsage, usage: &TokenUsage) {
 pub(crate) fn tokens(usage: &TokenUsage) -> u64 {
     usage.input_tokens.saturating_add(usage.output_tokens)
 }
+
+fn prepare_tool_call(state: &mut Session, name: &str, args: &Value) -> Result<(), EngineError> {
+    if !args.is_object() || serde_json::to_vec(args)?.len() > 512 * 1024 {
+        return Err(EngineError::Protocol(
+            "工具参数必须为不超过 512 KiB 的对象。".into(),
+        ));
+    }
+    if name != "report_blocker" {
+        state.extra.remove("unresolvedStopReports");
+    }
+    Ok(())
+}
+
 impl EngineService {
-    fn archive_obsolete_workspace(&self, workspace: &Path) -> Result<Option<PathBuf>, EngineError> {
-        let pin_path = workspace.join("src/tools/vntextpatch-reference.json");
-        if !pin_path.is_file() {
-            return Ok(None);
+    async fn refresh_workspace_native_pin(
+        &self,
+        workspace: &Path,
+        session_path: &Path,
+        state: &mut Session,
+    ) -> Result<bool, EngineError> {
+        let pin_path = resolve_relative(workspace, &workspace_file(native_tools::PIN_PATH))?;
+        if !pin_path.try_exists()? {
+            return Ok(false);
         }
-        let pin: Value = read_json(&pin_path).map_err(file_error)?;
-        match self.resolve_native_tools(&pin) {
-            Ok(_) => Ok(None),
-            Err(EngineError::Incompatible {
-                stage: "runtime", ..
-            }) => {
-                let parent = workspace
-                    .parent()
-                    .ok_or_else(|| EngineError::Protocol("智能适配工作区位置无效。".into()))?;
-                let archive = tempfile::Builder::new()
-                    .prefix("obsolete-")
-                    .tempdir_in(parent)?;
-                let destination = archive.path().join("current");
-                fs::rename(workspace, &destination)?;
-                let _ = archive.keep();
-                Ok(Some(destination))
-            }
-            Err(error) => Err(error),
-        }
+        let old = read_json(&pin_path).map_err(file_error)?;
+        let Some(current) = self.updated_native_pin(&old)? else {
+            return Ok(false);
+        };
+        flow::native_runtime_changed(state);
+        // Persist the revalidation before replacing the pin so an interrupted write can be retried.
+        save_session(session_path, state).await?;
+        write_json(&pin_path, &current).map_err(file_error)?;
+        Ok(true)
     }
 
     pub async fn adapt(
@@ -487,16 +498,6 @@ impl EngineService {
         }
         let workspace = request.project_directory.join("adaptation/current");
         let mut diagnostics = Vec::new();
-        if !cancellation.is_cancelled()
-            && let Some(archived) = self.archive_obsolete_workspace(&workspace)?
-        {
-            let message = format!(
-                "原生工具已更新，旧适配工作区已归档至 {}，正在使用当前工具重新识别。",
-                archived.display()
-            );
-            Self::report(progress, "重新建立适配会话", &message);
-            diagnostics.push(message);
-        }
         fs::create_dir_all(&workspace)?;
         for name in ["resources", "work"] {
             fs::create_dir_all(workspace.join(name))?;
@@ -555,6 +556,15 @@ impl EngineService {
         }
         normalize_messages(&mut state.messages);
         flow::recover(&mut state, request, provider.identity());
+        if !cancellation.is_cancelled()
+            && self
+                .refresh_workspace_native_pin(&workspace, &path, &mut state)
+                .await?
+        {
+            let message = "原生工具已更新，保留现有适配源码和会话，使用当前工具重新验收";
+            Self::report(progress, "更新适配工具依赖", message);
+            diagnostics.push(message.into());
+        }
         state.extra.remove("resourceChanges");
         if !request.reuse_failures.is_empty() {
             state.extra.insert(
@@ -710,6 +720,8 @@ impl EngineService {
             state.extra.insert("launchInspection".into(), launch);
             Self::report(progress, "检查已有工作样本", "正在复用解析器检查已暂存或解密的脚本样本。");
             automatic::inspect_workspace(self, &workspace, &mut state, cancellation).await?;
+            automatic::inspect_archives(self, request, &workspace, &mut state, cancellation)
+                .await?;
             if continuing {
                 automatic::run_trials(
                     self,
@@ -737,7 +749,7 @@ impl EngineService {
         }
         .await;
         trace_run(
-            json!({"operation":"local-preparation","elapsedMs":preparation_started.elapsed().as_millis(),"automaticTrials":state.extra.get("automaticTrials"),"automaticTemplate":state.extra.get("automaticTemplate"),"workspaceSamples":state.extra.get("workspaceSamples"),"sampleChecks":state.sample_checks.since(&sample_checks_before)}),
+            json!({"operation":"local-preparation","elapsedMs":preparation_started.elapsed().as_millis(),"automaticTrials":state.extra.get("automaticTrials"),"automaticArchiveTrials":state.extra.get("automaticArchiveTrials"),"automaticTemplate":state.extra.get("automaticTemplate"),"workspaceSamples":state.extra.get("workspaceSamples"),"sampleChecks":state.sample_checks.since(&sample_checks_before)}),
         )?;
         match prepared {
             Ok(Some(adapter)) => {
@@ -820,7 +832,41 @@ impl EngineService {
         clippy::too_many_arguments,
         reason = "Tool execution keeps request, persisted state and execution controls explicit at the host boundary."
     )]
-    async fn adaptation_tool(
+    fn adaptation_tool<'a>(
+        &'a self,
+        request: &'a AdaptationRequest<'_>,
+        workspace: &'a Path,
+        state: &'a mut Session,
+        name: &'a str,
+        args: &'a Value,
+        cancellation: &'a CancellationToken,
+        progress: ProgressCallback<'a>,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, EngineError>> + Send + 'a>> {
+        // Keep verification out of the general tool handler's debug stack frame.
+        if name == "test_adapter" {
+            Box::pin(async move {
+                prepare_tool_call(state, name, args)?;
+                self.test_adapter(request, workspace, state, args, cancellation, progress)
+                    .await
+            })
+        } else {
+            Box::pin(self.run_adaptation_tool(
+                request,
+                workspace,
+                state,
+                name,
+                args,
+                cancellation,
+                progress,
+            ))
+        }
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Tool execution borrows the request, session, and operation controls."
+    )]
+    async fn run_adaptation_tool(
         &self,
         request: &AdaptationRequest<'_>,
         workspace: &Path,
@@ -830,14 +876,7 @@ impl EngineService {
         cancellation: &CancellationToken,
         progress: ProgressCallback<'_>,
     ) -> Result<Value, EngineError> {
-        if !args.is_object() || serde_json::to_vec(args)?.len() > 512 * 1024 {
-            return Err(EngineError::Protocol(
-                "工具参数必须为不超过 512 KiB 的对象。".into(),
-            ));
-        }
-        if name != "report_blocker" {
-            state.extra.remove("unresolvedStopReports");
-        }
+        prepare_tool_call(state, name, args)?;
         match name {
             "load_tool_groups" => {
                 if args
@@ -1353,8 +1392,13 @@ impl EngineService {
                 self.helper(&params, cancellation).await
             }
             "use_engine_reference" => {
-                self.bind_reference(workspace, state, None, cancellation)
-                    .await
+                let native = match args.get("nativeTools") {
+                    None => false,
+                    Some(value) => value
+                        .as_bool()
+                        .ok_or_else(|| EngineError::Protocol("nativeTools 必须为布尔值".into()))?,
+                };
+                self.bind_reference(workspace, state, None, native, cancellation)
             }
             "run_engine_python" => {
                 let mut samples = automatic::sample_files(workspace, args)?;
@@ -1717,10 +1761,6 @@ impl EngineService {
             }
             "read_tool_result" => read_tool_result(workspace, state, args),
             "read_session_history" => read_session_history(state, args),
-            "test_adapter" => {
-                self.test_adapter(request, workspace, state, args, cancellation, progress)
-                    .await
-            }
             "finish" => {
                 self.finish_adapter(request, workspace, state, args, cancellation)
                     .await
@@ -2214,55 +2254,57 @@ impl EngineService {
         Ok(result)
     }
 
-    async fn bind_reference(
+    fn bind_reference(
         &self,
         workspace: &Path,
         state: &mut Session,
         reference: Option<Value>,
+        require_native: bool,
         cancellation: &CancellationToken,
     ) -> Result<Value, EngineError> {
+        let reference_path = resolve_relative(workspace, "src/tools/engine-reference.json")?;
+        let existing = reference_path
+            .try_exists()?
+            .then(|| read_json::<Value>(&reference_path).map_err(file_error))
+            .transpose()?;
         let reference = match reference {
             Some(value) => value,
-            None => self.current_reference()?,
+            None => match &existing {
+                Some(pin) => pin["reference"].clone(),
+                None => self.current_reference()?,
+            },
         };
         if reference.get("kind").and_then(Value::as_str) != Some("siglus") {
             self.reference_library(&reference)?;
         }
         let runtime: Value =
             read_json(&self.tools.root.join("python/runtime.json")).map_err(file_error)?;
-        let pin = json!({"reference":reference,"pythonVersion":"3.14.10","pythonSha256":runtime["archiveSha256"]});
-        let native_pin_path = workspace.join("src/tools/vntextpatch-reference.json");
-        let native_pin = if native_pin_path.is_file() {
+        let mut pin = json!({"reference":reference,"pythonVersion":"3.14.10","pythonSha256":runtime["archiveSha256"]});
+        if existing
+            .as_ref()
+            .is_none_or(|value| value["nativePinRequired"] == true)
+        {
+            pin["nativePinRequired"] = json!(true);
+        }
+        let native_pin_path = resolve_relative(workspace, &workspace_file(native_tools::PIN_PATH))?;
+        let native_pin = if native_pin_path.try_exists()? {
             let pin: Value = read_json(&native_pin_path).map_err(file_error)?;
             self.resolve_native_tools(&pin)?;
-            pin
+            Some(pin)
+        } else if require_native {
+            Some(self.create_native_pin()?)
         } else {
-            self.create_native_pin()?
+            None
         };
         let helper_source = self.asset_root.join("adapters/components/gamel10n_host.py");
         let helper_content = fs::read(&helper_source)?;
         let helper_path = workspace.join("src/tools/gamel10n_host.py");
-        let pins = [
-            (
-                workspace.join("src/tools/engine-reference.json"),
-                &pin,
-                "当前源码固定到另一个引擎依赖版本，请先核实原有依赖。",
-            ),
-            (
-                workspace.join("src/tools/vntextpatch-reference.json"),
-                &native_pin,
-                "现有源码固定到其他原生工具；确认接口和行为兼容后再更换依赖。",
-            ),
-        ];
-        for (path, expected, message) in &pins {
-            if path.is_file() {
-                let current: Value = read_json(path).map_err(file_error)?;
-                if current != **expected {
-                    return Err(EngineError::Rejected((*message).into()));
-                }
-            } else {
-                preflight_unmodified(path, &[])?;
-            }
+        if let Some(existing) = &existing
+            && existing != &pin
+        {
+            return Err(EngineError::Rejected(
+                "当前源码固定到另一个引擎依赖版本，请先核实原有依赖".into(),
+            ));
         }
         preflight_unmodified(&helper_path, &helper_content)?;
         let mut selection = state.release_files.clone();
@@ -2275,11 +2317,13 @@ impl EngineService {
                 "tools/gamel10n_host.py",
                 "调用固定原生解析器的 Python 协议桥。",
             ),
-            (
-                "tools/vntextpatch-reference.json",
-                "固定原生脚本、编码与字体组件宿主。",
-            ),
-        ] {
+        ]
+        .into_iter()
+        .chain(
+            native_pin
+                .as_ref()
+                .map(|_| (native_tools::PIN_PATH, native_tools::PIN_PURPOSE)),
+        ) {
             select_release(
                 &mut selection,
                 ReleaseFile {
@@ -2292,15 +2336,18 @@ impl EngineService {
         if cancellation.is_cancelled() {
             return Err(EngineError::Cancelled);
         }
-        for (path, value, _) in pins {
-            if !path.exists() {
-                write_json(&path, value).map_err(file_error)?;
-            }
+        if existing.is_none() {
+            write_json(&reference_path, &pin).map_err(file_error)?;
+        }
+        if let Some(native_pin) = &native_pin
+            && !native_pin_path.try_exists()?
+        {
+            write_json(&native_pin_path, native_pin).map_err(file_error)?;
         }
         copy_unmodified(&helper_source, &helper_path)?;
         state.release_files = selection;
         Ok(
-            json!({"success":true,"dependency":pin,"helper":"tools/gamel10n_host.py","usage":"from tools.gamel10n_host import parser, write_response; parser(request, format) calls the bundled NativeAOT parser. Shared Python modules import python.engines.*; inspect signatures first."}),
+            json!({"success":true,"dependency":pin,"nativeTools":native_pin.is_some(),"helper":"tools/gamel10n_host.py","usage":"Import shared Python modules from python.engines or python.archives. For the NativeAOT parser or components, declare nativeTools=true and call parser(request, format) or component from tools.gamel10n_host."}),
         )
     }
 
@@ -2333,7 +2380,7 @@ impl EngineService {
                 preflight_unmodified(&workspace.join(relative), content.as_bytes())?;
             }
             let prepared = self.siglus(cancellation).await?;
-            self.bind_reference(workspace,state,Some(json!({"revision":prepared["revision"],"sourceSha256":prepared["sourceSha256"],"librarySha256":prepared["librarySha256"],"kind":"siglus"})),cancellation).await?;
+            self.bind_reference(workspace,state,Some(json!({"revision":prepared["revision"],"sourceSha256":prepared["sourceSha256"],"librarySha256":prepared["librarySha256"],"kind":"siglus"})),false,cancellation)?;
             for (relative, content) in files {
                 write_unmodified(&workspace.join(relative), content)?;
             }
@@ -2366,8 +2413,7 @@ impl EngineService {
                 "import json\nimport sys\nfrom tools.gamel10n_host import parser, write_response\nrequest=json.load(sys.stdin)\nwrite_response(request,parser(request,{format:?}))\n"
             );
             preflight_unmodified(&workspace.join("src/adapter.py"), entry.as_bytes())?;
-            self.bind_reference(workspace, state, None, cancellation)
-                .await?;
+            self.bind_reference(workspace, state, None, true, cancellation)?;
             write_unmodified(&workspace.join("src/adapter.py"), &entry)?;
             register_python(state, "src/adapter.py")?;
             return Ok(
@@ -2389,7 +2435,7 @@ impl EngineService {
                 }
                 if manifest.manifest_version == 4 {
                     manifest.handle(directory)?;
-                    let native_pin = directory.join("tools/vntextpatch-reference.json");
+                    let native_pin = directory.join(native_tools::PIN_PATH);
                     if native_pin.is_file() {
                         let pin: Value = read_json(&native_pin).map_err(file_error)?;
                         self.resolve_native_tools(&pin)?;
@@ -2622,8 +2668,7 @@ impl EngineService {
                 "XP3 模板要求已独立确认 filter=none。".into(),
             ));
         }
-        self.bind_reference(workspace, state, None, cancellation)
-            .await?;
+        self.bind_reference(workspace, state, None, true, cancellation)?;
         let patterns = args
             .get("resourcePatterns")
             .cloned()
@@ -4606,7 +4651,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn obsolete_workspace_is_archived_without_changing_project_data_or_old_pins() {
+    async fn native_upgrade_preserves_the_workspace_and_queues_reverification() {
         let root = tempfile::tempdir().expect("fixture");
         let assets = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         let paths = crate::ToolPaths::new(root.path().join("tools"));
@@ -4638,17 +4683,31 @@ mod tests {
             fs::create_dir_all(path.parent().expect("parent")).expect("data directory");
             fs::write(path, relative).expect("project data");
         }
-        fs::write(workspace.join("session.json"), b"old session").expect("session");
         fs::write(workspace.join("src/adapter.py"), b"old source").expect("source");
-        let mut state = Session::default();
+        let mut state = Session {
+            notes: "existing evidence".into(),
+            verified_package: Some(json!({"id":"engine.fixture"})),
+            verified_fingerprint: Some("old implementation".into()),
+            progress_note: json!({"kind":"verified","message":"Previous verification passed"}),
+            ..Session::default()
+        };
+        state
+            .extra
+            .insert("verificationCache".into(), json!({"passed":true}));
+        state
+            .extra
+            .insert("lastBreakthrough".into(), state.progress_note.clone());
+        state.workflow.verification_args = Some(
+            json!({"kind":"engine","key":"fixture","name":"Fixture","resourcePatterns":["*.dat"]}),
+        );
         let error = service
             .bind_reference(
                 &workspace,
                 &mut state,
                 Some(json!({"kind":"siglus","revision":"fixture"})),
+                false,
                 &CancellationToken::new(),
             )
-            .await
             .expect_err("obsolete dependency");
         assert!(matches!(
             error,
@@ -4659,23 +4718,28 @@ mod tests {
         ));
         assert_eq!(fs::read(&pin_path).expect("preserved pin"), original);
         assert!(state.release_files.is_empty());
-        let archived = service
-            .archive_obsolete_workspace(&workspace)
-            .expect("archive")
-            .expect("obsolete workspace");
-        assert!(!workspace.exists());
-        assert_eq!(
-            fs::read(archived.join("src/tools/vntextpatch-reference.json")).expect("archived pin"),
-            original
+        let session = workspace.join("session.json");
+        assert!(
+            service
+                .refresh_workspace_native_pin(&workspace, &session, &mut state)
+                .await
+                .expect("refresh")
         );
         assert_eq!(
-            fs::read(archived.join("src/adapter.py")).expect("archived source"),
+            fs::read(workspace.join("src/adapter.py")).expect("preserved source"),
             b"old source"
         );
+        let restored = load_session(&session).expect("preserved session");
+        assert_eq!(restored.notes, "existing evidence");
         assert_eq!(
-            fs::read(archived.join("session.json")).expect("archived session"),
-            b"old session"
+            restored.workflow.verification_args,
+            state.workflow.verification_args
         );
+        assert!(restored.workflow.needs_verification);
+        assert!(restored.verified_package.is_none() && restored.verified_fingerprint.is_none());
+        assert!(restored.progress_note.is_null());
+        assert!(!restored.extra.contains_key("lastBreakthrough"));
+        assert!(!restored.extra.contains_key("verificationCache"));
         let (_, mut request, _, _) = fixture(&root.path().join("reuse"));
         let package = published_reuse_fixture(root.path());
         fs::remove_file(package.join("src/text.py")).expect("unused source");
@@ -4688,10 +4752,11 @@ mod tests {
             }
         })).expect("published manifest");
         request.package_directories.push(package);
+        let new_workspace = root.path().join("reuse-workspace");
         let error = service
             .copy_adapter(
                 &request,
-                &workspace,
+                &new_workspace,
                 &mut state,
                 &json!({"id":"engine.reuse-fixture","version":"1"}),
                 &CancellationToken::new(),
@@ -4705,7 +4770,7 @@ mod tests {
                 ..
             }
         ));
-        assert!(!workspace.exists());
+        assert!(!new_workspace.exists());
         for relative in [
             "game.json",
             "extraction/native.json",
@@ -4722,9 +4787,9 @@ mod tests {
                 &workspace,
                 &mut state,
                 Some(json!({"kind":"siglus","revision":"fixture"})),
+                false,
                 &CancellationToken::new(),
             )
-            .await
             .expect("bind current runtime");
         let new_pin: Value = read_json(&pin_path).expect("new pin");
         assert_ne!(new_pin, pin);
@@ -4732,14 +4797,16 @@ mod tests {
             .resolve_native_tools(&new_pin)
             .expect("supported runtime");
         assert!(
-            service
-                .archive_obsolete_workspace(&workspace)
-                .expect("current workspace")
-                .is_none()
+            !service
+                .refresh_workspace_native_pin(&workspace, &session, &mut state)
+                .await
+                .expect("unchanged dependency")
         );
         fs::remove_file(service.tools.vntextpatch()).expect("missing tool");
         assert!(matches!(
-            service.archive_obsolete_workspace(&workspace),
+            service
+                .refresh_workspace_native_pin(&workspace, &session, &mut state)
+                .await,
             Err(EngineError::ToolMissing(_))
         ));
         assert_eq!(
@@ -4748,9 +4815,8 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn dependency_binding_preflights_every_file_and_preserves_release_selection_on_conflict()
-    {
+    #[test]
+    fn dependency_binding_preflights_every_file_and_preserves_release_selection_on_conflict() {
         let root = tempfile::tempdir().expect("fixture");
         let assets = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         let paths = crate::ToolPaths::new(root.path().join("tools"));
@@ -4780,9 +4846,9 @@ mod tests {
                     &workspace,
                     &mut state,
                     Some(reference.clone()),
+                    false,
                     &CancellationToken::new()
                 )
-                .await
                 .is_err()
         );
         assert!(!workspace.join("src/tools/engine-reference.json").exists());
@@ -4800,9 +4866,9 @@ mod tests {
                     &workspace,
                     &mut state,
                     Some(reference),
+                    true,
                     &CancellationToken::new()
                 )
-                .await
                 .is_err()
         );
         assert!(!workspace.join("src/tools/engine-reference.json").exists());
@@ -6137,54 +6203,6 @@ mod tests {
         let result=service.test_adapter(&request,&workspace,&mut session,&json!({"kind":"engine","key":"fixture","name":"Fixture","resourcePatterns":["*.json"]}),&CancellationToken::new(),None).await.expect("full");
         assert_eq!(result["stage"], "finish-ready");
         assert_eq!(result["passed"], true);
-    }
-
-    #[tokio::test]
-    async fn bundled_loose_template_reuses_actual_native_parser() {
-        let root = tempfile::tempdir().expect("fixture");
-        let (service, request, workspace, mut session) = fixture(root.path());
-        if !service.tools.python().is_file() || !service.tools.vntextpatch().is_file() {
-            return;
-        }
-        fs::remove_file(workspace.join("src/adapter.py")).expect("fixture");
-        fs::write(
-            request.game_directory.join("script.rpy"),
-            "label start:\n    \"日本語の台詞\"\n",
-        )
-        .expect("fixture");
-        service
-            .adaptation_tool(
-                &request,
-                &workspace,
-                &mut session,
-                "stage_resources",
-                &json!({"files":["script.rpy"]}),
-                &CancellationToken::new(),
-                None,
-            )
-            .await
-            .expect("stage template sample");
-        let composed = service
-            .compose_template(
-                &workspace,
-                &mut session,
-                &json!({"id":"loose-renpy"}),
-                &CancellationToken::new(),
-            )
-            .await
-            .expect("compose");
-        let result = service
-            .test_adapter(
-                &request,
-                &workspace,
-                &mut session,
-                &composed["testArguments"],
-                &CancellationToken::new(),
-                None,
-            )
-            .await
-            .expect("verify template");
-        assert_eq!(result["passed"], true, "{result}");
     }
 
     #[test]

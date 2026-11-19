@@ -297,6 +297,7 @@ function Verification-Scope($row) {
     $selectors = $row.entry.call.selectors
     $stage = $row.entry.result.stage
     if ($selectors.discoveryOnly -eq $true -or $stage -eq 'discovery') { 'discovery' }
+    elseif ($stage -eq 'member-retest') { 'member-retest' }
     elseif ($stage -eq 'trial' -or $selectors.trialFilesCount -gt 0 -or ($null -ne $selectors.trialFiles -and @($selectors.trialFiles).Count -gt 0)) { 'trial' }
     elseif ($stage -in @('full', 'verification', 'finish-ready') -or $null -ne $selectors) { 'full' }
     else { 'unknown' }
@@ -355,6 +356,7 @@ $result = [ordered]@{
         fullVerificationCalls = $fullTests.Count
         discoveryVerificationCalls = @($verificationTests | Where-Object { (Verification-Scope $_) -eq 'discovery' }).Count
         trialVerificationCalls = @($verificationTests | Where-Object { (Verification-Scope $_) -eq 'trial' }).Count
+        memberRetestCalls = @($verificationTests | Where-Object { (Verification-Scope $_) -eq 'member-retest' }).Count
         unknownVerificationCalls = @($verificationTests | Where-Object { (Verification-Scope $_) -eq 'unknown' }).Count
         checkpoints = @($toolRows | Where-Object { $_.entry.tool -eq 'checkpoint' -and $_.entry.status -eq 'completed' }).Count
         checkpointRequests = @($rows | Where-Object { $_.entry.operation -eq 'checkpoint-request' }).Count

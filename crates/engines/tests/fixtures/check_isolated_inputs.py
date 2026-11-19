@@ -9,6 +9,7 @@ import subprocess
 import sys
 
 request = json.load(sys.stdin)
+native_command = request.get('toolPaths', {}).get('vnTextPatchCommand')
 root = Path(request['sourceDirectory'])
 file = root / 'script.ks'
 original = file.read_bytes()
@@ -68,24 +69,26 @@ def python_child(_):
 
 def native(operation, **extra):
     payload = dict(protocolVersion=1, operation=operation, sourceDirectory=str(root), format='KirikiriKs', **extra)
-    child = subprocess.run(request['toolPaths']['vnTextPatchCommand'], input=json.dumps(payload),
+    child = subprocess.run(native_command, input=json.dumps(payload),
                            capture_output=True, text=True, encoding='utf8')
+    assert child.returncode == 0, f'{operation} failed with exit code 0x{child.returncode & 0xffffffff:08X}: {child.stderr}'
     result = json.loads(child.stdout)
-    assert child.returncode == 0 and result['success'], result
+    assert result['success'], result
     return result
 
 with concurrent.futures.ThreadPoolExecutor(4) as pool:
     assert list(pool.map(lambda _: file.read_bytes(), range(20))) == [original] * 20
     list(pool.map(python_child, range(4)))
-    extractions = list(pool.map(lambda _: native('extract'), range(4)))
-units = extractions[0]['extraction']['units']
-assert units and all(item == extractions[0] for item in extractions)
-translations = {unit['id']: '変更された文章です。' for unit in units}
-output = request['outputDirectory']
-native('build', outputDirectory=output, translations=translations)
-validation = native('validate', outputDirectory=output, translations=translations)
-assert validation['validation']['passed'], validation
-assert (Path(output) / 'script.ks').read_bytes() != original
+    if native_command:
+        extractions = list(pool.map(lambda _: native('extract'), range(4)))
+        units = extractions[0]['extraction']['units']
+        assert units and all(item == extractions[0] for item in extractions)
+        translations = {unit['id']: '変更された文章です。' for unit in units}
+        output = request['outputDirectory']
+        native('build', outputDirectory=output, translations=translations)
+        validation = native('validate', outputDirectory=output, translations=translations)
+        assert validation['validation']['passed'], validation
+        assert (Path(output) / 'script.ks').read_bytes() != original
 assert file.read_bytes() == original
 Path(request['responseFile']).write_text(json.dumps(dict(protocolVersion=1, success=True,
     validation=dict(passed=True, issues=[], runtimeStatus='not-tested'))), encoding='utf8')

@@ -125,6 +125,30 @@ pub(super) fn recover(state: &mut Session, request: &AdaptationRequest<'_>, iden
     state.user_instruction = request.user_instruction.trim().into();
 }
 
+pub(super) fn native_runtime_changed(state: &mut Session) {
+    let message = "原生工具版本已更新，现有源码和会话可继续使用，发布前需用当前工具重新验收";
+    for call in std::mem::take(&mut state.pending_calls) {
+        append_failure(state, &call, message);
+    }
+    state
+        .messages
+        .push(json!({"role":"user","content":message}));
+    resources::invalidate(state);
+    state.workflow.needs_verification = state.workflow.verification_args.is_some();
+    state.workflow.last_attempt = None;
+    state.extra.remove("highestVerificationMilestone");
+    if state.progress_note["kind"] == "verified" {
+        state.progress_note = Value::Null;
+    }
+    if state
+        .extra
+        .get("lastBreakthrough")
+        .is_some_and(|note| note["kind"] == "verified")
+    {
+        state.extra.remove("lastBreakthrough");
+    }
+}
+
 pub(super) fn workspace_files(workspace: &Path, subdirectory: &str, limit: usize) -> Vec<String> {
     let Ok(entries) = fs::read_dir(workspace.join(subdirectory)) else {
         return vec![];
@@ -1155,34 +1179,25 @@ mod tests {
                 request.limits.maximum_tokens = RESPONSE_TOKENS;
                 let private = root.path().join("private.txt");
                 fs::write(&private, "must not leak").unwrap();
-                let args = if name == "run_engine_python" {
-                    let operation = if write {
-                        "p.write_text('changed')"
-                    } else {
-                        "print(p.read_text())"
-                    };
-                    json!({"script":"work/denied.py", "content":format!(
-                        "from pathlib import Path\np = Path({})\n{operation}\n", json!(private)
-                    )})
+                let service = EngineService::new(
+                    Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
+                    crate::ToolPaths::development(),
+                );
+                let operation = if write {
+                    "p.write_text('changed')"
                 } else {
-                    let operation = if write {
-                        format!(
-                            "[IO.File]::WriteAllText('{}', 'changed')",
-                            private.display().to_string().replace('\'', "''")
-                        )
-                    } else {
-                        format!(
-                            "[IO.File]::ReadAllText('{}')",
-                            private.display().to_string().replace('\'', "''")
-                        )
-                    };
-                    let script = workspace.join("work/denied.ps1");
-                    fs::write(
-                        &script,
-                        format!("$ErrorActionPreference = 'Stop'\n{operation}\n"),
-                    )
-                    .unwrap();
-                    json!({"executable":"powershell", "arguments":["-ExecutionPolicy","Bypass","-File",script]})
+                    "print(p.read_text())"
+                };
+                let script = format!(
+                    "from pathlib import Path\np = Path({})\n{operation}\n",
+                    json!(private)
+                );
+                let args = if name == "run_engine_python" {
+                    json!({"script":"work/denied.py", "content":script})
+                } else {
+                    crate::python::copy_python_runtime(&service.tools, &workspace.join("python"))
+                        .unwrap();
+                    json!({"executable":"python/python.exe", "arguments":["-I","-X","utf8","-c",script]})
                 };
                 let arguments = args.to_string();
                 state.messages.push(json!({"role":"assistant","tool_calls":[{"id":"denied","type":"function","function":{"name":name,"arguments":arguments}}]}));
@@ -1191,10 +1206,6 @@ mod tests {
                     name: name.into(),
                     arguments,
                 });
-                let service = EngineService::new(
-                    Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
-                    crate::ToolPaths::development(),
-                );
                 let (provider, server) = model(vec![budgeted_response(file_response(
                     ApiProtocol::ChatCompletions,
                     "recovered",
@@ -1232,16 +1243,19 @@ mod tests {
                     serde_json::from_str(message["content"].as_str().unwrap()).unwrap();
                 assert_eq!(failure["success"], false, "{failure}");
                 assert_ne!(failure["exitCode"], 0, "{failure}");
-                assert!(!failure["stderr"].as_str().unwrap().is_empty(), "{failure}");
-                if name == "run_engine_python" {
-                    assert!(
-                        failure["stderr"]
-                            .as_str()
-                            .unwrap()
-                            .contains("PermissionError"),
-                        "{failure}"
-                    );
-                }
+                assert!(
+                    failure["stderr"]
+                        .as_str()
+                        .unwrap()
+                        .contains("PermissionError"),
+                    "{failure}"
+                );
+                assert!(
+                    !failure["stdout"]
+                        .as_str()
+                        .unwrap()
+                        .contains("must not leak")
+                );
                 assert_eq!(fs::read_to_string(&private).unwrap(), "must not leak");
                 assert_eq!(
                     fs::read_to_string(workspace.join("work/recovered.py")).unwrap(),
@@ -1912,8 +1926,92 @@ mod tests {
                     .unwrap();
                 assert!(helper_done < verification_start);
                 assert!(state.verified_package.is_some());
+                let package = Path::new(
+                    state.verified_package.as_ref().unwrap()["directoryPath"]
+                        .as_str()
+                        .unwrap(),
+                );
+                let paths = service
+                    .tool_paths(Some(package), &CancellationToken::new())
+                    .await
+                    .unwrap();
+                assert!(!package.join(native_tools::PIN_PATH).exists());
+                assert!(paths.get("vnTextPatchCommand").is_none());
             }
         }
+    }
+
+    #[tokio::test]
+    async fn native_upgrade_reverifies_the_existing_adapter_before_model_work() {
+        let tools = crate::ToolPaths::development();
+        if !tools.python().is_file() || !tools.vntextpatch().is_file() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let (_, request, workspace, mut state) = fixture(root.path());
+        let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let service =
+            EngineService::new(assets, tools).with_shared_directory(root.path().join("shared"));
+        let cancellation = CancellationToken::new();
+        let text: Vec<_> = (0..SMALL_EXTRACTION_THRESHOLD)
+            .map(|i| format!("Fixture line {i}"))
+            .collect();
+        write_json(&request.game_directory.join("text.json"), &text).unwrap();
+        resources::stage(
+            &request,
+            &workspace,
+            &mut state,
+            &["text.json".into()],
+            false,
+            &cancellation,
+            None,
+        )
+        .unwrap();
+        let entry = workspace.join("src/adapter.py");
+        fs::create_dir_all(entry.parent().unwrap()).unwrap();
+        let source = include_str!("../tests/fixtures/json_adapter.py");
+        fs::write(&entry, source).unwrap();
+        register_python(&mut state, "src/adapter.py").unwrap();
+        service
+            .bind_reference(&workspace, &mut state, None, true, &cancellation)
+            .unwrap();
+        let native_path = workspace.join(workspace_file(native_tools::PIN_PATH));
+        let mut old_pin: Value = read_json(&native_path).unwrap();
+        old_pin["files"]["GameL10n.VnTextPatch.exe"] = json!(hash_text("previous tool build"));
+        write_json(&native_path, &old_pin).unwrap();
+        state.family = json!({"kind":"engine","key":"fixture","name":"Fixture"});
+        state.resource_patterns = vec!["*.json".into()];
+        state.workflow.verification_args = Some(
+            json!({"kind":"engine","key":"fixture","name":"Fixture","resourcePatterns":["*.json"]}),
+        );
+        state.notes = "Existing extraction and writeback design".into();
+        let path = workspace.join("session.json");
+        save_session(&path, &mut state).await.unwrap();
+
+        let (provider, server) = model(vec![json!({"id":"finish","choices":[{
+            "finish_reason":"tool_calls","message":{"role":"assistant","tool_calls":[{
+                "id":"finish","type":"function","function":{"name":"finish","arguments":
+                    json!({"summary":"Fixture adapter verified"}).to_string()}
+            }]}
+        }],"usage":{"prompt_tokens":100,"completion_tokens":20}})]);
+        let completed = service
+            .adapt(&request, &provider, &cancellation, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            completed.status,
+            AdaptationStatus::Activated,
+            "{completed:?}"
+        );
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].to_string().contains("finish-ready"));
+        assert_eq!(fs::read_to_string(&entry).unwrap(), source);
+        assert_eq!(
+            load_session(&path).unwrap().notes,
+            "Existing extraction and writeback design"
+        );
+        assert_ne!(read_json::<Value>(&native_path).unwrap(), old_pin);
     }
 
     #[tokio::test]

@@ -1200,8 +1200,8 @@ impl Application {
         let service = self
             .engine_service()?
             .with_disabled_families(catalog.disabled_family_ids()?);
-        let future = service.adapt(&request, &provider, cancellation, Some(&report));
-        tokio::pin!(future);
+        // Keep the engine future out of the recognition and workflow futures' stack frames.
+        let mut future = Box::pin(service.adapt(&request, &provider, cancellation, Some(&report)));
         let result = loop {
             tokio::select! {
                 biased;

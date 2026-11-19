@@ -1,7 +1,9 @@
 //! Reusable adapter component metadata and the component-specific source whitelist.
 use super::{ReleaseFile, Session, select_release, strings, text};
-use crate::{CancellationToken, EngineError, EngineService, discovery::resolve_relative};
-use gamel10n_translation::files::hash_bytes;
+use crate::{
+    CancellationToken, EngineError, EngineService, discovery::resolve_relative, native_tools,
+};
+use gamel10n_translation::files::{hash_bytes, read_json, write_json};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{collections::BTreeSet, ffi::OsString, fs, io::Write, path::Path};
@@ -21,6 +23,8 @@ struct Component {
     files: Vec<ComponentFile>,
     engine_families: Vec<String>,
     sample_check: Option<String>,
+    #[serde(default)]
+    native_tools: bool,
 }
 
 #[derive(Deserialize)]
@@ -333,6 +337,27 @@ pub(super) fn copy(
     let root = fs::canonicalize(workspace)?;
     let mut reused = BTreeSet::new();
     let mut selection = state.release_files.clone();
+    let new_native_pin = if selected.iter().any(|component| component.native_tools) {
+        let path = resolve_relative(&root, &super::workspace_file(native_tools::PIN_PATH))?;
+        let new_pin = if path.try_exists()? {
+            let pin = read_json(&path).map_err(super::file_error)?;
+            service.resolve_native_tools(&pin)?;
+            None
+        } else {
+            Some((path, service.create_native_pin()?))
+        };
+        select_release(
+            &mut selection,
+            ReleaseFile {
+                path: native_tools::PIN_PATH.into(),
+                role: "runtime".into(),
+                purpose: native_tools::PIN_PURPOSE.into(),
+            },
+        )?;
+        new_pin
+    } else {
+        None
+    };
     for (relative, content) in &files {
         let path = resolve_relative(&root, relative)?;
         if path.is_dir() {
@@ -399,6 +424,9 @@ pub(super) fn copy(
             .create_new(true)
             .open(path)?
             .write_all(content)?;
+    }
+    if let Some((path, pin)) = new_native_pin {
+        write_json(&path, &pin).map_err(super::file_error)?;
     }
     state.release_files = selection;
     Ok(
@@ -640,6 +668,38 @@ mod tests {
         );
         assert_eq!(state.release_files.len(), 1);
         assert_eq!(state.release_files[0].path, "tools/xp3_adler.py");
+    }
+
+    #[test]
+    fn native_component_copy_registers_the_runtime_pin() {
+        let root = tempfile::tempdir().unwrap();
+        let service = service(root.path());
+        let workspace = root.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let mut state = Session::default();
+        let args = json!({"ids":["cp932-glyph-map"]});
+        assert!(matches!(
+            copy(&service, &workspace, &mut state, &args),
+            Err(EngineError::ToolMissing(_))
+        ));
+        assert!(!workspace.join("src").exists());
+        assert!(state.release_files.is_empty());
+
+        let executable = service.tools.vntextpatch();
+        let runtime = executable.parent().unwrap();
+        fs::create_dir_all(runtime).unwrap();
+        fs::write(&executable, b"native host").unwrap();
+        fs::write(runtime.join("capstone.dll"), b"native companion").unwrap();
+        copy(&service, &workspace, &mut state, &args).unwrap();
+        let pin = read_json(&workspace.join(super::super::workspace_file(native_tools::PIN_PATH)))
+            .unwrap();
+        assert_eq!(service.resolve_native_tools(&pin).unwrap(), executable);
+        assert!(
+            state
+                .release_files
+                .iter()
+                .any(|file| { file.path == native_tools::PIN_PATH && file.role == "runtime" })
+        );
     }
 
     #[test]

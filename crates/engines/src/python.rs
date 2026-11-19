@@ -146,10 +146,44 @@ impl PythonAdapter {
     }
 }
 
+#[cfg(all(test, windows))]
+pub(crate) fn copy_python_runtime(paths: &ToolPaths, destination: &Path) -> std::io::Result<()> {
+    use std::fs;
+
+    fs::create_dir_all(destination)?;
+    for entry in fs::read_dir(paths.root.join("python"))? {
+        let entry = entry?;
+        if entry.file_type()?.is_file() {
+            fs::copy(entry.path(), destination.join(entry.file_name()))?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[cfg(windows)]
+    async fn has_interactive_desktop() -> bool {
+        let windows = PathBuf::from(std::env::var_os("SystemRoot").expect("Windows directory"));
+        ToolProcess::new(windows.join("System32/WindowsPowerShell/v1.0/powershell.exe"))
+            .with_arguments(
+                [
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    "[Environment]::UserInteractive | ConvertTo-Json -Compress",
+                ]
+                .map(OsString::from),
+            )
+            .with_timeout(Duration::from_secs(10))
+            .execute(&(), &CancellationToken::new())
+            .await
+            .expect("detect an interactive Windows desktop")
+    }
 
     #[cfg(windows)]
     #[tokio::test]
@@ -184,10 +218,16 @@ mod tests {
             "inputBootstrap".into(),
             serde_json::json!(include_str!("../python/isolation.py")),
         );
-        request.extra.insert(
-            "toolPaths".into(),
-            serde_json::json!({"vnTextPatchCommand":[paths.vntextpatch()]}),
-        );
+        if has_interactive_desktop().await {
+            request.extra.insert(
+                "toolPaths".into(),
+                serde_json::json!({"vnTextPatchCommand":[paths.vntextpatch()]}),
+            );
+        } else {
+            eprintln!(
+                "The VNTextPatch child requires an interactive Windows desktop under AppContainer"
+            );
+        }
         let result = PythonAdapter::new(&paths, &entry)
             .unwrap()
             .execute(&request, &CancellationToken::new())

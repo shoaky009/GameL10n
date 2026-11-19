@@ -28,6 +28,8 @@ cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo test --workspace --locked
 ```
 
+Windows 上的适配输入测试会检查 AppContainer 内 Python 子进程的只读资源访问。在交互式桌面会话运行时，同一测试还验证 VNTextPatch 子进程的提取、回填和校验。
+
 独立原生工具使用对应的 Cargo 清单。窗口捕获与 OCR 的实机测试需要交互式 Windows 桌面、OCR 语言包及样例游戏。[PR 检查](../.github/workflows/ci.yml) · [运行检查测试](../tools/GameL10n.GameCheck/tests/runtime.rs)
 
 ### 资源静态验证

@@ -13,17 +13,23 @@ use crate::{EngineError, EngineService, discovery::resolve_relative};
 const EXECUTABLE: &str = "GameL10n.VnTextPatch.exe";
 const RUNTIME_FILES: [&str; 2] = [EXECUTABLE, "capstone.dll"];
 const RUNTIME_MANIFEST: &str = "runtime.json";
+pub(crate) const PIN_PATH: &str = "tools/vntextpatch-reference.json";
+pub(crate) const PIN_PURPOSE: &str = "固定原生脚本、编码与字体组件宿主。";
 
 struct NativePin {
     files: BTreeMap<String, String>,
 }
 
 impl NativePin {
-    fn parse(value: &Value) -> Result<Self, EngineError> {
-        let schema = value
+    fn schema(value: &Value) -> Option<u64> {
+        value
             .get("schemaVersion")
             .or_else(|| value.get("schema"))
-            .and_then(Value::as_u64);
+            .and_then(Value::as_u64)
+    }
+
+    fn parse(value: &Value) -> Result<Self, EngineError> {
+        let schema = Self::schema(value);
         if schema == Some(1)
             || value
                 .get("runtime")
@@ -32,7 +38,7 @@ impl NativePin {
         {
             return Err(EngineError::Incompatible {
                 stage: "runtime",
-                message: "适配器依赖的旧 DLL 工具已不再支持，请重新识别游戏。".into(),
+                message: "适配器依赖的旧 DLL 工具已不再支持，请重新识别游戏".into(),
             });
         }
         if schema != Some(2)
@@ -105,12 +111,35 @@ impl EngineService {
                 return Err(EngineError::Incompatible {
                     stage: "runtime",
                     message:
-                        "适配器固定的原生工具已不再支持，请重新识别游戏，使用当前工具重新验收。"
+                        "适配器固定的原生工具与当前版本不同，请重新识别游戏并使用当前工具重新验收"
                             .into(),
                 });
             }
         }
         resolve_relative(&current, EXECUTABLE)
+    }
+
+    pub(super) fn updated_native_pin(&self, value: &Value) -> Result<Option<Value>, EngineError> {
+        if NativePin::schema(value) == Some(1) {
+            return self.create_native_pin().map(Some);
+        }
+        match self.resolve_native_tools(value) {
+            Ok(_) => return Ok(None),
+            Err(EngineError::Incompatible {
+                stage: "runtime", ..
+            }) => {}
+            Err(error) => return Err(error),
+        }
+        // A draft can be reverified against a new build of the same native runtime.
+        let mut files = NativePin::parse(value)?.files;
+        for relative in RUNTIME_FILES {
+            files.entry(relative.into()).or_default();
+        }
+        let current = self.tools.root.join("vntextpatch");
+        for (relative, hash) in &mut files {
+            *hash = file_hash(&current, relative)?;
+        }
+        Ok(Some(runtime_pin(&files)))
     }
 }
 
@@ -291,15 +320,21 @@ mod tests {
         let source = service.tools.root.join("vntextpatch");
         native_runtime(&source, b"current executable");
         let pin = old_pin(&source);
+        let legacy = json!({"schemaVersion":1,"runtime":"dll","files":pin["files"]});
         for invalid in [
             json!({"schemaVersion":2,"runtime":"native","files":{}}),
-            json!({"schemaVersion":1,"runtime":"dll","files":pin["files"]}),
+            legacy.clone(),
             json!({"schemaVersion":2,"runtime":"native","entryPoint":"other.exe","files":pin["files"]}),
             json!({"schemaVersion":2,"runtime":"native","files":{EXECUTABLE:"invalid"}}),
             json!({"schemaVersion":2,"runtime":"native","files":{EXECUTABLE:pin["files"][EXECUTABLE],"../outside.dll":"0".repeat(64)}}),
         ] {
             assert!(service.resolve_native_tools(&invalid).is_err());
         }
+        let draft_pin = service.updated_native_pin(&legacy).unwrap().unwrap();
+        assert_eq!(
+            service.resolve_native_tools(&draft_pin).unwrap(),
+            source.join(EXECUTABLE)
+        );
         assert!(!service.shared_directory.exists());
     }
 }
