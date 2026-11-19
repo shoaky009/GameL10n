@@ -4,6 +4,7 @@ use crate::{
     Application, CancellationToken, CoreError, GameProject,
     engine_tasks::{RecognitionMode, RecognitionResult},
     game_check::{CheckMode, CheckResult, CheckSettings, CheckStatus, protocol::normalize_text},
+    logs::LogSource,
 };
 use gamel10n_translation::{
     TranslationUnit,
@@ -264,6 +265,14 @@ struct RunContext {
     installed_all: bool,
 }
 
+fn needs_workflow_input(error: &CoreError) -> bool {
+    let error = match error {
+        CoreError::WithModelOutput(error) => error,
+        error => error,
+    };
+    matches!(error, CoreError::WorkflowInput(_))
+}
+
 impl Application {
     /// Returns the project default and whether to offer the custom workflow choice.
     pub async fn workflow_preferences(
@@ -382,12 +391,16 @@ impl Application {
                 }
                 let next = match &outcome {
                     Ok(()) => step.on_success.as_ref(),
-                    Err(CoreError::WorkflowInput(_)) => step.on_unavailable.as_ref(),
+                    Err(error) if needs_workflow_input(error) => step.on_unavailable.as_ref(),
                     Err(_) => step.on_failure.as_ref(),
                 };
                 if let Err(error) = &outcome {
-                    self.log_task_message(id, &format!("{}：{error}", step.action.title()))
-                        .await;
+                    self.log_task_message_from(
+                        id,
+                        &format!("{}：{error}", step.action.title()),
+                        LogSource::for_error(error),
+                    )
+                    .await;
                 }
                 if let Some(next) = next {
                     position = definition
@@ -408,7 +421,7 @@ impl Application {
             ))
         }
         .await;
-        if matches!(&result, Err(CoreError::WorkflowInput(_))) {
+        if result.as_ref().is_err_and(needs_workflow_input) {
             self.mark_workflow_waiting(id).await;
         }
         let terminal = result
@@ -425,7 +438,12 @@ impl Application {
                 }
             })
             .map_err(|error| format!("自动流程在步骤“{last_step}”停止：{error}"));
-        self.finish(id, "workflow", terminal).await?;
+        let source = result
+            .as_ref()
+            .err()
+            .map_or(LogSource::Application, LogSource::for_error);
+        self.finish_with_log_source(id, "workflow", terminal, source)
+            .await?;
         result
     }
 
@@ -448,19 +466,26 @@ impl Application {
                 if let RecognitionResult::Adapted(result) = result {
                     use gamel10n_engines::AdaptationStatus::*;
                     let message =
-                        format!("识别尚未完成：{} {}", result.summary, result.next_action);
-                    match result.status {
-                        Activated | Reused => {}
+                        || format!("识别尚未完成：{} {}", result.summary, result.next_action);
+                    let error = match result.status {
+                        Activated | Reused => None,
                         WaitingForUser | Incomplete | BudgetExhausted => {
-                            return Err(CoreError::WorkflowInput(message));
+                            Some(CoreError::WorkflowInput(message()))
                         }
                         Cancelled => {
                             cancellation.cancel();
                             return Err(gamel10n_engines::EngineError::Cancelled.into());
                         }
                         Failed | Unavailable | Unsupported => {
-                            return Err(CoreError::InvalidData(message));
+                            Some(CoreError::InvalidData(message()))
                         }
+                    };
+                    if let Some(error) = error {
+                        return Err(if result.next_action_from_model {
+                            CoreError::WithModelOutput(Box::new(error))
+                        } else {
+                            error
+                        });
                     }
                 }
                 if self.cached_analysis(id).await?.is_none() {

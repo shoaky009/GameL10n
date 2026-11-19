@@ -630,13 +630,13 @@ fn install_actions(ui: &MainWindow, context: &Context) {
                 }
                 if !state.as_ref().is_some_and(|s| s.message == message) {
                     let _ = app
-                        .log(
+                        .log_error(
                             if input.page == 0 {
                                 &input.project_id
                             } else {
                                 ""
                             },
-                            &message,
+                            &error,
                         )
                         .await;
                 }

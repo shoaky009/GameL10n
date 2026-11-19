@@ -3,7 +3,7 @@ use crate::{
     Application, CancellationToken, CoreError, StoredAnalysis,
     application::resolve_relative,
     catalog::{AdapterVersion, EngineCatalog, GameCompatibility},
-    logs::FileProgress,
+    logs::{FileProgress, LogSource},
     patching::{PAYLOAD_DIRECTORY, PatchInstaller, build_manifest, remove_unchanged_files},
 };
 use gamel10n_engines::{
@@ -487,13 +487,17 @@ impl Application {
         }
         .await;
         if task_cancellation.is_none() {
-            self.finish(
+            let source = LogSource::from_model(result.as_ref().is_ok_and(|result| {
+                matches!(result, RecognitionResult::Adapted(result) if result.next_action_from_model)
+            }));
+            self.finish_with_log_source(
                 id,
                 operation,
                 result
                     .as_ref()
                     .map_err(ToString::to_string)
                     .and_then(RecognitionResult::task_outcome),
+                source,
             )
             .await?;
         } else {
@@ -1041,13 +1045,19 @@ impl Application {
                 &cancellation,
             )
             .await;
-        self.finish(
+        let source = LogSource::from_model(
+            result
+                .as_ref()
+                .is_ok_and(|result| result.next_action_from_model),
+        );
+        self.finish_with_log_source(
             id,
             "adapt",
             result
                 .as_ref()
                 .map_err(ToString::to_string)
                 .and_then(adaptation_task_outcome),
+            source,
         )
         .await?;
         result
@@ -1304,11 +1314,17 @@ impl Application {
         progress: EngineProgress,
     ) -> Result<(), CoreError> {
         self.checkpoint_metrics(id).await;
-        if progress.status_only {
-            self.update_task_progress(id, operation, &progress.message)
-                .await;
-        } else {
-            self.progress(id, operation, &progress.message).await;
+        if self
+            .update_task_progress(id, operation, &progress.message)
+            .await
+            && !progress.status_only
+        {
+            self.log_task_message_from(
+                id,
+                &progress.message,
+                LogSource::from_model(progress.message_from_model),
+            )
+            .await;
         }
         let mut snapshot = json!(&progress);
         snapshot["operation"] = json!(operation);
@@ -1354,13 +1370,14 @@ impl Application {
             if let Some(entry) = &result.entry_id { EngineCatalog::open(self.data_directory())?.register_knowledge(entry)?; }
             Ok::<_,CoreError>(result)
         }.await;
-        self.finish(
+        self.finish_with_log_source(
             id,
             "review",
             result
                 .as_ref()
                 .map(|r| r.summary.clone())
                 .map_err(ToString::to_string),
+            LogSource::from_model(result.is_ok()),
         )
         .await?;
         result
@@ -4075,6 +4092,58 @@ mod tests {
                 .units[0]
                 .source_text,
             "ONE"
+        );
+    }
+
+    #[tokio::test]
+    async fn workflow_logs_keep_model_progress_and_continuation_punctuation() {
+        let tools = crate::ToolPaths::development();
+        if !tools.python().is_file() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let game = root.path().join("game");
+        fs::create_dir(&game).unwrap();
+        fs::write(game.join("text.json"), br#"["one","two"]"#).unwrap();
+        let app = Application::open(root.path().join("data"), &tools)
+            .await
+            .unwrap();
+        let project = app.add_project(&game).await.unwrap();
+        let progress = "已确认资源结构。";
+        let next_action = "Provide an extracted resource.";
+        let (endpoint, server) = local_analysis_responses(vec![
+            analysis_tool("report_progress", json!({"kind":"breakthrough","message":progress})),
+            analysis_tool(
+                "report_blocker",
+                json!({"kind":"needs_input","summary":"还需要样本。","reason":"当前资源受保护。","nextAction":next_action}),
+            ),
+        ])
+        .await;
+        use_local_analysis(&app, endpoint).await;
+        let error = app
+            .run_workflow(&project.id, String::new(), RecognitionMode::Intelligent)
+            .await
+            .unwrap_err();
+        assert_eq!(server.await.len(), 2, "{error}");
+        let state = app.task_state(&project.id).await.unwrap();
+        assert_eq!(
+            state.workflow.unwrap().status,
+            crate::workflow::WorkflowStatus::WaitingForInput
+        );
+        app.log_error(&project.id, &error).await.unwrap();
+        let logs = app.log_tail(&project.id).await.unwrap();
+        assert!(
+            logs.lines()
+                .any(|line| line.ends_with("正在开始全自动汉化流程")),
+            "{logs}"
+        );
+        assert!(logs.lines().any(|line| line.ends_with(progress)), "{logs}");
+        assert_eq!(
+            logs.lines()
+                .filter(|line| line.ends_with(next_action))
+                .count(),
+            3,
+            "{logs}"
         );
     }
 

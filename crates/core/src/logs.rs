@@ -7,6 +7,26 @@ use std::{
 };
 use tokio::sync::mpsc;
 
+#[derive(Clone, Copy)]
+pub(crate) enum LogSource {
+    Application,
+    Model,
+}
+
+impl LogSource {
+    pub(crate) fn from_model(from_model: bool) -> Self {
+        if from_model {
+            Self::Model
+        } else {
+            Self::Application
+        }
+    }
+
+    pub(crate) fn for_error(error: &CoreError) -> Self {
+        Self::from_model(matches!(error, CoreError::WithModelOutput(_)))
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct FileProgress {
     sender: mpsc::Sender<String>,
@@ -60,6 +80,24 @@ impl Application {
     }
 
     pub async fn log(&self, id: &str, message: &str) -> Result<(), CoreError> {
+        self.log_from(id, message, LogSource::Application).await
+    }
+
+    pub async fn log_error(&self, id: &str, error: &CoreError) -> Result<(), CoreError> {
+        self.log_from(id, &error.to_string(), LogSource::for_error(error))
+            .await
+    }
+
+    pub(crate) async fn log_from(
+        &self,
+        id: &str,
+        message: &str,
+        source: LogSource,
+    ) -> Result<(), CoreError> {
+        let message = match source {
+            LogSource::Application => message.trim_end_matches(['.', '。']),
+            LogSource::Model => message,
+        };
         let directory = if id.is_empty() {
             self.data_directory().join("logs")
         } else {
@@ -130,5 +168,31 @@ impl Application {
             Ok(lines.join("\n"))
         })
         .await?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn application_log_omits_terminal_periods_in_the_file_and_event() {
+        let root = tempfile::tempdir().unwrap();
+        let app = Application::open(root.path().join("data"), &crate::ToolPaths::new("tools"))
+            .await
+            .unwrap();
+        let mut events = app.subscribe();
+        for (message, expected) in [
+            ("已加载资源。", "已加载资源"),
+            ("Loaded version 1.2.", "Loaded version 1.2"),
+            ("已加载资源。\n等待确认。", "已加载资源。\n等待确认"),
+        ] {
+            app.log("", message).await.unwrap();
+            let AppEvent::Log { line, .. } = events.try_recv().unwrap() else {
+                panic!("expected a log event");
+            };
+            assert_eq!(line.split_once("] ").unwrap().1, expected);
+            assert!(app.log_tail("").await.unwrap().ends_with(&line));
+        }
     }
 }

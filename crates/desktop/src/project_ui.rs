@@ -181,6 +181,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                     return;
                 }
                 let a = ui.global::<App>();
+                a.set_project_files_path("".into());
                 a.set_project_id(requested.into());
                 a.set_page(0);
                 a.set_error("".into());
@@ -324,6 +325,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                     let a = ui.global::<App>();
                     a.set_project_id("".into());
                     a.set_project_name("".into());
+                    a.set_project_files_path("".into());
                     a.set_log_text("".into());
                     a.set_page(0);
                     a.set_texts(ModelRc::default());
@@ -777,6 +779,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                 a.set_activity("保存位置已切换。".into());
                 a.set_project_id("".into());
                 a.set_project_name("".into());
+                a.set_project_files_path("".into());
                 a.set_log_text("".into());
                 a.invoke_action("projects".into(), "".into());
             });
@@ -863,6 +866,7 @@ pub async fn refresh_project(ctx: &Context, id: &str, opening: bool) -> Result<(
     }
     let host = ctx.app().await;
     let snapshot = host.project_snapshot(id).await?;
+    let project_files_path = host.project_directory(id)?.display().to_string();
     let project = snapshot.project;
     let state = snapshot.task;
     crate::log_ui::refresh(ctx, id).await?;
@@ -903,6 +907,7 @@ pub async fn refresh_project(ctx: &Context, id: &str, opening: bool) -> Result<(
             return;
         }
         a.set_project_name(project.name.into());
+        a.set_project_files_path(project_files_path.into());
         a.set_source_materials_cleared(
             project
                 .extra

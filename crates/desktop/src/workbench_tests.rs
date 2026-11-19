@@ -422,6 +422,14 @@ fn project_actions_keep_settings_selection_and_saved_edits_in_sync_across_tabs()
         ctx.refresh_texts(&project.id);
         wait_for_actions(&ui, &ctx, "previous project refresh").await;
         assert_eq!(app.get_project_id().as_str(), other_project.id);
+        assert_eq!(
+            app.get_project_files_path().as_str(),
+            ctx.app()
+                .await
+                .project_directory(&other_project.id)
+                .unwrap()
+                .to_string_lossy()
+        );
         invoke_action(&ui, &ctx, "adapt-dialog", "").await;
         assert_eq!(app.get_modal().as_str(), "adapt");
         assert_ne!(app.get_adaptation_objective(), 3);
@@ -561,6 +569,10 @@ fn project_actions_keep_settings_selection_and_saved_edits_in_sync_across_tabs()
 
         app.set_modal("".into());
         invoke_action(&ui, &ctx, "project", &project.id).await;
+        assert_eq!(
+            app.get_project_files_path().as_str(),
+            host.project_directory(&project.id).unwrap().to_string_lossy()
+        );
         let game_directory = host.open_project(&project.id).await.unwrap().game_directory;
         std::fs::write(game_directory.join("game.exe"), "launch fixture").unwrap();
         std::fs::write(game_directory.join("Config.exe"), "configuration fixture").unwrap();
@@ -682,6 +694,7 @@ fn project_actions_keep_settings_selection_and_saved_edits_in_sync_across_tabs()
         assert!(app.get_projects().iter().all(|row| !row.selected));
         assert_eq!(app.get_project_id().as_str(), other_project.id);
         invoke_action(&ui, &ctx, "remove", "").await;
+        assert!(app.get_project_files_path().is_empty());
         assert!(host.open_project(&other_project.id).await.unwrap().is_removed);
         assert!(!host.open_project(&project.id).await.unwrap().is_removed);
 

@@ -101,6 +101,7 @@ export global App {
     in-out property <string> project-id;
     in-out property <string> project-name;
     in-out property <string> project-path;
+    in-out property <string> project-files-path;
     in-out property <string> launch-executable;
     in-out property <string> launch-arguments;
     in-out property <string> launch-directory;
@@ -350,6 +351,33 @@ export component Link inherits Rectangle {
             }
             return reject;
         }
+    }
+}
+export component CopyLink inherits Link {
+    in property <string> label;
+    in property <string> value;
+    callback copy(string);
+    private property <bool> copied;
+    text: root.copied ? "已复制" : root.label;
+    enabled: root.value != "";
+    font-size: 12px;
+    width: 56px;
+    changed value => { root.copied = false; }
+    clicked => {
+        root.copy(root.value);
+        root.copied = true;
+        reset.restart();
+    }
+    reset := Timer { interval: 1200ms; running: root.copied; triggered => { root.copied = false; } }
+}
+export component ClipboardBuffer inherits TextInput {
+    // Absolute positioning keeps the hidden buffer out of page layout constraints.
+    x: 0px; y: 0px; visible: false; width: 0px; height: 0px; read-only: true;
+    public function copy-text(value: string) {
+        self.text = value;
+        self.select-all();
+        self.copy();
+        self.text = "";
     }
 }
 export component TokenCaption inherits Caption {

@@ -63,6 +63,7 @@ fn render_desktop_preview_fixtures() {
     app.set_project_id("fixture".into());
     app.set_project_name("星海旅人 · 完整汉化项目".into());
     app.set_project_path("D:\\Games\\Visual Novels\\星海旅人\\Game\\资源与启动目录".into());
+    app.set_project_files_path("D:\\GameL10n Data\\games\\fixture".into());
     app.set_projects(ModelRc::new(VecModel::from(vec![
         ProjectRow {
             id: "fixture".into(),
@@ -183,7 +184,7 @@ fn render_desktop_preview_fixtures() {
     app.set_launch_summary("Game.exe · 使用游戏目录作为工作目录".into());
     app.set_launch_can_run(true);
     app.set_log_text(
-        "[信息] 已载入项目与保存的校对结果。\n[信息] 自动译文与人工修订分别显示来源。".into(),
+        "[信息] 已载入项目与保存的校对结果\n[信息] 自动译文与人工修订分别显示来源".into(),
     );
     ui.show().unwrap();
     let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/ui-preview");

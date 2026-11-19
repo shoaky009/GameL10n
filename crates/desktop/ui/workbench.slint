@@ -1,20 +1,9 @@
 import { Button, LineEdit, TextEdit, ComboBox, CheckBox, ScrollView, ListView } from "std-widgets.slint";
-import { App, Theme, Label, Caption, Heading, Link, ReportText, Badge } from "state.slint";
+import { App, Theme, Label, Caption, Heading, Link, CopyLink, ClipboardBuffer, ReportText, Badge } from "state.slint";
 
 component SelectableText inherits ReportText {
     callback activated;
     changed has-focus => { if self.has-focus { root.activated(); } }
-}
-
-component CopyLink inherits Link {
-    in property <string> label;
-    private property <bool> copied;
-    callback copy;
-    text: root.copied ? "已复制" : root.label;
-    font-size: 12px;
-    width: 56px;
-    clicked => { root.copy(); root.copied = true; reset.restart(); }
-    reset := Timer { interval: 1200ms; triggered => { root.copied = false; } }
 }
 
 export component Workbench inherits FocusScope {
@@ -25,14 +14,7 @@ export component Workbench inherits FocusScope {
     private property <string> candidate-key: App.candidate;
     changed candidate-key => { if self.candidate-key != "" { self.editor-details = true; } }
     property <bool> editor-ready: App.editor-id != "" && root.selection-enabled;
-    // Absolute positioning keeps this clipboard helper's zero size out of page layout constraints.
-    clipboard-buffer := TextInput { x: 0px; y: 0px; visible: false; width: 0px; height: 0px; read-only: true; }
-    function copy-text(value: string) {
-        clipboard-buffer.text = value;
-        clipboard-buffer.select-all();
-        clipboard-buffer.copy();
-        clipboard-buffer.text = "";
-    }
+    clipboard := ClipboardBuffer {}
     key-pressed(event) => {
         if App.modal != "" { return reject; }
         if event.modifiers.control && (event.text == "k" || event.text == "K") { search-input.focus(); return accept; }
@@ -81,8 +63,8 @@ export component Workbench inherits FocusScope {
                                         Caption { text: row.location; width: parent.width; height: parent.height; overflow: elide; wrap: no-wrap; }
                                         TouchArea { enabled: !App.loading; mouse-cursor: pointer; clicked => { App.action("edit-text", row.id); } }
                                     }
-                                    CopyLink { label: "复制原文"; enabled: row.source != ""; copy => { root.copy-text(row.source); } }
-                                    CopyLink { label: "复制译文"; enabled: row.translation != ""; copy => { root.copy-text(row.translation); } }
+                                    CopyLink { label: "复制原文"; value: row.source; copy(value) => { clipboard.copy-text(value); } }
+                                    CopyLink { label: "复制译文"; value: row.translation; copy(value) => { clipboard.copy-text(value); } }
                                 }
                                 HorizontalLayout { spacing: 6px; height: 24px;
                                     Badge { text: row.translation == "" ? "未翻译" : row.origin == 1 ? "自动" : row.origin == 2 ? "人工" : "来源未知"; tone: row.translation == "" ? 0 : row.origin; }
@@ -147,7 +129,7 @@ export component Workbench inherits FocusScope {
                     Label { text: "原文"; font-weight: 600; }
                     Link { text: root.editor-details ? "收起详情" : App.editor-has-issues || App.candidate != "" ? "查看问题与候选" : "展开详情"; clicked => { root.editor-details = !root.editor-details; } }
                     Rectangle { horizontal-stretch: 1; }
-                    CopyLink { label: "复制原文"; enabled: root.editor-ready && App.editor-source != ""; copy => { root.copy-text(App.editor-source); } }
+                    CopyLink { label: "复制原文"; value: root.editor-ready ? App.editor-source : ""; copy(value) => { clipboard.copy-text(value); } }
                 }
                 ScrollView { vertical-stretch: 1; min-height: 24px; max-height: root.editor-details ? 10000px : 48px; content-y <=> App.editor-scroll-y;
                     VerticalLayout { spacing: 8px;
@@ -172,7 +154,7 @@ export component Workbench inherits FocusScope {
                 HorizontalLayout {
                     Label { text: "译文"; font-weight: 600; }
                     Rectangle { horizontal-stretch: 1; }
-                    CopyLink { label: "复制译文"; enabled: root.editor-ready && App.editor-text != ""; copy => { root.copy-text(App.editor-text); } }
+                    CopyLink { label: "复制译文"; value: root.editor-ready ? App.editor-text : ""; copy(value) => { clipboard.copy-text(value); } }
                 }
                 translation-editor := TextEdit { text <=> App.editor-text; min-height: 100px; vertical-stretch: 2; enabled: root.editor-ready; read-only: !App.editor-editable; edited => { App.editor-dirty = true; App.action("edit-changed", ""); } }
                 if App.editor-dirty || App.editor-status != "": Caption { text: App.editor-dirty ? "未保存" : App.editor-status; color: App.editor-dirty ? Theme.pending : Theme.secondary; wrap: no-wrap; overflow: elide; }

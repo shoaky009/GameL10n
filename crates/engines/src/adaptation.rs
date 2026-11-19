@@ -143,6 +143,9 @@ pub struct AdaptationResult {
     pub api_requests_estimated: bool,
     pub summary: String,
     pub next_action: String,
+    /// The continuation text came from the model's blocker report.
+    #[serde(skip)]
+    pub next_action_from_model: bool,
     pub diagnostics: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<AdaptationFailure>,
@@ -255,6 +258,7 @@ impl Session {
         kind: &str,
         message: &str,
         tool: Option<&str>,
+        message_from_model: bool,
         callback: ProgressCallback<'_>,
     ) -> bool {
         if self.progress_note["kind"] == kind && self.progress_note["message"] == message {
@@ -281,6 +285,7 @@ impl Session {
                     }
                     .into(),
                     message: message.into(),
+                    message_from_model,
                     tool_name: tool.map(str::to_owned),
                     ..EngineProgress::default()
                 }),
@@ -882,7 +887,7 @@ impl EngineService {
                     state.repairs[index].approach = Some(approach);
                     state.repairs[index].status = repair::Status::Analyzing;
                 }
-                let changed = state.update_progress(kind, message, Some(name), progress);
+                let changed = state.update_progress(kind, message, Some(name), true, progress);
                 Ok(
                     json!({"changed":changed,"note":state.progress_note,"problem":state.decision.current_problem,"validation":false}),
                 )
@@ -3031,6 +3036,7 @@ fn report_knowledge(
             } else {
                 format!("模型已读取引擎经验：{label}。")
             },
+            message_from_model: false,
             usage: state.usage.clone(),
             status_only: false,
             tool_name: Some(
@@ -3084,16 +3090,39 @@ fn result(
 ) -> AdaptationResult {
     state.last_status = status;
     state.summary = summary.into();
-    state.next_action = match status {
-        AdaptationStatus::Activated | AdaptationStatus::Reused =>
-            "选择少量文本试译，生成并安装补丁后进游戏确认显示效果。".into(),
-        AdaptationStatus::WaitingForUser | AdaptationStatus::Unsupported if !state.next_action.is_empty() => state.next_action.clone(),
-        AdaptationStatus::Incomplete if state.extra.get("blocker").is_some_and(|blocker|blocker["workRemaining"]==true) => state.next_action.clone(),
-        AdaptationStatus::Unavailable => "使用带工具链的完整发行包，再继续适配。".into(),
-        AdaptationStatus::Incomplete => "点击“继续适配”处理剩余问题，可补充具体要求；若模型反复只给总结，可在项目设置中更换分析 API 后继续。".into(),
-        AdaptationStatus::Failed => "根据错误信息处理问题，再点击“继续适配”；已有代码和已提交步骤会继续使用。".into(),
-        _ => "点击“继续适配”，沿用当前源码和进度，并设置本次分析预算。".into(),
+    let (next_action, next_action_from_model) = match status {
+        AdaptationStatus::Activated | AdaptationStatus::Reused => (
+            "选择少量文本试译，生成并安装补丁后进游戏确认显示效果。",
+            false,
+        ),
+        AdaptationStatus::WaitingForUser | AdaptationStatus::Unsupported
+            if !state.next_action.is_empty() =>
+        {
+            (state.next_action.as_str(), true)
+        }
+        AdaptationStatus::Incomplete
+            if state
+                .extra
+                .get("blocker")
+                .is_some_and(|blocker| blocker["workRemaining"] == true) =>
+        {
+            (state.next_action.as_str(), true)
+        }
+        AdaptationStatus::Unavailable => ("使用带工具链的完整发行包，再继续适配。", false),
+        AdaptationStatus::Incomplete => (
+            "点击“继续适配”处理剩余问题，可补充具体要求；若模型反复只给总结，可在项目设置中更换分析 API 后继续。",
+            false,
+        ),
+        AdaptationStatus::Failed => (
+            "根据错误信息处理问题，再点击“继续适配”；已有代码和已提交步骤会继续使用。",
+            false,
+        ),
+        _ => (
+            "点击“继续适配”，沿用当前源码和进度，并设置本次分析预算。",
+            false,
+        ),
     };
+    state.next_action = next_action.into();
     AdaptationResult {
         status,
         adapter: None,
@@ -3102,6 +3131,7 @@ fn result(
         api_requests_estimated: state.api_requests_estimated(),
         summary: state.summary.clone(),
         next_action: state.next_action.clone(),
+        next_action_from_model,
         diagnostics,
         failure: None,
         pending_coverage: coverage_list(state, "pending"),
@@ -5662,7 +5692,7 @@ mod tests {
             json!({"kind":"engine","key":"fixture","name":"Fixture","resourcePatterns":["*.json"]});
         let cancellation = CancellationToken::new();
         state.total_turns = 3;
-        state.update_progress("breakthrough", "已定位文本表。", None, None);
+        state.update_progress("breakthrough", "已定位文本表。", None, true, None);
         let events = std::sync::Mutex::new(Vec::new());
         let report = |event| events.lock().expect("events").push(event);
         let first = service

@@ -403,7 +403,7 @@ fn assistant_progress(
         if message.is_empty() || message.chars().count() > 400 {
             return;
         }
-        state.update_progress(kind, message, None, progress);
+        state.update_progress(kind, message, None, true, progress);
         return;
     }
     // Only short public commentary accompanying work is eligible. Never infer a
@@ -416,7 +416,7 @@ fn assistant_progress(
         && !text.starts_with(['{', '[', '`', '#', '<', '|'])
         && text.chars().count() <= 400
     {
-        state.update_progress("update", text, None, progress);
+        state.update_progress("update", text, None, true, progress);
     }
 }
 
@@ -606,6 +606,7 @@ pub(super) async fn run(
                         &call.name,
                         args.as_ref().unwrap_or(&Value::Null),
                     ),
+                    message_from_model: false,
                     tool_name: Some(call.name.clone()),
                     usage: state.usage.clone(),
                     turn: state.total_turns,
@@ -887,6 +888,7 @@ pub(super) async fn run(
                 } else {
                     format!("工具调用格式无效，正在重试（{tool_call_retries}/2）。")
                 },
+                message_from_model: false,
                 usage: state.usage.clone(),
                 turn: state.total_turns,
                 api_requests: Some(state.api_requests()),

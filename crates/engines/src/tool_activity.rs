@@ -17,10 +17,12 @@ pub(crate) fn message(name: &str, args: &Value) -> String {
             } else {
                 "工作区"
             };
-            text(args, "path")
-                .or_else(|| (name == "list_files").then_some("."))
-                .map(|path| format!("{root} / {path}"))
-                .unwrap_or_default()
+            match text(args, "path") {
+                Some(".") => root.into(),
+                Some(path) => format!("{root} / {path}"),
+                None if name == "list_files" => root.into(),
+                None => String::new(),
+            }
         }
         "write_file" | "replace_text" | "remove_file" => text(args, "path")
             .map(|path| format!("工作区 / {path}"))

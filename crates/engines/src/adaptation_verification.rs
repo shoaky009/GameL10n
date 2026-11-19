@@ -163,7 +163,7 @@ fn report_verification_progress(
         }
         _ => return,
     };
-    state.update_progress("verified", message, Some("test_adapter"), callback);
+    state.update_progress("verified", message, Some("test_adapter"), false, callback);
 }
 
 fn evidence<'a>(

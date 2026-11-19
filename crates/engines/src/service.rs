@@ -32,6 +32,9 @@ pub type ProgressCallback<'a> = Option<&'a (dyn Fn(EngineProgress) + Send + Sync
 pub struct EngineProgress {
     pub stage: String,
     pub message: String,
+    /// The message is model-authored and retains its punctuation in project logs.
+    #[serde(skip)]
+    pub message_from_model: bool,
     pub usage: TokenUsage,
     pub tool_name: Option<String>,
     pub turn: u32,

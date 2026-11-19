@@ -1,5 +1,5 @@
 import { Button, LineEdit, CheckBox, SpinBox, ScrollView, ListView } from "std-widgets.slint";
-import { App, Theme, Label, Caption, Heading, SectionHeading, ReportText, Divider, ProjectRow, TextRow, NamedRow, EngineRow, TermRow, TokenDisplay, CleanupRow, NavigationButton, Link } from "state.slint";
+import { App, Theme, Label, Caption, Heading, SectionHeading, ReportText, Divider, ProjectRow, TextRow, NamedRow, EngineRow, TermRow, TokenDisplay, CleanupRow, NavigationButton, Link, CopyLink, ClipboardBuffer } from "state.slint";
 import { ProjectSettings, GlobalApis } from "settings.slint";
 import { Workbench } from "workbench.slint";
 import { Recognition, PatchPage, TaskFeedback } from "project.slint";
@@ -13,6 +13,7 @@ export component MainWindow inherits Window {
     title: "GameL10n"; preferred-width: 1420px; preferred-height: 900px; min-width: 1120px; min-height: 720px;
     icon: @image-url("../assets/GameL10n.png");
     default-font-family: "Microsoft YaHei UI"; default-font-size: 14px; background: Theme.background;
+    clipboard := ClipboardBuffer {}
     HorizontalLayout { padding: 16px; spacing: 20px;
         VerticalLayout { width: 220px; spacing: 8px;
             HorizontalLayout { Heading { text: "游戏项目"; font-size: 18px; } Rectangle { horizontal-stretch: 1; } }
@@ -56,10 +57,19 @@ export component MainWindow inherits Window {
                 if App.project-id == "": Heading { text: "选择或添加游戏"; font-size: 24px; }
                 if App.project-id != "": VerticalLayout { spacing: 12px;
                     HorizontalLayout { spacing: 16px;
-                        Heading { text: App.project-name; font-size: 24px; wrap: no-wrap; overflow: elide; min-width: 0px; max-width: parent.width - 200px; horizontal-stretch: 0; }
-                        VerticalLayout { alignment: center; horizontal-stretch: 0;
+                        Heading { text: App.project-name; font-size: 24px; wrap: no-wrap; overflow: elide; min-width: 0px; max-width: parent.width - project-actions.preferred-width - 2 * parent.spacing; horizontal-stretch: 0; }
+                        project-actions := VerticalLayout { alignment: center; horizontal-stretch: 0;
                             HorizontalLayout { spacing: 16px;
-                                Link { text: "项目文件"; font-size: 13px; clicked => { App.action("open", "project"); } }
+                                HorizontalLayout { spacing: 8px;
+                                    Link { text: "项目文件"; font-size: 13px; clicked => { App.action("open", "project"); } }
+                                    CopyLink {
+                                        label: "复制路径";
+                                        value: App.ready ? App.project-files-path : "";
+                                        font-size: 13px;
+                                        accessible-label: "项目文件，" + self.text;
+                                        copy(value) => { clipboard.copy-text(value); }
+                                    }
+                                }
                                 Link { text: "游戏目录"; font-size: 13px; clicked => { App.action("open", "game"); } }
                             }
                         }

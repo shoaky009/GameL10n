@@ -57,4 +57,6 @@ pub enum CoreError {
     LaunchConflict { revision: String },
     #[error("{0}")]
     WorkflowInput(String),
+    #[error(transparent)]
+    WithModelOutput(Box<CoreError>),
 }

@@ -21,7 +21,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, broadcast};
 
 use crate::{
-    CancellationToken, CoreError, GameProject, ProjectSummary, ToolPaths, projects::ProjectStore,
+    CancellationToken, CoreError, GameProject, ProjectSummary, ToolPaths, logs::LogSource,
+    projects::ProjectStore,
 };
 
 /// UI-neutral task state. Status records belong to the project, not to a window.
@@ -884,6 +885,17 @@ impl Application {
         operation: &str,
         result: Result<String, String>,
     ) -> Result<(), CoreError> {
+        self.finish_with_log_source(id, operation, result, LogSource::Application)
+            .await
+    }
+
+    pub(crate) async fn finish_with_log_source(
+        &self,
+        id: &str,
+        operation: &str,
+        result: Result<String, String>,
+        log_source: LogSource,
+    ) -> Result<(), CoreError> {
         let project_guard = self.lock_project(id).await?;
         let _lifecycle = self.project_lifecycle.lock().await;
         let cancelled = self
@@ -960,7 +972,12 @@ impl Application {
         }
         .await;
         drop(_lifecycle);
-        self.log_task_message(id, &state.message).await;
+        let source = if cancelled {
+            LogSource::Application
+        } else {
+            log_source
+        };
+        self.log_task_message_from(id, &state.message, source).await;
         drop(project_guard);
         if let Some(error) = detail_error {
             self.report_task_warning(
@@ -1018,7 +1035,12 @@ impl Application {
     }
 
     pub(crate) async fn log_task_message(&self, id: &str, message: &str) {
-        if let Err(error) = self.log(id, message).await {
+        self.log_task_message_from(id, message, LogSource::Application)
+            .await;
+    }
+
+    pub(crate) async fn log_task_message_from(&self, id: &str, message: &str, source: LogSource) {
+        if let Err(error) = self.log_from(id, message, source).await {
             self.report_task_warning(id, &format!("日志写入失败：{error}"));
         }
     }
