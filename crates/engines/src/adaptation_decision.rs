@@ -445,6 +445,7 @@ fn snapshot(
             "workspaceSamples":state.extra.get("workspaceSamples").map(|v|bounded(v,3000)),
             "automaticTrials":state.extra.get("automaticTrials").map(|v| bounded(v,3000)),
             "automaticArchiveTrials":state.extra.get("automaticArchiveTrials").map(|v| bounded(v,7000)),
+            "publishedReuse":state.extra.get("publishedReuse").map(|v| bounded(v,3000)),
             "automaticTemplate":state.extra.get("automaticTemplate").map(|v| bounded(v,3000)),
             "successfulProbes":probes,
             "launchInspection":state.extra.get("launchInspection").map(|v| bounded(v,3000)),

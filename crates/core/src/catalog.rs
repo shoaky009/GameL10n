@@ -2009,7 +2009,7 @@ mod tests {
     }
 
     #[test]
-    fn trial_history_is_reusable_only_for_its_game_and_keeps_exclusions_and_feedback() {
+    fn trial_history_preserves_source_reuse_and_runtime_matching_policy() {
         let root = tempfile::tempdir().unwrap();
         let package = root.path().join("packages/engine.fixture/v1");
         fs::create_dir_all(package.join("src")).unwrap();
@@ -2036,6 +2036,10 @@ mod tests {
             )
             .unwrap();
         assert!(catalog.discovery_candidates(None).unwrap().is_empty());
+        assert_eq!(
+            catalog.adaptation_reference_directories().unwrap(),
+            [package.clone()]
+        );
         assert!(
             catalog
                 .discovery_candidates_for_game("game-b", None)
@@ -2051,6 +2055,10 @@ mod tests {
         fs::remove_file(root.path().join("library-index.json")).unwrap();
         let catalog = EngineCatalog::from_extensions_root(root.path()).unwrap();
         assert_eq!(
+            catalog.adaptation_reference_directories().unwrap(),
+            [package.clone()]
+        );
+        assert_eq!(
             catalog
                 .discovery_candidates_for_game("game-a", None)
                 .unwrap()
@@ -2063,6 +2071,12 @@ mod tests {
             .unwrap();
         assert!(
             catalog
+                .adaptation_reference_directories()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            catalog
                 .discovery_candidates_for_game("game-a", None)
                 .unwrap()
                 .is_empty()
@@ -2073,6 +2087,12 @@ mod tests {
         let mut state = load_state(root.path()).unwrap();
         state["families"]["engine.fixture"]["excludedVersions"] = json!(["v1"]);
         write_json(&root.path().join("library-state.json"), &state).unwrap();
+        assert!(
+            catalog
+                .adaptation_reference_directories()
+                .unwrap()
+                .is_empty()
+        );
         assert!(
             catalog
                 .discovery_candidates_for_game("game-a", None)
@@ -2096,6 +2116,12 @@ mod tests {
                 },
             )
             .unwrap();
+        assert!(
+            catalog
+                .adaptation_reference_directories()
+                .unwrap()
+                .is_empty()
+        );
         assert!(
             catalog
                 .discovery_candidates_for_game("game-a", None)

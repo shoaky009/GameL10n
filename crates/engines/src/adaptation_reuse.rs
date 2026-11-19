@@ -1,12 +1,16 @@
 //! Bounded source inspection and selective reference copies of published adapters.
 use super::{
-    AdaptationRequest, number, optional_text, preflight_unmodified, readback_page, strings, text,
+    AdaptationRequest, Session, capability, number, optional_text, preflight_unmodified,
+    readback_page, strings, text,
 };
-use crate::{CancellationToken, EngineError, PackageManifest, discovery::resolve_relative};
+use crate::{
+    CancellationToken, EngineError, PackageManifest,
+    discovery::{glob_match, resolve_relative},
+};
 use gamel10n_translation::files::hash_bytes;
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::Path,
@@ -15,13 +19,98 @@ use std::{
 const MAX_SOURCE_BYTES: usize = 1024 * 1024;
 const MAX_COPY_BYTES: usize = 32 * 1024 * 1024;
 
+pub(super) fn sampled_recipes(request: &AdaptationRequest<'_>, state: &Session) -> Vec<Value> {
+    let mut samples: BTreeMap<String, Vec<&str>> = BTreeMap::new();
+    let trials = state
+        .extra
+        .get("automaticArchiveTrials")
+        .and_then(Value::as_array);
+    for sample in trials.into_iter().flatten() {
+        if let (Some(template), Some(archive)) =
+            (sample["templateId"].as_str(), sample["archive"].as_str())
+            && sample["trials"].as_array().is_some_and(|trials| {
+                trials.iter().any(|trial| {
+                    trial["parseStatus"] == "passed"
+                        && trial["roundtripStatus"] == "passed"
+                        && trial["unitCount"].as_u64().is_some_and(|count| count > 0)
+                })
+            })
+            && !request.inputs.excludes(archive)
+        {
+            samples
+                .entry(format!("template.{template}"))
+                .or_default()
+                .push(archive);
+        }
+    }
+    if samples.is_empty() {
+        return Vec::new();
+    }
+    let mut seen = BTreeSet::new();
+    request.source_packages().filter_map(|directory| {
+        let manifest = PackageManifest::load(directory).ok()?;
+        let archives: Vec<_> = samples.get(&manifest.id)?.iter().copied()
+            .filter(|path| manifest.resource_patterns.iter().any(|pattern| glob_match(pattern, path)))
+            .collect();
+        if archives.is_empty() || !seen.insert((manifest.id.clone(), manifest.version.clone())) {
+            return None;
+        }
+        capability::arguments(directory, &manifest)?;
+        Some(json!({
+            "id":manifest.id, "version":manifest.version, "sampledArchives":archives,
+            "nextAction":"优先复用已有中文回填实现。先按当前启动范围选择并暂存所需封包；不同目录的同名封包应先确认归属。用 copy_adapter 的 resourceFiles 传精确路径，由宿主重新验收当前资源"
+        }))
+    }).take(3).collect()
+}
+
+pub(super) fn resource_scope(
+    manifest: &PackageManifest,
+    game: &Path,
+    args: &Value,
+) -> Result<Vec<String>, EngineError> {
+    if args.get("resourceFiles").is_none() {
+        return Ok(manifest.resource_patterns.clone());
+    }
+    if manifest.manifest_version != 4 {
+        return Err(EngineError::Rejected(
+            "只有可执行的发布适配器可指定当前资源范围".into(),
+        ));
+    }
+    let mut paths = strings(args, "resourceFiles")?;
+    if paths.is_empty() || paths.len() > 1024 {
+        return Err(EngineError::Protocol("请选择 1 至 1024 个资源路径".into()));
+    }
+    let mut seen = BTreeSet::new();
+    for path in &mut paths {
+        *path = path.replace('\\', "/");
+        resolve_relative(game, path)?;
+        let matches = if manifest.resource_patterns.is_empty() {
+            manifest
+                .resource_files
+                .iter()
+                .any(|file| file.eq_ignore_ascii_case(path))
+        } else {
+            manifest
+                .resource_patterns
+                .iter()
+                .any(|pattern| glob_match(pattern, path))
+        };
+        if !matches || !seen.insert(path.to_lowercase()) {
+            return Err(EngineError::Rejected(format!(
+                "资源路径重复或超出来源适配器的资源条件：{path}"
+            )));
+        }
+    }
+    Ok(paths)
+}
+
 fn find<'a>(
     request: &'a AdaptationRequest<'_>,
     args: &Value,
 ) -> Result<(PackageManifest, &'a Path), EngineError> {
     let id = text(args, "id")?;
     let version = text(args, "version")?;
-    for directory in &request.package_directories {
+    for directory in request.source_packages() {
         if let Ok(manifest) = PackageManifest::load(directory)
             && manifest.id == id
             && manifest.version == version

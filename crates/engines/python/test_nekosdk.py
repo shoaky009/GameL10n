@@ -45,6 +45,13 @@ class NekoSdkTest(unittest.TestCase):
             root = Path(temporary)
             (root / "script.pak").write_bytes(pack)
             (root / "images.pak").write_bytes(nekopack.build_pak({"image.bin": media}))
+            (root / "update").mkdir()
+            (root / "update/script.pak").write_bytes(nekopack.build_pak({"other.txt": data}))
+            ambiguous = nekosdk_adapter.execute(dict(
+                operation="probe", sourceDirectory=str(root),
+                resourceFiles=["script.pak", "update/script.pak"]))
+            self.assertIsNone(ambiguous["probe"])
+            self.assertIn("script.pak, update/script.pak", ambiguous["diagnostic"])
             probe = nekosdk_adapter.execute(dict(operation="probe", sourceDirectory=str(root),
                                                 resourceFiles=["script.pak", "images.pak"]))
             request = dict(sourceDirectory=str(root), resourceFiles=probe["probe"]["requiredFiles"])

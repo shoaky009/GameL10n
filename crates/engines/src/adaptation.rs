@@ -103,7 +103,10 @@ pub struct AdaptationRequest<'a> {
     pub project_directory: PathBuf,
     /// Shared extension root; packages are written into its packages/ directory.
     pub package_directory: PathBuf,
+    /// Packages eligible for discovery under the caller's matching policy.
     pub package_directories: Vec<PathBuf>,
+    /// Additional published sources that can be copied and verified on the current inputs.
+    pub reference_package_directories: Vec<PathBuf>,
     pub user_instruction: String,
     pub objective: String,
     pub improve_existing: bool,
@@ -115,6 +118,14 @@ pub struct AdaptationRequest<'a> {
     pub discovery_inventory: Option<Inventory>,
     pub limits: AdaptationLimits,
     pub baseline_units: &'a [TranslationUnit],
+}
+
+impl AdaptationRequest<'_> {
+    fn source_packages(&self) -> impl Iterator<Item = &PathBuf> {
+        self.package_directories
+            .iter()
+            .chain(&self.reference_package_directories)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -722,6 +733,11 @@ impl EngineService {
             automatic::inspect_workspace(self, &workspace, &mut state, cancellation).await?;
             automatic::inspect_archives(self, request, &workspace, &mut state, cancellation)
                 .await?;
+            let recipes = published_reuse::sampled_recipes(request, &state);
+            state.extra.remove("publishedReuse");
+            if !recipes.is_empty() {
+                state.extra.insert("publishedReuse".into(), json!(recipes));
+            }
             if continuing {
                 automatic::run_trials(
                     self,
@@ -1980,7 +1996,7 @@ impl EngineService {
         let root = crate::adaptation_context::engine_root(text(family, "key")?);
         let mut published = Vec::new();
         let mut seen = BTreeSet::new();
-        for directory in &request.package_directories {
+        for directory in request.source_packages() {
             let Ok(manifest) = PackageManifest::load(directory) else {
                 continue;
             };
@@ -2102,7 +2118,7 @@ impl EngineService {
         .ok();
         let mut seen = BTreeSet::new();
         let mut packages = Vec::new();
-        for directory in &request.package_directories {
+        for directory in request.source_packages() {
             if let Ok(manifest) = PackageManifest::load(directory)
                 && (query.is_empty()
                     || format!("{} {}", manifest.id, manifest.family)
@@ -2110,7 +2126,7 @@ impl EngineService {
                         .contains(&query))
                 && seen.insert((manifest.id.clone(), manifest.version.clone()))
             {
-                packages.push(json!({"id":manifest.id,"version":manifest.version,"family":manifest.family,"pinned":pinned.as_ref().is_some_and(|pin|pin["id"]==manifest.id&&pin["version"]==manifest.version),"enabledForNewGames":!self.disabled_families.contains(&manifest.id),"manifestVersion":manifest.manifest_version,"resourcePatterns":manifest.resource_patterns,"runnable":manifest.manifest_version==4,"inspectCall":{"tool":"inspect_adapter_source","arguments":{"id":manifest.id,"version":manifest.version}}}));
+                packages.push(json!({"id":manifest.id,"version":manifest.version,"family":manifest.family,"pinned":pinned.as_ref().is_some_and(|pin|pin["id"]==manifest.id&&pin["version"]==manifest.version),"enabledForNewGames":!self.disabled_families.contains(&manifest.id),"awaitingRuntimeConfirmation":request.reference_package_directories.contains(directory),"manifestVersion":manifest.manifest_version,"resourcePatterns":manifest.resource_patterns,"runnable":manifest.manifest_version==4,"inspectCall":{"tool":"inspect_adapter_source","arguments":{"id":manifest.id,"version":manifest.version}}}));
             }
         }
         let builtins: Vec<_> = crate::adaptation_context::builtin_catalog()
@@ -2362,9 +2378,15 @@ impl EngineService {
         let id = text(args, "id")?;
         let version = text(args, "version")?;
         if args.get("files").is_some() {
+            if args.get("resourceFiles").is_some() {
+                return Err(EngineError::Protocol(
+                    "复制参考文件时无需指定验收资源".into(),
+                ));
+            }
             return published_reuse::copy_selected(request, workspace, args, cancellation);
         }
-        if id == "engine.siglus" && version == "1.0.0" {
+        let scoped = args.get("resourceFiles").is_some();
+        if !scoped && id == "engine.siglus" && version == "1.0.0" {
             let files = [
                 (
                     "src/adapter.py",
@@ -2408,7 +2430,7 @@ impl EngineService {
                     .find(|format| format.to_lowercase() == key)
             })
             .unwrap_or("");
-        if crate::vntextpatch::FORMATS.contains(&format) && version == "1.0.1" {
+        if !scoped && crate::vntextpatch::FORMATS.contains(&format) && version == "1.0.1" {
             let entry = format!(
                 "import json\nimport sys\nfrom tools.gamel10n_host import parser, write_response\nrequest=json.load(sys.stdin)\nwrite_response(request,parser(request,{format:?}))\n"
             );
@@ -2420,12 +2442,17 @@ impl EngineService {
                 json!({"success":true,"format":format,"nextAction":"补齐资源发现或容器胶水后执行 test_adapter。"}),
             );
         }
-        for directory in &request.package_directories {
+        for directory in request.source_packages() {
             let Ok(manifest) = PackageManifest::load(directory) else {
                 continue;
             };
             if manifest.id == id && manifest.version == version {
-                let test_arguments = capability::arguments(directory, &manifest);
+                let resource_patterns =
+                    published_reuse::resource_scope(&manifest, &request.game_directory, args)?;
+                let mut test_arguments = capability::arguments(directory, &manifest);
+                if let Some(arguments) = &mut test_arguments {
+                    arguments["resourcePatterns"] = json!(resource_patterns);
+                }
                 let source = workspace.join("src");
                 if source.exists() && (!source.is_dir() || fs::read_dir(&source)?.next().is_some())
                 {
@@ -2476,7 +2503,7 @@ impl EngineService {
                             }
                         }
                     }
-                    state.resource_patterns = manifest.resource_patterns;
+                    state.resource_patterns = resource_patterns;
                     state.recognition = manifest.recognition;
                     state.family = manifest.family;
                 }
@@ -5713,6 +5740,7 @@ mod tests {
             project_directory: root.join("project"),
             package_directory: root.join("extensions"),
             package_directories: vec![],
+            reference_package_directories: vec![],
             user_instruction: String::new(),
             objective: "Develop".into(),
             improve_existing: false,

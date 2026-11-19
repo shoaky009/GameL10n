@@ -851,7 +851,7 @@
       "type": "function",
       "function": {
         "name": "copy_adapter",
-        "description": "Without files, reuse a complete adapter in src (published copies require empty src); built-in IDs register their pinned parser and Python bridge. With files from inspect_adapter_source, copy 1-32 registered published files, <=32 MiB total, into work/adapter-references/id/version without changing src, identity, dependencies or release selection. This reference mode works with existing code and checks only selected files. Existing differing files are never overwritten. Preserve imports, pinned dependencies and licenses when integrating modules into src. Legacy C# is reference only; new logic uses Python. All implementations still require test_adapter before finish. Call alone.",
+        "description": "Without files, reuse a complete adapter in src (published copies require empty src). For a published adapter, resourceFiles can narrow the verification recipe to exact current-game files. Select and stage the resources loaded by this game before verifying. Built-in IDs register their pinned parser and Python bridge. With files from inspect_adapter_source, copy 1-32 registered published files, <=32 MiB total, into work/adapter-references/id/version without changing src, identity, dependencies or release selection. This reference mode works with existing code and checks only selected files. Existing differing files are never overwritten. Preserve imports, pinned dependencies and licenses when integrating modules into src. Legacy C# is reference only; new logic uses Python. All implementations still require test_adapter before finish. Call alone.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -861,7 +861,14 @@
             "version": {
               "type": "string"
           },
-          "files": {
+            "resourceFiles": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 1024,
+              "items": { "type": "string" },
+              "description": "Exact current resource paths within the published adapter's resource patterns. Only for whole published adapters."
+            },
+            "files": {
             "type": "array",
             "minItems": 1,
             "maxItems": 32,

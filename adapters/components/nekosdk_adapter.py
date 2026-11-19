@@ -26,6 +26,7 @@ def probe(root, request, files):
     ranges = {item["path"]: item for item in request.get("probeRanges", [])
               if item["offset"] == nekopack.HEADER_SIZE}
     fingerprints, reads, selected, names = {}, [], [], set()
+    script_volumes = {}
     index_bytes = script_count = script_bytes = 0
     try:
         for relative in files:
@@ -55,6 +56,13 @@ def probe(root, request, files):
             members = script_members(entries)
             if not members:
                 continue
+            volume = Path(relative).name.casefold()
+            if volume in script_volumes:
+                raise ValueError(
+                    f"Script volume occurs in multiple directories: {script_volumes[volume]}, {relative}. "
+                    "Select the volumes loaded by the current game"
+                )
+            script_volumes[volume] = relative
             script_names = {archive.member_name(entry.name).casefold() for entry in members}
             if script_names & names:
                 raise ValueError("NEKOPACK script names occur in more than one volume")

@@ -16,7 +16,7 @@ use crate::{
     vntextpatch::{BUILTIN_FORMATS, BuiltinFormat},
 };
 
-pub(crate) const DISCOVERY_REVISION: u64 = 15;
+pub(crate) const DISCOVERY_REVISION: u64 = 16;
 const CONTAINERS: &[&str] = &[
     "xp3", "rpa", "rpyc", "pack", "pak", "arc", "ypf", "int", "pfs",
 ];
@@ -587,7 +587,7 @@ fn inspect_builtin_files(
         }
     }
     let mut ordered: Vec<_> = files.iter().collect();
-    ordered.sort_by_key(|path| (priority(path), path.to_lowercase()));
+    ordered.sort_by_key(|path| (priority(path), path.split('/').count(), path.to_lowercase()));
     let mut extension_counts = BTreeMap::new();
     let mut samples: Vec<_> = ordered
         .into_iter()

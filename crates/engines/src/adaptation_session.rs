@@ -254,6 +254,7 @@ mod tests {
             project_directory: root.path().into(),
             package_directory: root.path().join("extensions"),
             package_directories: vec![],
+            reference_package_directories: vec![],
             user_instruction: String::new(),
             objective: "Develop".into(),
             improve_existing: false,

@@ -1710,6 +1710,7 @@ mod tests {
             project_directory: root.into(),
             package_directory: root.join("extensions"),
             package_directories: vec![],
+            reference_package_directories: vec![],
             user_instruction: String::new(),
             objective: "Develop".into(),
             improve_existing: false,
@@ -2716,7 +2717,8 @@ Path('work/result.json').write_text('{}', encoding='utf8')
     #[tokio::test]
     async fn nekopack_recognition_prepares_a_verified_dialogue_member() {
         let root = tempfile::tempdir().unwrap();
-        let (service, request, workspace, mut state) = fixture(root.path(), "NekoSDK", "scr.pak");
+        let (service, mut request, workspace, mut state) =
+            fixture(root.path(), "NekoSDK", "scr.pak");
         let service = service.with_execution_isolation(false);
         if !service.tools.python().is_file() {
             return;
@@ -2740,11 +2742,13 @@ pathlib.Path(sys.argv[2]).write_bytes(build_pak({'scene.txt': script, 'image.bin
             std::process::Command::new(service.tools.python())
                 .args(["-I", "-X", "utf8", "-c", fixture])
                 .arg(library)
-                .arg(original)
+                .arg(&original)
                 .status()
                 .unwrap()
                 .success()
         );
+        fs::create_dir_all(request.game_directory.join("update")).unwrap();
+        fs::copy(&original, request.game_directory.join("update/scr.pak")).unwrap();
         let cancellation = CancellationToken::new();
         state.extra.insert(
             "builtinDiscovery".into(),
@@ -2759,10 +2763,47 @@ pathlib.Path(sys.argv[2]).write_bytes(build_pak({'scene.txt': script, 'image.bin
             .unwrap();
         let result = &state.extra["automaticArchiveTrials"][0];
         assert_eq!(result["templateId"], "nekopack4a-advscript2", "{result}");
+        assert_eq!(result["archive"], "scr.pak");
+        assert_eq!(
+            state.extra["automaticArchiveTrials"][1]["archive"],
+            "update/scr.pak"
+        );
         let trial = &result["trials"][0];
         assert_eq!(trial["unitCount"], 2, "{trial}");
         assert_eq!(trial["roundtripStatus"], "passed", "{trial}");
         assert_eq!(trial["errorType"], "UnicodeEncodeError", "{trial}");
+
+        let package = root.path().join("published");
+        fs::create_dir_all(&package).unwrap();
+        let manifest: PackageManifest = serde_json::from_value(json!({
+            "id":"template.nekopack4a-advscript2","version":"1","manifestVersion":4,"protocolVersion":1,
+            "family":{"kind":"template","key":"nekopack4a-advscript2","name":"NekoSDK"},
+            "resourcePatterns":["**/*.pak"],"packageFiles":{"src/adapter.py":"fixture"}
+        })).unwrap();
+        write_json(&package.join("package.json"), &manifest).unwrap();
+        request.reference_package_directories.push(package.clone());
+        assert!(super::super::published_reuse::sampled_recipes(&request, &state).is_empty());
+        super::super::capability::publish(
+            &package,
+            &manifest,
+            &crate::VerificationResult {
+                passed: true,
+                original_roundtrip_passed: true,
+                stage_timings_ms: BTreeMap::from([
+                    ("partial-translation-re-extraction".into(), 0),
+                    ("full-translation-re-extraction".into(), 0),
+                    ("original-resource-check".into(), 0),
+                ]),
+                ..crate::VerificationResult::default()
+            },
+        )
+        .unwrap();
+        let reuse = super::super::published_reuse::sampled_recipes(&request, &state);
+        assert_eq!(reuse[0]["id"], "template.nekopack4a-advscript2");
+        assert_eq!(
+            reuse[0]["sampledArchives"],
+            json!(["scr.pak", "update/scr.pak"])
+        );
     }
 
     #[tokio::test]

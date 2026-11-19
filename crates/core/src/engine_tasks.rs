@@ -1173,6 +1173,7 @@ impl Application {
             .into_iter()
             .map(|candidate| candidate.directory)
             .collect();
+        let references = catalog.adaptation_reference_directories()?;
         let request = AdaptationRequest {
             game_id: id.into(),
             game_directory: project.game_directory.clone(),
@@ -1180,6 +1181,7 @@ impl Application {
             inputs,
             package_directory: self.data_directory().join("extensions"),
             package_directories: packages,
+            reference_package_directories: references,
             user_instruction: instruction,
             objective: objective.as_str().into(),
             improve_existing,

@@ -3,13 +3,13 @@ use crate::{
     AdaptationRequest, CancellationToken, EngineError, EngineService,
     adaptation::{Session, text},
     adaptation_context::{BSSCRIPT_GUIDANCE, builtin_catalog},
-    discovery::resolve_relative,
+    discovery::{glob_match, resolve_relative},
     vntextpatch::BUILTIN_FORMATS,
 };
 use gamel10n_translation::files::hash_file;
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::Read,
     path::{Path, PathBuf},
@@ -36,6 +36,7 @@ pub(crate) struct ArchiveTemplate {
     pub(crate) extra_sources: &'static [&'static str],
     pub(crate) discovery_key: Option<&'static str>,
     pub(crate) sample_component: Option<&'static str>,
+    distinct_volume_names: bool,
     pub(crate) limitations: &'static str,
 }
 
@@ -51,6 +52,7 @@ pub(crate) const ARCHIVE_TEMPLATES: &[ArchiveTemplate] = &[
         extra_sources: &[],
         discovery_key: Some("pfsArchives"),
         sample_component: None,
+        distinct_volume_names: false,
         limitations: "UTF-8 AST 2.0 的日文显示字段，完整重建含脚本的 PFS v8 卷。存在重名脚本、未知布局或需覆盖其他脚本时继续调查。游戏内加载与显示需要试译确认",
     },
     ArchiveTemplate {
@@ -64,9 +66,42 @@ pub(crate) const ARCHIVE_TEMPLATES: &[ArchiveTemplate] = &[
         extra_sources: &["nekosdk_script.py"],
         discovery_key: None,
         sample_component: Some("nekosdk-script"),
+        distinct_volume_names: true,
         limitations: "NEKOPACK4A 内带长度的 ADVSCRIPT2 对白、人名和日志字段，按 CP932 回填并复提。选择项、界面资源和中文运行需按游戏验证",
     },
 ];
+
+pub(crate) fn check_reused_archive_scope(
+    adapter_id: &str,
+    required_files: &[String],
+) -> Result<(), EngineError> {
+    // Check old published versions whose probe predates the template's scope check.
+    let Some(template) = adapter_id.strip_prefix("template.").and_then(|id| {
+        ARCHIVE_TEMPLATES
+            .iter()
+            .find(|template| template.id == id && template.distinct_volume_names)
+    }) else {
+        return Ok(());
+    };
+    let mut by_name = BTreeMap::new();
+    for path in required_files.iter().filter(|path| {
+        template
+            .patterns
+            .iter()
+            .any(|pattern| glob_match(pattern, path))
+    }) {
+        let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+        if let Some(other) = by_name.insert(name.to_lowercase(), path) {
+            return Err(EngineError::Incompatible {
+                stage: "probe",
+                message: format!(
+                    "不同目录的同名脚本卷可能属于不同启动范围，请先选择当前游戏加载的卷：{other}、{path}"
+                ),
+            });
+        }
+    }
+    Ok(())
+}
 
 pub(crate) fn template_catalog() -> Vec<Value> {
     let bundled = [

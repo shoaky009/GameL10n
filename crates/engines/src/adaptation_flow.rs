@@ -1126,6 +1126,7 @@ mod tests {
             project_directory: root.into(),
             package_directory: root.join("packages"),
             package_directories: vec![],
+            reference_package_directories: vec![],
             user_instruction: String::new(),
             objective: "Develop".into(),
             improve_existing: false,
@@ -2204,7 +2205,7 @@ mod tests {
             tool_response(
                 "trial",
                 "test_adapter",
-                json!({"kind":"engine","key":"fixture","name":"Fixture","resourcePatterns":["*.json"],"trialFiles":["text.json"],"coverageSamples":[{"resourcePath":"text.json","locator":"0","sourceText":"原文"}]}),
+                json!({"kind":"engine","key":"fixture","name":"Fixture","resourcePatterns":["**/*.json"],"trialFiles":["text.json"],"coverageSamples":[{"resourcePath":"text.json","locator":"0","sourceText":"原文"}]}),
             ),
             tool_response(
                 "finish",
@@ -2271,11 +2272,16 @@ mod tests {
         second.game_id = "second".into();
         second.game_directory = root.path().join("second-game");
         second.project_directory = root.path().join("second-project");
-        second.package_directories = vec![published.clone()];
-        fs::create_dir_all(&second.game_directory).unwrap();
+        second.reference_package_directories = vec![published.clone()];
+        fs::create_dir_all(second.game_directory.join("separate-update")).unwrap();
         fs::write(
             second.game_directory.join("text.json"),
             "[\"另一个输入\",\"third\",\"fourth\"]",
+        )
+        .unwrap();
+        fs::write(
+            second.game_directory.join("separate-update/text.json"),
+            "[\"Other installation\"]",
         )
         .unwrap();
         let workspace = second.project_directory.join("adaptation/current");
@@ -2300,12 +2306,12 @@ mod tests {
             tool_response(
                 "reuse",
                 "copy_adapter",
-                json!({"id":manifest.id,"version":manifest.version}),
+                json!({"id":manifest.id,"version":manifest.version,"resourceFiles":["text.json"]}),
             ),
             tool_response(
                 "coverage",
                 "test_adapter",
-                json!({"kind":"engine","key":"fixture","name":"Fixture","resourcePatterns":["*.json"],"coverageSamples":[{"resourcePath":"text.json","locator":"0","sourceText":"另一个输入"}]}),
+                json!({"kind":"engine","key":"fixture","name":"Fixture","resourcePatterns":["text.json"],"coverageSamples":[{"resourcePath":"text.json","locator":"0","sourceText":"另一个输入"}]}),
             ),
             tool_response(
                 "finish",
@@ -2334,17 +2340,18 @@ mod tests {
         assert_eq!(server.join().unwrap().len(), 3);
         assert_eq!(reused.0, AdaptationStatus::Activated);
         assert_eq!(state.verification.as_ref().unwrap().units, 3);
+        assert_eq!(state.resource_patterns, ["text.json"]);
         assert_ne!(
             state.verification.as_ref().unwrap().resource_hashes["text.json"],
             hash_file(&request.game_directory.join("text.json")).unwrap()
         );
-        assert!(
-            events
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|event| event["operation"] == "host-step-end" && event["passed"] == true)
-        );
+        let events = events.lock().unwrap();
+        let host = events
+            .iter()
+            .find(|event| event["operation"] == "host-step-end")
+            .unwrap();
+        assert_eq!(host["passed"], true);
+        assert_eq!(host["result"]["extractedSources"], json!({"text.json":3}));
         assert_eq!(
             fs::read(published.join("capability-profile.json")).unwrap(),
             profile
@@ -3096,6 +3103,7 @@ mod tests {
             project_directory: "project".into(),
             package_directory: "packages".into(),
             package_directories: vec![],
+            reference_package_directories: vec![],
             user_instruction: String::new(),
             objective: "Develop".into(),
             improve_existing: false,

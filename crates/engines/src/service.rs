@@ -1262,6 +1262,12 @@ impl EngineService {
                 let (probe, _) = probe?;
                 if let Some(probe) = probe {
                     recognized = true;
+                    if !self.ordered_packages_only {
+                        crate::adaptation_assets::check_reused_archive_scope(
+                            &manifest.id,
+                            &probe.required_files,
+                        )?;
+                    }
                     if verification == DiscoveryVerification::ProbeOnly {
                         return Ok(Some((handle, probe)));
                     }
@@ -3083,6 +3089,57 @@ else:
             .await
             .expect("next version");
         assert_eq!(discovered.probe.unwrap().adapter_version, "1");
+    }
+
+    #[tokio::test]
+    async fn cross_game_discovery_rejects_ambiguous_script_volumes_from_an_old_package() {
+        let Some(service) = service() else {
+            return;
+        };
+        let root = tempfile::tempdir().unwrap();
+        let game = root.path().join("game");
+        fs::create_dir_all(game.join("update")).unwrap();
+        fs::write(game.join("scr.pak"), "[\"Original scripts\"]").unwrap();
+        fs::write(game.join("update/scr.pak"), "[\"Other installation\"]").unwrap();
+        let package = root.path().join("package");
+        fs::create_dir_all(package.join("src")).unwrap();
+        let entry = package.join("src/adapter.py");
+        fs::write(
+            &entry,
+            include_str!("../tests/fixtures/json_adapter.py")
+                .replace(
+                    "requiredFiles=['text.json']",
+                    "requiredFiles=r['resourceFiles']",
+                )
+                .replace("text.json", "scr.pak"),
+        )
+        .unwrap();
+        write_json(
+            &package.join("package.json"),
+            &json!({
+                "id":"template.nekopack4a-advscript2","version":"1","manifestVersion":4,
+                "protocolVersion":1,"resourcePatterns":["**/*.pak"],
+                "packageFiles":{"src/adapter.py":hash_file(&entry).unwrap()}
+            }),
+        )
+        .unwrap();
+        let cancellation = CancellationToken::new();
+        let packages = [package];
+        let discovered = service
+            .discover(&game, &packages, &cancellation, None)
+            .await
+            .unwrap();
+        assert!(discovered.adapter.is_none());
+        let failure = &discovered.reuse_failures[0];
+        assert_eq!(failure.failed_stage, "probe");
+        assert!(failure.evidence[0].contains("update/scr.pak"));
+
+        let known = service
+            .with_ordered_packages_only()
+            .discover(&game, &packages, &cancellation, None)
+            .await
+            .unwrap();
+        assert_eq!(known.probe.unwrap().required_files.len(), 2);
     }
 
     #[tokio::test]

@@ -604,6 +604,7 @@ mod tests {
             project_directory: root.join("project"),
             package_directory: root.join("extensions"),
             package_directories: vec![],
+            reference_package_directories: vec![],
             user_instruction: String::new(),
             objective: "Repair".into(),
             improve_existing: true,

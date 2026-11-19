@@ -92,6 +92,41 @@ pub(super) fn save_lifecycle(
 }
 
 impl EngineCatalog {
+    /// Locally verified trial packages can supply code to intelligent adaptation.
+    /// Their runtime feedback still governs automatic cross-game matching.
+    pub(crate) fn adaptation_reference_directories(&self) -> Result<Vec<PathBuf>, CoreError> {
+        let cached = self.lock()?;
+        let state = load_state(&self.root)?;
+        let mut references = Vec::new();
+        for (id, family) in cached
+            .index
+            .families
+            .iter()
+            .filter(|(_, family)| family.enabled)
+        {
+            let setting = &state["families"][id];
+            let excluded = setting["excludedVersions"].as_array();
+            for release in setting["releases"].as_array().into_iter().flatten().rev() {
+                let Some(version) = release["version"].as_str() else {
+                    continue;
+                };
+                if !family
+                    .versions
+                    .get(version)
+                    .is_some_and(|entry| entry.source == 1 && entry.exists && !entry.is_candidate)
+                    || excluded.is_some_and(|versions| versions.iter().any(|item| item == version))
+                {
+                    continue;
+                }
+                let recorded = lifecycle(setting, version)?;
+                if recorded.requires_confirmation && recorded.feedback.is_empty() {
+                    references.push(self.package_path(id, version)?);
+                }
+            }
+        }
+        Ok(references)
+    }
+
     pub(crate) fn version_lifecycle(
         &self,
         adapter: &AdapterVersion,
