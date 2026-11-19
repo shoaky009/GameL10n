@@ -823,7 +823,7 @@ fn inspect_builtin_files(
         result.insert(0,json!({"format":"Eagls","adapterId":"reference.eagls","name":"EAGLS / ALIS SCPACK",
             "evidenceKind":"container-pair","evidence":["同目录存在 SCPACK.idx 与 SCPACK.pak；仅为配对线索，须校验索引、成员边界及脚本参数。"],
             "archivePairs":eagls_pairs,"scriptComponent":"eagls-script",
-            "missingCapabilities":["优先复用 automaticArchiveTrials 的索引、成员和脚本试验结果。","resourcePath 指外层 PAK，成员身份放入 locator/context；界面文字、姓名引用与运行编码须单独确认。"]}));
+            "missingCapabilities":["优先复用 automaticArchiveTrials 的索引、成员和脚本试验结果。","用 **/SCPACK.idx 和 **/SCPACK.pak 限定候选，probe 与暂存使用同目录的已验证脚本对。媒体包可能共享索引结构，按成员的脚本证据选择 requiredFiles。","resourcePath 指外层 PAK，成员身份放入 locator/context；界面文字、姓名引用与运行编码须单独确认。"]}));
     }
     if !neko.is_empty() {
         neko.sort_by_key(|path| (priority(path), path.to_lowercase()));

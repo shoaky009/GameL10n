@@ -2,7 +2,7 @@
 
 `eagls-script` 解析完整的已解包脚本成员，支持已确认 EAGLS v1/v2 布局中的对白、选项和字面姓名。其他密钥和标签布局需要显式 `Profile`。菜单等额外字段须有显示证据。
 
-从 `SCPACK.idx` 与 `SCPACK.pak` 读取完整成员，再用小样检查。
+从同目录的 `SCPACK.idx` 与 `SCPACK.pak` 读取完整成员，再用小样检查。媒体封包也可能使用同一索引布局，资源规则、探测和暂存以已确认的脚本文件对为准。
 
 ```text
 try_builtin_adapter(format="eagls-script", directory="work", files=["sample.dat"])

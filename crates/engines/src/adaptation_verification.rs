@@ -415,10 +415,26 @@ async fn discover_inputs(
             .map(|file| file.replace('\\', "/").to_lowercase())
             .collect::<BTreeSet<_>>()
     };
-    if paths(&sample.required_files) != paths(&actual.required_files) {
-        return Err(EngineError::Rejected(
-            "真实游戏与暂存样本的必需资源不一致，请补暂存缺少的必需资源或修正 probe。".into(),
-        ));
+    let staged_required = paths(&sample.required_files);
+    let game_required = paths(&actual.required_files);
+    if staged_required != game_required {
+        let difference = |left: &BTreeSet<String>, right: &BTreeSet<String>| {
+            let mut paths = left.difference(right);
+            let mut names = paths
+                .by_ref()
+                .take(8)
+                .map(|path| path.chars().take(160).collect::<String>())
+                .collect::<Vec<_>>();
+            if paths.next().is_some() {
+                names.push("…".into());
+            }
+            names.join("、")
+        };
+        return Err(EngineError::Rejected(format!(
+            "真实游戏与暂存样本的必需资源不一致。仅真实游戏选择 [{}]，仅暂存样本选择 [{}]。请核对 probe 和资源规则，暂存已确认的必需资源",
+            difference(&game_required, &staged_required),
+            difference(&staged_required, &game_required),
+        )));
     }
     let executable = |probe: &ProbeResult| {
         probe
@@ -2136,7 +2152,11 @@ mod tests {
         .await
         .expect("new required resource");
         assert_eq!(added["passed"], false);
-        assert!(added["diagnostics"].to_string().contains("必需资源不一致"));
+        assert!(
+            added["diagnostics"]
+                .to_string()
+                .contains("仅真实游戏选择 [new.json]")
+        );
         assert!(state.verified_package.is_none());
     }
 

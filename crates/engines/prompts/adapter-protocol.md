@@ -87,6 +87,7 @@ If both fields are returned they must select the same patch EXE. Omit launch met
 Write files only inside outputDirectory and declare all outputs. New paths including a launch EXE are permitted.
 In replace mode, original-text build must reproduce every source resource byte for byte under its original path;
 translated builds must also preserve every source resource path.
+Original-text verification supplies source strings as translations. Compare the supplied text with the source before re-encoding or repacking a member.
 Declare generated companions (e.g. encoding maps) in build.files even when absent from original inputs.
 Validation receives buildMode and outputFiles from build.mode/files in both replace and overlay modes.
 Replace-mode verification re-extraction receives validated build.files as resourceFiles, with sourceDirectory set to the build output.
