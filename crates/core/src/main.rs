@@ -177,14 +177,19 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 gamel10n_core::engine_tasks::RecognitionMode::Automatic
             };
-            app.run_workflow(&project_id, instruction, mode).await?;
-            println!(
-                "{}",
-                app.task_state(&project_id)
-                    .await
-                    .map(|state| state.message)
-                    .unwrap_or_default()
-            );
+            // Debug workflows can overflow the Windows main-thread stack.
+            // Use a Tokio worker as the desktop entry point does.
+            let message = tokio::spawn(async move {
+                app.run_workflow(&project_id, instruction, mode).await?;
+                Ok::<_, gamel10n_core::CoreError>(
+                    app.task_state(&project_id)
+                        .await
+                        .map(|state| state.message)
+                        .unwrap_or_default(),
+                )
+            })
+            .await??;
+            println!("{message}");
         }
         Operation::Extract { project_id, format } => println!(
             "已提取 {} 条文本。",
