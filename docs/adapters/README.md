@@ -17,6 +17,7 @@
 | [QLIE 字体与启动](engines/qlie-filepack3-systemfont.md) | 字体和启动组件 | 已确认的字体枚举和启动链 |
 | [System4 FNL 补字](engines/system4-ain14-msg1-fnl.md) | 字形组件 | 参考字形尺寸的位图生成，AIN、FNL 及运行补丁需单独适配 |
 | [Artemis PFS](engines/artemis-pfs.md) | AST 组合模板与覆盖卷参考 | PFS v8、UTF-8 AST 2.0，覆盖加载按游戏确认 |
+| [NekoSDK / ADVSCRIPT2](engines/nekosdk.md) | 封包与脚本组件、组合模板 | NEKOPACK4A 和已确认的 CP932 对白记录 |
 | [Valkyria DAT / SDT](engines/valkyria.md) | 参考解析 | 完整语义、变长跳转和运行支持由当前适配器验证 |
 
 ## 引擎库管理

@@ -160,6 +160,9 @@ fn source(name: &str) -> Result<&'static [u8], EngineError> {
         "eagls_script.py" => Ok(include_bytes!(
             "../../../adapters/components/eagls_script.py"
         )),
+        "nekosdk_script.py" => Ok(include_bytes!(
+            "../../../adapters/components/nekosdk_script.py"
+        )),
         "unity_serialized_file.py" => {
             Ok(include_bytes!("../../../adapters/unity/serialized_file.py"))
         }

@@ -1001,7 +1001,7 @@ def archive_samples(request):
     archive = Path(request['archive'])
     output = Path(request['directory'])
     requested = request.get('members')
-    if format_name in ('Ethornell', 'CatSystem', 'Yuris') and requested is None:
+    if format_name in ('Ethornell', 'CatSystem', 'Yuris', 'NekoSDK') and requested is None:
         sys.path.insert(0, request['components'])
         import engine_archive
         return engine_archive.script_samples(format_name, archive, output)

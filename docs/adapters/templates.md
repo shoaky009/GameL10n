@@ -12,8 +12,9 @@
 | `archive.kif` | `inspect`、`extract` | CatSystem2 普通 KIF，独立确认加密命名方案后可用固定 INT API 调查加密变体。 |
 | `archive.ypf482` | `inspect`、`extract` | YPF 482，成员名使用 Murmur2 校验和 FF 异或。 |
 | `archive.pfs8` | `inspect`、`extract` | Artemis PFS v8，使用索引派生的密钥读取成员。 |
+| `archive.nekopack4a` | `inspect`、`extract` | NEKOPACK4A，按索引读取选定成员并验证 zlib 解压长度。 |
 
-RPA、BGI、KIF、YPF 482 和 PFS v8 可以只读索引，再按成员名或扩展名提取。清单中的 `length` 为封包中的长度，已读取成员的 SHA-256 取解码后的字节。需要校验全部成员时用 `verifyContents: true`，适用组件的读取和解码预算。支持重建的组件按原成员名替换，并核对未修改成员。[封包接口与预算](../../adapters/components/engine_archive.py)
+索引组件可以只读索引，再按成员名或扩展名提取。清单中的 `length` 为封包中的长度，已读取成员的 SHA-256 取解码后的字节。需要校验全部成员时用 `verifyContents: true`，适用组件的读取和解码预算。支持重建的组件按原成员名替换，并核对未修改成员。[封包接口与预算](../../adapters/components/engine_archive.py)
 
 ## 组合模板
 
@@ -27,8 +28,9 @@ RPA、BGI、KIF、YPF 482 和 PFS v8 可以只读索引，再按成员名或扩�
 | `renpy-mixed` | 同一加载根下的 `.rpy`、RPYC2 与 RPA3 |
 | `xp3-kirikiri-ks` | 无过滤器 XP3 中的 `.ks` |
 | `artemis-pfs8-ast` | PFS v8 中无跨卷路径冲突的 UTF-8 AST 2.0 |
+| `nekopack4a-advscript2` | NEKOPACK4A 中无跨卷同名脚本的 CP932 ADVSCRIPT2 |
 
-用 `compose_adapter_template` 准备源码和固定依赖。首次识别可自动尝试 Ren’Py、松散 KS 和 Artemis PFS 组合，资源布局或验收不满足条件时进入后续调查。XP3 需要先确认过滤器。[模板注册](../../crates/engines/src/adaptation_assets.rs) · [生成和验收流程](automatic-adaptation.md)
+用 `compose_adapter_template` 准备源码和固定依赖。首次识别可自动尝试 Ren’Py、松散 KS 和 Artemis PFS 组合，资源布局或验收不满足条件时进入后续调查。XP3 需要先确认过滤器。NekoSDK 首轮尝试封包成员小样，组合模板供明确脚本和运行编码后使用。[模板注册](../../crates/engines/src/adaptation_assets.rs) · [生成和验收流程](automatic-adaptation.md)
 
 封包模板在注册项中声明候选证据、资源模式和固定模块。模块的 `probe` 返回完整验收需要的资源和已检查索引的指纹。宿主按同一套验收与发布流程处理，并在发布前复查索引。
 

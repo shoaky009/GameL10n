@@ -2685,8 +2685,14 @@ impl EngineService {
             "script_template"
         };
         let mut components = vec!["engine_archive.py".to_owned()];
-        if archive_template.is_some() {
+        if let Some(template) = archive_template {
             components.push(format!("{module}.py"));
+            components.extend(
+                template
+                    .extra_sources
+                    .iter()
+                    .map(|source| (*source).to_owned()),
+            );
         } else if module != "script_template" {
             components.extend([
                 "renpy_rpyc_adapter.py".into(),

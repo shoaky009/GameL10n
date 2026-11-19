@@ -19,7 +19,7 @@
 
 智能适配使用支持函数工具调用的分析 API。Token 预算不足时保存工作，点击继续可使用新的本次预算。切换模型或协议后，已保存的源码与调查进度仍可使用。[模型接口配置](../model-providers.md#智能适配预算)
 
-首次调用模型前，宿主用已有资源清单挑选少量封包，按需读取脚本和伴随文件。EAGLS SCPACK、Artemis PFS v8、BGI、普通 KIF 和支持的 YPF 482 布局可检查提取、原文往返和中文回读。YSTB 试验需要同目录的 `ysc.ybn`，格式或依赖不符时记录具体缺口并继续分析。[封包组件](templates.md#封包组件) · [EAGLS 脚本](engines/eagls-scpack.md) · [Artemis PFS](engines/artemis-pfs.md)
+首次调用模型前，宿主用已有资源清单挑选少量封包，按需读取脚本和伴随文件。EAGLS SCPACK、Artemis PFS v8、BGI、普通 KIF、YPF 482 和 NEKOPACK4A 的小样可检查提取、原文往返及译文回读。YSTB 试验需要同目录的 `ysc.ybn`。格式、编码或依赖不符时，后续调查可复用已通过的小样结果。[封包组件](templates.md#封包组件) · [EAGLS 脚本](engines/eagls-scpack.md) · [Artemis PFS](engines/artemis-pfs.md) · [NekoSDK](engines/nekosdk.md)
 
 适配可检索公开资料、下载依赖并向分析服务发送必要的资源片段与工具结果。工作区保留会话、源码和报告，供修复或总结使用。[适配产物](artifacts.md) · [执行隔离](execution-isolation.md)
 

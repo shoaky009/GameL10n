@@ -33,21 +33,40 @@ pub(crate) struct ArchiveTemplate {
     pub(crate) patterns: &'static [&'static str],
     pub(crate) name: &'static str,
     pub(crate) module: &'static str,
-    pub(crate) discovery_key: &'static str,
+    pub(crate) extra_sources: &'static [&'static str],
+    pub(crate) discovery_key: Option<&'static str>,
+    pub(crate) sample_component: Option<&'static str>,
     pub(crate) limitations: &'static str,
 }
 
-pub(crate) const ARCHIVE_TEMPLATES: &[ArchiveTemplate] = &[ArchiveTemplate {
-    id: ARTEMIS_PFS_TEMPLATE,
-    format: "ArtemisAst",
-    component: "archive.pfs8",
-    extensions: &[".ast"],
-    patterns: &["**/*.pfs", "**/*.pfs.*"],
-    name: "Artemis PFS v8 + AST 2.0",
-    module: "artemis_pfs_adapter",
-    discovery_key: "pfsArchives",
-    limitations: "UTF-8 AST 2.0 的日文显示字段，完整重建含脚本的 PFS v8 卷。存在重名脚本、未知布局或需覆盖其他脚本时继续调查。游戏内加载与显示需要试译确认",
-}];
+pub(crate) const ARCHIVE_TEMPLATES: &[ArchiveTemplate] = &[
+    ArchiveTemplate {
+        id: ARTEMIS_PFS_TEMPLATE,
+        format: "ArtemisAst",
+        component: "archive.pfs8",
+        extensions: &[".ast"],
+        patterns: &["**/*.pfs", "**/*.pfs.*"],
+        name: "Artemis PFS v8 + AST 2.0",
+        module: "artemis_pfs_adapter",
+        extra_sources: &[],
+        discovery_key: Some("pfsArchives"),
+        sample_component: None,
+        limitations: "UTF-8 AST 2.0 的日文显示字段，完整重建含脚本的 PFS v8 卷。存在重名脚本、未知布局或需覆盖其他脚本时继续调查。游戏内加载与显示需要试译确认",
+    },
+    ArchiveTemplate {
+        id: "nekopack4a-advscript2",
+        format: "NekoSDK",
+        component: "archive.nekopack4a",
+        extensions: &[".txt"],
+        patterns: &["**/*.pak"],
+        name: "NEKOPACK4A + NekoSDK ADVSCRIPT2",
+        module: "nekosdk_adapter",
+        extra_sources: &["nekosdk_script.py"],
+        discovery_key: None,
+        sample_component: Some("nekosdk-script"),
+        limitations: "NEKOPACK4A 内带长度的 ADVSCRIPT2 对白、人名和日志字段，按 CP932 回填并复提。选择项、界面资源和中文运行需按游戏验证",
+    },
+];
 
 pub(crate) fn template_catalog() -> Vec<Value> {
     let bundled = [
@@ -129,6 +148,7 @@ pub(crate) fn engine_components() -> Vec<Value> {
         json!({"id":"archive.kif","version":1,"format":"Unencrypted CatSystem2 KIF","module":"python.archives.catsystem2_int","operations":["inspect","extract"],"limitations":["Encrypted KIF requires independent filename scheme evidence.", "Selected .cst members can be tried with CatSystem."]}),
         json!({"id":"archive.ypf482","version":1,"format":"YU-RIS YPF 482 with Murmur2 and FF name XOR","module":"python.archives.yuris_482","operations":["inspect","extract"],"limitations":["Use a proven scheme for other YPF versions or layouts.", "Pass YSTB scripts with their same-directory ysc.ybn; encrypted YBN needs separate evidence."]}),
         json!({"id":"archive.pfs8","version":1,"format":"Artemis PFS v8","module":"python.archives.pfs","operations":["inspect","extract"],"limitations":["Member reads use the index-derived key; verify the script layout and load order separately."]}),
+        json!({"id":"archive.nekopack4a","version":1,"format":"NekoSDK NEKOPACK4A","module":"engine_archive","operations":["inspect","extract"],"limitations":["Inspect reads only the index. Select .txt members and verify ADVSCRIPT2 with nekosdk-script. Combine with the nekopack4a-advscript2 template for CP932 script replacement."]}),
     ]
 }
 
@@ -215,7 +235,7 @@ pub(crate) async fn inspect_builtin(
     let key = text(args, "format")?;
     if key.eq_ignore_ascii_case("NekoSDK") {
         return Ok(
-            json!({"format":key,"status":"reference-only","engine":"nekosdk","usage":"请调用 inspect_engine_reference(engine=nekosdk)。共享 Python 已提供 NEKOPACK4 和 ADVSCRIPT2 工具；尚无经过当前游戏验证的内置中文运行适配器。"}),
+            json!({"format":key,"status":"component","engine":"nekosdk","archiveComponent":"archive.nekopack4a","scriptComponent":"nekosdk-script","template":"nekopack4a-advscript2","usage":"先复用 automaticArchiveTrials 或对完整 ADVSCRIPT2 成员试用 nekosdk-script。组合模板按 CP932 提取、回填和复提；按游戏确认选项、界面和中文运行。"}),
         );
     }
     if key.eq_ignore_ascii_case("BSScriptRev6") || key == "reference.bsscript-rev6" {

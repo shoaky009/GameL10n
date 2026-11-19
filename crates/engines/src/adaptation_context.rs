@@ -16,7 +16,7 @@ use crate::{
     vntextpatch::{BUILTIN_FORMATS, BuiltinFormat},
 };
 
-pub(crate) const DISCOVERY_REVISION: u64 = 11;
+pub(crate) const DISCOVERY_REVISION: u64 = 13;
 const CONTAINERS: &[&str] = &[
     "xp3", "rpa", "rpyc", "pack", "pak", "arc", "ypf", "int", "pfs",
 ];
@@ -590,6 +590,7 @@ fn inspect_builtin_files(
     let mut candidates = BTreeMap::new();
     let mut identified = BTreeSet::new();
     let mut neko = Vec::new();
+    let mut nekosdk_scripts = Vec::new();
     let mut bsscript = Vec::new();
     let mut scn = Vec::new();
     let mut pfs_archives = Vec::new();
@@ -629,6 +630,8 @@ fn inspect_builtin_files(
                 Some("CatSystem")
             } else if head.starts_with(b"YPF\0") && head.get(4..8) == Some(&482_u32.to_le_bytes()) {
                 Some("Yuris")
+            } else if head.starts_with(b"NEKOPACK4A") {
+                Some("NekoSDK")
             } else {
                 None
             };
@@ -656,6 +659,9 @@ fn inspect_builtin_files(
         {
             neko.push(path.clone());
             identified.insert(path.to_lowercase());
+        }
+        if head.starts_with(b"NEKOSDK_ADVSCRIPT2\0") && nekosdk_scripts.len() < 4 {
+            nekosdk_scripts.push(path.clone());
         }
         if let Some((key, detail, container)) = identify(&head, &tail) {
             add(
@@ -774,8 +780,9 @@ fn inspect_builtin_files(
         neko.sort_by_key(|path| (priority(path), path.to_lowercase()));
         neko.truncate(4);
         result.insert(0,json!({"format":"NekoSDK","adapterId":"reference.nekosdk","name":"NekoSDK / NEKOPACK4 / ADVSCRIPT2","evidenceKind":"format-signature",
-            "evidence":["文件头匹配 NEKOPACK4A/S 或 NEKOSDK_ADVSCRIPT2；共享工具含容器 reader/writer 和局部文本字段 reader/writer。先 inspect_engine_reference(engine=nekosdk)，常规适配器尚未内置。"],"sampleFiles":neko,
-            "missingCapabilities":["确认脚本记录变体、选择项与中文运行支持；不能把容器可读视为汉化完成。"]}));
+            "evidence":["文件头匹配 NEKOPACK4A/S 或 NEKOSDK_ADVSCRIPT2。复用首轮 archive.nekopack4a 成员试验或对完整成员试用 nekosdk-script。"],"sampleFiles":neko,
+            "scriptComponent":"nekosdk-script",
+            "missingCapabilities":["NEKOPACK4A 脚本可用 nekopack4a-advscript2 模板按记录读写。选项、界面资源和中文显示须分别确认。"]}));
     }
     if !bsscript.is_empty() {
         bsscript.truncate(4);
@@ -802,7 +809,7 @@ fn inspect_builtin_files(
             "候选只来自文件名或局部字节特征，尚未运行解析器、解包资源或确认游戏兼容。".into(),
         );
     }
-    let components = if scn.is_empty() {
+    let mut components = if scn.is_empty() {
         vec![]
     } else {
         vec![
@@ -812,6 +819,11 @@ fn inspect_builtin_files(
             "nextAction":"先复用组件检查已解密、无资源的 PSB v2/v3 SCN，再定位过滤器或布局缺口；不要重新实现 PSB 字符串池和偏移表。"}),
         ]
     };
+    if !nekosdk_scripts.is_empty() {
+        components.push(json!({"id":"nekosdk-script","sampleFiles":nekosdk_scripts,
+            "evidence":"脚本头匹配 NEKOSDK_ADVSCRIPT2，按记录检查提取和回填。",
+            "inspectCall":{"tool":"inspect_adapter_component","arguments":{"id":"nekosdk-script"}}}));
+    }
     Ok(
         json!({"revision":DISCOVERY_REVISION,"filesScanned":scanned,"partial":partial,"candidates":result,"components":components,"pfsArchives":pfs_archives,"scriptArchives":script_archives,"warnings":warnings}),
     )

@@ -23,7 +23,7 @@ MAX_TOTAL = 256 << 20
 MAX_ENTRIES = 10_000
 RPA_MAX_ARCHIVE = 2 << 30
 MAX_INDEX = 8 << 20
-INDEXED_COMPONENTS = ("archive.bgi", "archive.kif", "archive.ypf482", "archive.pfs8")
+INDEXED_COMPONENTS = ("archive.bgi", "archive.kif", "archive.ypf482", "archive.pfs8", "archive.nekopack4a")
 
 
 class ArchiveInput:
@@ -194,11 +194,74 @@ def open_index(component, stream):
             return pfs.read_member(stream, index, entry, max_stored_size=maximum).data
 
         version, entries = index.version, index.entries
+    elif component == "archive.nekopack4a":
+        from python.archives import nekopack
+        length = stream.seek(0, os.SEEK_END)
+        stream.seek(0)
+        header = stream.read(nekopack.HEADER_SIZE)
+        index_size = nekopack4a_index_size(header, length)
+        entries = nekopack4a_entries(stream.read(index_size), length, index_size)
+
+        def read(entry, maximum):
+            if entry.size > maximum:
+                raise ValueError("NEKOPACK stored member exceeds the read budget")
+            payload = b"".join(chunks(stream, entry.offset, entry.size))
+            unpacked, = struct.unpack_from("<I", payload, len(payload) - 4)
+            if unpacked > maximum:
+                raise ValueError("NEKOPACK decoded member exceeds the read budget")
+            return nekopack.read_member(payload, nekopack.PakEntry(entry.name, 0, entry.size))
+
+        version = "4A"
     else:
         raise ValueError("unknown indexed archive component")
     if component != "archive.pfs8":
         validate_names(entries)
     return version, entries, read
+
+
+def nekopack4a_index_size(header, length):
+    from python.archives import nekopack
+    if len(header) != nekopack.HEADER_SIZE or not header.startswith(b"NEKOPACK4A"):
+        raise ValueError("expected a NEKOPACK4A header")
+    size, = struct.unpack_from("<I", header, 10)
+    if not 0 < size <= min(MAX_INDEX, length - len(header)):
+        raise ValueError("NEKOPACK index exceeds the input or index budget")
+    return size
+
+
+def nekopack4a_entries(data, length, index_size):
+    from python.archives import nekopack
+    if len(data) != index_size:
+        raise ValueError("truncated NEKOPACK index")
+    entries, position = [], 0
+    data_offset = nekopack.HEADER_SIZE + index_size
+    while position < index_size:
+        if position + 4 > index_size or len(entries) >= MAX_ENTRIES:
+            raise ValueError("truncated NEKOPACK name length or too many members")
+        size, = struct.unpack_from("<I", data, position)
+        position += 4
+        if size == 0 and not any(data[position:]):
+            break
+        end = position + size
+        if not 1 < size <= nekopack.MAX_NAME or end + 8 > index_size:
+            raise ValueError("invalid NEKOPACK name length")
+        name = data[position:end]
+        if name[-1] != 0:
+            raise ValueError("NEKOPACK member name has no terminator")
+        key = nekopack.name_checksum(name) & 0xFFFFFFFF
+        offset, size = (value ^ key for value in struct.unpack_from("<II", data, end))
+        if size < 8 or offset < data_offset or offset + size > length:
+            raise ValueError("NEKOPACK member range exceeds the archive")
+        entries.append(nekopack.PakEntry(name[:-1].decode("cp932"), offset, size))
+        position = end + 8
+    if not entries:
+        raise ValueError("NEKOPACK archive has no entries")
+    previous_end = data_offset
+    for entry in sorted(entries, key=lambda entry: entry.offset):
+        if entry.offset < previous_end:
+            raise ValueError("overlapping NEKOPACK member ranges")
+        previous_end = entry.offset + entry.size
+    return entries
 
 
 def pfs8_index(stream):
@@ -355,6 +418,7 @@ def script_samples(format_name, source, output):
         "Ethornell": ("archive.bgi", {".bgi", ""}),
         "CatSystem": ("archive.kif", {".cst"}),
         "Yuris": ("archive.ypf482", {".ybn"}),
+        "NekoSDK": ("archive.nekopack4a", {".txt"}),
     }[format_name]
     maximum = 2 << 20
     samples, errors = [], []
@@ -375,6 +439,8 @@ def script_samples(format_name, source, output):
                         and not data.startswith(b"BurikoCompiledScriptVer1.00\0")):
                     continue
                 if format_name == "CatSystem" and not data.startswith(b"CatScene"):
+                    continue
+                if format_name == "NekoSDK" and not data.startswith(b"NEKOSDK_ADVSCRIPT2\0"):
                     continue
                 members = {name: data}
                 if format_name == "Yuris":

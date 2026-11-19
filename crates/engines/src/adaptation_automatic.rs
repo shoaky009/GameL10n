@@ -1192,9 +1192,10 @@ pub(super) async fn inspect_archives(
             let samples: Vec<Value> = serde_json::from_value(
                 report.as_object_mut().and_then(|report| report.remove("samples")).unwrap_or(json!([])),
             )?;
+            let template = ARCHIVE_TEMPLATES.iter().find(|template| template.format == format);
             if !samples.is_empty()
-                && let Some(template) = ARCHIVE_TEMPLATES.iter().find(|template| {
-                    template.format == format && !service.disabled_families.contains(&format!("template.{}", template.id))
+                && let Some(template) = template.filter(|template| {
+                    !service.disabled_families.contains(&format!("template.{}", template.id))
                 })
             {
                 report["templateId"] = json!(template.id);
@@ -1249,8 +1250,13 @@ pub(super) async fn inspect_archives(
                     }
                 }
                 let relative = format!("{directory}/{}", files.first().ok_or_else(|| reject("封包未返回样本"))?);
-                let outcome = if format == "eagls-script" {
-                    try_component_sample(service, workspace, state, format, &relative, (true, true), token).await?
+                let component = if format == "eagls-script" {
+                    Some(format)
+                } else {
+                    template.and_then(|template| template.sample_component)
+                };
+                let outcome = if let Some(component) = component {
+                    try_component_sample(service, workspace, state, component, &relative, (true, true), token).await?
                 } else {
                     try_cached_sample(service, workspace, state, format, &directory, &files, token).await?
                 };
@@ -1523,12 +1529,13 @@ pub(super) async fn run_template(
     progress: ProgressCallback<'_>,
 ) -> Result<Option<AdapterHandle>, EngineError> {
     let archive_template = ARCHIVE_TEMPLATES.iter().find(|template| {
-        state.extra["builtinDiscovery"][template.discovery_key]
-            .as_array()
-            .is_some_and(|archives| !archives.is_empty())
-            && !service
-                .disabled_families
-                .contains(&format!("template.{}", template.id))
+        template.discovery_key.is_some_and(|key| {
+            state.extra["builtinDiscovery"][key]
+                .as_array()
+                .is_some_and(|archives| !archives.is_empty())
+        }) && !service
+            .disabled_families
+            .contains(&format!("template.{}", template.id))
     });
     if !fresh(request, workspace, state)?
         || !state.messages.is_empty()
@@ -2704,6 +2711,58 @@ Path('work/result.json').write_text('{}', encoding='utf8')
             original
         );
         assert_eq!(coverage_list(&state, "runtimeChecks"), vec![RUNTIME_CHECK]);
+    }
+
+    #[tokio::test]
+    async fn nekopack_recognition_prepares_a_verified_dialogue_member() {
+        let root = tempfile::tempdir().unwrap();
+        let (service, request, workspace, mut state) = fixture(root.path(), "NekoSDK", "scr.pak");
+        let service = service.with_execution_isolation(false);
+        if !service.tools.python().is_file() {
+            return;
+        }
+        let reference = service.adaptation_reference(&workspace, &state).unwrap();
+        let library = service.reference_library(&reference).unwrap();
+        let original = request.game_directory.join("scr.pak");
+        let fixture = r#"
+import pathlib, struct, sys
+sys.path.insert(0, sys.argv[1])
+from python.archives.nekopack import build_pak
+header = bytearray(212)
+struct.pack_into('<I', header, 12, 5)
+fields = ['[テキスト表示] speed:1', '花子', 'こんにちは'] + [''] * 30
+encoded = [field.encode('cp932') + b'\0' for field in fields]
+script = b'NEKOSDK_ADVSCRIPT2\0' + struct.pack('<I', 1) + header
+script += b''.join(struct.pack('<I', len(value)) + value for value in encoded)
+pathlib.Path(sys.argv[2]).write_bytes(build_pak({'scene.txt': script, 'image.bin': b'fixture-media'}))
+"#;
+        assert!(
+            std::process::Command::new(service.tools.python())
+                .args(["-I", "-X", "utf8", "-c", fixture])
+                .arg(library)
+                .arg(original)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let cancellation = CancellationToken::new();
+        state.extra.insert(
+            "builtinDiscovery".into(),
+            crate::adaptation_context::inspect_builtin_discovery(
+                &request.game_directory,
+                &cancellation,
+            )
+            .unwrap(),
+        );
+        inspect_archives(&service, &request, &workspace, &mut state, &cancellation)
+            .await
+            .unwrap();
+        let result = &state.extra["automaticArchiveTrials"][0];
+        assert_eq!(result["templateId"], "nekopack4a-advscript2", "{result}");
+        let trial = &result["trials"][0];
+        assert_eq!(trial["unitCount"], 2, "{trial}");
+        assert_eq!(trial["roundtripStatus"], "passed", "{trial}");
+        assert_eq!(trial["errorType"], "UnicodeEncodeError", "{trial}");
     }
 
     #[tokio::test]

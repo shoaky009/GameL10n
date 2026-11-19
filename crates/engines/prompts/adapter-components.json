@@ -11,6 +11,17 @@
     "engineFamilies": ["eagls", "alis"]
   },
   {
+    "id": "nekosdk-script",
+    "name": "NekoSDK ADVSCRIPT2 文本记录",
+    "scope": "完整 ADVSCRIPT2 脚本成员。按记录与字符串长度提取 CP932 对白、人名和日志字段，保留控制记录、语音与未修改字节。",
+    "origin": "NekoSDK ADVSCRIPT2 格式描述及显示指令，独立实现。",
+    "api": "ScriptText(data).fields 提供 path、text、kind。build({path: text}) 返回完整成员。path 由记录序号和字段编号组成。选择项、界面和中文运行需分别验证。",
+    "example": "try_builtin_adapter(format=\"nekosdk-script\", directory=\"work\", files=[\"sample.txt\"])\n# For a complete NEKOPACK4A script volume, use compose_adapter_template(id=\"nekopack4a-advscript2\").",
+    "sampleCheck": "nekosdk_script.py",
+    "files": [{"name": "nekosdk_script.py", "path": "src/tools/nekosdk_script.py", "binary": false}],
+    "engineFamilies": ["nekosdk"]
+  },
+  {
     "id": "unity-serialized-file",
     "name": "Unity SerializedFile 与 TextAsset 读写",
     "scope": "Unity 2022 小端 SerializedFile v22；保留类型表、path ID、引用和未修改对象，支持 TextAsset 原始字节读取及变长回填。不支持 UnityFS 封包，不解释脚本语法或 MonoBehaviour 字段，也不确认字体与运行显示。",
