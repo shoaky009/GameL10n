@@ -22,6 +22,17 @@
     "engineFamilies": ["nekosdk"]
   },
   {
+    "id": "ai5v-mes",
+    "name": "AI5V / SILV 字表式 MES",
+    "scope": "完整、已解包的 MES。按 0x80 字表和已知字节码读取内联 CP932 文本，支持变长回填及复提。其他 MES 方言按各自组件检查。",
+    "origin": "AI5V/SILV 字表与指令格式描述，独立实现。",
+    "api": "ScriptText(data).fields 提供 path、text、kind。build({path: text}) 返回完整脚本，保留现有字表序号、参数字符串和控制指令。遇到未知字节码或不可表示字符时报告不兼容。",
+    "example": "try_builtin_adapter(format=\"ai5v-mes\", directory=\"work\", files=[\"scene.mes\"])\n# Use field.path and the original archive member identity for stable IDs.",
+    "sampleCheck": "ai5v_mes.py",
+    "files": [{"name": "ai5v_mes.py", "path": "src/tools/ai5v_mes.py", "binary": false}],
+    "engineFamilies": ["ai5v", "silv", "elf"]
+  },
+  {
     "id": "unity-serialized-file",
     "name": "Unity SerializedFile 与 TextAsset 读写",
     "scope": "Unity 2022 小端 SerializedFile v22；保留类型表、path ID、引用和未修改对象，支持 TextAsset 原始字节读取及变长回填。不支持 UnityFS 封包，不解释脚本语法或 MonoBehaviour 字段，也不确认字体与运行显示。",

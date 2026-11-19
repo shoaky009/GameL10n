@@ -16,7 +16,7 @@ use crate::{
     vntextpatch::{BUILTIN_FORMATS, BuiltinFormat},
 };
 
-pub(crate) const DISCOVERY_REVISION: u64 = 13;
+pub(crate) const DISCOVERY_REVISION: u64 = 14;
 const CONTAINERS: &[&str] = &[
     "xp3", "rpa", "rpyc", "pack", "pak", "arc", "ypf", "int", "pfs",
 ];
@@ -104,6 +104,22 @@ fn priority(path: &str) -> u8 {
         "cfg" | "config" | "system" | "gameexe" => 1,
         _ => 2,
     }
+}
+
+fn ai5v_dictionary_header(head: &[u8]) -> bool {
+    let Some(size) = head.first_chunk::<2>().map(|raw| u16::from_le_bytes(*raw)) else {
+        return false;
+    };
+    let size = usize::from(size);
+    if !(4..=258).contains(&size) || size % 2 != 0 {
+        return false;
+    }
+    head.get(2..size).is_some_and(|dictionary| {
+        dictionary.chunks_exact(2).all(|pair| {
+            matches!(pair[0], 0x81..=0x9f | 0xe0..=0xfc)
+                && matches!(pair[1], 0x40..=0x7e | 0x80..=0xfc)
+        })
+    })
 }
 
 fn diagnostic(error: impl std::fmt::Display) -> String {
@@ -591,6 +607,7 @@ fn inspect_builtin_files(
     let mut identified = BTreeSet::new();
     let mut neko = Vec::new();
     let mut nekosdk_scripts = Vec::new();
+    let mut ai5v_samples = Vec::new();
     let mut bsscript = Vec::new();
     let mut scn = Vec::new();
     let mut pfs_archives = Vec::new();
@@ -662,6 +679,9 @@ fn inspect_builtin_files(
         }
         if head.starts_with(b"NEKOSDK_ADVSCRIPT2\0") && nekosdk_scripts.len() < 4 {
             nekosdk_scripts.push(path.clone());
+        }
+        if ai5v_samples.len() < 2 && extension(path) == "mes" && ai5v_dictionary_header(&head) {
+            ai5v_samples.push(path.clone());
         }
         if let Some((key, detail, container)) = identify(&head, &tail) {
             add(
@@ -823,6 +843,11 @@ fn inspect_builtin_files(
         components.push(json!({"id":"nekosdk-script","sampleFiles":nekosdk_scripts,
             "evidence":"脚本头匹配 NEKOSDK_ADVSCRIPT2，按记录检查提取和回填。",
             "inspectCall":{"tool":"inspect_adapter_component","arguments":{"id":"nekosdk-script"}}}));
+    }
+    if !ai5v_samples.is_empty() {
+        components.push(json!({"id":"ai5v-mes","sampleFiles":ai5v_samples,
+            "evidence":"MES 头部符合 CP932 字表布局，请用完整字节码和往返确认 AI5V 方言。",
+            "inspectCall":{"tool":"inspect_adapter_component","arguments":{"id":"ai5v-mes"}}}));
     }
     Ok(
         json!({"revision":DISCOVERY_REVISION,"filesScanned":scanned,"partial":partial,"candidates":result,"components":components,"pfsArchives":pfs_archives,"scriptArchives":script_archives,"warnings":warnings}),
