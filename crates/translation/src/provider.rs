@@ -23,11 +23,34 @@ const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
 const ANALYSIS_FIRST_RESPONSE_TIMEOUT: Duration = Duration::from_secs(180);
 const ANALYSIS_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 
+type RetryCallback<'a> = &'a (dyn Fn(&ProviderError, u64) + Send + Sync);
+
 #[derive(Clone, Copy)]
-enum CompletionMode {
+enum CompletionMode<'a> {
     Standard,
     Analysis,
+    Review(RetryCallback<'a>),
     ConnectionTest,
+}
+
+impl CompletionMode<'_> {
+    fn streams(self) -> bool {
+        matches!(self, Self::Analysis | Self::Review(_))
+    }
+
+    fn retries(self, error: &ProviderError) -> bool {
+        match error.status_code {
+            Some(429 | 500..=599) => !matches!(self, Self::ConnectionTest),
+            Some(408) => matches!(self, Self::Review(_)),
+            // A timed-out stream can already have reported billable usage.
+            None if error.diagnostic.code == "request-timeout" => {
+                matches!(self, Self::Review(_))
+                    && error.usage.input_tokens == 0
+                    && error.usage.output_tokens == 0
+            }
+            _ => false,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -443,7 +466,46 @@ impl OpenAiProvider {
         maximum_output_tokens: u32,
         cancellation: &CancellationToken,
     ) -> Result<Completion, ProviderError> {
-        let known = agent_tool_names(tools, known_tool_names)?;
+        self.complete_tool_turn(
+            messages,
+            tools,
+            agent_tool_names(tools, known_tool_names)?,
+            maximum_output_tokens,
+            cancellation,
+            CompletionMode::Analysis,
+        )
+        .await
+    }
+
+    /// Streams a review turn and reports retries before waiting to send it again.
+    pub async fn complete_review(
+        &self,
+        messages: &[Value],
+        tools: &[Value],
+        maximum_output_tokens: u32,
+        cancellation: &CancellationToken,
+        on_retry: RetryCallback<'_>,
+    ) -> Result<Completion, ProviderError> {
+        self.complete_tool_turn(
+            messages,
+            tools,
+            agent_tool_names(tools, &[])?,
+            maximum_output_tokens,
+            cancellation,
+            CompletionMode::Review(on_retry),
+        )
+        .await
+    }
+
+    async fn complete_tool_turn(
+        &self,
+        messages: &[Value],
+        tools: &[Value],
+        known: HashSet<String>,
+        maximum_output_tokens: u32,
+        cancellation: &CancellationToken,
+        mode: CompletionMode<'_>,
+    ) -> Result<Completion, ProviderError> {
         validate_agent_messages(
             messages,
             self.settings.protocol,
@@ -456,7 +518,7 @@ impl OpenAiProvider {
             Some(&known),
             maximum_output_tokens,
             cancellation,
-            CompletionMode::Analysis,
+            mode,
         )
         .await
     }
@@ -468,7 +530,7 @@ impl OpenAiProvider {
         known_tool_names: Option<&HashSet<String>>,
         maximum_output_tokens: u32,
         cancellation: &CancellationToken,
-        mode: CompletionMode,
+        mode: CompletionMode<'_>,
     ) -> Result<Completion, ProviderError> {
         let waiting = std::time::Instant::now();
         let permit = tokio::select! {
@@ -496,10 +558,12 @@ impl OpenAiProvider {
             // Translation batches have their own retries and journal in the executor.
             if let Err(error) = &result
                 && tools.is_some()
-                && !matches!(mode, CompletionMode::ConnectionTest)
-                && matches!(error.status_code, Some(429 | 500..=599))
                 && retries < 2
+                && mode.retries(error)
             {
+                if let CompletionMode::Review(on_retry) = mode {
+                    on_retry(error, retries + 1);
+                }
                 let delay = error
                     .retry_after
                     .unwrap_or(Duration::from_secs(retries + 1))
@@ -527,7 +591,7 @@ impl OpenAiProvider {
         known_tool_names: Option<&HashSet<String>>,
         maximum_output_tokens: u32,
         cancellation: &CancellationToken,
-        mode: CompletionMode,
+        mode: CompletionMode<'_>,
     ) -> Result<Completion, ProviderError> {
         let mut body = match self.settings.protocol {
             ApiProtocol::ChatCompletions => {
@@ -596,7 +660,7 @@ impl OpenAiProvider {
                 }
             }
         }
-        if matches!(mode, CompletionMode::Analysis) {
+        if mode.streams() {
             body["stream"] = json!(true);
             if self.settings.protocol == ApiProtocol::ChatCompletions {
                 body["stream_options"] = json!({"include_usage":true});
@@ -621,7 +685,7 @@ impl OpenAiProvider {
             .post(self.endpoint.clone())
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(payload.clone());
-        if !matches!(mode, CompletionMode::Analysis) {
+        if !mode.streams() {
             request = request.timeout(self.request_timeout);
         }
         if !self.settings.api_key.is_empty() {
@@ -629,7 +693,7 @@ impl OpenAiProvider {
         }
         let started = std::time::Instant::now();
         let mut attempted = false;
-        let result = if matches!(mode, CompletionMode::Analysis) {
+        let result = if mode.streams() {
             self.receive_agent_stream(
                 request,
                 payload.len(),
@@ -1899,9 +1963,11 @@ mod tests {
 
     #[tokio::test]
     async fn adaptation_deadline_overrides_only_the_actual_analysis_request() {
+        let ignore_retry = |_: &ProviderError, _: u64| {};
         for protocol in [ApiProtocol::ChatCompletions, ApiProtocol::Responses] {
             for mode in [
                 CompletionMode::Analysis,
+                CompletionMode::Review(&ignore_retry),
                 CompletionMode::Standard,
                 CompletionMode::ConnectionTest,
             ] {
@@ -1918,6 +1984,10 @@ mod tests {
                         .complete_agent(&messages, &agent_tools(), &[], 128, &cancellation)
                         .await
                         .map(|_| ()),
+                    CompletionMode::Review(on_retry) => provider
+                        .complete_review(&messages, &agent_tools(), 128, &cancellation, on_retry)
+                        .await
+                        .map(|_| ()),
                     CompletionMode::Standard => provider
                         .complete(&messages, None, 128, &cancellation)
                         .await
@@ -1928,7 +1998,7 @@ mod tests {
                             .await
                     }
                 };
-                if matches!(mode, CompletionMode::Analysis) {
+                if mode.streams() {
                     result.unwrap();
                 } else {
                     let error = result.unwrap_err();

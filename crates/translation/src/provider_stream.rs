@@ -489,15 +489,16 @@ impl OpenAiProvider {
                     *attempted = true;
                     request.send().await
                 }) => match result {
-                    Err(_) => {
+                    Ok(Ok(response)) => response,
+                    Ok(Err(error)) if !error.is_timeout() => {
+                        return Err(ProviderError::new("network-error", "API 请求失败，结果未知。"));
+                    }
+                    _ => {
                         timing.timeout_stage = Some("first-response");
                         return Err(ProviderError::new(
                             "request-timeout", "等待分析响应首字节超时，结果未知。",
                         ));
                     }
-                    Ok(result) => result.map_err(|_| ProviderError::new(
-                        "network-error", "API 请求失败，结果未知。",
-                    ))?,
                 }
             };
             let status = response.status();
@@ -535,7 +536,11 @@ impl OpenAiProvider {
                         return Err(ProviderError::new("cancelled", "任务已取消。"));
                     }
                     result = tokio::time::timeout_at(deadline,response.chunk()) => match result {
-                        Err(_) => {
+                        Ok(Ok(chunk)) => chunk,
+                        Ok(Err(error)) if !error.is_timeout() => {
+                            return Err(ProviderError::new("network-interrupted", "API 流式响应中断，结果未知。"));
+                        }
+                        _ => {
                             timing.timeout_stage = Some(if first.is_none() {
                                 "first-response"
                             } else {
@@ -545,9 +550,6 @@ impl OpenAiProvider {
                                 "request-timeout", "分析响应等待超时，结果未知。",
                             ));
                         }
-                        Ok(result) => result.map_err(|_| ProviderError::new(
-                            "network-interrupted", "API 流式响应中断，结果未知。",
-                        ))?,
                     }
                 };
                 let Some(chunk) = chunk else {
@@ -612,7 +614,7 @@ impl OpenAiProvider {
                 if !assembly.done && !error.is_cancelled() && error.status_code.is_none() {
                     error.outcome_unknown = true;
                 }
-                if !usage_recorded && assembly.root().get("usage").is_some() {
+                if !usage_recorded && !assembly.root()["usage"].is_null() {
                     let usage = read_usage(assembly.root(), self.settings.protocol, payload_len, 0);
                     self.record_usage(&usage);
                     error.usage = usage;
@@ -928,6 +930,48 @@ mod tests {
             assert_eq!(provider.request_count(), 1);
             handle.join().unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn review_retries_the_same_turn_after_a_response_timeout() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stalled, _) = listener.accept().unwrap();
+            let original = read_mock_request(&mut stalled);
+            let (mut resumed, _) = listener.accept().unwrap();
+            let retry = read_mock_request(&mut resumed);
+            let body = stream_fixture(response_done(), ApiProtocol::Responses);
+            write!(resumed, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            (original, retry)
+        });
+        let mut provider = local_agent(endpoint, ApiProtocol::Responses);
+        provider.analysis_first_response_timeout = Duration::from_millis(500);
+        let retries = std::sync::Mutex::new(Vec::new());
+        let completion = provider
+            .complete_review(
+                &agent_messages(),
+                &agent_tools(),
+                128,
+                &CancellationToken::new(),
+                &|error, retry| {
+                    retries
+                        .lock()
+                        .unwrap()
+                        .push((retry, error.diagnostic.code.clone()));
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(completion.tool_calls[0].name, "read");
+        assert_eq!(
+            retries.into_inner().unwrap(),
+            [(1, "request-timeout".into())]
+        );
+        let (original, retry) = server.join().unwrap();
+        assert_eq!(original, retry);
+        let metrics = provider.request_metrics();
+        assert_eq!((metrics.requests, metrics.failed_requests), (2, 1));
     }
 
     #[tokio::test]

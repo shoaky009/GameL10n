@@ -2464,18 +2464,14 @@ mod tests {
         .unwrap();
 
         let response = |name: &str, arguments: Value, input_tokens: u64, output_tokens: u64| {
-            (
-                200,
-                json!({
-                    "choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","tool_calls":[{
-                        "id":name,"type":"function","function":{"name":name,"arguments":arguments.to_string()}
-                    }]}}],
-                    "usage":{"prompt_tokens":input_tokens,"completion_tokens":output_tokens}
-                }),
-            )
+            let mut response = analysis_tool(name, arguments);
+            response.1["usage"] =
+                json!({"prompt_tokens":input_tokens,"completion_tokens":output_tokens});
+            response
         };
         let (endpoint, server) = local_analysis_responses(vec![
             response("read_evidence", json!({"path":"overview"}), 0, 0),
+            (408, json!({})),
             response(
                 "finish_review",
                 json!({"summary":"Review summary","improvement":null,"mainProgramSuggestions":[]}),
@@ -2491,7 +2487,9 @@ mod tests {
 
         let error = app.review_engine(&project.id).await.unwrap_err();
         assert!(error.to_string().contains("Token 预算不足"), "{error}");
-        assert_eq!(server.await.len(), 2);
+        let requests = server.await;
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[1], requests[2]);
         let draft: Value = read_json(&directory.join("logs/engine-review-session.json")).unwrap();
         assert_eq!(draft["usage"]["estimated"], true);
         assert!(draft["usage"]["inputTokens"].as_u64().unwrap() > 0);

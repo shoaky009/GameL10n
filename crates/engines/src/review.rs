@@ -305,17 +305,38 @@ impl EngineService {
                     ..EngineProgress::default()
                 });
             }
-            let completion = provider
-                .complete(
+            let response = provider
+                .complete_review(
                     &messages,
-                    Some(&tools),
+                    &tools,
                     limits
                         .maximum_output_tokens
                         .min((remaining - estimated).min(u64::from(u32::MAX)) as u32),
                     cancellation,
+                    &|error, retry| {
+                        if let Some(progress) = progress {
+                            progress(EngineProgress {
+                                stage: "重试总结请求".into(),
+                                message: format!(
+                                    "{}，正在进行第 {retry} 次重试",
+                                    error.failure_summary()
+                                ),
+                                usage: usage.clone(),
+                                turn,
+                                api_requests: Some(
+                                    provider.request_count().saturating_sub(requests_before),
+                                ),
+                                ..EngineProgress::default()
+                            });
+                        }
+                    },
                 )
-                .await
-                .map_err(|error| EngineError::Api(Box::new(error)))?;
+                .await;
+            let completion = match response {
+                Ok(completion) => completion,
+                Err(error) if error.is_cancelled() => return Err(EngineError::Cancelled),
+                Err(error) => return Err(EngineError::Api(Box::new(error))),
+            };
             add_usage(&mut usage, &completion_usage(&completion, estimated)?);
             if tokens(&usage) > limits.maximum_tokens {
                 break;
