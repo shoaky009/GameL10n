@@ -4,6 +4,7 @@
 pub mod adaptation;
 mod adaptation_assets;
 mod adaptation_context;
+mod adapter_assets;
 pub mod discovery;
 mod native_tools;
 mod process;

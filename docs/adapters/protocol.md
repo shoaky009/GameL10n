@@ -45,4 +45,6 @@ Python 适配器入口为 `src/adapter.py`。从标准输入读取一份 UTF-8 J
 
 宿主提供包根目录 `adapterDirectory` 和固定工具的 `toolPaths`。通过 `tools/gamel10n_host.py` 使用 `parser`、`component` 和 `write_response`。[宿主接口](../../adapters/components/gamel10n_host.py)
 
+构建或校验需要登记的公开素材时，可以在写入产物之前返回 `success: false`、`errorKind: "dependency"` 和 `requiredAssets: {catalog, files}`。`catalog` 为宿主登记的素材来源 ID，`files` 为对应清单内的文件名。宿主校验共享缓存中的素材，缺失时按登记的地址和哈希获取，随后用同一请求重试一次。`toolPaths.assets` 提供素材名到只读文件路径的映射。
+
 当前执行 Manifest v4 Python 包。固定依赖需要同版本文件，更新后需重新验收。正式包和补丁使用不同的发布目录与清单。[正式适配器](artifacts.md#正式适配器) · [协议字段参考](../../crates/engines/prompts/adapter-protocol.md)

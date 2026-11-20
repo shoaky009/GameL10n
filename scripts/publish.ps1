@@ -41,10 +41,6 @@ $runtimeFiles = @(
     Get-Item -LiteralPath (Join-Path $runtime 'game-check/GameL10n.GameCheck.exe')
     Get-Item -LiteralPath (Join-Path $runtime 'tool-runner/GameL10n.ToolRunner.exe')
     Get-Item -LiteralPath (Join-Path $runtime 'adapter-components/QlieLauncher.exe')
-    $qlieFontSources = Get-Content -LiteralPath (Join-Path $repo 'third_party/qlie-fonts/sources.json') -Raw | ConvertFrom-Json
-    foreach ($name in $qlieFontSources.files.PSObject.Properties.Name) {
-        Get-Item -LiteralPath (Join-Path $runtime "adapter-components/qlie-fonts/$name")
-    }
     Get-Item -LiteralPath (Join-Path $runtime 'adapter-components/GameL10n.FontBridge.dll')
     Get-Item -LiteralPath (Join-Path $runtime 'adapter-components/GameL10n.FontBridge.LICENSE')
     $references = Join-Path $repo 'third_party/engine-tools'

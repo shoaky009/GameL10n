@@ -6,7 +6,7 @@ use std::{
 };
 
 use crate::{
-    CancellationToken, EngineError, ToolPaths, ToolProcess,
+    CancellationToken, EngineError, EngineService, ToolPaths, ToolProcess, adapter_assets,
     protocol::{AdapterRequest, AdapterResponse},
 };
 
@@ -59,6 +59,43 @@ impl PythonAdapter {
         request: &AdapterRequest,
         cancellation: &CancellationToken,
     ) -> Result<AdapterResponse, EngineError> {
+        self.run(request, &[], cancellation)
+            .await?
+            .checked_for_operation(&request.operation)
+    }
+
+    pub(crate) async fn execute_with_assets(
+        &self,
+        service: &EngineService,
+        request: &AdapterRequest,
+        cancellation: &CancellationToken,
+    ) -> Result<AdapterResponse, EngineError> {
+        let response = self.run(request, &[], cancellation).await?;
+        if response.protocol_version == 1
+            && !response.success
+            && response.error_kind.as_deref() == Some("dependency")
+            && matches!(request.operation.as_str(), "build" | "validate")
+            && let Some(required) = &response.required_assets
+        {
+            let assets = adapter_assets::resolve(service, required, cancellation).await?;
+            let mut request = request.clone();
+            request.extra.entry("toolPaths".into()).or_default()["assets"] =
+                serde_json::json!(&assets);
+            let read_paths: Vec<_> = assets.into_values().collect();
+            return self
+                .run(&request, &read_paths, cancellation)
+                .await?
+                .checked_for_operation(&request.operation);
+        }
+        response.checked_for_operation(&request.operation)
+    }
+
+    async fn run(
+        &self,
+        request: &AdapterRequest,
+        asset_paths: &[PathBuf],
+        cancellation: &CancellationToken,
+    ) -> Result<AdapterResponse, EngineError> {
         let directory = tempfile::tempdir()?;
         let response_file = directory.path().join("response.json");
         let mut request = request.clone();
@@ -79,6 +116,7 @@ impl PythonAdapter {
         if self.isolate_execution {
             process = process.with_arguments([OsString::from("--isolated")]);
             let mut read_paths = vec![self.paths.root.clone()];
+            read_paths.extend_from_slice(asset_paths);
             if let Some(parent) = self.entry.parent() {
                 read_paths.push(parent.into());
             }
@@ -138,12 +176,11 @@ impl PythonAdapter {
                 .with_isolation(self.paths.isolated_runner(), read_paths, write_paths)
                 .with_isolated_inputs(vec![request.source_directory.clone()]);
         }
-        let response = process
+        process
             .with_response_file(response_file)
             .with_failure_response()
             .execute::<_, AdapterResponse>(&request, cancellation)
-            .await?;
-        response.checked_for_operation(&request.operation)
+            .await
     }
 }
 

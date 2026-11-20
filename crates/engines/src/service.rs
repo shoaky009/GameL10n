@@ -773,7 +773,7 @@ impl EngineService {
                 );
                 PythonAdapter::new(&self.tools, entry)?
                     .with_execution_isolation(self.isolate_execution)
-                    .execute(&request, cancellation)
+                    .execute_with_assets(self, &request, cancellation)
                     .await
             }
             AdapterHandle::BuiltinSiglus => {
@@ -2384,7 +2384,10 @@ impl EngineService {
             Err(error) => {
                 result.cacheable = !matches!(
                     &error,
-                    EngineError::Io(_) | EngineError::Timeout | EngineError::ToolMissing(_)
+                    EngineError::Io(_)
+                        | EngineError::Timeout
+                        | EngineError::ToolMissing(_)
+                        | EngineError::Research(_)
                 );
                 result.issues.push(
                     issue.unwrap_or_else(|| crate::VerificationIssue::from_error(phase, &error)),

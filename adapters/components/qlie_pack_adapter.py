@@ -431,9 +431,11 @@ def rebuild(root, request, install, translations, warnings):
     layout = install.font_layout
     characters = {char for text in translations.values() for char in text}
     needed = font.glyphs_needed(characters, mapping)
+    assets = {}
     if needed:
         if not layout:
             raise ValueError(f"QLIE 译文需要已确认的中文编码与字体方案（{install.font_diagnostic}）")
+        assets = font.resolve_assets(request, layout)
         sources = list(sources)
         occupied = {char for _, _, script in sources for char in font.PRIVATE_CHARS.findall(script)}
         mapping = font.plan(layout, mapping, needed, occupied, characters)
@@ -444,7 +446,7 @@ def rebuild(root, request, install, translations, warnings):
             raise ValueError("QLIE 补丁启动器与原游戏 EXE 同名")
         config, table = layout.resource_edits(mapping)
         changes.setdefault(layout.table_volume, {})[layout.table_member] = table
-        runtime = font.make_runtime(layout, install.executable, mapping)
+        runtime = font.make_runtime(layout, install.executable, mapping, assets)
         runtime[layout.config_path] = config
     files = sorted(set(install.files) | set(runtime), key=str.casefold)
     operation = request["operation"]
@@ -496,6 +498,9 @@ def main():
     request = json.load(sys.stdin)
     try:
         response = dict(protocolVersion=1, success=True, **execute(request))
+    except font.NeedFontAssets as error:
+        response = dict(protocolVersion=1, success=False, errorKind="dependency", error=str(error),
+                        requiredAssets=dict(catalog=font.ASSET_CATALOG, files=error.files))
     except (ValueError, OSError) as error:
         kind = "io" if isinstance(error, OSError) else "incompatible"
         response = dict(protocolVersion=1, success=False, errorKind=kind, error=str(error)[:1000])

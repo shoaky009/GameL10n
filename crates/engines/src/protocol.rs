@@ -252,6 +252,15 @@ pub struct AdapterResponse {
     pub inspection: Option<serde_json::Value>,
     #[serde(default)]
     pub probe_reads: Vec<ProbeRead>,
+    /// A build or validation can request read-only files from a registered asset source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_assets: Option<RequiredAssets>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RequiredAssets {
+    pub catalog: String,
+    pub files: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

@@ -21,7 +21,7 @@ vnTextPatch, vnTextPatchCommand and hostCommand in toolPaths.
 Python can call existing python.engines/python.archives modules without rewriting their algorithms.
 from tools.gamel10n_host import parser, component accesses pinned parsers and precompiled font/encoding components.
 Implement bounded probe in Python; full-file parsers must never run against truncated probe input.
-The same pinned files are used for test_adapter and all published operations; use bundled/shared dependencies, restoring missing files from a complete release.
+test_adapter and published operations use the same pinned files. The host supplies registered public assets on demand.
 Never hardcode these paths, download libraries from adapter code, or copy shared runtimes into game output.
 Always enumerate the current resourceFiles or sourceDirectory; filenames from the development game must not be pinned.
 Resource discovery patterns accept *, ? and ** with / separators (e.g. **/*.dat), and form a union, not required-file conditions.

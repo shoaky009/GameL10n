@@ -10,6 +10,7 @@ use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
+use tokio_util::task::AbortOnDropHandle;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -169,7 +170,12 @@ impl EngineService {
             cached => cached,
         };
         let request = async {
-            let mut response = public_response(parsed).await?;
+            // Debug HTTPS proxy connections need a shallow call stack.
+            let mut response = AbortOnDropHandle::new(tokio::spawn(public_response(parsed)))
+                .await
+                .map_err(|error| {
+                    EngineError::Research(format!("公开资料请求任务中断（{error}）"))
+                })??;
             if response
                 .content_length()
                 .is_some_and(|bytes| bytes > maximum_bytes)

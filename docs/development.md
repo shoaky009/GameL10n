@@ -20,8 +20,6 @@
 
 开发工具保存在 `target/runtime/`，发布后位于程序目录的 `tools/`。找不到 .NET SDK 时可通过 `-Dotnet` 指定 `dotnet.exe`。已有固定版本的本地 Python 归档可传给 `prepare-python.ps1 -ArchivePath`。[工具准备脚本](../scripts/prepare-tools.ps1)
 
-QLIE 模板使用固定版本的 Noto Sans SC、Noto Serif SC 和随附许可。可单独用 `scripts/prepare-qlie-fonts.ps1` 准备字体资产。[字体来源和哈希](../third_party/qlie-fonts/sources.json)
-
 ## 检查
 
 ```powershell

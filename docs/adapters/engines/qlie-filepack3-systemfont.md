@@ -12,11 +12,11 @@
 
 遇到 CP932 无法往返的译文时，模板跳过脚本及字体配置中已用的双字节码位，给新增字符分配字形，生成对应的 Noto SC 衍生字体和启动配置。补丁保留字形映射和 OFL 许可。再次提取时按原封包、成员和字段回读译文，沿用既有文本 ID。
 
-匹配的游戏可在首轮模型请求前完成原文逐字节验收、少量中文试写和全量中文回填验收。系统文本、实际游戏显示及排版仍需确认。[智能适配流程](../automatic-adaptation.md)
+匹配的游戏可在首轮模型请求前完成原文逐字节验收、少量中文试写和全量中文回填验收。需要补字时，宿主从固定上游获取对应的字体和许可，校验 SHA-256 后存入共享下载缓存。首次缺缓存时需要联网。游戏补丁随附生成的字体及许可。系统文本、实际游戏显示及排版仍需确认。[智能适配流程](../automatic-adaptation.md) · [字体来源和哈希](../../../third_party/qlie-fonts/sources.json)
 
 ## 字体组件接口
 
-`qlie-sfnt-font` 提供其他已确认单字体布局所需的独立字体试验。模板使用随附的字体素材和 `qlie-japanese-font-launcher`。
+`qlie-sfnt-font` 提供其他已确认单字体布局所需的独立字体试验。模板使用按需准备的字体素材和 `qlie-japanese-font-launcher`。单独检查素材时可用 `inspect_adapter_component` 查询 `qlie-systemfont-assets` 的固定下载地址及哈希，使用 `download_tool` 下载到 `work/`。
 
 用 `component("qlie_font", request, input=..., output=..., family=..., map=...)` 生成配套 SFNT 字体。配置名使用字体 `name` 表 ID 4 的完整 Regular 名称，保留原有外字槽并附字体许可。[组件接口](../components.md#接入与版本管理)
 

@@ -328,7 +328,11 @@ pub(super) fn inspect(
     let id = text(args, "id")?;
     let component = find(&components, id)?;
     let Some(path) = args.get("path").and_then(Value::as_str) else {
-        return Ok(describe(component, service));
+        let mut description = describe(component, service);
+        if let Some(sources) = crate::adapter_assets::sources(&component.id)? {
+            description["sources"] = json!(sources);
+        }
+        return Ok(description);
     };
     let path = path.replace('\\', "/");
     if component.id == QLIE_LAUNCHER
@@ -459,7 +463,6 @@ pub(super) fn copy(
                 role: if is_release_source(relative)
                     || relative.ends_with("/VNTextProxy-LICENSE.txt")
                     || relative.ends_with("/GameL10n.FontBridge.LICENSE")
-                    || relative.ends_with("-OFL.txt")
                 {
                     "license"
                 } else if relative.ends_with(".py") {

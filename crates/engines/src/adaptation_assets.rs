@@ -92,7 +92,7 @@ pub(crate) const ARCHIVE_TEMPLATES: &[ArchiveTemplate] = &[
         name: "QLIE PACK 3.0 + ImoScripter FormatType=1",
         module: "qlie_pack_adapter",
         extra_sources: &["qlie_samples.py", "qlie_systemfont.py", "qlie_sfnt.py"],
-        optional_components: &["qlie-systemfont-assets", "qlie-japanese-font-launcher"],
+        optional_components: &["qlie-japanese-font-launcher"],
         discovery_key: None,
         sample_component: None,
         prepare_for_model: true,

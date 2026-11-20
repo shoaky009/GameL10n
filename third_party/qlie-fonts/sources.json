@@ -1,5 +1,6 @@
 {
   "repository": "https://github.com/google/fonts",
+  "rawBaseUrl": "https://raw.githubusercontent.com/google/fonts",
   "revision": "869789e84da92782c144d83d69b64cec54905b5f",
   "license": "OFL-1.1",
   "files": {

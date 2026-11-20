@@ -15,6 +15,7 @@ TABLE = "system/font/fontdata.dat"
 MAPPING = "qlie-l10n/glyphs.json"
 LAUNCH = "qlie-l10n/launch.xml"
 LAUNCHER = "QlieLauncher.exe"
+ASSET_CATALOG = "qlie-systemfont-assets"
 FONT_INPUTS = {
     "Sans": "NotoSansSC",
     "Serif": "NotoSerifSC",
@@ -40,6 +41,12 @@ SYSTEM_FACES = {
 }
 CONFIG_BYTES = 64 << 10
 FONT_BYTES = 64 << 20
+
+
+class NeedFontAssets(ValueError):
+    def __init__(self, files):
+        super().__init__("QLIE 中文回填需要已登记的字体素材")
+        self.files = files
 
 
 def read_map(value):
@@ -188,21 +195,28 @@ def plan(layout, mapping, needed, occupied, characters):
     return mapping | dict(zip(available, codes))
 
 
-def make_runtime(layout, executable, mapping):
-    launch = ElementTree.Element("launch", executable=executable)
+def resolve_assets(request, layout):
     if not (TOOLS / LAUNCHER).is_file():
         raise ValueError("QLIE 中文回填缺少启动器，请准备系统字体模板组件")
+    names = [f"{FONT_INPUTS[style]}-{suffix}" for style in sorted(set(layout.styles.values()))
+             for suffix in ("VF.ttf", "OFL.txt")]
+    assets = (request.get("toolPaths") or {}).get("assets", {})
+    if any(name not in assets for name in names):
+        raise NeedFontAssets(names)
+    return {name: Path(assets[name]) for name in names}
+
+
+def make_runtime(layout, executable, mapping, assets):
+    launch = ElementTree.Element("launch", executable=executable)
     artifacts = {MAPPING: map_bytes(mapping), LAUNCHER: archive.read_file(TOOLS / LAUNCHER, 8 << 20)}
     for style in sorted(set(layout.styles.values())):
         filename = f"{style}.ttf"
         relative = f"qlie-l10n/{filename}"
         name = family(style, mapping)
-        source = TOOLS / "qlie-fonts" / f"{FONT_INPUTS[style]}-VF.ttf"
         license_name = f"{FONT_INPUTS[style]}-OFL.txt"
-        if not source.is_file() or not source.with_name(license_name).is_file():
-            raise ValueError(f"QLIE 缺少适用的字体源 {source.name}")
-        artifacts[f"qlie-l10n/{license_name}"] = archive.read_file(source.with_name(license_name), CONFIG_BYTES)
-        artifacts[relative] = qlie_sfnt.derive(archive.read_file(source, FONT_BYTES), name, mapping)
+        source = archive.read_file(assets[f"{FONT_INPUTS[style]}-VF.ttf"], FONT_BYTES)
+        artifacts[f"qlie-l10n/{license_name}"] = archive.read_file(assets[license_name], CONFIG_BYTES)
+        artifacts[relative] = qlie_sfnt.derive(source, name, mapping)
         ElementTree.SubElement(launch, "font", file=relative, face=name + " Regular")
     artifacts[LAUNCH] = ElementTree.tostring(launch, encoding="utf-8", xml_declaration=True)
     return artifacts

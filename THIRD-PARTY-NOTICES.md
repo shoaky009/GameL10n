@@ -28,10 +28,10 @@ the dependency versions are recorded in Cargo.lock and each standalone tool's Ca
 
 ## Noto Sans SC and Noto Serif SC
 
-The QLIE system-font recipe uses pinned TrueType fonts under the SIL Open Font
-License 1.1. The application includes their upstream copyright notices and
-license files. The generated QLIE fonts have distinct family names and retain
-the same licenses. [Sources and hashes](third_party/qlie-fonts/sources.json)
+The QLIE system-font recipe obtains pinned TrueType fonts and their notices on
+demand under the SIL Open Font License 1.1. The generated QLIE fonts have
+distinct family names and include the upstream copyright notices and licenses.
+[Sources and hashes](third_party/qlie-fonts/sources.json)
 
 ## Windows Capture
 

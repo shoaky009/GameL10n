@@ -299,17 +299,12 @@
   },
   {
     "id": "qlie-systemfont-assets",
-    "name": "QLIE 系统字体模板素材",
-    "scope": "为 qlie-pack3-imos 的系统字体布局提供固定的简体 Noto Sans SC、Noto Serif SC 及各自的 OFL 许可",
+    "name": "QLIE 系统字体公开来源",
+    "scope": "qlie-pack3-imos 模板使用的 Noto Sans SC、Noto Serif SC 及各自的 OFL 许可",
     "origin": "Google Fonts 发布的 Noto SC，来源和哈希记在 third_party/qlie-fonts/sources.json",
-    "api": "组合 qlie-pack3-imos 时自动接入素材和启动器。匹配系统字体布局的游戏直接运行 test_adapter",
-    "example": "compose_adapter_template(id='qlie-pack3-imos')",
-    "files": [
-      {"name": "qlie-fonts/NotoSansSC-VF.ttf", "path": "src/tools/qlie-fonts/NotoSansSC-VF.ttf", "binary": true},
-      {"name": "qlie-fonts/NotoSansSC-OFL.txt", "path": "src/tools/qlie-fonts/NotoSansSC-OFL.txt", "binary": true},
-      {"name": "qlie-fonts/NotoSerifSC-VF.ttf", "path": "src/tools/qlie-fonts/NotoSerifSC-VF.ttf", "binary": true},
-      {"name": "qlie-fonts/NotoSerifSC-OFL.txt", "path": "src/tools/qlie-fonts/NotoSerifSC-OFL.txt", "binary": true}
-    ],
+    "api": "模板需要补字时由宿主校验并缓存所需字体。直接使用 qlie-pack3-imos 的验收结果。单独试验字体时用 sources 中的固定 URL 下载到 work/，核对返回的 sha256",
+    "example": "download_tool(url=sources['NotoSansSC-VF.ttf']['url'], path='work/qlie-fonts/NotoSansSC-VF.ttf')",
+    "files": [],
     "engineFamilies": ["template.qlie-pack3-imos"]
   },
   {
