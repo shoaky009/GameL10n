@@ -8,10 +8,6 @@ pub(crate) struct Workflow {
     pub needs_verification: bool,
     pub last_attempt: Option<String>,
     pub running: Option<String>,
-    pub evidence_revision: u64,
-    pub observations: BTreeSet<String>,
-    #[serde(skip)]
-    pub last_decision: Option<String>,
 }
 
 pub(super) struct Step {
@@ -91,33 +87,6 @@ pub(super) fn observe(
     {
         state.workflow.needs_verification = true;
     }
-
-    if matches!(
-        name,
-        "report_progress" | "checkpoint" | "load_tool_groups" | "finish"
-    ) {
-        return;
-    }
-    if matches!(
-        name,
-        "write_file" | "replace_text" | "remove_file" | "update_release_files"
-    ) {
-        return;
-    }
-    let evidence = if name == "test_adapter" {
-        json!({"passed":result["passed"],"stage":result["stage"],"issues":result["issues"],"error":result["error"],"diagnostics":result["diagnostics"]})
-    } else {
-        result.clone()
-    };
-    let signature =
-        hash_text(&json!({"tool":name,"arguments":args,"evidence":evidence}).to_string());
-    if state.workflow.observations.insert(signature) {
-        state.workflow.evidence_revision = state.workflow.evidence_revision.saturating_add(1);
-    }
-    // The guard is deliberately conservative when its bounded observation set fills up.
-    if state.workflow.observations.len() > 512 {
-        state.workflow.observations.clear();
-    }
 }
 
 pub(super) fn next(state: &mut Session, workspace: &Path) -> Result<Option<Step>, EngineError> {
@@ -153,20 +122,6 @@ pub(super) fn next(state: &mut Session, workspace: &Path) -> Result<Option<Step>
         arguments,
         fingerprint,
     }))
-}
-
-pub(super) fn decision_key(
-    state: &Session,
-    workspace: &Path,
-) -> Result<Option<String>, EngineError> {
-    let input = repair::input_key(state);
-    let tickets: Vec<_> = repair::pending(state, &input)
-        .map(|ticket| json!({"id":ticket.id,"evidence":ticket.evidence,"approach":ticket.approach}))
-        .collect();
-    if tickets.is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(hash_text(&json!({"tickets":tickets,"inputs":input,"implementation":workspace_fingerprint(workspace,state)?,"evidenceRevision":state.workflow.evidence_revision,"instruction":state.user_instruction}).to_string())))
 }
 
 pub(super) fn recover(state: &mut Session) {

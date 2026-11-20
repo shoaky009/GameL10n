@@ -536,7 +536,6 @@ pub(super) async fn run(
     trace_run: &impl Fn(Value) -> Result<(), EngineError>,
 ) -> Result<(AdaptationStatus, String, Option<AdapterHandle>), EngineError> {
     state.extra.remove("blocker");
-    state.workflow.last_decision = None;
     state.next_action.clear();
     decision::bootstrap(state);
     let initial_usage = tokens(&state.usage);
@@ -554,7 +553,6 @@ pub(super) async fn run(
     let output_limit = request.limits.maximum_output_tokens;
     let mut recovering_output = false;
     let mut tool_call_retries = 0;
-    let mut summaries = 0;
     for key in ["lastImplementationTurn", "lastVerificationProgressTurn"] {
         if !state.extra.contains_key(key) {
             set_number(
@@ -754,12 +752,7 @@ pub(super) async fn run(
                 ));
             }
             if call.name == "report_blocker" && value["stopped"] == true {
-                let status = if value["status"] == "incomplete"
-                    || value["workRemaining"] == true
-                    || value["kind"] == "work_remaining"
-                {
-                    AdaptationStatus::Incomplete
-                } else if value["kind"] == "needs_input" {
+                let status = if value["kind"] == "needs_input" {
                     AdaptationStatus::WaitingForUser
                 } else {
                     AdaptationStatus::Unsupported
@@ -840,26 +833,6 @@ pub(super) async fn run(
             trace_run(
                 json!({"operation":"implementation-review","turn":state.total_turns,"lastImplementationTurn":number(state,"lastImplementationTurn"),"lastVerificationProgressTurn":number(state,"lastVerificationProgressTurn"),"highestVerificationMilestone":number(state,"highestVerificationMilestone")}),
             )?;
-        }
-        let decision_key = workflow::decision_key(state, workspace).ok().flatten();
-        if decision_key.is_some() && decision_key == state.workflow.last_decision {
-            trace_run(
-                json!({"operation":"decision-deferred","reason":"no-new-repair-evidence","turn":state.total_turns,"fingerprint":decision_key}),
-            )?;
-            let input = repair::input_key(state);
-            let mut summary = "没有新增证据或实现变化，已暂停重复分析".to_owned();
-            if let Some(ticket) = repair::pending(state, &input).next_back() {
-                let issue = &ticket.issue;
-                let detail = issue.actual.lines().next().unwrap_or_default().trim();
-                let detail = detail.chars().take(256).collect::<String>();
-                summary.push_str(&format!(
-                    "\n待修的验收问题 [{}] {}",
-                    issue.stage,
-                    detail.trim_end_matches(['。', '.']),
-                ));
-            }
-            state.next_action = "点击“继续适配”，从待修的验收问题继续，可补充具体线索".into();
-            return Ok((AdaptationStatus::Incomplete, summary, None));
         }
         let mut decision_context = decision::build(state, workspace, &service.disabled_families)?;
         let mut retained = state.messages[state.history_start..]
@@ -1008,7 +981,6 @@ pub(super) async fn run(
         };
         recovering_output = false;
         tool_call_retries = 0;
-        state.workflow.last_decision = decision_key;
         state.total_turns += 1;
         let usage = completion_usage(&response, estimated)?;
         add_usage(&mut state.usage, &usage);
@@ -1040,21 +1012,7 @@ pub(super) async fn run(
             ));
         }
         if state.pending_calls.is_empty() {
-            summaries += 1;
-            if summaries >= 2 {
-                state.next_action = "点击“继续适配”沿用现有工作。若模型持续只返回总结，可在项目设置中更换分析 API 后继续".into();
-                return Ok((
-                    AdaptationStatus::Incomplete,
-                    format!(
-                        "模型连续返回总结，未继续执行适配操作。已有源码和调查结果已保存。\n\n{}",
-                        state.summary
-                    ),
-                    None,
-                ));
-            }
             state.messages.push(json!({"role":"user","content":format!("{}\n全部工具定义均已提供，请直接选择下一项操作。{}如果确实需要用户提供资料或操作，或调查后已确认无法支持，请单独调用 report_blocker，说明已尝试的方案、具体卡点和可执行的下一步。",objective_context(&state.objective),if state.verified_package.is_some(){"完整资源验收已通过。若当前目标已完成，请直接 finish；在 summary 披露已知覆盖遗漏和仍需用户验证的运行效果。不要因未进游戏验证而重新开始研究或扩展其他类别。"}else{"适配尚未发布。请执行下一项工具操作，继续解决真实验证失败，包括中文编码和字体支持；不要仅返回阶段总结。"})}));
-        } else {
-            summaries = 0;
         }
     }
 }
@@ -1399,6 +1357,25 @@ mod tests {
         json!({"id":"fixture","choices":[{"finish_reason":reason,"message":{"role":"assistant","content":"仍在探索：正在核对资源结构。"}}],"usage":{"prompt_tokens":100,"completion_tokens":20,"prompt_tokens_details":{"cached_tokens":50}}})
     }
 
+    fn tool_response(id: &str, name: &str, args: Value) -> Value {
+        json!({"id":id,"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","tool_calls":[
+            {"id":id,"type":"function","function":{"name":name,"arguments":args.to_string()}}
+        ]}}],"usage":{"prompt_tokens":100,"completion_tokens":20}})
+    }
+
+    fn input_required_response(id: &str) -> Value {
+        tool_response(
+            id,
+            "report_blocker",
+            json!({
+                "kind":"needs_input",
+                "summary":"需要一份原版脚本样本。",
+                "reason":"游戏目录缺少可验证的原版脚本。",
+                "nextAction":"请提供原版脚本样本。"
+            }),
+        )
+    }
+
     const RESPONSE_TOKENS: u64 = 100_000;
 
     fn budgeted_response(mut response: Value) -> Value {
@@ -1524,8 +1501,8 @@ mod tests {
             &json!({"passed":false,"issues":[{"code":"text-mismatch","stage":"extract","expected":"original","actual":"changed"}]}),
         );
         assert!(
-            workflow::decision_key(&state, &workspace)
-                .unwrap()
+            repair::pending(&state, &repair::input_key(&state))
+                .next()
                 .is_some()
         );
         let malformed = file_response(
@@ -1613,6 +1590,77 @@ mod tests {
             assert_eq!(state.api_requests(), 1);
             assert!(!workspace.join("work/rejected.py").exists());
         }
+    }
+
+    #[tokio::test]
+    async fn repeated_rejected_repair_batches_return_errors_and_allow_correction() {
+        let root = tempfile::tempdir().unwrap();
+        let (service, mut request, workspace, mut state) = fixture(root.path());
+        request.limits.maximum_tokens = 3 * RESPONSE_TOKENS;
+        repair::observe(
+            &mut state,
+            repair::Scope::Full,
+            "adapter-v1",
+            &json!({"passed":false,"issues":[{"code":"text-mismatch","stage":"extract","expected":"original","actual":"changed"}]}),
+        );
+
+        let rejected_batch = |id| {
+            json!({
+                "choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":null,
+                    "tool_calls":[
+                        {"id":format!("run-{id}"),"type":"function","function":{"name":"run_engine_python",
+                            "arguments":json!({"script":"work/probe.py","content":"print('ready')\n"}).to_string()}},
+                        {"id":format!("inspect-{id}"),"type":"function","function":{"name":"inspect_pe_imports",
+                            "arguments":json!({"root":"game","path":"game.exe"}).to_string()}}
+                    ]}}],
+                "usage":{"prompt_tokens":100,"completion_tokens":20}
+            })
+        };
+        let repair = file_response(
+            ApiProtocol::ChatCompletions,
+            "repair",
+            "src/adapter.py",
+            false,
+        );
+        let (provider, server) = model(
+            [rejected_batch(1), rejected_batch(2), repair]
+                .map(budgeted_response)
+                .into(),
+        );
+        let result = run(
+            &service,
+            &request,
+            &provider,
+            &workspace,
+            &workspace.join("session.json"),
+            &mut state,
+            "Repair the text mismatch.".into(),
+            &CancellationToken::new(),
+            None,
+            &|_| Ok(()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.total_turns, 3);
+        assert_eq!(result.0, AdaptationStatus::BudgetExhausted);
+        let requests = server.join().unwrap();
+        for (index, request) in requests.iter().enumerate().skip(1) {
+            assert!(
+                request["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|message| {
+                        message["role"] == "tool"
+                            && message["tool_call_id"] == format!("run-{index}")
+                            && message["content"]
+                                .as_str()
+                                .is_some_and(|content| content.contains("读取与运行须拆成不同批次"))
+                    })
+            );
+        }
+        assert!(!workspace.join("work/probe.py").exists());
+        assert!(workspace.join("src/adapter.py").is_file());
     }
 
     #[tokio::test]
@@ -2065,11 +2113,6 @@ mod tests {
         register_python(&mut state, "src/adapter.py").unwrap();
 
         let main = auxiliary.replace("text.json", "main.json");
-        let tool_response = |id: &str, name: &str, args: Value| {
-            json!({"id":id,"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","tool_calls":[
-                {"id":id,"type":"function","function":{"name":name,"arguments":args.to_string()}}
-            ]}}],"usage":{"prompt_tokens":100,"completion_tokens":20}})
-        };
         let (provider, server) = model([
             tool_response(
                 "auxiliary",
@@ -2200,7 +2243,6 @@ mod tests {
             json!({"text.json":hash_file(&request.game_directory.join("text.json")).unwrap()}),
         );
         register_python(&mut state, "src/adapter.py").unwrap();
-        let tool_response = |id: &str, name: &str, args: Value| json!({"id":id,"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","tool_calls":[{"id":id,"type":"function","function":{"name":name,"arguments":args.to_string()}}]}}],"usage":{"prompt_tokens":100,"completion_tokens":20}});
         let (provider, server) = model(vec![
             tool_response(
                 "trial",
@@ -2359,11 +2401,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn identical_failed_verification_defers_a_third_model_decision() {
+    async fn repeated_failed_verification_reaches_the_model_until_it_requests_input() {
         let root = tempfile::tempdir().unwrap();
         let (service, request, workspace, mut state) = fixture(root.path());
-        let response = |id: &str| json!({"id":id,"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","tool_calls":[{"id":id,"type":"function","function":{"name":"test_adapter","arguments":json!({"kind":"engine","key":"fixture","name":"Fixture","resourcePatterns":["*.json"]}).to_string()}}]}}],"usage":{"prompt_tokens":100,"completion_tokens":20}});
-        let (provider, server) = model(vec![response("first"), response("same")]);
+        let response = |id| {
+            tool_response(
+                id,
+                "test_adapter",
+                json!({"kind":"engine","key":"fixture","name":"Fixture","resourcePatterns":["*.json"]}),
+            )
+        };
+        let (provider, server) = model(vec![
+            response("first"),
+            response("same"),
+            input_required_response("blocker"),
+        ]);
         let (status, summary, _) = run(
             &service,
             &request,
@@ -2378,20 +2430,88 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(server.join().unwrap().len(), 2);
-        assert_eq!(status, AdaptationStatus::Incomplete);
-        assert!(summary.contains("没有新增证据"));
+        assert_eq!(status, AdaptationStatus::WaitingForUser);
+        assert_eq!(summary, "需要一份原版脚本样本。");
         assert_eq!(state.repairs.len(), 1);
-        let issue = &state.repairs[0].issue;
-        assert!(summary.contains(&issue.stage));
-        assert!(summary.contains(issue.actual.trim_end_matches(['。', '.'])));
+        let requests = server.join().unwrap();
+        let failure = requests[2]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["role"] == "tool" && message["tool_call_id"] == "same")
+            .unwrap();
+        let failure: Value = serde_json::from_str(failure["content"].as_str().unwrap()).unwrap();
+        assert_eq!(failure["success"], false);
         let completed = result(&mut state, status, &summary, vec![]);
-        assert!(completed.next_action.contains("待修的验收问题"));
-        assert!(!completed.next_action_from_model);
+        assert_eq!(completed.next_action, "请提供原版脚本样本。");
+        assert!(completed.next_action_from_model);
 
         let inventory = Inventory::scan(&request.game_directory).unwrap();
         let resume = continuation(&state, &workspace, &inventory, 0, &BTreeSet::new()).unwrap();
         assert!(resume.contains(&state.repairs[0].id));
+    }
+
+    #[tokio::test]
+    async fn blocker_reports_require_evidence_and_no_remaining_local_work() {
+        let root = tempfile::tempdir().unwrap();
+        let (service, request, workspace, mut state) = fixture(root.path());
+        let unsupported = json!({
+            "kind":"unsupported",
+            "summary":"当前无法读取加密脚本。",
+            "reason":"未取得解密密钥。",
+            "nextAction":"在取得可读取的原版资源后继续。",
+            "canContinueLocally":false
+        });
+        let mut needs_input = unsupported.clone();
+        needs_input["kind"] = json!("needs_input");
+        needs_input["canContinueLocally"] = json!(true);
+        let mut confirmed = unsupported.clone();
+        confirmed["evidence"] =
+            json!("样本头部与目录可解析。已检查启动程序和配置，当前材料没有解密所需数据。");
+        let (provider, server) = model(vec![
+            tool_response("missing-evidence", "report_blocker", unsupported.clone()),
+            tool_response("still-missing-evidence", "report_blocker", unsupported),
+            tool_response("local-work-remains", "report_blocker", needs_input),
+            tool_response("confirmed", "report_blocker", confirmed.clone()),
+        ]);
+        let (status, summary, _) = run(
+            &service,
+            &request,
+            &provider,
+            &workspace,
+            &workspace.join("session.json"),
+            &mut state,
+            "检查资源能否读取".into(),
+            &CancellationToken::new(),
+            None,
+            &|_| Ok(()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, AdaptationStatus::Unsupported);
+        assert_eq!(state.total_turns, 4);
+        let requests = server.join().unwrap();
+        for (index, id) in [
+            "missing-evidence",
+            "still-missing-evidence",
+            "local-work-remains",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let feedback = requests[index + 1]["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|message| message["role"] == "tool" && message["tool_call_id"] == id)
+                .unwrap();
+            let feedback: Value =
+                serde_json::from_str(feedback["content"].as_str().unwrap()).unwrap();
+            assert_eq!(feedback["stopped"], false);
+        }
+        let completed = result(&mut state, status, &summary, vec![]);
+        assert_eq!(completed.blocker, confirmed);
+        assert!(completed.next_action_from_model);
     }
 
     #[test]
@@ -2776,7 +2896,10 @@ mod tests {
         recover(&mut state, &request, "fixture");
         let inventory = Inventory::scan(&request.game_directory).unwrap();
         let context = continuation(&state, &workspace, &inventory, 0, &BTreeSet::new()).unwrap();
-        let (provider, server) = model(vec![summary_response("stop"), summary_response("stop")]);
+        let (provider, server) = model(vec![
+            summary_response("stop"),
+            input_required_response("blocker"),
+        ]);
         run(
             &service,
             &request,
@@ -2853,17 +2976,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn truncated_output_recovers_once_and_summary_only_responses_stop() {
+    async fn truncated_output_recovers_and_summary_only_responses_use_the_token_budget() {
         let root = tempfile::tempdir().unwrap();
-        let (service, request, workspace, mut state) = fixture(root.path());
+        let (service, mut request, workspace, mut state) = fixture(root.path());
+        request.limits.maximum_tokens = 4 * RESPONSE_TOKENS;
         state
             .extra
             .insert("preferredOutputTokens".into(), json!(20_000));
-        let (provider, server) = model(vec![
-            summary_response("length"),
-            summary_response("stop"),
-            summary_response("stop"),
-        ]);
+        let (provider, server) = model(
+            [
+                summary_response("length"),
+                summary_response("stop"),
+                summary_response("stop"),
+                summary_response("stop"),
+            ]
+            .map(budgeted_response)
+            .into(),
+        );
         let result = run(
             &service,
             &request,
@@ -2878,12 +3007,12 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(result.0, AdaptationStatus::Incomplete);
-        assert_eq!(state.usage.input_tokens, 300);
-        assert_eq!(state.usage.output_tokens, 60);
-        assert_eq!(state.usage.cached_tokens, Some(150));
-        assert_eq!(state.total_turns, 2);
-        assert_eq!(state.api_requests(), 3);
+        assert_eq!(result.0, AdaptationStatus::BudgetExhausted);
+        assert_eq!(state.usage.input_tokens, 4 * (RESPONSE_TOKENS - 20));
+        assert_eq!(state.usage.output_tokens, 80);
+        assert_eq!(state.usage.cached_tokens, Some(200));
+        assert_eq!(state.total_turns, 3);
+        assert_eq!(state.api_requests(), 4);
         assert!(!state.api_requests_estimated());
         assert_eq!(state.progress_note["kind"], "exploring");
         let requests = server.join().unwrap();
@@ -2950,7 +3079,7 @@ mod tests {
         let (service, mut request, workspace, mut state) = fixture(root.path());
         request.limits.maximum_output_tokens = 128_000;
         request.limits.maximum_tokens = 80_000;
-        let (provider, server) = model(vec![summary_response("stop"), summary_response("stop")]);
+        let (provider, server) = model(vec![budgeted_response(summary_response("stop"))]);
         run(
             &service,
             &request,
@@ -3002,7 +3131,7 @@ mod tests {
         let (provider, server) = model(vec![
             edit,
             summary_response("stop"),
-            summary_response("stop"),
+            input_required_response("blocker"),
         ]);
         let events = std::sync::Mutex::new(Vec::new());
         run(
@@ -3062,7 +3191,10 @@ mod tests {
             fs::read_to_string(workspace.join("src/adapter.py")).unwrap(),
             "def main(): pass\n"
         );
-        let (provider, server) = model(vec![summary_response("stop"), summary_response("stop")]);
+        let (provider, server) = model(vec![
+            summary_response("stop"),
+            input_required_response("resumed-blocker"),
+        ]);
         run(
             &service,
             &request,
@@ -3108,7 +3240,10 @@ mod tests {
                 arguments: json!({"offset":0}).to_string(),
             },
         ];
-        let (provider, server) = model(vec![summary_response("stop"), summary_response("stop")]);
+        let (provider, server) = model(vec![
+            summary_response("stop"),
+            input_required_response("blocker"),
+        ]);
         let result = run(
             &service,
             &request,
@@ -3123,7 +3258,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(result.0, AdaptationStatus::Incomplete);
+        assert_eq!(result.0, AdaptationStatus::WaitingForUser);
         let requests = server.join().unwrap();
         let first = requests[0]["messages"].as_array().unwrap();
         let results = first

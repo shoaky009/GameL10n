@@ -457,14 +457,11 @@ pub(crate) fn tokens(usage: &TokenUsage) -> u64 {
     usage.input_tokens.saturating_add(usage.output_tokens)
 }
 
-fn prepare_tool_call(state: &mut Session, name: &str, args: &Value) -> Result<(), EngineError> {
+fn validate_tool_arguments(args: &Value) -> Result<(), EngineError> {
     if !args.is_object() || serde_json::to_vec(args)?.len() > 512 * 1024 {
         return Err(EngineError::Protocol(
             "工具参数必须为不超过 512 KiB 的对象。".into(),
         ));
-    }
-    if name != "report_blocker" {
-        state.extra.remove("unresolvedStopReports");
     }
     Ok(())
 }
@@ -861,7 +858,7 @@ impl EngineService {
         // Keep verification out of the general tool handler's debug stack frame.
         if name == "test_adapter" {
             Box::pin(async move {
-                prepare_tool_call(state, name, args)?;
+                validate_tool_arguments(args)?;
                 self.test_adapter(request, workspace, state, args, cancellation, progress)
                     .await
             })
@@ -892,7 +889,7 @@ impl EngineService {
         cancellation: &CancellationToken,
         progress: ProgressCallback<'_>,
     ) -> Result<Value, EngineError> {
-        prepare_tool_call(state, name, args)?;
+        validate_tool_arguments(args)?;
         match name {
             "load_tool_groups" => {
                 if args
@@ -1811,42 +1808,23 @@ impl EngineService {
                         )));
                     }
                 }
-                let can_continue = args
-                    .get("canContinueLocally")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false);
-                if kind == "unsupported"
-                    && (args
-                        .get("evidence")
-                        .and_then(Value::as_str)
-                        .is_none_or(|value| value.trim().is_empty())
-                        || text(args, "evidence")
-                            .is_ok_and(|value| value.encode_utf16().count() > 2000)
-                        || args
-                            .get("canContinueLocally")
-                            .and_then(Value::as_bool)
-                            .is_none()
-                        || can_continue)
-                {
-                    let count = state
-                        .extra
-                        .get("unresolvedStopReports")
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0)
-                        + 1;
-                    state
-                        .extra
-                        .insert("unresolvedStopReports".into(), json!(count));
-                    if count >= 2 {
-                        state.summary = text(args, "summary")?.trim().into();
-                        state.next_action = text(args, "nextAction")?.trim().into();
-                        state.extra.insert("blocker".into(),json!({"needsUserInput":false,"reason":args["reason"],"nextAction":args["nextAction"],"workRemaining":true}));
-                        return Ok(
-                            json!({"stopped":true,"status":"incomplete","workRemaining":true,"reason":"模型连续请求停止，但未提供充分的停止说明。已保存未完成步骤，可继续适配。"}),
-                        );
+                let can_continue = match args.get("canContinueLocally") {
+                    Some(Value::Bool(value)) => Some(*value),
+                    None => None,
+                    _ => {
+                        return Err(EngineError::Protocol(
+                            "canContinueLocally 必须为布尔值".into(),
+                        ));
                     }
+                };
+                let has_evidence = args["evidence"].as_str().is_some_and(|evidence| {
+                    !evidence.trim().is_empty() && evidence.encode_utf16().count() <= 2000
+                });
+                if can_continue == Some(true)
+                    || (kind == "unsupported" && (can_continue != Some(false) || !has_evidence))
+                {
                     return Ok(
-                        json!({"stopped":false,"nextAction":"尚有本地工作或缺少不可支持的证据，请继续实现与验收。"}),
+                        json!({"stopped":false,"nextAction":"请继续当前可执行的本地工作。确有无法适配的阻碍时，提供已尝试方案和结果，并确认本地工作无法继续"}),
                     );
                 }
                 state.summary = text(args, "summary")?.into();
@@ -3235,13 +3213,6 @@ fn result(
         {
             (state.next_action.as_str(), true)
         }
-        AdaptationStatus::Incomplete if !state.next_action.is_empty() => (
-            state.next_action.as_str(),
-            state
-                .extra
-                .get("blocker")
-                .is_some_and(|blocker| blocker["workRemaining"] == true),
-        ),
         AdaptationStatus::Unavailable => ("使用带工具链的完整发行包，再继续适配。", false),
         AdaptationStatus::Incomplete => (
             "点击“继续适配”沿用现有源码和调查结果，可补充具体要求",
