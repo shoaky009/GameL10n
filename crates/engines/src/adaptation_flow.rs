@@ -2517,6 +2517,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn qlie_prepares_template_before_resuming_model_analysis() {
+        let root = tempfile::tempdir().unwrap();
+        let (_, mut request, workspace, mut state) = fixture(root.path());
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let service = EngineService::new(&repo, crate::ToolPaths::development());
+        if !service.tools.python().is_file() {
+            return;
+        }
+        let library = service
+            .reference_library(&service.current_reference().unwrap())
+            .unwrap();
+        assert!(
+            std::process::Command::new(service.tools.python())
+                .args(["-I", "-B", "-X", "utf8"])
+                .arg(repo.join("crates/engines/python/fixtures/qlie_installation.py"))
+                .arg(library)
+                .arg(&request.game_directory)
+                .status()
+                .unwrap()
+                .success()
+        );
+        fs::write(
+            request.game_directory.join("game.exe.le.config"),
+            "<LEConfig><Profiles><Profile><Location>ja-JP</Location></Profile></Profiles></LEConfig>",
+        )
+        .unwrap();
+        request.require_model_analysis = true;
+        request.limits.maximum_tokens = RESPONSE_TOKENS;
+        state.total_turns = 1;
+        let path = workspace.join("session.json");
+        save_session(&path, &mut state).await.unwrap();
+        let (provider, server) = model(vec![budgeted_response(summary_response("stop"))]);
+
+        let result = service
+            .adapt(&request, &provider, &CancellationToken::new(), None)
+            .await
+            .unwrap();
+        assert!(result.adapter.is_none());
+        let state = load_session(&path).unwrap();
+        let template = &state.extra["automaticTemplate"];
+        assert_eq!(template["templateId"], "qlie-pack3-imos", "{template}");
+        assert_eq!(template["originalRoundtripPassed"], true, "{template}");
+        assert!(
+            template["diagnostics"].to_string().contains("中文编码"),
+            "{template}"
+        );
+        assert!(workspace.join("src/adapter.py").is_file());
+        assert!(state.extra["resourceHashes"]["game.exe.le.config"].is_string());
+        assert!(state.extra["resourceHashes"]["GameData/media.pack"].is_null());
+        assert!(state.verified_package.is_none());
+        assert_eq!(
+            state.workflow.verification_args.unwrap()["key"],
+            "qlie-pack3-imos"
+        );
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].to_string().contains("originalRoundtripPassed"));
+    }
+
+    #[tokio::test]
     async fn automatic_sample_evidence_survives_compaction_restart_and_changed_inputs() {
         let root = tempfile::tempdir().unwrap();
         let (_, _, workspace, mut state) = fixture(root.path());

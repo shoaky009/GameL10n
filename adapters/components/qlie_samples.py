@@ -22,30 +22,37 @@ def _read_file(path, limit):
     return data
 
 
-def _read_member(archive, entry, external_key, game_key, limit):
+def internal_key(archive, external_key, game_key):
     stream, index = archive
     first = index.entries[0]
     if first.name != qlie.PACK_KEY_NAME or any(e.name == qlie.PACK_KEY_NAME for e in index.entries[1:]):
         raise ValueError('封包缺少唯一的首项内部密钥')
-    internal_key = qlie.read_member(stream, index, first, mode='keyed', key_file=external_key,
-                                    game_key=game_key, max_stored=KEY_BYTES, max_output=KEY_BYTES)
-    return qlie.read_member(stream, index, entry, mode='keyed', key_file=internal_key,
+    return qlie.read_member(stream, index, first, mode='keyed', key_file=external_key,
+                            game_key=game_key, max_stored=KEY_BYTES, max_output=KEY_BYTES)
+
+
+def read_member(archive, entry, key, game_key, limit):
+    stream, index = archive
+    return qlie.read_member(stream, index, entry, mode='keyed', key_file=key,
                             game_key=game_key, max_stored=limit, max_output=limit)
 
 
-def _profile(archives, external_key, game_key):
+def profile_members(index):
+    for entry in index.entries:
+        name = entry.name.replace('\\', '/').casefold()
+        if name in PROFILE:
+            yield entry, PROFILE[name]
+
+
+def script_profile(archives, read):
     sources = {}
     checked = 0
     for path, archive in archives.items():
-        for entry in archive[1].entries:
-            name = entry.name.replace('\\', '/').casefold()
-            if name not in PROFILE:
-                continue
+        for entry, (field, expected) in profile_members(archive[1]):
             checked += 1
             if checked > 8:
-                raise ValueError('ImoScripter 配置副本超过小样预算')
-            field, expected = PROFILE[name]
-            config = _read_member(archive, entry, external_key, game_key, 64 << 10).decode('cp932')
+                raise ValueError('ImoScripter 配置副本超出读取范围')
+            config = read(path, entry, 64 << 10).decode('cp932')
             values = set()
             for line in config.splitlines():
                 key, separator, value = line.partition('=')
@@ -99,6 +106,7 @@ def probe(request):
 
     with ExitStack() as stack:
         archives = {}
+        keys = {}
         eligible = []
         for path in request['archives']:
             stream = stack.enter_context(Path(files[path]).open('rb'))
@@ -108,7 +116,13 @@ def probe(request):
                             if entry.name.lower().endswith('.s')
                             and 0 < entry.size <= SAMPLE_BYTES
                             and 0 < entry.unpacked_size <= SAMPLE_BYTES)
-        profile = _profile(archives, external_key, game_key)
+        def read(path, entry, limit):
+            archive = archives[path]
+            if path not in keys:
+                keys[path] = internal_key(archive, external_key, game_key)
+            return read_member(archive, entry, keys[path], game_key, limit)
+
+        profile = script_profile(archives, read)
         # Prefer longer scene members over short bootstrap and interface scripts.
         eligible.sort(key=lambda item: (not item[1].name.replace('\\', '/').casefold().startswith('scenario/'),
                                         not (item[1].packed and item[1].encryption),
@@ -118,7 +132,7 @@ def probe(request):
             archive = archives[path]
             try:
                 qlie_writer.hash13_tail(*archive, max_bytes=4 << 20)
-                raw = _read_member(archive, entry, external_key, game_key, SAMPLE_BYTES)
+                raw = read(path, entry, SAMPLE_BYTES)
                 trial = _script_trial(entry, raw)
             except ValueError as exc:
                 error = str(exc)[:160]

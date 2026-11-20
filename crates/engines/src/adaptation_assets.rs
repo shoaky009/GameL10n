@@ -23,6 +23,7 @@ const ARTEMIS_REFERENCE: &str = include_str!("../references/Artemis_pfs_overlay.
 const KAGUYA_WARNING: &str = "KaGuYa MESSAGE v4.0 内置适配器只提供 CP932 脚本提取和回填；可提取不代表已支持中文运行。CP932 无法表示的译文会报错，中文编码、字节遍历和字体绘制仍需验证。";
 const GRAPHICS_SHA256: &str = "E1292E3D47D1C65F4AE52A30B1159A476137422BD7A9272A5A2E0129F3CB0684";
 pub(crate) const ARTEMIS_PFS_TEMPLATE: &str = "artemis-pfs8-ast";
+pub(crate) const QLIE_PACK_TEMPLATE: &str = "qlie-pack3-imos";
 
 /// An archive-specific adapter can qualify its own input before common verification.
 pub(crate) struct ArchiveTemplate {
@@ -36,6 +37,7 @@ pub(crate) struct ArchiveTemplate {
     pub(crate) extra_sources: &'static [&'static str],
     pub(crate) discovery_key: Option<&'static str>,
     pub(crate) sample_component: Option<&'static str>,
+    pub(crate) prepare_for_model: bool,
     distinct_volume_names: bool,
     pub(crate) limitations: &'static str,
 }
@@ -52,6 +54,7 @@ pub(crate) const ARCHIVE_TEMPLATES: &[ArchiveTemplate] = &[
         extra_sources: &[],
         discovery_key: Some("pfsArchives"),
         sample_component: None,
+        prepare_for_model: false,
         distinct_volume_names: false,
         limitations: "UTF-8 AST 2.0 的日文显示字段，完整重建含脚本的 PFS v8 卷。存在重名脚本、未知布局或需覆盖其他脚本时继续调查。游戏内加载与显示需要试译确认",
     },
@@ -66,8 +69,29 @@ pub(crate) const ARCHIVE_TEMPLATES: &[ArchiveTemplate] = &[
         extra_sources: &["nekosdk_script.py"],
         discovery_key: None,
         sample_component: Some("nekosdk-script"),
+        prepare_for_model: false,
         distinct_volume_names: true,
         limitations: "NEKOPACK4A 内带长度的 ADVSCRIPT2 对白、人名和日志字段，按 CP932 回填并复提。选择项、界面资源和中文运行需按游戏验证",
+    },
+    ArchiveTemplate {
+        id: QLIE_PACK_TEMPLATE,
+        format: "Qlie",
+        component: "python.archives.qlie",
+        extensions: &[".s"],
+        patterns: &[
+            "GameData/*.pack",
+            "DLL/key.fkey",
+            "*.exe",
+            "*.exe.le.config",
+        ],
+        name: "QLIE PACK 3.0 + ImoScripter FormatType=1",
+        module: "qlie_pack_adapter",
+        extra_sources: &["qlie_samples.py"],
+        discovery_key: None,
+        sample_component: None,
+        prepare_for_model: true,
+        distinct_volume_names: false,
+        limitations: "需要同一启动目录的 EXE 图标密钥、外部与各卷内部密钥、HashVer1.3 和一致的脚本配置。已识别字段按 CP932 提取与回填，中文编码、系统文本和游戏显示仍需验收",
     },
 ];
 

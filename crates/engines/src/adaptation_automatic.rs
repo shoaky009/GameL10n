@@ -94,14 +94,15 @@ fn fresh(
     request: &AdaptationRequest<'_>,
     workspace: &Path,
     state: &Session,
+    prepare_for_model: bool,
 ) -> Result<bool, EngineError> {
-    Ok(!request.require_model_analysis
+    Ok((prepare_for_model || !request.require_model_analysis)
         && request.inputs.files.is_empty()
         && request.inputs.excluded.is_empty()
         && request.objective.eq_ignore_ascii_case("develop")
         && !request.improve_existing
         && request.baseline_units.is_empty()
-        && state.total_turns == 0
+        && (prepare_for_model || state.total_turns == 0)
         && state.pending_calls.is_empty()
         && state.verified_package.is_none()
         && state.release_files.is_empty()
@@ -1527,10 +1528,10 @@ async fn probe_archive_template(
     workspace: &Path,
     state: &Session,
     template: &ArchiveTemplate,
-    volumes: &[String],
+    files: &[String],
     cancellation: &CancellationToken,
 ) -> Result<Value, EngineError> {
-    let originals = volumes
+    let originals = files
         .iter()
         .map(|relative| {
             Ok((
@@ -1546,12 +1547,26 @@ async fn probe_archive_template(
         .helper(
             &json!({
                 "operation":"archive_template_probe","root":request.game_directory,"module":template.module,
-                "files":volumes,"library":library,"components":service.asset_root.join("adapters/components"),
+                "files":files,"library":library,"components":service.asset_root.join("adapters/components"),
                 "timeoutSeconds":10
             }),
             cancellation,
         )
         .await
+}
+
+fn preparable_template(state: &Session) -> Option<&'static ArchiveTemplate> {
+    let trials = state.extra.get("automaticArchiveTrials")?.as_array()?;
+    ARCHIVE_TEMPLATES.iter().find(|template| {
+        template.prepare_for_model
+            && trials
+                .iter()
+                .any(|trial| trial["templateId"] == template.id)
+    })
+}
+
+pub(super) fn can_prepare_for_model(state: &Session) -> bool {
+    preparable_template(state).is_some()
 }
 
 pub(super) async fn run_template(
@@ -1563,17 +1578,20 @@ pub(super) async fn run_template(
     cancellation: &CancellationToken,
     progress: ProgressCallback<'_>,
 ) -> Result<Option<AdapterHandle>, EngineError> {
-    let archive_template = ARCHIVE_TEMPLATES.iter().find(|template| {
-        template.discovery_key.is_some_and(|key| {
-            state.extra["builtinDiscovery"][key]
-                .as_array()
-                .is_some_and(|archives| !archives.is_empty())
-        }) && !service
-            .disabled_families
-            .contains(&format!("template.{}", template.id))
+    let archive_template = preparable_template(state).or_else(|| {
+        ARCHIVE_TEMPLATES.iter().find(|template| {
+            template.discovery_key.is_some_and(|key| {
+                state.extra["builtinDiscovery"][key]
+                    .as_array()
+                    .is_some_and(|archives| !archives.is_empty())
+            }) && !service
+                .disabled_families
+                .contains(&format!("template.{}", template.id))
+        })
     });
-    if !fresh(request, workspace, state)?
-        || !state.messages.is_empty()
+    let prepare_for_model = archive_template.is_some_and(|template| template.prepare_for_model);
+    if !fresh(request, workspace, state, prepare_for_model)?
+        || (!prepare_for_model && !state.messages.is_empty())
         || !request.user_instruction.trim().is_empty()
         || !state.user_instruction.trim().is_empty()
         || state.extra.contains_key("automaticTemplate")
@@ -1601,30 +1619,32 @@ pub(super) async fn run_template(
             archive_template.is_none() && service.disabled_families.contains(&parser_id)
         {return Err(reject(format!("模板或其内置解析器已禁用，未自动组合：{id}")));}
         let patterns:Vec<String>=serde_json::from_value(template["resourcePatterns"].clone())?;
-        let template_archive = |path: &str| archive_template.is_some()
+        let template_input = |path: &str| archive_template.is_some()
             && patterns.iter().any(|pattern| glob_match(pattern, path));
-        let volumes: Vec<_> = paths.keys().filter(|path| template_archive(path)).cloned().collect();
-        if volumes.len() > 64 {
-            return Err(reject("自动组合的待检查封包超过 64 项"));
+        let candidate_files: Vec<_> = paths.keys().filter(|path| template_input(path)).cloned().collect();
+        if candidate_files.len() > 64 {
+            return Err(reject("自动组合的待检查资源超过 64 项"));
         }
-        supported(paths.keys().filter(|path| !template_archive(path)),&template,
+        supported(paths.keys().filter(|path| !template_input(path)),&template,
             template["archiveComponent"] == "archive.rpa3",false)?;
         let lengths: BTreeMap<_, _> = if let Some(profile) = archive_template {
             report["stage"] = json!("archive-inspection");
-            let evidence = probe_archive_template(service, request, workspace, state, profile, &volumes, token).await?;
+            let evidence = probe_archive_template(service, request, workspace, state, profile, &candidate_files, token).await?;
             let selected: Vec<String> = serde_json::from_value(
                 evidence["probe"]["requiredFiles"].clone()
             ).map_err(|_| reject(evidence["diagnostic"].as_str().unwrap_or("封包与脚本布局不符合组合模板")))?;
             if !evidence["indexFingerprints"].as_object().is_some_and(|indices| !indices.is_empty()) {
                 return Err(reject("封包模板未返回已检查索引的指纹"));
             }
-            report["archiveIndexFingerprints"] = evidence["indexFingerprints"].clone();
+            if !prepare_for_model {
+                report["archiveIndexFingerprints"] = evidence["indexFingerprints"].clone();
+            }
             report["mediaOnlyArchives"] = evidence["mediaOnlyArchives"].clone();
             report["archiveReadBytes"] = evidence["indexBytes"].clone();
             report["archivedScripts"] = evidence["scriptCount"].clone();
             report["selectedBytes"] = evidence["scriptBytes"].clone();
             selected.into_iter().map(|relative| {
-                let length = paths.get(&relative).ok_or_else(|| reject("模板返回了清单以外的封包"))?;
+                let length = paths.get(&relative).ok_or_else(|| reject("模板返回了清单以外的资源"))?;
                 Ok((relative, *length))
             }).collect::<Result<_, EngineError>>()?
         } else {
@@ -1633,7 +1653,7 @@ pub(super) async fn run_template(
         };
         if lengths.is_empty()||lengths.len()>1024||archives.len()>16{return Err(reject("自动组合需要 1～1,024 个资源，且最多 16 个封包；当前资源数量超出范围。"));}
         if let Some(other)=candidates(state).into_iter().find(|candidate|candidate["format"]!=format&&matches!(candidate["evidenceKind"].as_str(),Some("script-signature"|"container-signature"|"format-signature"|"container-header"))){return Err(reject(format!("另有未被模板覆盖的格式证据：{}；{}",other["format"],other["evidence"])));}
-        if let Some(launch)=state.extra.get("launchInspection")&& (launch["partial"]==true||["localeProfiles","launchScripts","errorLogs"].iter().any(|field|launch[*field].as_array().is_some_and(|items|!items.is_empty()))){return Err(reject("存在尚需解释的启动配置、启动脚本、错误日志或不完整启动检查；先交给模型核对。"));}
+        if !prepare_for_model && let Some(launch)=state.extra.get("launchInspection")&& (launch["partial"]==true||["localeProfiles","launchScripts","errorLogs"].iter().any(|field|launch[*field].as_array().is_some_and(|items|!items.is_empty()))){return Err(reject("存在尚需解释的启动配置、启动脚本、错误日志或不完整启动检查；先交给模型核对。"));}
         if !coverage_list(state,"pending").is_empty()||!coverage_list(state,"runtimeChecks").is_empty(){return Err(reject("已有覆盖或运行待办需要继续处理，未自动完成任务。"));}
         let resource_bytes=lengths.values().try_fold(0_u64,|sum,length|sum.checked_add(*length)).ok_or_else(||reject("完整资源超过输入预算。"))?;
         let mut selected_bytes=lengths.iter().filter(|(path,_)|archive_template.is_none()&&extension(path)!="rpa").map(|(_,length)|*length).sum::<u64>();let input_budget=if archives.is_empty()&&archive_template.is_none(){TEMPLATE_BYTES}else{PACKED_TEMPLATE_BYTES};
@@ -1671,13 +1691,26 @@ pub(super) async fn run_template(
         report["stage"]=json!("compose");record(state,path,"automaticTemplate",report.clone()).await?;EngineService::report(progress,"自动组合适配器",format!("资源符合 {} 的条件，正在连接现有组件。",template["id"]));
         let composed=service.compose_template(workspace,state,&json!({"id":template["id"]}),token).await?;
         if !state.text_coverage.is_object(){state.text_coverage=json!({});}let mut checks=coverage_list(state,"runtimeChecks");checks.push(RUNTIME_CHECK.into());state.text_coverage["runtimeChecks"]=json!(checks);
+        let arguments = &composed["testArguments"];
+        if prepare_for_model {
+            workflow::register(state, arguments.clone());
+        }
         report["stage"]=json!("verification");record(state,path,"automaticTemplate",report.clone()).await?;EngineService::report(progress,"验证自动组合适配器","正在检查原字节往返，先做少量中文试写，通过后再验收全量中文回填。");
-        let tested=service.test_adapter(request,workspace,state,&composed["testArguments"],token,progress).await?;report["diagnostics"]=tested["diagnostics"].clone();
+        let tested = service.test_adapter(request, workspace, state, arguments, token, progress).await?;
+        report["diagnostics"] = tested["diagnostics"].clone();
+        if prepare_for_model {
+            workflow::observe(state, workspace, "test_adapter", arguments, &tested);
+            if state.verification.as_ref().is_some_and(|result| result.original_roundtrip_passed) {
+                report["originalRoundtripPassed"] = json!(true);
+                report["nextAction"] = json!("沿用已通过原文往返的模板和资源范围，处理当前译文验收问题及游戏内显示。修改后宿主按已保存的配方重新验收");
+            }
+            return Ok(None);
+        }
         if tested["passed"]!=true||tested["stage"]!="finish-ready"||tested["coveragePending"]==true{return Ok(None);}
         report["stage"]=json!("scope-recheck");record(state,path,"automaticTemplate",report.clone()).await?;
         let current=scan(&request.game_directory,token)?;
         let same_indices = if let Some(profile) = archive_template {
-            probe_archive_template(service, request, workspace, state, profile, &volumes, token)
+            probe_archive_template(service, request, workspace, state, profile, &candidate_files, token)
                 .await?["indexFingerprints"] == report["archiveIndexFingerprints"]
         } else {
             true
@@ -1810,7 +1843,7 @@ mod tests {
         state
             .messages
             .push(json!({"role":"user","content":"saved context"}));
-        assert!(fresh(&request, &workspace, &state).unwrap());
+        assert!(fresh(&request, &workspace, &state, false).unwrap());
         assert!(
             run_template(
                 &service,

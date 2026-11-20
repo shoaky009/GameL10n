@@ -3,7 +3,8 @@ from pathlib import Path
 import struct
 import sys
 
-sys.path.insert(0, sys.argv[1])
+if __name__ == '__main__':
+    sys.path.insert(0, sys.argv[1])
 from python.archives import qlie
 
 GAME_KEY = bytes(range(256))
@@ -31,13 +32,19 @@ def key_resource_exe():
     header[:2] = b'MZ'
     struct.pack_into('<I', header, 0x3C, 64)
     header[64:68] = b'PE\0\0'
-    struct.pack_into('<H', header, 70, 1)
-    struct.pack_into('<H', header, 84, 120)
-    struct.pack_into('<H', header, 88, 0x10B)
-    struct.pack_into('<I', header, 88 + 92, 3)
-    struct.pack_into('<II', header, 88 + 112, 0x1000, len(resource))
-    struct.pack_into('<III', header, 88 + 120 + 12, 0x1000, len(resource), len(header))
-    return header + resource
+    struct.pack_into('<HHIIIHH', header, 68, 0x14C, 1, 0, 0, 0, 224, 0x102)
+    optional = 88
+    struct.pack_into('<H', header, optional, 0x10B)
+    struct.pack_into('<I', header, optional + 16, 0x1000 + len(resource))
+    struct.pack_into('<III', header, optional + 28, 0x400000, 0x1000, 512)
+    struct.pack_into('<II', header, optional + 56, 0x2000, len(header))
+    struct.pack_into('<I', header, optional + 92, 16)
+    struct.pack_into('<II', header, optional + 112, 0x1000, len(resource))
+    section = optional + 224
+    header[section:section + 8] = b'.rsrc\0\0\0'
+    struct.pack_into('<IIII', header, section + 8, len(resource) + 1, 0x1000, 512, len(header))
+    struct.pack_into('<I', header, section + 36, 0x60000020)
+    return header + (resource + b'\xc3').ljust(512, b'\0')
 
 
 def make_pack(members, internal_key):
@@ -72,14 +79,26 @@ def make_pack(members, internal_key):
     return contents + index + tail + footer
 
 
-root = Path(sys.argv[2])
-(root / 'GameData').mkdir()
-(root / 'DLL').mkdir()
-(root / 'game.exe').write_bytes(key_resource_exe())
-(root / 'DLL/key.fkey').write_bytes(EXTERNAL_KEY)
-(root / 'GameData/system.pack').write_bytes(make_pack([
-    ('avg/projectsetting.txt', b'FormatType=1\r\n'), ('avg/setting.txt', b'ReturnCode=[n]\r\n'),
-], bytes([113]) * 256))
-(root / 'GameData/story.pack').write_bytes(make_pack([
-    ('scenario/story.s', '【花子】\r\nこんにちは\r\n\r\nさようなら\r\n'.encode('cp932')),
-], bytes([157]) * 256))
+def make_installation(root):
+    (root / 'GameData').mkdir()
+    (root / 'DLL').mkdir()
+    (root / 'game.exe').write_bytes(key_resource_exe())
+    (root / 'DLL/key.fkey').write_bytes(EXTERNAL_KEY)
+    (root / 'GameData/system.pack').write_bytes(make_pack([
+        ('asset.bin', bytes(70 << 10)),
+        ('avg/projectsetting.txt', b'FormatType=1\r\n'), ('avg/setting.txt', b'ReturnCode=[n]\r\n'),
+    ], bytes([113]) * 256))
+    (root / 'GameData/story.pack').write_bytes(make_pack([
+        ('scenario/story.s', '【花子】\r\nこんにちは\r\n\r\nさようなら\r\n'.encode('cp932')),
+    ], bytes([157]) * 256))
+    (root / 'GameData/update.pack').write_bytes(make_pack([
+        ('scenario/story.s', '別の会話\r\n'.encode('cp932')),
+        ('notes.txt', b'original member'),
+    ], bytes([253]) * 256))
+    (root / 'GameData/media.pack').write_bytes(make_pack([
+        ('image.bin', b'original media'),
+    ], bytes([195]) * 256))
+
+
+if __name__ == '__main__':
+    make_installation(Path(sys.argv[2]))

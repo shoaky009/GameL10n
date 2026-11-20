@@ -738,7 +738,7 @@ impl EngineService {
             if !recipes.is_empty() {
                 state.extra.insert("publishedReuse".into(), json!(recipes));
             }
-            if continuing {
+            if continuing && !automatic::can_prepare_for_model(&state) {
                 automatic::run_trials(
                     self,
                     request,
