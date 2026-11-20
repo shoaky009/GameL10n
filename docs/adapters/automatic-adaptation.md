@@ -23,7 +23,7 @@
 
 首次调用模型前，宿主用已有资源清单挑选少量封包，按需读取脚本和伴随文件。EAGLS SCPACK、Artemis PFS v8、BGI、普通 KIF、YPF 482 和 NEKOPACK4A 的小样可检查提取、原文往返及译文回读。YSTB 试验需要同目录的 `ysc.ybn`。格式、编码或依赖不符时，后续调查可复用已通过的小样结果。[封包组件](templates.md#封包组件) · [EAGLS 脚本](engines/eagls-scpack.md) · [Artemis PFS](engines/artemis-pfs.md) · [NekoSDK](engines/nekosdk.md)
 
-命中 QLIE 封包脚本模板时，宿主可在请求模型前组装适配器，验收提取及原文回填。需要继续验证中文编码与显示时，分析模型可以沿用已有模板和验收结果。[QLIE 适用范围](engines/qlie-filepack3-systemfont.md#封包脚本模板)
+NekoSDK 或 QLIE 封包小样通过原文往返后，宿主可在请求模型前组装适配器，验收提取及整卷原文回填。已有符合样本的中文回填配方时优先复用。需要处理译文编码、补充文字覆盖或确认游戏显示时，分析模型可以沿用已有实现和验收结果。[NekoSDK 适用范围](engines/nekosdk.md) · [QLIE 适用范围](engines/qlie-filepack3-systemfont.md#封包脚本模板)
 
 适配可检索公开资料、下载依赖并向分析服务发送必要的资源片段与工具结果。工作区保留会话、源码和报告，供修复或总结使用。[适配产物](artifacts.md) · [执行隔离](execution-isolation.md)
 

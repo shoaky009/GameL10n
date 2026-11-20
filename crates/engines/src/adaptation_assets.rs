@@ -69,7 +69,7 @@ pub(crate) const ARCHIVE_TEMPLATES: &[ArchiveTemplate] = &[
         extra_sources: &["nekosdk_script.py"],
         discovery_key: None,
         sample_component: Some("nekosdk-script"),
-        prepare_for_model: false,
+        prepare_for_model: true,
         distinct_volume_names: true,
         limitations: "NEKOPACK4A 内带长度的 ADVSCRIPT2 对白、人名和日志字段，按 CP932 回填并复提。选择项、界面资源和中文运行需按游戏验证",
     },

@@ -32,7 +32,7 @@
 | `nekopack4a-advscript2` | NEKOPACK4A 中无跨卷同名脚本的 CP932 ADVSCRIPT2 |
 | `qlie-pack3-imos` | [带密钥的 QLIE PACK 3.0 和 Hash 1.3 中的 ImoScripter FormatType=1](engines/qlie-filepack3-systemfont.md#封包脚本模板) |
 
-用 `compose_adapter_template` 准备源码和固定依赖。首次识别可自动尝试 Ren’Py、松散 KS 和 Artemis PFS 组合，资源布局或验收不满足条件时进入后续调查。XP3 需要先确认过滤器。NekoSDK 首轮尝试封包成员小样，组合模板供明确脚本和运行编码后使用。[模板注册](../../crates/engines/src/adaptation_assets.rs) · [生成和验收流程](automatic-adaptation.md)
+用 `compose_adapter_template` 准备源码和固定依赖。首次识别可自动尝试 Ren’Py、松散 KS 和 Artemis PFS 组合，资源布局或验收不满足条件时进入后续调查。XP3 需要先确认过滤器。NekoSDK 和 QLIE 的封包小样通过原文往返后，可在请求模型前组合模板并验证整卷，已有符合样本的中文回填配方时优先复用该配方。[模板注册](../../crates/engines/src/adaptation_assets.rs) · [生成和验收流程](automatic-adaptation.md)
 
 封包模板在注册项中声明候选证据、资源模式和固定模块。模块的 `probe` 返回完整验收需要的资源和已检查索引的指纹。宿主按同一套验收与发布流程处理，并在发布前复查索引。
 

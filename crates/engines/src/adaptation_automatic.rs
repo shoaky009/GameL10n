@@ -1223,17 +1223,6 @@ async fn inspect_archive_samples(
                 report.as_object_mut().and_then(|report| report.remove("samples")).unwrap_or(json!([])),
             )?;
             let template = ARCHIVE_TEMPLATES.iter().find(|template| template.format == format);
-            if !samples.is_empty()
-                && let Some(template) = template.filter(|template| {
-                    !service.disabled_families.contains(&format!("template.{}", template.id))
-                })
-            {
-                report["templateId"] = json!(template.id);
-                report["nextAction"] = json!(format!(
-                    "可用 compose_adapter_template 复用 {}，按模板条件检查当前资源后验收",
-                    template.name
-                ));
-            }
             let mut trials = Vec::new();
             for sample in samples {
                 let member = text(&sample, "member")?;
@@ -1308,6 +1297,16 @@ async fn inspect_archive_samples(
                 }
             }
             report["trials"] = json!(trials);
+            if let Some(template) = template
+                && crate::adaptation_context::archive_sample_passed(&report)
+                && !service.disabled_families.contains(&format!("template.{}", template.id))
+            {
+                report["templateId"] = json!(template.id);
+                report["nextAction"] = json!(format!(
+                    "复用 {} 的封包和脚本实现。已有自动组合结果时沿用其验收进度，继续确认译文编码和游戏显示",
+                    template.name
+                ));
+            }
             Ok::<_, EngineError>(report)
         }.await;
         let mut report = match result {
@@ -1557,11 +1556,19 @@ async fn probe_archive_template(
 
 fn preparable_template(state: &Session) -> Option<&'static ArchiveTemplate> {
     let trials = state.extra.get("automaticArchiveTrials")?.as_array()?;
+    let recipes = state.extra.get("publishedReuse").and_then(Value::as_array);
     ARCHIVE_TEMPLATES.iter().find(|template| {
         template.prepare_for_model
-            && trials
-                .iter()
-                .any(|trial| trial["templateId"] == template.id)
+            && trials.iter().any(|sample| {
+                sample["templateId"] == template.id
+                    && crate::adaptation_context::archive_sample_passed(sample)
+            })
+            && !recipes.into_iter().flatten().any(|recipe| {
+                recipe["id"]
+                    .as_str()
+                    .and_then(|id| id.strip_prefix("template."))
+                    == Some(template.id)
+            })
     })
 }
 
@@ -2848,6 +2855,26 @@ pathlib.Path(sys.argv[2]).write_bytes(build_pak({'scene.txt': script, 'image.bin
         assert_eq!(trial["unitCount"], 2, "{trial}");
         assert_eq!(trial["roundtripStatus"], "passed", "{trial}");
         assert_eq!(trial["errorType"], "UnicodeEncodeError", "{trial}");
+        assert!(can_prepare_for_model(&state));
+        assert!(
+            run_template(
+                &service,
+                &request,
+                &workspace,
+                &mut state,
+                &workspace.join("session.json"),
+                &cancellation,
+                None,
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+        assert_eq!(
+            state.extra["automaticTemplate"]["stage"],
+            "archive-inspection"
+        );
+        assert!(!workspace.join("src").exists());
 
         let package = root.path().join("published");
         fs::create_dir_all(&package).unwrap();
@@ -2880,6 +2907,8 @@ pathlib.Path(sys.argv[2]).write_bytes(build_pak({'scene.txt': script, 'image.bin
             reuse[0]["sampledArchives"],
             json!(["scr.pak", "update/scr.pak"])
         );
+        state.extra.insert("publishedReuse".into(), json!(reuse));
+        assert!(!can_prepare_for_model(&state));
     }
 
     #[tokio::test]
