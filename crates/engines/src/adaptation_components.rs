@@ -1,5 +1,5 @@
 //! Reusable adapter component metadata and the component-specific source whitelist.
-use super::{ReleaseFile, Session, select_release, strings, text};
+use super::{ReleaseFile, Session, select_release, strings, text, workspace_file};
 use crate::{
     CancellationToken, EngineError, EngineService, discovery::resolve_relative, native_tools,
 };
@@ -8,8 +8,42 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{collections::BTreeSet, ffi::OsString, fs, io::Write, path::Path};
 
-const VERSION: &str = "2.9.0";
-const USAGE: &str = "copy_adapter_components 按需复制 Python 辅助文件或预编译运行组件。work/ 中的诊断工具仅用于分析，不进入发布清单；src/ 中的组件供适配器复用。支持的 JSON CLI 可用 run_engine_python 直接运行。组件本身不保证当前游戏兼容，仍需资源回填及运行显示验证。";
+const VERSION: &str = "2.10.0";
+const USAGE: &str = "按 api 和 example 接入组件，有 probeCall 时可直接运行小样。work/ 下的探针用于分析，src/tools/ 下的组件供正式适配器复用。接入后仍需当前资源验收和游戏显示验证";
+const QLIE_LAUNCHER: &str = "qlie-japanese-font-launcher";
+const QLIE_LAUNCHER_BINARY: &str = "tools/QlieLauncher.exe";
+pub(super) const LAUNCHER_SOURCE_DIRECTORY: &str = "tools/launcher-source";
+const QLIE_LAUNCHER_SOURCES: &[(&str, &[u8])] = &[
+    ("LICENSE", include_bytes!("../../../LICENSE")),
+    (
+        "Cargo.toml",
+        include_bytes!("../../../tools/GameL10n.QlieLauncher/Cargo.toml"),
+    ),
+    (
+        "Cargo.lock",
+        include_bytes!("../../../tools/GameL10n.QlieLauncher/Cargo.lock"),
+    ),
+    (
+        "src/main.rs",
+        include_bytes!("../../../tools/GameL10n.QlieLauncher/src/main.rs"),
+    ),
+    (
+        "src/config.rs",
+        include_bytes!("../../../tools/GameL10n.QlieLauncher/src/config.rs"),
+    ),
+    (
+        "src/font.rs",
+        include_bytes!("../../../tools/GameL10n.QlieLauncher/src/font.rs"),
+    ),
+    (
+        "src/windows.rs",
+        include_bytes!("../../../tools/GameL10n.QlieLauncher/src/windows.rs"),
+    ),
+    (
+        "src/self_test.rs",
+        include_bytes!("../../../tools/GameL10n.QlieLauncher/src/self_test.rs"),
+    ),
+];
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -23,6 +57,7 @@ struct Component {
     files: Vec<ComponentFile>,
     engine_families: Vec<String>,
     sample_check: Option<String>,
+    probe_call: Option<Value>,
     #[serde(default)]
     native_tools: bool,
 }
@@ -32,6 +67,44 @@ struct ComponentFile {
     name: String,
     path: String,
     binary: bool,
+}
+
+pub(super) fn is_release_source(path: &str) -> bool {
+    let path = path.to_ascii_lowercase();
+    let path = path.strip_prefix("src/").unwrap_or(&path);
+    path.strip_prefix(LAUNCHER_SOURCE_DIRECTORY)
+        .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with('/'))
+}
+
+pub(super) fn visible_release_files(
+    files: &[ReleaseFile],
+) -> impl Iterator<Item = &ReleaseFile> + Clone {
+    files.iter().filter(|file| !is_release_source(&file.path))
+}
+
+fn launcher_source(path: &str) -> Option<&'static [u8]> {
+    let relative = path
+        .strip_prefix("src/")?
+        .strip_prefix(LAUNCHER_SOURCE_DIRECTORY)?
+        .strip_prefix('/')?;
+    QLIE_LAUNCHER_SOURCES
+        .iter()
+        .find_map(|(name, content)| (*name == relative).then_some(*content))
+}
+
+pub(super) fn retain_release_sources(
+    previous: &[ReleaseFile],
+    selection: &mut Vec<ReleaseFile>,
+) -> Result<(), EngineError> {
+    if selection
+        .iter()
+        .any(|file| file.path.eq_ignore_ascii_case(QLIE_LAUNCHER_BINARY))
+    {
+        for source in previous.iter().filter(|file| is_release_source(&file.path)) {
+            select_release(selection, source.clone())?;
+        }
+    }
+    Ok(())
 }
 
 fn catalog() -> Result<Vec<Component>, EngineError> {
@@ -54,6 +127,9 @@ pub(super) fn matches_shipped_dependency(
     path: &str,
     sha256: &str,
 ) -> Result<bool, EngineError> {
+    if let Some(content) = launcher_source(path) {
+        return Ok(hash_bytes(content) == sha256);
+    }
     let file = catalog()?
         .into_iter()
         .flat_map(|component| component.files)
@@ -146,13 +222,17 @@ pub(super) async fn check_sample(
 }
 
 fn describe(component: &Component, service: &EngineService) -> Value {
-    json!({
+    let mut description = json!({
         "id":component.id,"version":VERSION,"name":component.name,"scope":component.scope,
         "origin":component.origin,"api":component.api,"example":component.example,
         "sampleCheck":component.sample_check,
         "files":component.files.iter().map(|file|json!({"path":file.path,"binary":file.binary,"available":!file.binary||service.tools.root.join("adapter-components").join(&file.name).is_file()})).collect::<Vec<_>>(),
         "usage":USAGE
-    })
+    });
+    if let Some(call) = &component.probe_call {
+        description["probeCall"] = call.clone();
+    }
+    description
 }
 
 fn source(name: &str) -> Result<&'static [u8], EngineError> {
@@ -206,8 +286,8 @@ fn source(name: &str) -> Result<&'static [u8], EngineError> {
         "gamel10n_host.py" => Ok(include_bytes!(
             "../../../adapters/components/gamel10n_host.py"
         )),
-        "QlieLauncher.Cargo.toml" => Ok(include_bytes!(
-            "../../../tools/GameL10n.QlieLauncher/Cargo.toml"
+        "qlie_runtime_sample.py" => Ok(include_bytes!(
+            "../../../adapters/components/qlie_runtime_sample.py"
         )),
         _ => Err(EngineError::Rejected(format!("内置组件源码缺失：{name}"))),
     }
@@ -251,6 +331,11 @@ pub(super) fn inspect(
         return Ok(describe(component, service));
     };
     let path = path.replace('\\', "/");
+    if component.id == QLIE_LAUNCHER
+        && let Some(content) = launcher_source(&path)
+    {
+        return page(id, &path, &String::from_utf8_lossy(content), args);
+    }
     let file = component
         .files
         .iter()
@@ -307,39 +392,10 @@ pub(super) fn copy(
             };
             files.push((file.path.clone(), content));
         }
-        if component.id == "qlie-japanese-font-launcher" {
-            // Retain the launcher's complete Rust project beside the pinned binary.
-            for (name, content) in [
-                ("LICENSE", include_bytes!("../../../LICENSE").as_slice()),
-                (
-                    "Cargo.lock",
-                    include_bytes!("../../../tools/GameL10n.QlieLauncher/Cargo.lock").as_slice(),
-                ),
-                (
-                    "src/main.rs",
-                    include_bytes!("../../../tools/GameL10n.QlieLauncher/src/main.rs").as_slice(),
-                ),
-                (
-                    "src/config.rs",
-                    include_bytes!("../../../tools/GameL10n.QlieLauncher/src/config.rs").as_slice(),
-                ),
-                (
-                    "src/font.rs",
-                    include_bytes!("../../../tools/GameL10n.QlieLauncher/src/font.rs").as_slice(),
-                ),
-                (
-                    "src/windows.rs",
-                    include_bytes!("../../../tools/GameL10n.QlieLauncher/src/windows.rs")
-                        .as_slice(),
-                ),
-                (
-                    "src/self_test.rs",
-                    include_bytes!("../../../tools/GameL10n.QlieLauncher/src/self_test.rs")
-                        .as_slice(),
-                ),
-            ] {
+        if component.id == QLIE_LAUNCHER {
+            for (name, content) in QLIE_LAUNCHER_SOURCES {
                 files.push((
-                    format!("src/tools/launcher-source/{name}"),
+                    workspace_file(&format!("{LAUNCHER_SOURCE_DIRECTORY}/{name}")),
                     content.to_vec(),
                 ));
             }
@@ -393,16 +449,14 @@ pub(super) fn copy(
             }
             reused.insert(relative.clone());
         }
-        if !relative.starts_with("src/")
-            || (relative.ends_with(".cs") && !relative.starts_with("src/tools/launcher-source/"))
-        {
+        if !relative.starts_with("src/") || relative.ends_with(".cs") {
             continue;
         }
         select_release(
             &mut selection,
             ReleaseFile {
                 path: relative.trim_start_matches("src/").into(),
-                role: if relative.starts_with("src/tools/launcher-source/")
+                role: if is_release_source(relative)
                     || relative.ends_with("/VNTextProxy-LICENSE.txt")
                     || relative.ends_with("/GameL10n.FontBridge.LICENSE")
                 {
@@ -413,7 +467,7 @@ pub(super) fn copy(
                     "asset"
                 }
                 .into(),
-                purpose: if relative.starts_with("src/tools/launcher-source/") {
+                purpose: if is_release_source(relative) {
                     "保留启动器对应源码与构建说明。"
                 } else {
                     "内置文本、编码、字体或启动组件"
@@ -440,9 +494,12 @@ pub(super) fn copy(
         write_json(&path, &pin).map_err(super::file_error)?;
     }
     state.release_files = selection;
-    Ok(
-        json!({"components":selected.iter().map(|component|describe(component,service)).collect::<Vec<_>>(),"files":files.iter().map(|(relative,content)|json!({"path":relative,"reused":reused.contains(relative),"sha256":hash_bytes(content)})).collect::<Vec<_>>()}),
-    )
+    Ok(json!({
+        "components":selected.iter().map(|component|describe(component,service)).collect::<Vec<_>>(),
+        "files":files.iter().filter(|(relative,_)| !is_release_source(relative))
+            .map(|(relative,content)|json!({"path":relative,"reused":reused.contains(relative),"sha256":hash_bytes(content)}))
+            .collect::<Vec<_>>()
+    }))
 }
 
 #[cfg(test)]
@@ -770,7 +827,10 @@ mod tests {
         let service = service(root.path());
         let args = json!({"id":"qlie-japanese-font-launcher"});
         let description = inspect(&service, &args, &CancellationToken::new()).expect("description");
-        assert_eq!(description["files"][1]["available"], false);
+        assert_eq!(
+            description["files"],
+            json!([{"path":"src/tools/QlieLauncher.exe","binary":true,"available":false}])
+        );
         assert!(
             description["scope"]
                 .as_str()
@@ -806,7 +866,13 @@ mod tests {
             &json!({"ids":["qlie-japanese-font-launcher"]}),
         )
         .expect("copy");
-        assert_eq!(result["components"][0]["files"][1]["available"], true);
+        assert_eq!(result["components"][0]["files"][0]["available"], true);
+        assert_eq!(result["files"].as_array().unwrap().len(), 1);
+        assert_eq!(result["files"][0]["path"], "src/tools/QlieLauncher.exe");
+        assert_eq!(
+            result["components"][0]["probeCall"]["arguments"]["arguments"],
+            json!(["--self-test"])
+        );
         assert!(
             workspace
                 .join("src/tools/launcher-source/Cargo.toml")
@@ -831,6 +897,22 @@ mod tests {
                 .count(),
             8
         );
+        let mut selection: Vec<ReleaseFile> = state
+            .release_files
+            .iter()
+            .filter(|file| file.role == "asset")
+            .cloned()
+            .collect();
+        retain_release_sources(&state.release_files, &mut selection).unwrap();
+        assert_eq!(selection.len(), state.release_files.len());
+        let source = inspect(
+            &service,
+            &json!({"id":"qlie-japanese-font-launcher","path":"src/tools/launcher-source/src/config.rs","length":80}),
+            &CancellationToken::new(),
+        )
+        .expect("targeted source inspection");
+        assert_eq!(source["nextOffset"], 80);
+        assert_eq!(source["more"], true);
         assert!(
             !state
                 .release_files

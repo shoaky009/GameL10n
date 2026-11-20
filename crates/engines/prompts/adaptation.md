@@ -95,7 +95,9 @@ Only for confirmed Unity games, use inspect_unity_schema for fields, display lit
 guidance covers Unity-specific extraction and coverage review. mode=references accepts matching IL2CPP v31 metadata and x64
 GameAssembly; queryKind=method inspects the text group used by a display function. Use inspect_pe_code to verify candidate uses.
 Put engine-specific display syntax and substitutions in the adapter and unit protectedTokens, never in another engine's parsing rules.
-Before encoding/font/launcher work, inspect_adapter_component and copy suitable components; their applicability is conditional.
+Before encoding/font/launcher work, use inspect_adapter_component for the supported inputs, API and example. Copy suitable
+components and run their probeCall on a representative sample when available. For a confirmed component fault, use a specific
+source path and a short inspection range. Keep new integration code in the Python adapter.
 cp932-glyph-map requires proven allowed slots and every preserved/output logical text; it does not assume private-use support.
 Check upstream VNTextPatch / VNTranslationTools (including VNTextProxy) and GARbro for missing capabilities; distinguish extraction
 from runtime display support. Read targeted source/API excerpts and verify versions, licenses and required companion files.

@@ -860,7 +860,8 @@ pub(super) async fn test_adapter(
         recognition.validate()?;
     }
     if let Some(selection) = args.get("releaseFiles") {
-        let selection: Vec<ReleaseFile> = serde_json::from_value(selection.clone())?;
+        let mut selection: Vec<ReleaseFile> = serde_json::from_value(selection.clone())?;
+        components::retain_release_sources(&state.release_files, &mut selection)?;
         state.release_files = validate_release_selection(&selection)?;
     }
     apply_coverage(state, args)?;

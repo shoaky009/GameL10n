@@ -732,7 +732,7 @@
       "type": "function",
       "function": {
         "name": "inspect_adapter_component",
-        "description": "Inspect one reusable text/encoding/font/launcher component from list_adapters.components: API, example, exact applicability and files. Optional path reads a bounded source slice (character offsets). Components are not complete adapters or proof of game compatibility.",
+        "description": "Get a reusable component's supported inputs, API, example, installable files and probeCall when available. Use path with offset and length for a specific code excerpt when diagnosing a component fault. Verify compatibility on current inputs.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -760,7 +760,7 @@
       "type": "function",
       "function": {
         "name": "copy_adapter_components",
-        "description": "Copy 1-4 selected helpers/components without overwriting differing files. Analysis-only tools such as windows-font-metrics go to work/ and are not released. Runtime helpers go to src/tools; the QLIE launcher includes a standalone EXE. No C# compilation, font files or framework installation. Confirm applicability before use; test_adapter still required for adapter changes. Call alone.",
+        "description": "Copy 1-4 selected components and return their usage and available probes. Diagnostics go to work/ and runtime files to src/tools. The host retains the launcher source with its binary for publication. Use the provided configuration and run the probe on confirmed inputs, then test_adapter for adapter changes. Call alone.",
         "parameters": {
           "type": "object",
           "properties": {

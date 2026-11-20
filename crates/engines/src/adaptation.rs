@@ -969,8 +969,12 @@ impl EngineService {
                 let mut params = args.clone();
                 params["operation"] = json!(name);
                 params["root"] = json!(tool_root(request, workspace, args)?);
-                params["workspaceRoot"] =
-                    json!(args["root"].as_str().unwrap_or("workspace") == "workspace");
+                let workspace_root = args["root"].as_str().unwrap_or("workspace") == "workspace";
+                params["workspaceRoot"] = json!(workspace_root);
+                if workspace_root {
+                    params["componentSourceDirectory"] =
+                        json!(workspace_file(components::LAUNCHER_SOURCE_DIRECTORY));
+                }
                 let inputs = args["root"] == "game";
                 params["inputFiles"] = if inputs && name == "read_file" {
                     let path = text(args, "path")?;
@@ -1315,6 +1319,7 @@ impl EngineService {
                             .any(|path| path.eq_ignore_ascii_case(&file.path))
                     });
                 }
+                components::retain_release_sources(&state.release_files, &mut next)?;
                 let inventory = Inventory::scan(&workspace.join("src"))?;
                 if next.iter().any(|file| file.path.starts_with("tools/"))
                     && workspace.join("src/tools/sources.json").is_file()
@@ -1342,12 +1347,13 @@ impl EngineService {
                         )
                     })
                     .filter(|(path, _)| {
-                        !next.iter().any(|file| file.path.eq_ignore_ascii_case(path))
+                        !components::is_release_source(path)
+                            && !next.iter().any(|file| file.path.eq_ignore_ascii_case(path))
                     })
                     .collect();
                 state.release_files = next;
                 Ok(
-                    json!({"releaseFiles":state.release_files,"unregisteredCount":unregistered.len(),"unregisteredBytes":unregistered.iter().map(|(_,bytes)|bytes).sum::<u64>(),"unregistered":unregistered.iter().take(30).map(|(path,bytes)|json!({"path":path,"bytes":bytes})).collect::<Vec<_>>(),"nextAction":"未登记文件不会发布；只补充确实需要的依赖。分析脚本与样本保留在工作区即可，不必登记或删除。"}),
+                    json!({"releaseFiles":components::visible_release_files(&state.release_files).collect::<Vec<_>>(),"unregisteredCount":unregistered.len(),"unregisteredBytes":unregistered.iter().map(|(_,bytes)|bytes).sum::<u64>(),"unregistered":unregistered.iter().take(30).map(|(path,bytes)|json!({"path":path,"bytes":bytes})).collect::<Vec<_>>(),"nextAction":"请登记适配器实际使用的文件。组件的随附源码已由宿主管理，分析脚本与样本保留在 work/ 即可"}),
                 )
             }
             "inspect_adapter_source" => published_reuse::inspect(request, args),
@@ -2777,10 +2783,11 @@ impl EngineService {
             "只连接已声明的脚本与封包组件。RPYC2 保留非文本对象及源码摘要；其他脚本编码沿用解析器。不生成未经当前游戏验证的字体、转区或运行时补丁。",
             |template| template.limitations,
         );
+        let files = components::visible_release_files(&state.release_files);
         Ok(json!({
             "success":true,"template":template,
-            "files":state.release_files.iter().map(|file|format!("src/{}",file.path)).collect::<Vec<_>>(),
-            "releaseFiles":state.release_files,
+            "files":files.clone().map(|file|format!("src/{}",file.path)).collect::<Vec<_>>(),
+            "releaseFiles":files.collect::<Vec<_>>(),
             "testArguments":{"kind":"template","key":id,"name":template["family"]["name"],"resourcePatterns":state.resource_patterns},
             "limitations":limitations,"nextAction":"暂存与规则匹配的真实资源，用返回的 testArguments 调用完整 test_adapter"
         }))
@@ -3396,6 +3403,11 @@ fn write_path(root: &Path, relative: &str) -> Result<PathBuf, EngineError> {
     let relative = normalized.as_str();
     if !relative.starts_with("src/") && !relative.starts_with("work/") {
         return Err(EngineError::Protocol("只能修改 src/ 或 work/。".into()));
+    }
+    if components::is_release_source(relative) {
+        return Err(EngineError::Rejected(
+            "预编译组件的随附源码由宿主管理，请通过组件接口接入".into(),
+        ));
     }
     if [".cs", ".csproj"]
         .iter()

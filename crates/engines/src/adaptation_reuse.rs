@@ -173,6 +173,7 @@ pub(super) fn inspect(request: &AdaptationRequest<'_>, args: &Value) -> Result<V
     let files: Vec<_> = manifest
         .package_files
         .keys()
+        .filter(|path| !super::components::is_release_source(path))
         .filter(|path| query.is_empty() || path.to_lowercase().contains(&query))
         .collect();
     let offset = number(args, "offset", 0, 0, files.len() as u64)? as usize;

@@ -421,6 +421,7 @@ fn snapshot(
         .flatten()
         .map(|value| bounded(value, 6000));
     let notes_turn = state.extra.get("notesTurn").and_then(Value::as_u64);
+    let release_files = super::components::visible_release_files(&state.release_files);
     let host_state = json!({
             "recognition":bounded(&json!(state.recognition),2048),"family":bounded(&state.family,2048),
             "verification":verification_summary(state,"verificationCache"),
@@ -436,8 +437,8 @@ fn snapshot(
             "stagedResources":state.extra.get("resourceHashes").and_then(Value::as_object).map(|h| json!({"count":h.len(),"paths":h.keys().take(24).collect::<Vec<_>>()})),
             "sourceFiles":super::flow::workspace_files(workspace,"src",32),
             "workFiles":super::flow::workspace_files(workspace,"work",8),
-            "releaseFiles":state.release_files.iter().take(32).map(|f| &f.path).collect::<Vec<_>>(),
-            "releaseFileCount":state.release_files.len(),"resourcePatterns":state.resource_patterns,
+            "releaseFiles":release_files.clone().take(32).map(|f| &f.path).collect::<Vec<_>>(),
+            "releaseFileCount":release_files.count(),"resourcePatterns":state.resource_patterns,
             "engineReference":state.extra.get("engineReference"),
             "builtinDiscovery":discovery,
             "builtinProbes":state.extra.get("builtinProbes").map(|v| bounded(v,3000)),

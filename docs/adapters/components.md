@@ -17,6 +17,8 @@
 
 用 `copy_adapter_components` 取得所需组件。分析探针放在 `work/`，正式依赖放在 `src/tools/` 并登记发布清单。需要 VNTextPatch 的组件会自动绑定该工具。使用 `use_engine_reference` 固定共享库。预编译组件由项目工具准备脚本构建。[正式适配器](artifacts.md#正式适配器) · [工具准备](../development.md#工具准备)
 
+从 `inspect_adapter_component` 获取参数、配置示例和可用的 `probeCall`。宿主管理预编译启动器的随附源码并一起发布。排查组件故障时，可以通过组件 ID 和具体源码路径检查所需片段。
+
 具有 `sampleCheck` 的组件可用完整小样检查解析、原文往返和中文复提。小样通过后仍需验收当前适配器和全部选中资源。
 
 ## 固定解析器与校验上下文

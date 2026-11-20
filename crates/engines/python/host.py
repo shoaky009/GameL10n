@@ -88,9 +88,17 @@ class InputFiles:
         self.overrides = {relative.casefold(): (relative, Path(path))
                           for relative, path in request.get('inputFiles', {}).items()}
         self.excluded = {relative.replace('\\', '/').casefold() for relative in request.get('excludedFiles', [])}
+        self.component_source_directory = request.get('componentSourceDirectory', '').casefold()
+
+    def is_component_source(self, relative):
+        directory = self.component_source_directory
+        key = relative.casefold()
+        return bool(directory and (key == directory or key.startswith(directory + '/')))
 
     def resolve(self, relative):
         logical = safe(self.root, relative)
+        if self.is_component_source(relative):
+            raise ValueError('优先使用组件接口和小样。排查组件故障时可通过 inspect_adapter_component 定点检查源码')
         selected = self.overrides.get(relative.casefold())
         if selected:
             return logical, selected[1]
@@ -100,11 +108,13 @@ class InputFiles:
 
     def files(self, relative=''):
         directory = self.root if relative in ('', '.') else safe(self.root, relative)
+        if self.is_component_source(relative):
+            return
         seen = set()
         for logical in iter_files(directory):
             name = logical.relative_to(self.root).as_posix()
             key = name.casefold()
-            if key in self.excluded and key not in self.overrides:
+            if self.is_component_source(name) or (key in self.excluded and key not in self.overrides):
                 continue
             seen.add(key)
             yield self.resolve(name)

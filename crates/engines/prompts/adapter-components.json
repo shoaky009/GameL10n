@@ -239,8 +239,8 @@
     "name": "CP932 字形映射",
     "scope": "确定性分配、保留原文码位、已有映射复用、严格编解码；不修改 EXE 或字体。调用者必须确认允许码位能被原引擎遍历、查字和显示。",
     "origin": "基于现有 QLIE / System4 适配器的映射流程整理；增加全补丁保留文本及严格往返检查。",
-    "api": "from tools.gamel10n_host import component。glyph_plan 接受 texts、allowedSlots、preservedTexts、map，返回 map（码位→真实 Unicode，JSON 键为十进制字符串）；glyph_encode 接受 texts/map，返回 base64 values；glyph_decode 接受 values/map，返回 texts。一次处理完整文本单元，按批次调用预编译组件。",
-    "example": "from tools.gamel10n_host import component\n# Include ALL final logical text and reserve known UI/non-extracted literals.\n# allowedSlots needs runtime + glyph evidence; CP932 support alone is insufficient.\nmapping = component(\"glyph_plan\", request, texts=all_output_texts, allowedSlots=verified_slots,\n                    preservedTexts=other_preserved_text, map=existing_slot_to_unicode)[\"map\"]\nencoded = component(\"glyph_encode\", request, texts=output_texts, map=mapping)[\"values\"]\n# Persist mapping with output fonts/resources; FNL maps use the reverse direction: convert explicitly.",
+    "api": "copy_adapter_components(ids=['cp932-glyph-map']) 后，通过 tools.gamel10n_host.component 调用已固定的原生宿主。glyph_plan 接受 texts、allowedSlots、preservedTexts、map，返回码位到实际字符的 map。allowedSlots 使用十进制整数，map 的键是十进制字符串，值是 Unicode 整数。glyph_encode 返回 base64 values，glyph_decode 返回 texts。",
+    "example": "from tools.gamel10n_host import component\nmapping = component('glyph_plan', request, texts=all_output_texts, allowedSlots=verified_slots, preservedTexts=other_preserved_text, map=existing_slot_to_unicode)['map']\nencoded = component('glyph_encode', request, texts=output_texts, map=mapping)['values']\nlogical_texts = component('glyph_decode', request, values=encoded, map=mapping)['texts']\n# Plan for all output and preserved text. Persist the map with the fonts and rebuilt resources.",
     "files": [
       {
         "name": "gamel10n_host.py",
@@ -255,13 +255,26 @@
     "nativeTools": true,
     "name": "QLIE SFNT 字体模板",
     "scope": "仅适用于已确认的 QLIE system 字体列表、MS Gothic/Mincho 字高与半角宽度策略。支持原模板使用的单字体 SFNT、cmap 4/12；不是 TTC/WOFF 通用字体工具。保留轮廓，调整映射、名称和该模板的度量。",
-    "origin": "tools/GameL10n.VnTextPatch/Components/QlieFont.cs；用于 QLIE system 字体布局，其他布局需另行验证。",
-    "api": "component('qlie_font', request, input=source_font, output=output_font, family=family, map=slot_to_unicode)。引擎配置完整名为 family + \" Regular\"，须与原转区路径的枚举结果一致。字体文件及其许可由适配器准备。",
-    "example": "from tools.gamel10n_host import component\ncomponent('qlie_font', request, input=source_font, output=output_font, family=family_name, map=slot_to_unicode)",
+    "origin": "GameL10n 的预编译字体组件。",
+    "api": "copy_adapter_components(ids=['qlie-sfnt-font']) 同时固定编码与字体操作所需的宿主。component('qlie_font', request, input=source_font, output=output_font, family=family, map=slot_to_unicode) 生成字体，配置完整名使用 family + ' Regular'，并提供所用字体的许可。",
+    "example": "from tools.gamel10n_host import component\ncomponent('qlie_font', request, input=source_font, output=output_font, family=family_name, map=slot_to_unicode)\n# Wire the same map into script build/readback. Run test_adapter on the selected current-game inputs.",
+    "probeCall": {
+      "tool": "run_engine_python",
+      "arguments": {
+        "script": "work/qlie_runtime_sample.py",
+        "stdin": "{\"script\":\"work/scene.s\",\"font\":\"work/chinese.ttf\",\"allowedSlots\":[],\"text\":\"汉\"}"
+      },
+      "inputs": "复制组件后，填入一个解包的 FormatType=1 CP932 脚本和可用的单字体 SFNT 路径。allowedSlots 填当前引擎已确认可用的双字节 Unicode 码位整数。小样检查字形映射、脚本中文回读和字体生成，补丁验收及显示另行检查。"
+    },
     "files": [
       {
         "name": "gamel10n_host.py",
         "path": "src/tools/gamel10n_host.py",
+        "binary": false
+      },
+      {
+        "name": "qlie_runtime_sample.py",
+        "path": "work/qlie_runtime_sample.py",
         "binary": false
       }
     ],
@@ -288,15 +301,18 @@
     "id": "qlie-japanese-font-launcher",
     "name": "QLIE 日语转区与字体启动器",
     "scope": "独立 Windows x64 Rust EXE，无共享运行时；读取 qlie-l10n/launch.xml，临时加载字体并保留日语 Locale Emulator 路径。检查 QLIE SHIFTJIS_CHARSET 完整字体名；等待 LEProc/游戏退出后卸载字体。仅适用 LEProc 等待实际游戏的已确认启动链。",
-    "origin": "tools/GameL10n.QlieLauncher/src/；直接提供同源码编译的启动器，不调用分析 API 编写或编译。",
-    "api": "将 tools/QlieLauncher.exe 复制到补丁的启动入口并声明 build.launchExecutable。launch.xml 的 executable、font.file 相对启动器目录；原 EXE 的 .le.config 保持原样。face 必须与字体内部 name ID 4 一致。Windows x64 Rust，无需额外安装运行时；需要转区时使用玩家本机 Locale Emulator。",
-    "example": "// Build output example: 启动汉化.exe (copied from tools/QlieLauncher.exe), qlie-l10n/launch.xml, generated fonts.\n// XML values must be escaped with an XML writer. Filenames below are placeholders, not discovery rules.\n<launch executable=\"game.exe\"><font file=\"qlie-l10n/Serif.ttf\" face=\"Patch Serif Regular\" /></launch>\n// Copy the original game/config resources as required by the protocol; test_adapter still gates publication.",
-    "files": [
-      {
-        "name": "QlieLauncher.Cargo.toml",
-        "path": "src/tools/launcher-source/Cargo.toml",
-        "binary": false
+    "origin": "GameL10n 随附的预编译 Windows 启动器。",
+    "api": "用 copy_adapter_components(ids=['qlie-japanese-font-launcher']) 复制。构建补丁时将 tools/QlieLauncher.exe 作为启动入口，声明 build.launchExecutable，旁置 qlie-l10n/launch.xml。XML 的 executable、font.file 相对启动器目录，face 使用字体 name ID 4 的完整名称。保留原游戏 EXE 和它的 .le.config，通过玩家现有 Locale Emulator 启动需要转区的游戏。",
+    "example": "<launch executable=\"game.exe\"><font file=\"qlie-l10n/Serif.ttf\" face=\"Patch Serif Regular\" /></launch>\n将示例文件名替换为当前资源路径，用 XML 写入器生成配置。用 test_adapter 验收补丁，再确认实机字体选择和退出行为。",
+    "probeCall": {
+      "tool": "run_tool",
+      "arguments": {
+        "executable": "src/tools/QlieLauncher.exe",
+        "arguments": ["--self-test"]
       },
+      "inputs": "复制组件后运行内置自检，检查配置解析和启动器基础条件。实际游戏启动和字体显示需要在游戏中确认。"
+    },
+    "files": [
       {
         "name": "QlieLauncher.exe",
         "path": "src/tools/QlieLauncher.exe",
