@@ -96,7 +96,7 @@ pub(super) async fn inspect(
     {
         report["templateId"] = json!(QLIE_PACK_TEMPLATE);
         report["nextAction"] = json!(
-            "复用 qlie-pack3-imos 的封包与脚本实现。若已自动组合，沿当前验收结果继续。确认可用码位和字体条件后，使用 qlie-sfnt-font 提供的 probeCall 检查一个解包脚本。需要转区和加载字体时再按 qlie-japanese-font-launcher 的配置接入"
+            "复用 qlie-pack3-imos 及自动验收结果。模板可按系统字体表和外置配置生成中文脚本、字体及启动入口。已通过中文资源验收时，直接核对文字覆盖和游戏显示。字体布局不匹配时，按诊断确认当前变体"
         );
     }
     Ok(Some(report))

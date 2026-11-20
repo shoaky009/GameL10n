@@ -298,6 +298,21 @@
     "engineFamilies": []
   },
   {
+    "id": "qlie-systemfont-assets",
+    "name": "QLIE 系统字体模板素材",
+    "scope": "为 qlie-pack3-imos 的系统字体布局提供固定的简体 Noto Sans SC、Noto Serif SC 及各自的 OFL 许可",
+    "origin": "Google Fonts 发布的 Noto SC，来源和哈希记在 third_party/qlie-fonts/sources.json",
+    "api": "组合 qlie-pack3-imos 时自动接入素材和启动器。匹配系统字体布局的游戏直接运行 test_adapter",
+    "example": "compose_adapter_template(id='qlie-pack3-imos')",
+    "files": [
+      {"name": "qlie-fonts/NotoSansSC-VF.ttf", "path": "src/tools/qlie-fonts/NotoSansSC-VF.ttf", "binary": true},
+      {"name": "qlie-fonts/NotoSansSC-OFL.txt", "path": "src/tools/qlie-fonts/NotoSansSC-OFL.txt", "binary": true},
+      {"name": "qlie-fonts/NotoSerifSC-VF.ttf", "path": "src/tools/qlie-fonts/NotoSerifSC-VF.ttf", "binary": true},
+      {"name": "qlie-fonts/NotoSerifSC-OFL.txt", "path": "src/tools/qlie-fonts/NotoSerifSC-OFL.txt", "binary": true}
+    ],
+    "engineFamilies": ["template.qlie-pack3-imos"]
+  },
+  {
     "id": "qlie-japanese-font-launcher",
     "name": "QLIE 日语转区与字体启动器",
     "scope": "独立 Windows x64 Rust EXE，无共享运行时；读取 qlie-l10n/launch.xml，临时加载字体并保留日语 Locale Emulator 路径。检查 QLIE SHIFTJIS_CHARSET 完整字体名；等待 LEProc/游戏退出后卸载字体。仅适用 LEProc 等待实际游戏的已确认启动链。",

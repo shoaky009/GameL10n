@@ -26,6 +26,13 @@ and LicenseRef-Slint-Software-3.0; those alternatives are not selected here.
 See https://slint.dev/license. Rust dependencies retain their respective licenses;
 the dependency versions are recorded in Cargo.lock and each standalone tool's Cargo.lock.
 
+## Noto Sans SC and Noto Serif SC
+
+The QLIE system-font recipe uses pinned TrueType fonts under the SIL Open Font
+License 1.1. The application includes their upstream copyright notices and
+license files. The generated QLIE fonts have distinct family names and retain
+the same licenses. [Sources and hashes](third_party/qlie-fonts/sources.json)
+
 ## Windows Capture
 
 The game check component uses windows-capture 2.0.1 from

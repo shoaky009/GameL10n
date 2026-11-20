@@ -2761,6 +2761,9 @@ impl EngineService {
                 },
             )?;
         }
+        if let Some(template) = archive_template {
+            components::copy_available(self, workspace, state, template.optional_components)?;
+        }
         if module == "script_template" {
             write_unmodified(
                 &workspace.join("src/tools/script_template.py"),

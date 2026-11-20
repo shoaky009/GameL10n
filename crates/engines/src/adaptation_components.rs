@@ -459,6 +459,7 @@ pub(super) fn copy(
                 role: if is_release_source(relative)
                     || relative.ends_with("/VNTextProxy-LICENSE.txt")
                     || relative.ends_with("/GameL10n.FontBridge.LICENSE")
+                    || relative.ends_with("-OFL.txt")
                 {
                     "license"
                 } else if relative.ends_with(".py") {
@@ -500,6 +501,32 @@ pub(super) fn copy(
             .map(|(relative,content)|json!({"path":relative,"reused":reused.contains(relative),"sha256":hash_bytes(content)}))
             .collect::<Vec<_>>()
     }))
+}
+
+/// A template can keep using its base capabilities when optional assets are absent.
+pub(super) fn copy_available(
+    service: &EngineService,
+    workspace: &Path,
+    state: &mut Session,
+    ids: &[&str],
+) -> Result<(), EngineError> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let catalog = catalog()?;
+    let component_directory = service.tools.root.join("adapter-components");
+    for id in ids {
+        let component = find(&catalog, id)?;
+        if component
+            .files
+            .iter()
+            .any(|file| file.binary && !component_directory.join(&file.name).is_file())
+        {
+            return Ok(());
+        }
+    }
+    copy(service, workspace, state, &json!({"ids":ids}))?;
+    Ok(())
 }
 
 #[cfg(test)]
