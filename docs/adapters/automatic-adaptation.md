@@ -49,7 +49,7 @@ Artemis PFS v8 替换式适配器的部分试译如果发现说话人身份变�
 
 ## 诊断
 
-在任务详情和项目日志查看当前阶段、失败原因与验收结果。开发者可从源码目录汇总适配日志。
+在任务详情和项目日志查看当前阶段、失败原因与验收结果。工具操作记录带简短的目标和参数，读取范围可用来区分分段读取和重复读取。开发者可从源码目录汇总适配日志。
 
 ```powershell
 ./scripts/analyze-adaptation-log.ps1 -ProjectDirectory 'D:\GameL10n Data\games\项目ID'

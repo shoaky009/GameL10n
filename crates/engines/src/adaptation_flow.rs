@@ -287,6 +287,9 @@ fn selectors(args: &Value) -> Value {
         "messageIndex",
         "offset",
         "length",
+        "limit",
+        "encoding",
+        "fileByteOffset",
     ] {
         if let Some(value) = args.get(key) {
             result.insert(key.into(), value.clone());

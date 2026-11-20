@@ -3,7 +3,7 @@ use serde_json::Value;
 /// User-visible tool activity includes targets, never source bodies or complete arguments.
 pub(crate) fn message(name: &str, args: &Value) -> String {
     if !args.is_object() {
-        return format!("正在执行 {name}。");
+        return format!("正在执行 {name}");
     }
     let subject = match name {
         "list_files"
@@ -12,10 +12,10 @@ pub(crate) fn message(name: &str, args: &Value) -> String {
         | "inspect_pe_imports"
         | "inspect_pe_code"
         | "inspect_unity_schema" => {
-            let root = if text(args, "root") == Some("game") {
-                "游戏目录"
-            } else {
-                "工作区"
+            let root = match text(args, "root") {
+                Some("game") => "游戏目录",
+                Some("installed") => "已安装文件",
+                _ => "工作区",
             };
             match text(args, "path") {
                 Some(".") => root.into(),
@@ -31,7 +31,7 @@ pub(crate) fn message(name: &str, args: &Value) -> String {
             .map(|path| format!("游戏目录 / {path}"))
             .unwrap_or_default(),
         "download_tool" => fields(args, &["path", "url"]),
-        "fetch_url" => fields(args, &["url", "query"]),
+        "fetch_url" => fields(args, &["url"]),
         "inspect_existing_text" => fields(args, &["resourcePath"]),
         "read_evidence" => fields(args, &["path"]),
         "read_tool_result" => fields(args, &["toolCallId"]),
@@ -92,14 +92,33 @@ pub(crate) fn message(name: &str, args: &Value) -> String {
         ]),
         _ => String::new(),
     };
-    if subject.is_empty() {
-        format!("正在执行 {name}。")
+    let options = match name {
+        "list_files" => parameters(args, &["offset", "limit"]),
+        "read_file" => parameters(args, &["offset", "length", "encoding"]),
+        "search_text" => parameters(args, &["offset", "fileByteOffset", "encoding", "query"]),
+        "fetch_url" => parameters(args, &["mode", "offset", "length", "query"]),
+        "inspect_existing_text" => parameters(args, &["offset", "limit"]),
+        "inspect_adapter_component" | "inspect_builtin_adapter" => {
+            parameters(args, &["offset", "length"])
+        }
+        "inspect_adapter_source"
+        | "inspect_engine_reference"
+        | "read_evidence"
+        | "read_tool_result"
+        | "read_session_history" => parameters(args, &["offset", "length", "query"]),
+        "write_file" => parameters(args, &["copyFrom"]),
+        "run_engine_python" | "run_tool" => join(&[
+            parameters(args, &["workingDirectory"]),
+            command_arguments(args),
+        ]),
+        "test_adapter" => parameters(args, &["discoveryOnly"]),
+        _ => String::new(),
+    };
+    let details = join(&[short(&subject, 152), options]);
+    if details.is_empty() {
+        format!("正在执行 {name}")
     } else {
-        let subject = subject
-            .chars()
-            .map(|ch| if ch.is_control() { ' ' } else { ch })
-            .collect::<String>();
-        format!("正在执行 {name}：{subject}")
+        format!("正在执行 {name} · {}", short(&details, 256))
     }
 }
 
@@ -114,6 +133,64 @@ fn fields(args: &Value, keys: &[&str]) -> String {
         .filter_map(|key| text(args, key))
         .collect::<Vec<_>>()
         .join(" · ")
+}
+
+fn short(value: &str, limit: usize) -> String {
+    let mut chars = value.chars();
+    let mut result = chars
+        .by_ref()
+        .take(limit)
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect::<String>();
+    if chars.next().is_some() {
+        result.push('…');
+    }
+    result
+}
+
+fn parameters(args: &Value, keys: &[&str]) -> String {
+    keys.iter()
+        .filter_map(|key| {
+            let value = match args.get(*key)? {
+                Value::String(value) if !value.trim().is_empty() => short(value, 56),
+                Value::Number(value) => value.to_string(),
+                Value::Bool(value) => value.to_string(),
+                _ => return None,
+            };
+            Some(format!("{key}={value}"))
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn command_arguments(args: &Value) -> String {
+    let Some(values) = args["arguments"]
+        .as_array()
+        .filter(|values| !values.is_empty())
+    else {
+        return String::new();
+    };
+    let flags = values
+        .iter()
+        .filter_map(Value::as_str)
+        .filter_map(|value| value.strip_prefix("--"))
+        .map(|value| value.split('=').next().unwrap_or_default())
+        .filter(|flag| {
+            !flag.is_empty()
+                && flag
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
+        .take(3)
+        .map(|flag| format!("--{}", short(flag, 24)))
+        .collect::<Vec<_>>();
+    let remaining = values.len() - flags.len();
+    let count = if remaining > 0 {
+        format!("参数 {remaining} 项")
+    } else {
+        String::new()
+    };
+    join(&[flags.join(" "), count])
 }
 
 fn join(values: &[String]) -> String {
