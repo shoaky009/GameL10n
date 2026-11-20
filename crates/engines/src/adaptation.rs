@@ -222,6 +222,8 @@ pub(crate) struct Session {
     #[serde(skip)]
     sample_checks: automatic::SampleCheckMetrics,
     #[serde(skip)]
+    preparation_skips: Vec<Value>,
+    #[serde(skip)]
     reported_knowledge: BTreeSet<(String, String)>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
@@ -736,6 +738,11 @@ impl EngineService {
                 state.extra.insert("publishedReuse".into(), json!(recipes));
             }
             if continuing && !automatic::can_prepare_for_model(&state) {
+                state.preparation_skips.push(automatic::preparation_skip(
+                    "template-selection",
+                    "no-preparable-template-on-resume",
+                    json!({"publishedRecipes": state.extra.get("publishedReuse")}),
+                ));
                 automatic::run_trials(
                     self,
                     request,
@@ -761,8 +768,19 @@ impl EngineService {
             }
         }
         .await;
+        let discovery_candidates: Vec<_> = state.extra.get("builtinDiscovery")
+            .and_then(|report| report["candidates"].as_array())
+            .into_iter()
+            .flatten()
+            .map(|candidate| json!({"format":candidate["format"],"evidenceKind":candidate["evidenceKind"],"evidence":candidate["evidence"]}))
+            .collect();
+        let preparation_skips = std::mem::take(&mut state.preparation_skips);
         trace_run(
-            json!({"operation":"local-preparation","elapsedMs":preparation_started.elapsed().as_millis(),"automaticTrials":state.extra.get("automaticTrials"),"automaticArchiveTrials":state.extra.get("automaticArchiveTrials"),"automaticTemplate":state.extra.get("automaticTemplate"),"workspaceSamples":state.extra.get("workspaceSamples"),"sampleChecks":state.sample_checks.since(&sample_checks_before)}),
+            json!({"operation":"local-preparation","elapsedMs":preparation_started.elapsed().as_millis(),
+                "discoveryCandidates":discovery_candidates,"preparationSkips":preparation_skips,
+                "automaticTrials":state.extra.get("automaticTrials"),"automaticArchiveTrials":state.extra.get("automaticArchiveTrials"),
+                "automaticTemplate":state.extra.get("automaticTemplate"),"workspaceSamples":state.extra.get("workspaceSamples"),
+                "sampleChecks":state.sample_checks.since(&sample_checks_before)}),
         )?;
         match prepared {
             Ok(Some(adapter)) => {
@@ -2778,7 +2796,13 @@ impl EngineService {
                 },
             )?;
         }
-        let entry = format!("import sys\nfrom tools.{module} import main\nsys.exit(main())\n");
+        let main_args = if module == "qlie_pack_adapter" {
+            format!("{id:?}")
+        } else {
+            String::new()
+        };
+        let entry =
+            format!("import sys\nfrom tools.{module} import main\nsys.exit(main({main_args}))\n");
         write_unmodified(&workspace.join("src/adapter.py"), &entry)?;
         register_python(state, "src/adapter.py")?;
         state.resource_patterns = serde_json::from_value(patterns)?;

@@ -89,6 +89,29 @@ fn verification_summary_keeps_coverage_and_source_scope() {
 }
 
 #[test]
+fn summary_exposes_local_preparation_evidence_and_skip_reasons() {
+    let candidates = json!([{"format":"Qlie","evidence":["FilePackVer3.1"]}]);
+    let skips = json!([{"stage":"archive-trial","code":"missing-key-file",
+        "details":{"format":"Qlie","requiredFile":"DLL/key.fkey"}}]);
+    let trials = json!([{"format":"Qlie","status":"unsupported-layout","stage":"index"}]);
+    let entries = [json!({"operation":"local-preparation",
+        "discoveryCandidates":candidates,"preparationSkips":skips,"automaticArchiveTrials":trials,
+        "automaticTemplate":{"stage":"verification","status":"incomplete","diagnostics":["translation readback"]}})];
+    for detail in [false, true] {
+        let result = analyze(&entries, detail);
+        let preparation = &result["runs"][0]["localPreparation"];
+        assert_eq!(preparation["discoveryCandidates"], candidates);
+        assert_eq!(preparation["skips"], skips);
+        assert_eq!(preparation["archiveTrials"], trials);
+        assert_eq!(preparation["template"]["stage"], "verification");
+        assert_eq!(
+            preparation["template"]["diagnostics"],
+            json!(["translation readback"])
+        );
+    }
+}
+
+#[test]
 fn legacy_and_mixed_logs_keep_unmeasured_categories_unknown() {
     for measured_scope in [None, Some("local-preparation"), Some("tool-end")] {
         let mut entries = vec![
@@ -102,6 +125,7 @@ fn legacy_and_mixed_logs_keep_unmeasured_categories_unknown() {
             entries[index]["sampleChecks"] = metrics(1, 1, 100, 0, 200);
         }
         let result = analyze(&entries, false);
+        assert!(result["runs"][0]["localPreparation"].is_null());
         assert_eq!(result["coverage"]["missingBuildIdentity"], 1);
         assert!(result["runs"][0]["maximumOutputTokens"].is_null());
         assert!(result["runs"][0]["analysisRequestTimeoutMs"].is_null());

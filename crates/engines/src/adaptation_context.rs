@@ -16,7 +16,7 @@ use crate::{
     vntextpatch::{BUILTIN_FORMATS, BuiltinFormat},
 };
 
-pub(crate) const DISCOVERY_REVISION: u64 = 16;
+pub(crate) const DISCOVERY_REVISION: u64 = 17;
 const CONTAINERS: &[&str] = &[
     "xp3", "rpa", "rpyc", "pack", "pak", "arc", "ypf", "int", "pfs",
 ];
@@ -243,6 +243,22 @@ fn add(
         .add(path, kind, detail, container, compiled);
 }
 
+pub(crate) fn filepack_version(tail: &[u8]) -> Option<&str> {
+    let signature = tail.get(tail.len().checked_sub(28)?..)?.get(..16)?;
+    let version = signature
+        .strip_prefix(b"FilePackVer")?
+        .strip_suffix(b"\0\0")?;
+    if version.len() == 3
+        && version[0].is_ascii_digit()
+        && version[1] == b'.'
+        && version[2].is_ascii_digit()
+    {
+        std::str::from_utf8(version).ok()
+    } else {
+        None
+    }
+}
+
 fn identify(head: &[u8], tail: &[u8]) -> Option<(&'static str, String, bool)> {
     if head.starts_with(b"XP3\r\n \n\x1a\x8bg\x01") {
         return Some((
@@ -264,22 +280,10 @@ fn identify(head: &[u8], tail: &[u8]) -> Option<(&'static str, String, bool)> {
             false,
         ));
     }
-    if tail.len() >= 28
-        && [
-            b"FilePackVer1.0",
-            b"FilePackVer2.0",
-            b"FilePackVer3.0",
-            b"FilePackVer3.1",
-        ]
-        .iter()
-        .any(|signature| tail[tail.len() - 28..].starts_with(*signature))
-    {
+    if let Some(version) = filepack_version(tail) {
         return Some((
             "Qlie",
-            format!(
-                "文件末尾 -28 字节处匹配 {}",
-                String::from_utf8_lossy(&tail[tail.len() - 28..tail.len() - 14])
-            ),
+            format!("文件末尾 -28 字节处匹配 FilePackVer{version}"),
             true,
         ));
     }

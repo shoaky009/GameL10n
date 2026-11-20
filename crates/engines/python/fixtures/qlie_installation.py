@@ -5,6 +5,7 @@ import sys
 
 if __name__ == '__main__':
     sys.path.insert(0, sys.argv[1])
+    sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
 from python.archives import qlie
 
 GAME_KEY = bytes(range(256))
@@ -100,5 +101,55 @@ def make_installation(root):
     ], bytes([195]) * 256))
 
 
+def make_pack31(members, key_data):
+    from adapters.components import qlie_pack31 as pack
+
+    key_area = bytes(range(256)) * 4
+    seed = pack.checksum(key_area[:256]) & 0x0fffffff
+    volume_key = pack.derive_volume_key(key_data) if key_data is not None else None
+    payload = bytearray()
+    index = bytearray()
+    originals = [(qlie.PACK_KEY_NAME, key_data), *members] if key_data is not None else members
+    for number, (name, raw) in enumerate(originals):
+        name_bytes = name.encode('utf-16-le')
+        encryption = (1 if number == 0 else 2) if key_data is not None else 0
+        entry = qlie.Entry(name, name_bytes, len(payload), len(raw), len(raw), 0, encryption, 0)
+        stored = pack.crypt(raw, entry, seed, volume_key, encrypt=True)
+        index += struct.pack('<H', len(name_bytes) // 2) + pack.crypt_name(name_bytes, seed)
+        index += pack.MEMBER.pack(entry.offset, entry.size, entry.unpacked_size, 0, encryption,
+                                  pack.checksum(stored))
+        payload += stored
+    lookup = b'fixture lookup table'
+    count = len(originals)
+    tail = pack.TAIL_SIGNATURE + struct.pack('<IIII', 256, count, count * 4, len(lookup)) + lookup + key_area
+    return payload + index + tail + pack.FOOTER.pack(b'FilePackVer3.1\0\0', count, len(payload))
+
+
+def make_installation31(root):
+    (root / 'GameData').mkdir()
+    (root / 'UnInstall.exe').write_bytes(key_resource_exe() + b'UnInstallData.pack\0')
+    (root / 'UnInstallData.pack').write_bytes(make_pack31([
+        ('icon.ico', b'fixture icon'), ('uninstall.txt', b'fixture instructions'),
+    ], None))
+    (root / 'GameData/system.pack').write_bytes(make_pack31([
+        ('avg/projectsetting.txt', 'FormatType=1\r\n'.encode('utf-16')),
+        ('avg/setting.txt', 'ReturnCode=[n]\r\n'.encode('utf-16')),
+        ('avg/include.s', '@@!Helper\r\nCount[0]=Next\r\n'.encode('utf-16')),
+    ], GAME_KEY))
+    (root / 'GameData/story.pack').write_bytes(make_pack31([
+        ('scenario/story.s', '【花子】\r\n[rb,朝,あさ]の挨拶\r\n\r\n^select,先に進む,戻る\r\n'.encode('utf-16')),
+        ('notes.txt', b'original member'),
+    ], EXTERNAL_KEY))
+    (root / 'GameData/update.pack').write_bytes(make_pack31([
+        ('scenario/story.s', '更新された別の会話\r\n'.encode('utf-16')),
+    ], bytes(range(128))))
+    (root / 'GameData/media.pack').write_bytes(make_pack31([
+        ('image.bin', b'original media'),
+    ], bytes(range(64, 192))))
+    (root / 'updates/GameData').mkdir(parents=True)
+    (root / 'updates/GameData/update.pack').write_bytes((root / 'GameData/update.pack').read_bytes())
+
+
 if __name__ == '__main__':
-    make_installation(Path(sys.argv[2]))
+    install = make_installation31 if sys.argv[3:] == ['3.1'] else make_installation
+    install(Path(sys.argv[2]))

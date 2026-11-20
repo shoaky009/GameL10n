@@ -24,6 +24,15 @@ const KAGUYA_WARNING: &str = "KaGuYa MESSAGE v4.0 内置适配器只提供 CP932
 const GRAPHICS_SHA256: &str = "E1292E3D47D1C65F4AE52A30B1159A476137422BD7A9272A5A2E0129F3CB0684";
 pub(crate) const ARTEMIS_PFS_TEMPLATE: &str = "artemis-pfs8-ast";
 pub(crate) const QLIE_PACK_TEMPLATE: &str = "qlie-pack3-imos";
+pub(crate) const QLIE_PACK31_TEMPLATE: &str = "qlie-pack31-imos";
+const QLIE_TEMPLATE_SOURCES: &[&str] = &[
+    "qlie_archive.py",
+    "qlie_pack31.py",
+    "qlie_samples.py",
+    "qlie_script.py",
+    "qlie_systemfont.py",
+    "qlie_sfnt.py",
+];
 
 /// An archive-specific adapter can qualify its own input before common verification.
 pub(crate) struct ArchiveTemplate {
@@ -91,13 +100,29 @@ pub(crate) const ARCHIVE_TEMPLATES: &[ArchiveTemplate] = &[
         ],
         name: "QLIE PACK 3.0 + ImoScripter FormatType=1",
         module: "qlie_pack_adapter",
-        extra_sources: &["qlie_samples.py", "qlie_systemfont.py", "qlie_sfnt.py"],
+        extra_sources: QLIE_TEMPLATE_SOURCES,
         optional_components: &["qlie-japanese-font-launcher"],
         discovery_key: None,
         sample_component: None,
         prepare_for_model: true,
         distinct_volume_names: false,
         limitations: "需要同一启动目录的 EXE 图标密钥、外部与各卷内部密钥、HashVer1.3 和一致的脚本配置。匹配系统字体布局时可生成中文脚本及配套字体，系统文本和游戏内显示需单独验收",
+    },
+    ArchiveTemplate {
+        id: QLIE_PACK31_TEMPLATE,
+        format: "Qlie",
+        component: "qlie_pack31",
+        extensions: &[".s"],
+        patterns: &["GameData/*.pack"],
+        name: "QLIE PACK 3.1 + ImoScripter FormatType=1",
+        module: "qlie_pack_adapter",
+        extra_sources: QLIE_TEMPLATE_SOURCES,
+        optional_components: &[],
+        discovery_key: None,
+        sample_component: None,
+        prepare_for_model: true,
+        distinct_volume_names: false,
+        limitations: "支持带首项卷内密钥的 FilePack 3.1 和 HashVer1.4。按脚本原编码保留控制标签并回填。系统文本、卷覆盖顺序和游戏显示需单独验收",
     },
 ];
 

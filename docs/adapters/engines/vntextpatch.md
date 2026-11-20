@@ -26,7 +26,7 @@
 | Musica | `Musica` | `.sc` | SJIS；对应的文本命令格式 |
 | Mware | `Mware` | `.nut` | Squirrel v2 编译脚本；按文件编码需要 SJIS或 Unicode 字体 |
 | Propeller／Stuff Script Engine | `Propeller` | `.msc` | SJIS；对应的 MSC 指令版本 |
-| QLIE | `Qlie` | `.s` | SJIS 文件需要运行支持；Unicode 文件需要中文字体；与 FilePackVer3.0 专用适配器分开登记 |
+| QLIE | `Qlie` | `.s` | SJIS 文件需要运行支持，Unicode 文件需要中文字体。封包支持见 [QLIE 模板](qlie-filepack3-systemfont.md#封包脚本模板) |
 | RealLive | `RealLive` | `.rl`、`.txt` | SJIS；已经解包的单个场景二进制，不是整个 `SEEN.TXT` 容器 |
 | Ren'Py | `Renpy` | `.rpy` | UTF-8、中文字体；对白、旁白及菜单文字；不处理 `.rpyc`、`.rpa` 或 Python／资源路径字符串 |
 | ShSystem | `ShSystem` | `.hst` | SJIS；对应的指令结构 |

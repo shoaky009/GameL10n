@@ -1000,8 +1000,14 @@ def archive_template_probe(request):
     from importlib import import_module
     sys.path[:0] = [str(Path(request['components']).parent), request['library']]
     adapter = import_module('components.' + request['module'])
-    return adapter.execute(dict(operation='probe', sourceDirectory=request['root'],
-                                resourceFiles=request['files']))
+    result = adapter.execute(dict(operation='probe', sourceDirectory=request['root'],
+                                  resourceFiles=request['files'], templateId=request.get('templateId')))
+    if request.get('templateId') == 'qlie-pack31-imos':
+        from components import qlie_samples
+        uninstall = qlie_samples.inspect_uninstall_archive(Path(request['root']), request['files'])
+        if uninstall is not None:
+            result['uninstallArchive'] = uninstall
+    return result
 
 
 def archive_samples(request):
@@ -1009,8 +1015,8 @@ def archive_samples(request):
     maximum_member = 2 << 20
     format_name = request['format']
     if format_name == 'Qlie':
-        sys.path.insert(0, request['components'])
-        import qlie_samples
+        sys.path.insert(0, str(Path(request['components']).parent))
+        from components import qlie_samples
         return qlie_samples.probe(request)
     archive = Path(request['archive'])
     output = Path(request['directory'])

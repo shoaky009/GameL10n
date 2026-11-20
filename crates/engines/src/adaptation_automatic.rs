@@ -90,29 +90,84 @@ fn extension(path: &str) -> String {
         .to_ascii_lowercase()
 }
 
-fn fresh(
+pub(super) fn preparation_skip(stage: &str, code: &str, details: Value) -> Value {
+    json!({"stage":stage,"code":code,"details":details})
+}
+
+fn template_skip_reason(
     request: &AdaptationRequest<'_>,
     workspace: &Path,
     state: &Session,
     prepare_for_model: bool,
-) -> Result<bool, EngineError> {
-    Ok((prepare_for_model || !request.require_model_analysis)
-        && request.inputs.files.is_empty()
-        && request.inputs.excluded.is_empty()
-        && request.objective.eq_ignore_ascii_case("develop")
-        && !request.improve_existing
-        && request.baseline_units.is_empty()
-        && (prepare_for_model || state.total_turns == 0)
-        && state.pending_calls.is_empty()
-        && state.verified_package.is_none()
-        && state.release_files.is_empty()
-        && state
-            .extra
-            .get("reuseFailures")
-            .and_then(Value::as_array)
-            .is_none_or(Vec::is_empty)
-        && (!workspace.join("src").is_dir()
-            || fs::read_dir(workspace.join("src"))?.next().is_none()))
+) -> Result<Option<&'static str>, EngineError> {
+    let reason = if !prepare_for_model && request.require_model_analysis {
+        "model-analysis-required"
+    } else if !request.inputs.files.is_empty() || !request.inputs.excluded.is_empty() {
+        "custom-resource-inputs"
+    } else if !request.objective.eq_ignore_ascii_case("develop") || request.improve_existing {
+        "existing-adapter-objective"
+    } else if !request.baseline_units.is_empty() {
+        "existing-text-baseline"
+    } else if (!prepare_for_model && state.total_turns > 0) || !state.pending_calls.is_empty() {
+        "adaptation-in-progress"
+    } else if state.verified_package.is_some()
+        || state.release_files.iter().any(|file| {
+            !prepare_for_model
+                || file.role != "runtime"
+                || !file.path.strip_prefix("tools/").is_some_and(bootstrap_tool)
+        })
+    {
+        "existing-adapter-files"
+    } else if state
+        .extra
+        .get("reuseFailures")
+        .and_then(Value::as_array)
+        .is_some_and(|failures| !failures.is_empty())
+    {
+        "previous-reuse-failure"
+    } else if has_adapter_source(workspace, prepare_for_model)? {
+        "existing-source-files"
+    } else if !prepare_for_model && !state.messages.is_empty() {
+        "existing-conversation"
+    } else if !request.user_instruction.trim().is_empty()
+        || !state.user_instruction.trim().is_empty()
+    {
+        "custom-instructions"
+    } else if !prepare_for_model && state.extra.contains_key("automaticTemplate") {
+        "template-already-attempted"
+    } else {
+        return Ok(None);
+    };
+    Ok(Some(reason))
+}
+
+fn bootstrap_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "gamel10n_host.py" | "engine-reference.json" | "vntextpatch-reference.json"
+    )
+}
+
+fn has_adapter_source(workspace: &Path, prepare_for_model: bool) -> Result<bool, EngineError> {
+    let source = workspace.join("src");
+    if !source.is_dir() {
+        return Ok(false);
+    }
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        if !prepare_for_model || entry.file_name() != "tools" || !entry.file_type()?.is_dir() {
+            return Ok(true);
+        }
+        for tool in fs::read_dir(entry.path())? {
+            let tool = tool?;
+            if !tool.file_type()?.is_file()
+                || !tool.file_name().to_str().is_some_and(bootstrap_tool)
+            {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 fn candidates(state: &Session) -> Vec<Value> {
@@ -1181,11 +1236,24 @@ async fn inspect_archive_samples(
                 }),
         )
         .filter(|(format, archive, index)| {
-            !service.disabled_families.contains(&format!(
+            let code = if service.disabled_families.contains(&format!(
                 "engine.vntextpatch-{}",
                 format.to_ascii_lowercase()
-            )) && !request.inputs.excludes(archive)
-                && index.is_none_or(|path| !request.inputs.excludes(path))
+            )) {
+                "family-disabled"
+            } else if request.inputs.excludes(archive)
+                || index.is_some_and(|path| request.inputs.excludes(path))
+            {
+                "resource-excluded"
+            } else {
+                return true;
+            };
+            state.preparation_skips.push(preparation_skip(
+                "archive-trial",
+                code,
+                json!({"format":format,"archive":archive,"index":index}),
+            ));
+            false
         })
         .take(3)
         .map(|(format, archive, index)| {
@@ -1386,10 +1454,20 @@ pub(super) async fn run_trials(
     // Bound originals may differ from installed files. Explicit workspace samples
     // remain available for these tasks without replacing their production inputs.
     if !request.inputs.files.is_empty() || !request.inputs.excluded.is_empty() {
+        state.preparation_skips.push(preparation_skip(
+            "script-trial",
+            "custom-resource-inputs",
+            Value::Null,
+        ));
         return Ok(());
     }
     let mut candidates = candidates(state);
     if candidates.is_empty() {
+        state.preparation_skips.push(preparation_skip(
+            "script-trial",
+            "no-detected-candidate",
+            Value::Null,
+        ));
         return Ok(());
     }
     candidates
@@ -1411,7 +1489,10 @@ pub(super) async fn run_trials(
         for candidate in candidates{
             if attempted>=3{break;}cancelled(token)?;
             let catalog=crate::adaptation_context::builtin_catalog();let Some(definition)=catalog.iter().find(|definition|definition["format"]==candidate["format"])else{continue;};
-            if service.disabled_families.contains(definition["id"].as_str().unwrap_or("")){continue;}
+            if service.disabled_families.contains(definition["id"].as_str().unwrap_or("")) {
+                state.preparation_skips.push(preparation_skip("script-trial", "family-disabled", json!({"format":definition["format"],"adapterId":definition["id"]})));
+                continue;
+            }
             let format=text(definition,"format")?;let mut lengths=BTreeMap::new();let mut scripts=0;
             for script in candidate["sampleFiles"].as_array().into_iter().flatten().take(4).filter_map(Value::as_str){
                 if scripts>=2{break;}
@@ -1587,7 +1668,7 @@ async fn probe_archive_template(
     service
         .helper(
             &json!({
-                "operation":"archive_template_probe","root":request.game_directory,"module":template.module,
+                "operation":"archive_template_probe","root":request.game_directory,"module":template.module,"templateId":template.id,
                 "files":files,"library":library,"components":service.asset_root.join("adapters/components"),
                 "timeoutSeconds":10
             }),
@@ -1629,26 +1710,41 @@ pub(super) async fn run_template(
 ) -> Result<Option<AdapterHandle>, EngineError> {
     let archive_template = preparable_template(state).or_else(|| {
         ARCHIVE_TEMPLATES.iter().find(|template| {
-            template.discovery_key.is_some_and(|key| {
+            if !template.discovery_key.is_some_and(|key| {
                 state.extra["builtinDiscovery"][key]
                     .as_array()
                     .is_some_and(|archives| !archives.is_empty())
-            }) && !service
+            }) {
+                return false;
+            }
+            if service
                 .disabled_families
                 .contains(&format!("template.{}", template.id))
+            {
+                state.preparation_skips.push(preparation_skip(
+                    "template-selection",
+                    "template-disabled",
+                    json!({"format":template.format,"templateId":template.id}),
+                ));
+                return false;
+            }
+            true
         })
     });
     let prepare_for_model = archive_template.is_some_and(|template| template.prepare_for_model);
-    if !fresh(request, workspace, state, prepare_for_model)?
-        || (!prepare_for_model && !state.messages.is_empty())
-        || !request.user_instruction.trim().is_empty()
-        || !state.user_instruction.trim().is_empty()
-        || state.extra.contains_key("automaticTemplate")
-        || archive_template.is_none()
+    let skip = template_skip_reason(request, workspace, state, prepare_for_model)?.or_else(|| {
+        (archive_template.is_none()
             && !candidates(state).iter().any(|candidate| {
                 matches!(candidate["format"].as_str(), Some("Renpy" | "KirikiriKs"))
-            })
-    {
+            }))
+        .then_some("no-eligible-template")
+    });
+    if let Some(code) = skip {
+        state.preparation_skips.push(preparation_skip(
+            "template-selection",
+            code,
+            json!({"templateId":archive_template.map(|template| template.id),"publishedRecipes":state.extra.get("publishedReuse")}),
+        ));
         return Ok(None);
     }
     let budget = Budget::new(cancellation, Duration::from_secs(300));
@@ -1668,20 +1764,49 @@ pub(super) async fn run_template(
             archive_template.is_none() && service.disabled_families.contains(&parser_id)
         {return Err(reject(format!("模板或其内置解析器已禁用，未自动组合：{id}")));}
         let patterns:Vec<String>=serde_json::from_value(template["resourcePatterns"].clone())?;
+        let qlie31 = id == crate::adaptation_assets::QLIE_PACK31_TEMPLATE;
         let template_input = |path: &str| archive_template.is_some()
             && patterns.iter().any(|pattern| glob_match(pattern, path));
-        let candidate_files: Vec<_> = paths.keys().filter(|path| template_input(path)).cloned().collect();
+        let mut candidate_files: Vec<_> = paths.keys().filter(|path| template_input(path)).cloned().collect();
         if candidate_files.len() > 64 {
             return Err(reject("自动组合的待检查资源超过 64 项"));
         }
-        supported(paths.keys().filter(|path| !template_input(path)),&template,
-            template["archiveComponent"] == "archive.rpa3",false)?;
+        let mut remaining = Vec::new();
+        let mut identical_copies = Vec::new();
+        let mut uninstall_archive = None;
+        for path in paths.keys().filter(|path| !template_input(path)) {
+            if qlie31 && qlie::uninstall_companion(path) {
+                if extension(path) == "pack" {
+                    uninstall_archive = Some(path);
+                }
+            } else if qlie31 && qlie::identical_volume_copy(&request.game_directory, path, &candidate_files, &paths, token)? {
+                identical_copies.push(path);
+            } else {
+                remaining.push(path);
+            }
+        }
+        if !identical_copies.is_empty() {
+            report["identicalArchiveCopies"] = json!(identical_copies);
+        }
+        supported(remaining,&template,template["archiveComponent"] == "archive.rpa3",false)?;
+        if uninstall_archive.is_some() {
+            candidate_files.extend(paths.keys().filter(|path| qlie::uninstall_companion(path)).cloned());
+        }
         let lengths: BTreeMap<_, _> = if let Some(profile) = archive_template {
             report["stage"] = json!("archive-inspection");
             let evidence = probe_archive_template(service, request, workspace, state, profile, &candidate_files, token).await?;
+            if let Some(ancillary) = evidence.get("uninstallArchive") {
+                report["uninstallArchive"] = ancillary.clone();
+            }
             let selected: Vec<String> = serde_json::from_value(
                 evidence["probe"]["requiredFiles"].clone()
             ).map_err(|_| reject(evidence["diagnostic"].as_str().unwrap_or("封包与脚本布局不符合组合模板")))?;
+            if let Some(archive) = uninstall_archive
+                && (evidence["uninstallArchive"]["archive"] != archive.as_str()
+                    || evidence["uninstallArchive"]["status"] != "confirmed")
+            {
+                return Err(reject(format!("未确认根目录封包的卸载用途：{archive}")));
+            }
             if !evidence["indexFingerprints"].as_object().is_some_and(|indices| !indices.is_empty()) {
                 return Err(reject("封包模板未返回已检查索引的指纹"));
             }
@@ -1691,6 +1816,9 @@ pub(super) async fn run_template(
             report["mediaOnlyArchives"] = evidence["mediaOnlyArchives"].clone();
             report["archiveReadBytes"] = evidence["indexBytes"].clone();
             report["archivedScripts"] = evidence["scriptCount"].clone();
+            if let Some(duplicates) = evidence.get("duplicateScripts") {
+                report["duplicateScripts"] = duplicates.clone();
+            }
             report["selectedBytes"] = evidence["scriptBytes"].clone();
             selected.into_iter().map(|relative| {
                 let length = paths.get(&relative).ok_or_else(|| reject("模板返回了清单以外的资源"))?;
@@ -1739,7 +1867,15 @@ pub(super) async fn run_template(
         }
         report["stage"]=json!("compose");record(state,path,"automaticTemplate",report.clone()).await?;EngineService::report(progress,"自动组合适配器",format!("资源符合 {} 的条件，正在连接现有组件。",template["id"]));
         let composed=service.compose_template(workspace,state,&json!({"id":template["id"]}),token).await?;
-        if !state.text_coverage.is_object(){state.text_coverage=json!({});}let mut checks=coverage_list(state,"runtimeChecks");checks.push(RUNTIME_CHECK.into());state.text_coverage["runtimeChecks"]=json!(checks);
+        if !state.text_coverage.is_object() {
+            state.text_coverage = json!({});
+        }
+        let mut checks = coverage_list(state, "runtimeChecks");
+        checks.push(RUNTIME_CHECK.into());
+        if let Some(duplicates) = report["duplicateScripts"].as_u64().filter(|count| *count > 0) {
+            checks.push(format!("各卷有 {duplicates} 份同路径脚本，需要确认游戏加载顺序。"));
+        }
+        state.text_coverage["runtimeChecks"] = json!(checks);
         let arguments = &composed["testArguments"];
         if prepare_for_model {
             workflow::register(state, arguments.clone());
@@ -1747,9 +1883,13 @@ pub(super) async fn run_template(
         report["stage"]=json!("verification");record(state,path,"automaticTemplate",report.clone()).await?;EngineService::report(progress,"验证自动组合适配器","正在检查原字节往返，先做少量中文试写，通过后再验收全量中文回填。");
         let tested = service.test_adapter(request, workspace, state, arguments, token, progress).await?;
         report["diagnostics"] = tested["diagnostics"].clone();
+        report["resourceVerificationPassed"] = tested["passed"].clone();
+        report["verificationStage"] = tested["stage"].clone();
         if prepare_for_model {
             workflow::observe(state, workspace, "test_adapter", arguments, &tested);
-            if state.verification.as_ref().is_some_and(|result| result.original_roundtrip_passed) {
+            if tested["passed"] == true {
+                report["nextAction"] = json!("沿用宿主已验收的资源和源码，核对独立文字覆盖、卷加载顺序及游戏显示");
+            } else if state.verification.as_ref().is_some_and(|result| result.original_roundtrip_passed) {
                 report["originalRoundtripPassed"] = json!(true);
                 report["nextAction"] = json!("沿用已通过原文往返的模板和资源范围，处理当前译文验收问题及游戏内显示。修改后宿主按已保存的配方重新验收");
             }
@@ -1892,7 +2032,10 @@ mod tests {
         state
             .messages
             .push(json!({"role":"user","content":"saved context"}));
-        assert!(fresh(&request, &workspace, &state, false).unwrap());
+        assert_eq!(
+            template_skip_reason(&request, &workspace, &state, false).unwrap(),
+            Some("existing-conversation")
+        );
         assert!(
             run_template(
                 &service,

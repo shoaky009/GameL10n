@@ -1,17 +1,23 @@
-"""Probe a keyed QLIE PACK 3.0 + ImoScripter installation using only selected members."""
+"""Probe QLIE layouts and retain the results of bounded archive and script trials."""
 from contextlib import ExitStack
+from dataclasses import dataclass
+import json
 from pathlib import Path
+import tempfile
 
-from python.archives import qlie, qlie_keys, qlie_writer
-from python.engines import qlie_imos
+from python.archives import qlie_keys
 
+from . import engine_archive as archive
+from . import qlie_archive as pack
+from . import qlie_script as script_format
 
 PROFILE = {
     'avg/projectsetting.txt': ('FormatType', '1'),
     'avg/setting.txt': ('ReturnCode', '[n]'),
 }
-KEY_BYTES = 1 << 20
 SAMPLE_BYTES = 128 << 10
+SAMPLE_ARCHIVE_BYTES = 32 << 20
+MAX_EXE = 64 << 20
 
 
 def _read_file(path, limit):
@@ -22,37 +28,53 @@ def _read_file(path, limit):
     return data
 
 
-def internal_key(archive, external_key, game_key):
-    stream, index = archive
-    first = index.entries[0]
-    if first.name != qlie.PACK_KEY_NAME or any(e.name == qlie.PACK_KEY_NAME for e in index.entries[1:]):
-        raise ValueError('封包缺少唯一的首项内部密钥')
-    return qlie.read_member(stream, index, first, mode='keyed', key_file=external_key,
-                            game_key=game_key, max_stored=KEY_BYTES, max_output=KEY_BYTES)
+def inspect_uninstall_archive(root, files):
+    paths = {path.casefold(): path for path in files}
+    relative = paths.get('uninstalldata.pack')
+    if relative is None:
+        return None
+    executable = paths.get('uninstall.exe')
+    report = dict(archive=relative, executable=executable, status='unconfirmed')
+    if executable is None:
+        return dict(report, reason='missing-executable')
+    try:
+        binary = archive.read_file(root / executable, MAX_EXE).lower()
+        name = relative.lower()
+        if not binary.startswith(b'mz') or not any(
+            name.encode(encoding) in binary for encoding in ('ascii', 'utf-16-le')
+        ):
+            return dict(report, reason='missing-archive-reference')
+        layout = pack.LAYOUTS['3.1']
+        with archive.checked_path(root / relative).open('rb') as stream:
+            index = pack.read_index(stream, layout)
+        types = {Path(entry.name).suffix.lower() for entry in index.entries}
+        report.update(memberCount=len(index.entries), memberTypes=sorted(types))
+        if not types <= {'.bmp', '.ico', '.txt'} or not types & {'.bmp', '.ico'}:
+            return dict(report, reason='unexpected-member-types')
+    except (OSError, ValueError) as error:
+        return dict(report, reason='inspection-failed', error=str(error)[:240])
+    return dict(report, status='confirmed', reason='uninstaller-reference-and-index')
 
 
-def read_member(archive, entry, key, game_key, limit):
-    stream, index = archive
-    return qlie.read_member(stream, index, entry, mode='keyed', key_file=key,
-                            game_key=game_key, max_stored=limit, max_output=limit)
-
-
-def profile_members(index):
+def profile_members(index, layout):
     for entry in index.entries:
         name = entry.name.replace('\\', '/').casefold()
+        if layout.unicode_scripts and name.startswith('avg2/'):
+            name = 'avg/' + name[len('avg2/'):]
         if name in PROFILE:
             yield entry, PROFILE[name]
 
 
-def script_profile(archives, read):
+def script_profile(archives, read, layout):
     sources = {}
     checked = 0
     for path, archive in archives.items():
-        for entry, (field, expected) in profile_members(archive[1]):
+        for entry, (field, expected) in profile_members(archive[1], layout):
             checked += 1
             if checked > 8:
                 raise ValueError('ImoScripter 配置副本超出读取范围')
-            config = read(path, entry, 64 << 10).decode('cp932')
+            raw = read(path, entry, 64 << 10)
+            config, _, _ = script_format.decode(raw, unicode_scripts=layout.unicode_scripts)
             values = set()
             for line in config.splitlines():
                 key, separator, value = line.partition('=')
@@ -66,81 +88,167 @@ def script_profile(archives, read):
     return sources
 
 
-def _script_trial(entry, raw):
-    script = raw.decode('cp932')
-    original = qlie_imos.rows(script)
+def _script_trial(entry, raw, layout):
+    script, encoding, bom = script_format.decode(raw, unicode_scripts=layout.unicode_scripts)
+    options = dict(unicode_scripts=layout.unicode_scripts)
+    original = [record.row() for record in script_format.scan(script, **options)]
     row = next((i for i, value in enumerate(original) if value['message']), None)
     if row is None:
         raise ValueError('脚本小样没有可回填文本')
-    if qlie_imos.patch(script, original).encode('cp932') != raw:
+    if bom + script_format.patch(script, original, **options).encode(encoding) != raw:
         raise ValueError('脚本原文回填字节发生变化')
 
     translated = original.copy()
-    translated[row] = dict(original[row], message=original[row]['message'] + '汉')
-    changed = qlie_imos.patch(script, translated)
+    lines = original[row]['message'].split('\n')
+    lines[-1] += '汉'
+    translated[row] = dict(original[row], message='\n'.join(lines))
+    changed = script_format.patch(script, translated, **options)
     trial = dict(member=entry.name, bytes=len(raw), unitCount=len(original), parseStatus='passed',
-                 roundtripStatus='passed', scriptTranslationStatus='passed')
+                 roundtripStatus='passed', scriptTranslationStatus='passed', encoding=encoding)
     try:
-        encoded = changed.encode('cp932')
+        encoded = bom + changed.encode(encoding)
     except UnicodeEncodeError:
-        return dict(trial, translationStatus='failed', errorType='UnicodeEncodeError')
-    if qlie_imos.rows(encoded.decode('cp932')) != translated:
+        return dict(trial, translationStatus='failed', errorType='UnicodeEncodeError'), None
+    decoded, _, _ = script_format.decode(encoded, **options)
+    if [record.row() for record in script_format.scan(decoded, **options)] != translated:
         raise ValueError('编码后的脚本回读与请求译文不符')
-    return dict(trial, translationStatus='passed')
+    return dict(trial, translationStatus='passed'), encoded
+
+
+def check_rebuild(layout, source, before, output, key, game_key, changes, *, limit):
+    after = pack.read_index(output, layout)
+    if (layout.tail(source, before) != layout.tail(output, after)
+            or [entry.raw_name for entry in before.entries] != [entry.raw_name for entry in after.entries]):
+        raise ValueError('QLIE 封包的成员顺序或查找表发生变化')
+    for old, new in zip(before.entries, after.entries, strict=True):
+        if old.encryption != new.encryption:
+            raise ValueError('QLIE 封包成员的加密方式发生变化')
+        if old.name in changes:
+            actual = layout.read(output, after, new, key, game_key, limit)
+            if new.packed or actual != changes[old.name]:
+                raise ValueError(f'QLIE 封包成员回读与目标译文不一致（{old.name}）')
+        elif (old.size, old.unpacked_size, old.packed, old.checksum) != (
+                new.size, new.unpacked_size, new.packed, new.checksum
+        ) or archive.hash_range(source, old.offset, old.size) != archive.hash_range(output, new.offset, new.size):
+            raise ValueError(f'QLIE 封包未翻译成员发生变化（{old.name}）')
 
 
 def probe(request):
     files = request['files']
-    key_file = request['keyFile']
-    external_key = _read_file(files[key_file], KEY_BYTES)
-    executable_keys = []
-    for exe in request['executables']:
-        try:
-            game_key = qlie_keys.game_key_from_pe(_read_file(files[exe], 64 << 20))
-        except (OSError, ValueError):
-            continue
-        executable_keys.append((exe, game_key))
-    if len(executable_keys) != 1:
-        return dict(status='executable-unconfirmed', error='未确认唯一带 IconKeyImage 的游戏 EXE')
-    exe, game_key = executable_keys[0]
-
     with ExitStack() as stack:
-        archives = {}
-        keys = {}
-        eligible = []
-        for path in request['archives']:
-            stream = stack.enter_context(Path(files[path]).open('rb'))
-            index = qlie.read_index(stream, max_entries=16_000, max_index_bytes=2 << 20)
-            archives[path] = stream, index
-            eligible.extend((path, entry) for entry in index.entries
-                            if entry.name.lower().endswith('.s')
-                            and 0 < entry.size <= SAMPLE_BYTES
-                            and 0 < entry.unpacked_size <= SAMPLE_BYTES)
-        def read(path, entry, limit):
-            archive = archives[path]
-            if path not in keys:
-                keys[path] = internal_key(archive, external_key, game_key)
-            return read_member(archive, entry, keys[path], game_key, limit)
+        streams = {path: stack.enter_context(Path(files[path]).open('rb')) for path in request['archives']}
+        versions = {path: pack.version(stream) for path, stream in streams.items()}
+        layout = pack.LAYOUTS.get(next(iter(versions.values())))
+        report = dict(volumes=[dict(archive=path, version=version) for path, version in versions.items()])
+        if layout is None or set(versions.values()) != {layout.version}:
+            return dict(report, status='unsupported-layout', stage='index',
+                        error='当前启动目录的 FilePack 版本没有匹配的组合读写布局')
+        report.update(version=f'FilePackVer{layout.version}', keySource=layout.key_source,
+                      stage='index', status='unavailable')
+        try:
+            volumes = {}
+            for path, stream in streams.items():
+                try:
+                    volumes[path] = stream, pack.read_index(stream, layout)
+                except (OSError, ValueError) as error:
+                    return dict(report, failedArchive=path, error=str(error)[:240])
+            return trial_volumes(request, report, layout, volumes)
+        except (OSError, ValueError) as error:
+            return dict(report, error=str(error)[:240])
 
-        profile = script_profile(archives, read)
-        # Prefer longer scene members over short bootstrap and interface scripts.
-        eligible.sort(key=lambda item: (not item[1].name.replace('\\', '/').casefold().startswith('scenario/'),
-                                        not (item[1].packed and item[1].encryption),
-                                        -item[1].unpacked_size, item[0], item[1].name))
-        error = '封包中没有预算内的 ImoScripter 脚本小样'
-        for path, entry in eligible[:6]:
-            archive = archives[path]
+
+def trial_volumes(request, report, layout, volumes):
+    report['indexStatus'] = 'passed'
+    report['stage'] = 'key'
+    files = request['files']
+    external_key = game_key = None
+    if layout.key_source == 'external-and-executable':
+        key_file = request['keyFile']
+        external_key = _read_file(files[key_file], pack.KEY_BYTES)
+        if len(external_key) < 256:
+            raise ValueError('QLIE 外部密钥长度不足')
+        executable_keys = []
+        for exe in request['executables']:
             try:
-                qlie_writer.hash13_tail(*archive, max_bytes=4 << 20)
-                raw = read(path, entry, SAMPLE_BYTES)
-                trial = _script_trial(entry, raw)
-            except ValueError as exc:
-                error = str(exc)[:160]
+                executable_keys.append((exe, qlie_keys.game_key_from_pe(_read_file(files[exe], MAX_EXE))))
+            except (OSError, ValueError):
                 continue
-            return dict(status='sampled', archive=path, version='FilePackVer3.0', writerLayout='HashVer1.3',
-                        mode='keyed', executable=exe, keyFile=key_file, scriptParser=qlie_imos.REFERENCE,
-                        profile=profile, trials=[trial],
-                        nextAction='沿用已通过的小样及 python.archives.qlie、qlie_keys 和 python.engines.qlie_imos。'
-                                   '脚本原文已逐字节回填，简体字已在脚本结构层读回，严格 CP932 编码仍需解决。'
-                                   '按现有 qlie_writer 的模板条件实现回包，定向验证译文编码和游戏内显示，再做完整 test_adapter')
-        return dict(status='script-unconfirmed', error=error)
+        if len(executable_keys) != 1:
+            raise ValueError('未确认唯一带 IconKeyImage 的游戏 EXE')
+        exe, game_key = executable_keys[0]
+        report.update(executable=exe, keyFile=key_file)
+
+    keys = {}
+    config_hashes = {}
+
+    def read(path, entry, limit):
+        stream, index = volumes[path]
+        if path not in keys:
+            try:
+                keys[path] = layout.key(stream, index, external_key, game_key)
+            except ValueError as error:
+                raise ValueError(f'{path} 卷内密钥：{error}') from error
+        try:
+            return layout.read(stream, index, entry, keys[path], game_key, limit)
+        except ValueError as error:
+            raise ValueError(f'{path}/{entry.name}：{error}') from error
+
+    def read_config(path, entry, limit):
+        raw = read(path, entry, limit)
+        config_hashes[(path, entry.name)] = archive.digest(raw)
+        return raw
+
+    report['stage'] = 'script-profile'
+    profile = script_profile(volumes, read_config, layout)
+    report['profile'] = profile
+    eligible = [(path, entry) for path, (_, index) in volumes.items() for entry in index.entries
+                if entry.name.lower().endswith('.s') and 0 < entry.size <= SAMPLE_BYTES
+                and 0 < entry.unpacked_size <= SAMPLE_BYTES
+                and (not layout.unicode_scripts or index.file_size <= SAMPLE_ARCHIVE_BYTES)]
+    eligible.sort(key=lambda item: (not item[1].name.replace('\\', '/').casefold().startswith('scenario/'),
+                                    not (item[1].packed and item[1].encryption),
+                                    -item[1].unpacked_size, item[0], item[1].name))
+
+    proof = None
+    if layout.unicode_scripts:
+        indices = [(path, archive.hash_range(stream, index.index_offset, index.file_size - index.index_offset))
+                   for path, (stream, index) in volumes.items()]
+        proof = archive.digest(json.dumps([indices, sorted(config_hashes.items())]).encode())
+        previous = request.get('previous') or {}
+        previous_path = previous.get('archive')
+        if previous.get('indexFingerprint') == proof and any(path == previous_path for path, _ in eligible):
+            stream, index = volumes[previous_path]
+            if previous.get('sampleHash') == archive.hash_range(stream, 0, index.file_size):
+                return dict(previous, reused=True)
+
+    report.update(stage='script', error='封包中没有预算内的 ImoScripter 脚本小样')
+    for path, entry in eligible[:6]:
+        stream, index = volumes[path]
+        try:
+            raw = read(path, entry, SAMPLE_BYTES)
+            trial, replacement = _script_trial(entry, raw, layout)
+        except ValueError as error:
+            if 'trials' not in report:
+                report.update(error=str(error)[:240])
+            continue
+        report.update(stage='archive-rebuild', archive=path, trials=[trial], memberReadStatus='passed')
+        try:
+            layout.tail(stream, index)
+            if layout.unicode_scripts:
+                if replacement is None:
+                    raise ValueError('当前脚本编码无法完成中文回填小样')
+                changes = {entry.name: replacement}
+                with tempfile.TemporaryFile() as output:
+                    layout.rebuild(stream, output, index, keys[path], external_key, game_key, changes)
+                    check_rebuild(layout, stream, index, output, keys[path], game_key, changes, limit=2 * SAMPLE_BYTES)
+                trial['archiveRoundtripStatus'] = 'passed'
+        except ValueError as error:
+            report['error'] = str(error)[:240]
+            continue
+        result = dict(report, status='sampled', stage='completed', templateId=layout.template,
+                      writerLayout='HashVer1.4' if layout.unicode_scripts else 'HashVer1.3')
+        result.pop('error', None)
+        if proof:
+            result.update(indexFingerprint=proof, sampleHash=archive.hash_range(stream, 0, index.file_size))
+        return result
+    return report

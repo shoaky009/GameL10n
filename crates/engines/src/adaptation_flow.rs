@@ -2,6 +2,8 @@
 use super::history;
 use super::*;
 
+const MAX_RESPONSE_FORMAT_RETRIES: u8 = 2;
+
 #[cfg(test)]
 const CHECKPOINT_REQUEST: &str = "当前会话较长。下一步先调用 checkpoint，保存已确认的引擎和版本、现有源码及资源路径、已通过与失败的验证、排除的方案和下一项具体操作。摘要优先控制在 3000 字内，保留当前实现必需的字段顺序、数组步长、调用约定和证据位置；明确已覆盖、已知遗漏和未调查的文字类别。详细反汇编和源码引用路径及范围，避免复制全文。这是保存已有进度，不需要重新扫描游戏、查找同一资料或重跑已完成测试。";
 
@@ -555,7 +557,8 @@ pub(super) async fn run(
     let mut continuation = Some(continuation);
     let output_limit = request.limits.maximum_output_tokens;
     let mut recovering_output = false;
-    let mut tool_call_retries = 0;
+    let mut response_format_retries = 0;
+    let mut next_format_retry = None;
     for key in ["lastImplementationTurn", "lastVerificationProgressTurn"] {
         if !state.extra.contains_key(key) {
             set_number(
@@ -891,16 +894,18 @@ pub(super) async fn run(
         );
         save_session(path, state).await?;
         let requested = output_limit.min((remaining - estimated).min(u64::from(u32::MAX)) as u32);
-        if tool_call_retries > 0 {
-            trace_run(json!({"operation":"tool-call-retry","retry":tool_call_retries}))?;
+        let retry = next_format_retry.take();
+        if let Some((operation, _)) = retry {
+            trace_run(json!({"operation":operation,"retry":response_format_retries}))?;
         }
         if let Some(progress) = progress {
             progress(EngineProgress {
                 stage: "智能适配".into(),
-                message: if tool_call_retries == 0 {
-                    "正在分析资源或规划下一步操作。".into()
-                } else {
-                    format!("工具调用格式无效，正在重试（{tool_call_retries}/2）。")
+                message: match retry {
+                    Some((_, reason)) => format!(
+                        "{reason}，正在重试（{response_format_retries}/{MAX_RESPONSE_FORMAT_RETRIES}）。"
+                    ),
+                    None => "正在分析资源或规划下一步操作。".into(),
                 },
                 message_from_model: false,
                 usage: state.usage.clone(),
@@ -958,12 +963,16 @@ pub(super) async fn run(
                         None,
                     ));
                 }
-                if matches!(
-                    error.diagnostic.code.as_str(),
-                    "tool-call" | "agent-tool-format"
-                ) && tool_call_retries < 2
-                {
-                    tool_call_retries += 1;
+                let retry = match error.diagnostic.code.as_str() {
+                    "stream-format" => Some(("stream-format-retry", "流式响应格式无效")),
+                    "tool-call" | "agent-tool-format" => {
+                        Some(("tool-call-retry", "工具调用格式无效"))
+                    }
+                    _ => None,
+                };
+                if retry.is_some() && response_format_retries < MAX_RESPONSE_FORMAT_RETRIES {
+                    response_format_retries += 1;
+                    next_format_retry = retry;
                     continue;
                 }
                 if error.diagnostic.code == "output-token-limit"
@@ -983,7 +992,7 @@ pub(super) async fn run(
             }
         };
         recovering_output = false;
-        tool_call_retries = 0;
+        response_format_retries = 0;
         state.total_turns += 1;
         let usage = completion_usage(&response, estimated)?;
         add_usage(&mut state.usage, &usage);
@@ -1316,7 +1325,9 @@ mod tests {
                 }
                 requests.push(serde_json::from_slice(&bytes[start..start + length]).unwrap());
                 let mut response = response;
-                let content = if protocol == ApiProtocol::Responses {
+                let content = if let Some(events) = response.as_str() {
+                    events.to_owned()
+                } else if protocol == ApiProtocol::Responses {
                     let kind = format!("response.{}", response["status"].as_str().unwrap());
                     format!(
                         "event: {kind}\ndata: {}\n\n",
@@ -1412,6 +1423,75 @@ mod tests {
                 "usage":{"input_tokens":100,"output_tokens":20,"input_tokens_details":{"cached_tokens":50}}
             }),
         }
+    }
+
+    #[tokio::test]
+    async fn adaptation_retries_responses_with_inconsistent_stream_items() {
+        let root = tempfile::tempdir().unwrap();
+        let (service, mut request, workspace, mut state) = fixture(root.path());
+        request.limits.maximum_tokens = 3 * RESPONSE_TOKENS;
+        let protocol = ApiProtocol::Responses;
+        let mut rejected = budgeted_response(file_response(
+            protocol,
+            "rejected",
+            "work/rejected.py",
+            false,
+        ));
+        rejected["output"][0]["id"] = json!("terminal-item");
+        let item_added = json!({"type":"response.output_item.added","output_index":0,
+            "item":{"id":"streamed-item","type":"function_call"}});
+        let completed = json!({"type":"response.completed","response":rejected});
+        let malformed = json!(format!("data: {item_added}\n\ndata: {completed}\n\n"));
+        let accepted = budgeted_response(file_response(
+            protocol,
+            "accepted",
+            "work/accepted.py",
+            false,
+        ));
+        let (provider, server) =
+            model_with_protocol(vec![malformed.clone(), malformed, accepted], protocol);
+        let events = std::sync::Mutex::new(Vec::new());
+        let path = workspace.join("session.json");
+        let result = run(
+            &service,
+            &request,
+            &provider,
+            &workspace,
+            &path,
+            &mut state,
+            "Continue implementation.".into(),
+            &CancellationToken::new(),
+            None,
+            &|event| {
+                events.lock().unwrap().push(event);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.0, AdaptationStatus::BudgetExhausted);
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0], requests[1]);
+        assert_eq!(requests[1], requests[2]);
+        assert!(!workspace.join("work/rejected.py").exists());
+        assert_eq!(
+            fs::read_to_string(workspace.join("work/accepted.py")).unwrap(),
+            "pass\n"
+        );
+        let restored = load_session(&path).unwrap();
+        assert_eq!(restored.total_turns, 1);
+        assert_eq!(restored.api_requests(), 3);
+        assert_eq!(tokens(&restored.usage), request.limits.maximum_tokens);
+        let events = events.into_inner().unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event["operation"] == "stream-format-retry")
+                .map(|event| event["retry"].as_u64().unwrap())
+                .collect::<Vec<_>>(),
+            [1, 2]
+        );
     }
 
     #[tokio::test]
@@ -2554,6 +2634,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn local_preparation_logs_why_a_detected_qlie_archive_was_skipped() {
+        let root = tempfile::tempdir().unwrap();
+        let (_, mut request, _, _) = fixture(root.path());
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let service = EngineService::new(repo, crate::ToolPaths::development());
+        if !service.tools.python().is_file() {
+            return;
+        }
+        let resources = request.game_directory.join("GameData");
+        fs::create_dir(&resources).unwrap();
+        let mut footer = [0; 28];
+        footer[..14].copy_from_slice(b"FilePackVer3.0");
+        fs::write(resources.join("story.pack"), footer).unwrap();
+        request.discovery_inventory = Some(Inventory::scan(&request.game_directory).unwrap());
+        request.limits.maximum_tokens = RESPONSE_TOKENS;
+        let (provider, server) = model(vec![budgeted_response(summary_response("stop"))]);
+        let result = service
+            .adapt(&request, &provider, &CancellationToken::new(), None)
+            .await
+            .unwrap();
+        assert_eq!(result.status, AdaptationStatus::BudgetExhausted);
+        server.join().unwrap();
+
+        let log = fs::read_dir(request.project_directory.join("logs"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let preparation = fs::read_to_string(log)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .find(|row| row["entry"]["operation"] == "local-preparation")
+            .unwrap();
+        let entry = &preparation["entry"];
+        assert_eq!(entry["discoveryCandidates"][0]["format"], "Qlie");
+        assert!(
+            entry["discoveryCandidates"][0]["evidence"][0]
+                .as_str()
+                .unwrap()
+                .contains("FilePackVer3.0")
+        );
+        let skips = entry["preparationSkips"].as_array().unwrap();
+        assert!(skips.iter().any(|skip| skip["stage"] == "archive-trial"
+            && skip["code"] == "missing-key-file"
+            && skip["details"]["requiredFile"] == "DLL/key.fkey"));
+        assert!(
+            skips
+                .iter()
+                .any(|skip| skip["stage"] == "template-selection"
+                    && skip["code"] == "no-eligible-template")
+        );
+        assert!(entry["automaticArchiveTrials"].is_null());
+    }
+
+    #[tokio::test]
     async fn qlie_archive_trial_reaches_first_and_compacted_model_requests() {
         let root = tempfile::tempdir().unwrap();
         let (_, mut request, workspace, _) = fixture(root.path());
@@ -2697,6 +2834,150 @@ mod tests {
         let requests = server.join().unwrap();
         assert_eq!(requests.len(), 1);
         assert!(requests[0].to_string().contains("originalRoundtripPassed"));
+    }
+
+    async fn verify_qlie31_resume(game_directory: Option<PathBuf>) {
+        let root = tempfile::tempdir().unwrap();
+        let (_, mut request, workspace, mut state) = fixture(root.path());
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let service = EngineService::new(&repo, crate::ToolPaths::development());
+        if !service.tools.python().is_file() {
+            assert!(game_directory.is_none(), "需要开发工具运行时");
+            return;
+        }
+        let installed = game_directory.is_some();
+        if let Some(game_directory) = game_directory {
+            request.game_directory = game_directory;
+            state.game_directory = request.game_directory.clone();
+        } else {
+            let library = service
+                .reference_library(&service.current_reference().unwrap())
+                .unwrap();
+            assert!(
+                std::process::Command::new(service.tools.python())
+                    .args(["-I", "-B", "-X", "utf8"])
+                    .arg(repo.join("crates/engines/python/fixtures/qlie_installation.py"))
+                    .arg(library)
+                    .arg(&request.game_directory)
+                    .arg("3.1")
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        let cancellation = CancellationToken::new();
+        service
+            .bind_reference(&workspace, &mut state, None, false, &cancellation)
+            .unwrap();
+        state.total_turns = 1;
+        if !installed {
+            state.extra.insert(
+                "automaticTemplate".into(),
+                json!({"status":"incomplete","stage":"archive-inspection","templateId":"qlie-pack31-imos"}),
+            );
+        }
+        let path = workspace.join("session.json");
+        save_session(&path, &mut state).await.unwrap();
+        request.require_model_analysis = true;
+        request.discovery_inventory = Some(Inventory::scan(&request.game_directory).unwrap());
+        request.limits.maximum_tokens = RESPONSE_TOKENS;
+        let (provider, server) = model(vec![
+            budgeted_response(summary_response("stop"));
+            if installed { 1 } else { 2 }
+        ]);
+        let result = service
+            .adapt(&request, &provider, &cancellation, None)
+            .await
+            .unwrap();
+        let state = load_session(&path).unwrap();
+        let trial = &state.extra["automaticArchiveTrials"][0];
+        assert_eq!(trial["keySource"], "embedded", "{trial}");
+        assert_eq!(
+            trial["trials"][0]["archiveRoundtripStatus"], "passed",
+            "{trial}"
+        );
+        let template = &state.extra["automaticTemplate"];
+        assert_eq!(template["templateId"], "qlie-pack31-imos", "{template}");
+        assert_eq!(
+            template["resourceVerificationPassed"], true,
+            "{template} {result:?}"
+        );
+        assert!(
+            template["identicalArchiveCopies"]
+                .as_array()
+                .is_some_and(|paths| !paths.is_empty())
+        );
+        assert_eq!(template["uninstallArchive"]["status"], "confirmed");
+        assert!(workspace.join("src/adapter.py").is_file());
+        assert!(!state.extra["resourceHashes"]["GameData/media.pack"].is_string());
+        if installed {
+            println!(
+                "{} units, {} archived scripts, {} duplicate script paths.",
+                state.verification.as_ref().unwrap().units,
+                template["archivedScripts"],
+                template["duplicateScripts"]
+            );
+        } else {
+            service
+                .adapt(&request, &provider, &cancellation, None)
+                .await
+                .unwrap();
+            let resumed = load_session(&path).unwrap();
+            assert_eq!(resumed.extra["automaticArchiveTrials"][0]["reused"], true);
+        }
+        let requests = server.join().unwrap();
+        assert!(
+            requests[0]
+                .to_string()
+                .contains("resourceVerificationPassed")
+        );
+    }
+
+    #[tokio::test]
+    async fn qlie31_adapts_before_model_analysis_with_saved_runtime_dependencies() {
+        verify_qlie31_resume(None).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "Requires GAMEL10N_QLIE31_GAME with a FilePack 3.1 game, update copy and uninstaller"]
+    async fn installed_qlie31_resources_pass_automatic_verification() {
+        let game_directory = std::env::var_os("GAMEL10N_QLIE31_GAME").unwrap();
+        verify_qlie31_resume(Some(game_directory.into())).await;
+    }
+
+    #[tokio::test]
+    async fn qlie_unknown_version_reports_index_gap_before_checking_keys() {
+        let root = tempfile::tempdir().unwrap();
+        let (_, mut request, workspace, _) = fixture(root.path());
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let service = EngineService::new(repo, crate::ToolPaths::development());
+        if !service.tools.python().is_file() {
+            return;
+        }
+        let mut footer = [0; 28];
+        footer[..14].copy_from_slice(b"FilePackVer3.2");
+        let resources = request.game_directory.join("GameData");
+        fs::create_dir(&resources).unwrap();
+        fs::write(resources.join("story.pack"), footer).unwrap();
+        request.discovery_inventory = Some(Inventory::scan(&request.game_directory).unwrap());
+        request.limits.maximum_tokens = RESPONSE_TOKENS;
+        let (provider, server) = model(vec![budgeted_response(summary_response("stop"))]);
+        service
+            .adapt(&request, &provider, &CancellationToken::new(), None)
+            .await
+            .unwrap();
+        let state = load_session(&workspace.join("session.json")).unwrap();
+        assert_eq!(
+            state.extra["builtinDiscovery"]["candidates"][0]["format"],
+            "Qlie"
+        );
+        let report = &state.extra["automaticArchiveTrials"][0];
+        assert_eq!(report["volumes"][0]["version"], "3.2");
+        assert_eq!(report["stage"], "index");
+        assert_eq!(report["status"], "unsupported-layout");
+        assert!(!workspace.join("src/adapter.py").exists());
+        let requests = server.join().unwrap();
+        assert!(requests[0].to_string().contains("unsupported-layout"));
     }
 
     #[tokio::test]

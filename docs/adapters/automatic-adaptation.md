@@ -25,7 +25,7 @@
 
 首次调用模型前，宿主用已有资源清单挑选少量封包，按需读取脚本和伴随文件。EAGLS SCPACK、Artemis PFS v8、BGI、KIF、YPF 482 和 NEKOPACK4A 的小样可检查提取、原文往返及译文回读。CatSystem2 加密 KIF 需要可由同目录 EXE 和成员签名交叉验证的命名密钥。YSTB 试验需要同目录的 `ysc.ybn`。格式、编码或依赖不符时，后续调查可复用已通过的小样结果。[封包组件](templates.md#封包组件) · [EAGLS 脚本](engines/eagls-scpack.md) · [Artemis PFS](engines/artemis-pfs.md) · [NekoSDK](engines/nekosdk.md)
 
-NekoSDK 或 QLIE 封包小样通过原文往返后，宿主可在请求模型前组装适配器，验收提取及整卷原文回填。已有符合样本的中文回填配方时优先复用。需要处理译文编码、补充文字覆盖或确认游戏显示时，分析模型可以沿用已有实现和验收结果。[NekoSDK 适用范围](engines/nekosdk.md) · [QLIE 适用范围](engines/qlie-filepack3-systemfont.md#封包脚本模板)
+NekoSDK 或 QLIE 封包小样通过后，宿主可在请求模型前组装适配器，验收提取、整卷原文回填和译文回读。QLIE 3.1 小样需要通过改写成员的回包和回读。索引、关键配置、小样封包及所用组件和参考库一致时，可复用已通过的小样。已有符合样本的中文回填配方时优先复用。需要处理译文编码、补充文字覆盖或确认游戏显示时，分析模型可以沿用已有实现和验收结果。[NekoSDK 适用范围](engines/nekosdk.md) · [QLIE 适用范围](engines/qlie-filepack3-systemfont.md#封包脚本模板)
 
 适配可检索公开资料、下载依赖并向分析服务发送必要的资源片段与工具结果。工作区保留会话、源码和报告，供修复或总结使用。[适配产物](artifacts.md) · [执行隔离](execution-isolation.md)
 
@@ -49,7 +49,7 @@ Artemis PFS v8 替换式适配器的部分试译如果发现说话人身份变�
 
 ## 诊断
 
-在任务详情和项目日志查看当前阶段、失败原因与验收结果。工具操作记录带简短的目标和参数，读取范围可用来区分分段读取和重复读取。开发者可从源码目录汇总适配日志。
+在任务详情和项目日志查看当前阶段、失败原因与验收结果。本地准备日志记录识别证据和自动试用或模板筛选的跳过原因。工具操作记录带简短的目标和参数，读取范围可用来区分分段读取和重复读取。开发者可从源码目录汇总适配日志。
 
 ```powershell
 ./scripts/analyze-adaptation-log.ps1 -ProjectDirectory 'D:\GameL10n Data\games\项目ID'

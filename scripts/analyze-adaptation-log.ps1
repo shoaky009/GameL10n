@@ -261,6 +261,7 @@ $runs = @($rows | Where-Object { $_.runId } | Group-Object runId | ForEach-Objec
     $group = $_.Group
     $start = $group | Where-Object { $_.entry.operation -eq 'run-start' } | Select-Object -First 1
     $modelStart = $group | Where-Object { $_.entry.operation -eq 'model-start' } | Select-Object -First 1
+    $preparation = $group | Where-Object { $_.entry.operation -eq 'local-preparation' } | Select-Object -Last 1
     $end = $group | Where-Object { $_.entry.operation -eq 'run-end' } | Select-Object -Last 1
     $runAttempts = @($attempts | Where-Object { $_.row.runId -eq $group[0].runId })
     $item = [ordered]@{ runId = $_.Name; firstEvent = $group[0].at; lastEvent = $group[-1].at
@@ -280,6 +281,14 @@ $runs = @($rows | Where-Object { $_.runId } | Group-Object runId | ForEach-Objec
     }
     $item.sampleChecks = Sample-Summary $group
     $item.streams = Stream-Summary @($runAttempts | ForEach-Object { $_.row })
+    if ($null -ne $preparation.entry.preparationSkips -or $null -ne $preparation.entry.automaticArchiveTrials -or $null -ne $preparation.entry.automaticTemplate) {
+        $item.localPreparation = [ordered]@{
+            discoveryCandidates = $preparation.entry.discoveryCandidates
+            skips = $preparation.entry.preparationSkips
+            archiveTrials = $preparation.entry.automaticArchiveTrials
+            template = $preparation.entry.automaticTemplate | Select-Object templateId,status,stage,diagnostics,resourceVerificationPassed,verificationStage,duplicateScripts,uninstallArchive
+        }
+    }
     if ($end) {
         $hostUsage = Get-Usage $end.entry
         $item.hostRunTokens = if ($null -ne $end.entry.tokens) { $end.entry.tokens }
@@ -347,6 +356,7 @@ $result = [ordered]@{
             maximumOutputTokens = $_.maximumOutputTokens; analysisRequestTimeoutMs = $_.analysisRequestTimeoutMs
             analysisStreaming = $_.analysisStreaming; analysisFirstResponseTimeoutMs = $_.analysisFirstResponseTimeoutMs
             analysisStreamIdleTimeoutMs = $_.analysisStreamIdleTimeoutMs; streams = $_.streams
+            localPreparation = $_.localPreparation
             sampleChecks = $_.sampleChecks }
     })
     milestones = [ordered]@{
