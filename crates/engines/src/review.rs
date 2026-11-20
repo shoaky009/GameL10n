@@ -1,5 +1,7 @@
 //! Conditional shared engine knowledge from cited project evidence.
 
+mod evidence;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
@@ -19,8 +21,7 @@ use crate::{
     AdaptationLimits, CancellationToken, EngineError, EngineProgress, EngineService,
     ProgressCallback,
     adaptation::{
-        Session, add_usage, completion_usage, definition, file_error, page_text, read_tool_result,
-        text, tokens,
+        Session, add_usage, completion_usage, definition, file_error, page_text, text, tokens,
     },
     discovery::{Inventory, InventoryFile, resolve_relative},
 };
@@ -255,7 +256,6 @@ impl EngineService {
             })
             .await
             .map_err(file_error)??;
-        let overview = json!({"objective":state.objective,"summary":state.summary,"checkpoint":state.checkpoint,"usage":state.usage,"totalTurns":state.total_turns,"verification":state.verification,"coverage":state.text_coverage,"family":state.family,"evidenceFiles":evidence,"runtimeTested":false});
         let report = project_directory.join("engine-review.json");
         if let Ok(mut previous) = read_json::<EngineReviewResult>(&report)
             && previous.cache_version == 2
@@ -271,6 +271,7 @@ impl EngineService {
             );
             return Ok(previous);
         }
+        let overview = evidence::overview(&state, &evidence);
         let mut messages = vec![
             json!({"role":"system","content":format!("{}\nRust host: read_evidence is bounded/read-only. Existing Python helpers may be copied only from inspected sources with attribution. Never execute scripts or the game.\n",include_str!("../prompts/review.md"))}),
             json!({"role":"user","content":json!({"task":"总结当前项目对后续同引擎/格式变体的可靠经验，无有用改进时 improvement=null。","overview":overview,"existingKnowledge":read_knowledge(knowledge_directory,&json!({}),None)?}).to_string()}),
@@ -280,11 +281,13 @@ impl EngineService {
         let requests_before = provider.request_count();
         let mut inspected = BTreeMap::new();
         let mut turn = 0;
+        let mut latest_exchange = 0;
         loop {
             if cancellation.is_cancelled() {
                 return Err(EngineError::Cancelled);
             }
-            let estimated = (serde_json::to_vec(&messages)?.len()
+            let request_messages = evidence::request_messages(&messages, latest_exchange);
+            let estimated = (serde_json::to_vec(&request_messages)?.len()
                 + serde_json::to_vec(&tools)?.len()) as u64
                 / 3
                 + 1;
@@ -307,7 +310,7 @@ impl EngineService {
             }
             let response = provider
                 .complete_review(
-                    &messages,
+                    &request_messages,
                     &tools,
                     limits
                         .maximum_output_tokens
@@ -341,6 +344,7 @@ impl EngineService {
             if tokens(&usage) > limits.maximum_tokens {
                 break;
             }
+            latest_exchange = messages.len();
             if completion.output_items.is_empty() {
                 messages.push(json!({"role":"assistant","content":completion.text,"tool_calls":completion.tool_calls.iter().map(|call|json!({"id":call.id,"type":"function","function":{"name":call.name,"arguments":call.arguments}})).collect::<Vec<_>>()}));
             } else {
@@ -352,7 +356,11 @@ impl EngineService {
             }
             let finish_alone = completion.tool_calls.len() == 1;
             for call in completion.tool_calls {
-                let args = serde_json::from_str::<Value>(&call.arguments)?;
+                let mut args = serde_json::from_str::<Value>(&call.arguments)?;
+                if matches!(call.name.as_str(), "read_evidence" | "read_tool_result") {
+                    let length = args["length"].as_u64().unwrap_or(2400).min(4096);
+                    args["length"] = json!(length);
+                }
                 if let Some(progress) = progress {
                     progress(EngineProgress {
                         stage: "执行总结工具".into(),
@@ -389,12 +397,17 @@ impl EngineService {
                             Ok(value)
                         }
                     }
-                    "read_tool_result" => {
-                        let mut value = read_tool_result(&workspace, &state, &args)?;
-                        value["evidencePath"] = json!("adaptation/current/session.json");
-                        inspected.insert("adaptation/current/session.json".into(), String::new());
-                        Ok(value)
-                    }
+                    "read_tool_result" => evidence::tool_result(
+                        &workspace, &state, &messages, &args,
+                    )
+                    .inspect(|value| {
+                        if value["evidencePath"] == evidence::ADAPTATION_RESULT_PATH
+                            && value["found"] != false
+                        {
+                            inspected
+                                .insert(evidence::ADAPTATION_RESULT_PATH.into(), String::new());
+                        }
+                    }),
                     "read_knowledge" => {
                         if let Some(id) = args.get("id").and_then(Value::as_str) {
                             inspected.insert(format!("knowledge:{id}"), String::new());
@@ -869,14 +882,14 @@ fn review_tools() -> Vec<Value> {
     vec![
         definition(
             "read_evidence",
-            "Read bounded source/log evidence; path=overview returns aggregate. Cite returned evidencePath. No execution; whole sessions blocked.",
+            "Read a source or log excerpt. Use a single exact symbol or diagnostic to locate what is missing. path=overview returns the host's facts. Cite returned evidencePath.",
             json!({"path":string,"query":string,"offset":integer,"length":integer}),
             &["path"],
         ),
         definition(
             "read_tool_result",
-            "Read an adaptation tool's saved result by original toolCallId; no rerun, no complete session.",
-            json!({"toolCallId":string,"query":string,"offset":integer,"length":integer}),
+            "Read the retained original result by toolCallId. Use source=review for a truncated review result or source=adaptation for adaptation evidence.",
+            json!({"toolCallId":string,"query":string,"offset":integer,"length":integer,"source":{"type":"string","enum":["auto","review","adaptation"]}}),
             &["toolCallId"],
         ),
         definition(

@@ -3434,7 +3434,7 @@ fn editing_next_action(state: &Session, relative: &str) -> &'static str {
     }
 }
 
-fn workspace_file(relative: &str) -> String {
+pub(crate) fn workspace_file(relative: &str) -> String {
     if relative.starts_with("tools/") {
         format!("src/{relative}")
     } else {
@@ -3886,7 +3886,7 @@ fn find_ordinal_ignore_case(content: &str, query: &str, start: usize) -> Option<
     None
 }
 
-fn readback_page(
+pub(crate) fn readback_page(
     content: &str,
     args: &Value,
     default_offset: usize,
