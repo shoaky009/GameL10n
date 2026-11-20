@@ -1236,6 +1236,16 @@ pub(crate) fn builtin_trial_summaries(state: &Session) -> Vec<Value> {
     summaries
 }
 
+pub(crate) fn archive_sample_passed(report: &Value) -> bool {
+    report["trials"].as_array().is_some_and(|trials| {
+        trials.iter().any(|trial| {
+            trial["parseStatus"] == "passed"
+                && trial["roundtripStatus"] == "passed"
+                && trial["unitCount"].as_u64().is_some_and(|count| count > 0)
+        })
+    })
+}
+
 pub(crate) fn builtin_context(
     state: &Session,
     disabled: &BTreeSet<String>,
@@ -1275,10 +1285,19 @@ pub(crate) fn builtin_context(
         .any(|trial| trial["status"] == "passed" || trial["parseStatus"] == "passed")
     {
         "\n记录中有解析步骤通过，仅适用于列出的样本及哈希。按 parseStatus、roundtripStatus、translationStatus 分别复用解析或回填能力，仅修复未通过的阶段；已有源码则沿用，仍须完整 test_adapter。"
+    } else if state
+        .extra
+        .get("automaticArchiveTrials")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(archive_sample_passed)
+    {
+        "\n当前决策状态的 automaticArchiveTrials 已记录封包小样通过的阶段。沿用对应小样和下一步，当前资源仍须完整 test_adapter。"
     } else {
         "\n尚无通过的解析样本时，用 inspect_builtin_adapter 查看相关能力，stage_resources 准备样本，try_builtin_adapter 验证；已有调查按当前进度继续。解析可用时 copy_adapter 复用解析库，只补缺失环节。"
     };
-    context += "记录的试验只覆盖列出的文件及哈希，不替代当前资源的最终 test_adapter；样本未变时沿用结论，勿重复调查。";
+    context += "记录的试验仅覆盖已检查的样本，不替代当前资源的最终 test_adapter；样本未变时沿用结论，勿重复调查。";
     let guidance = builtin_guidance(state, disabled);
     if !guidance.is_empty() {
         context.push('\n');

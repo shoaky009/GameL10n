@@ -998,6 +998,10 @@ def archive_samples(request):
     sys.path.insert(0, request['library'])
     maximum_member = 2 << 20
     format_name = request['format']
+    if format_name == 'Qlie':
+        sys.path.insert(0, request['components'])
+        import qlie_samples
+        return qlie_samples.probe(request)
     archive = Path(request['archive'])
     output = Path(request['directory'])
     requested = request.get('members')

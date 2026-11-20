@@ -731,7 +731,7 @@ impl EngineService {
             state.extra.insert("launchInspection".into(), launch);
             Self::report(progress, "检查已有工作样本", "正在复用解析器检查已暂存或解密的脚本样本。");
             automatic::inspect_workspace(self, &workspace, &mut state, cancellation).await?;
-            automatic::inspect_archives(self, request, &workspace, &mut state, cancellation)
+            automatic::inspect_archives(self, request, &inventory, &workspace, &mut state, cancellation)
                 .await?;
             let recipes = published_reuse::sampled_recipes(request, &state);
             state.extra.remove("publishedReuse");

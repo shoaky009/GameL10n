@@ -28,13 +28,7 @@ pub(super) fn sampled_recipes(request: &AdaptationRequest<'_>, state: &Session) 
     for sample in trials.into_iter().flatten() {
         if let (Some(template), Some(archive)) =
             (sample["templateId"].as_str(), sample["archive"].as_str())
-            && sample["trials"].as_array().is_some_and(|trials| {
-                trials.iter().any(|trial| {
-                    trial["parseStatus"] == "passed"
-                        && trial["roundtripStatus"] == "passed"
-                        && trial["unitCount"].as_u64().is_some_and(|count| count > 0)
-                })
-            })
+            && crate::adaptation_context::archive_sample_passed(sample)
             && !request.inputs.excludes(archive)
         {
             samples

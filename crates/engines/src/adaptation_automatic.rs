@@ -5,6 +5,9 @@ use crate::discovery::{glob_match, is_link};
 use sha2::{Digest, Sha256};
 use std::{io::Read, time::Duration};
 
+#[path = "adaptation_automatic/qlie.rs"]
+mod qlie;
+
 const TRIAL_BYTES: u64 = 64 * 1024 * 1024;
 const TEMPLATE_BYTES: u64 = 256 * 1024 * 1024;
 const PACKED_TEMPLATE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
@@ -1108,13 +1111,40 @@ pub(super) async fn inspect_workspace(
 pub(super) async fn inspect_archives(
     service: &EngineService,
     request: &AdaptationRequest<'_>,
+    inventory: &Inventory,
     workspace: &Path,
     state: &mut Session,
     cancellation: &CancellationToken,
 ) -> Result<(), EngineError> {
-    if state.total_turns != 0 || !state.pending_calls.is_empty() {
-        return Ok(());
+    let qlie = qlie::inspect(service, request, inventory, workspace, state, cancellation).await?;
+    let mut reports = if state.total_turns == 0 && state.pending_calls.is_empty() {
+        inspect_archive_samples(service, request, workspace, state, cancellation).await?
+    } else if let Some(Value::Array(mut saved)) = state.extra.remove("automaticArchiveTrials") {
+        saved.retain(|report| report["format"] != qlie::FORMAT);
+        saved
+    } else {
+        Vec::new()
+    };
+    if let Some(report) = qlie {
+        reports.insert(0, report);
     }
+    if reports.is_empty() {
+        state.extra.remove("automaticArchiveTrials");
+    } else {
+        state
+            .extra
+            .insert("automaticArchiveTrials".into(), json!(reports));
+    }
+    Ok(())
+}
+
+async fn inspect_archive_samples(
+    service: &EngineService,
+    request: &AdaptationRequest<'_>,
+    workspace: &Path,
+    state: &mut Session,
+    cancellation: &CancellationToken,
+) -> Result<Vec<Value>, EngineError> {
     let eagls = candidates(state)
         .into_iter()
         .find(|candidate| candidate["format"] == "Eagls");
@@ -1164,9 +1194,8 @@ pub(super) async fn inspect_archives(
             )
         })
         .collect();
-    state.extra.remove("automaticArchiveTrials");
     if archives.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let budget = Budget::new(cancellation, Duration::from_secs(20));
     let token = &budget.token;
@@ -1300,10 +1329,7 @@ pub(super) async fn inspect_archives(
             break;
         }
     }
-    state
-        .extra
-        .insert("automaticArchiveTrials".into(), json!(reports));
-    Ok(())
+    Ok(reports)
 }
 
 pub(super) async fn run_trials(
@@ -1357,7 +1383,16 @@ pub(super) async fn run_trials(
                     if skipped.len()<6{skipped.push(format!("{format}：{} 及伴随文件超过自动试用的 64 MiB／12 文件预算。",limit(script,80)));}continue;}
                 selected_bytes+=bytes.unwrap_or(0);lengths.extend(extra);scripts+=1;
             }
-            if scripts==0{if skipped.len()<6{skipped.push(format!("{format}：没有可直接试用的裸脚本样本；封包、编译脚本和私有过滤器需要另行确认。"));}continue;}
+            if scripts == 0 {
+                let archive_sample_passed = state.extra.get("automaticArchiveTrials")
+                    .and_then(Value::as_array).into_iter().flatten().any(|report| {
+                        report["format"] == format && crate::adaptation_context::archive_sample_passed(report)
+                    });
+                if !archive_sample_passed && skipped.len() < 6 {
+                    skipped.push(format!("{format}：没有可直接试用的裸脚本样本；封包、编译脚本和私有过滤器需要另行确认"));
+                }
+                continue;
+            }
             attempted+=1;EngineService::report(progress,"自动试用内置解析器",format!("正在用 {} 个原始资源检查 {format} 的提取与原文回填。",lengths.len()));
             let candidate_budget=Budget::new(token,Duration::from_secs(20));let token=&candidate_budget.token;
             let hashes=sample_hashes(&request.game_directory,&lengths,token)?;
@@ -2758,9 +2793,17 @@ pathlib.Path(sys.argv[2]).write_bytes(build_pak({'scene.txt': script, 'image.bin
             )
             .unwrap(),
         );
-        inspect_archives(&service, &request, &workspace, &mut state, &cancellation)
-            .await
-            .unwrap();
+        let inventory = Inventory::scan(&request.game_directory).unwrap();
+        inspect_archives(
+            &service,
+            &request,
+            &inventory,
+            &workspace,
+            &mut state,
+            &cancellation,
+        )
+        .await
+        .unwrap();
         let result = &state.extra["automaticArchiveTrials"][0];
         assert_eq!(result["templateId"], "nekopack4a-advscript2", "{result}");
         assert_eq!(result["archive"], "scr.pak");

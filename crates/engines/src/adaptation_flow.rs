@@ -2431,6 +2431,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn qlie_archive_trial_reaches_first_and_compacted_model_requests() {
+        let root = tempfile::tempdir().unwrap();
+        let (_, mut request, workspace, _) = fixture(root.path());
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let service = EngineService::new(&repo, crate::ToolPaths::development());
+        if !service.tools.python().is_file() {
+            return;
+        }
+        let library = service
+            .reference_library(&service.current_reference().unwrap())
+            .unwrap();
+        assert!(
+            std::process::Command::new(service.tools.python())
+                .args(["-I", "-B", "-X", "utf8"])
+                .arg(repo.join("crates/engines/python/fixtures/qlie_installation.py"))
+                .arg(library)
+                .arg(&request.game_directory)
+                .status()
+                .unwrap()
+                .success()
+        );
+        fs::create_dir_all(request.game_directory.join("bonus/GameData")).unwrap();
+        fs::write(
+            request.game_directory.join("bonus/GameData/unrelated.pack"),
+            b"unrelated",
+        )
+        .unwrap();
+        request.require_model_analysis = true;
+        request.limits.maximum_tokens = RESPONSE_TOKENS;
+        let (provider, server) = model(vec![budgeted_response(summary_response("stop")); 3]);
+        let cancellation = CancellationToken::new();
+        let path = workspace.join("session.json");
+
+        for _ in 0..2 {
+            let result = service
+                .adapt(&request, &provider, &cancellation, None)
+                .await
+                .unwrap();
+            assert_eq!(result.status, AdaptationStatus::BudgetExhausted);
+            let mut state = load_session(&path).unwrap();
+            let report = &state.extra["automaticArchiveTrials"][0];
+            assert_eq!(report["archive"], "GameData/story.pack", "{report}");
+            assert_eq!(
+                report["profile"]["FormatType"]["archive"],
+                "GameData/system.pack"
+            );
+            let trial = &report["trials"][0];
+            assert_eq!(trial["roundtripStatus"], "passed");
+            assert_eq!(trial["scriptTranslationStatus"], "passed");
+            assert_eq!(trial["errorType"], "UnicodeEncodeError");
+            assert!(state.verified_package.is_none());
+            compact_history(&mut state, &BTreeSet::new()).unwrap();
+            save_session(&path, &mut state).await.unwrap();
+        }
+
+        request
+            .inputs
+            .excluded
+            .insert("GameData/system.pack".into());
+        let result = service
+            .adapt(&request, &provider, &cancellation, None)
+            .await
+            .unwrap();
+        assert_eq!(result.status, AdaptationStatus::BudgetExhausted);
+        let restored = load_session(&path).unwrap();
+        let report = &restored.extra["automaticArchiveTrials"][0];
+        assert_eq!(report["status"], "unavailable", "{report}");
+        assert!(!crate::adaptation_context::archive_sample_passed(report));
+
+        let requests = server.join().unwrap();
+        for request in &requests[..2] {
+            let report = request["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .rev()
+                .filter_map(|message| message["content"].as_str())
+                .find(|content| content.contains("\"automaticArchiveTrials\":"))
+                .unwrap();
+            assert!(report.contains("scenario/story.s") && report.contains("UnicodeEncodeError"));
+            assert!(!report.contains("こんにちは"));
+        }
+        assert!(!requests[2].to_string().contains("scenario/story.s"));
+    }
+
+    #[tokio::test]
     async fn automatic_sample_evidence_survives_compaction_restart_and_changed_inputs() {
         let root = tempfile::tempdir().unwrap();
         let (_, _, workspace, mut state) = fixture(root.path());
