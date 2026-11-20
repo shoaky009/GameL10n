@@ -4,7 +4,7 @@
 
 常规识别命中已有适配器时可以零模型调用完成。智能适配也已有自动样本试验、组合模板及小样通过后自动完整验收。下一步最有机会同时缩短耗时和减少 Token 的，是把**工具和参数已经能由资源证据确定**的工作接到已有流程里。每省去一轮，都同时省去一次请求、该轮输入和等待模型回答的时间。[常规识别](../crates/core/src/engine_tasks.rs) · [自动样本与模板](../crates/engines/src/adaptation_automatic.rs) · [宿主验收](../crates/engines/src/adaptation_workflow.rs)
 
-首次模型请求前，宿主用固定库读取 EAGLS SCPACK、Artemis PFS v8、BGI、普通 KIF 和支持的 YPF 482 布局，选择少量脚本与必要伴随文件。首轮的 `automaticArchiveTrials` 给出成员来源、工作样本与各阶段结果。原文往返通过但出现编码错误时，复用已验证的读取和写回结构，调查具体的译文编码及运行条件。[自动试用](../crates/engines/src/adaptation_automatic.rs)
+首次模型请求前，宿主用固定库选择少量脚本与必要伴随文件。首轮的 `automaticArchiveTrials` 给出成员来源、工作样本与各阶段结果。符合条件的 QLIE 和 NekoSDK 小样还可触发模板组装与整卷原文验收。已有原文往返证据时，后续调查可从译文编码、覆盖和运行条件开始。[自动试用](../crates/engines/src/adaptation_automatic.rs) · [封包组件与模板](../docs/adapters/templates.md)
 
 ## 两项可单独验证的开销
 

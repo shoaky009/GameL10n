@@ -6,6 +6,7 @@ in python.archives; this file supplies bounded file I/O, rebuilds and IPC.
 import hashlib
 import importlib
 from dataclasses import replace
+import io
 import json
 import os
 from pathlib import Path
@@ -154,7 +155,44 @@ def copy_range(stream, output, offset, length):
         output.write(data)
 
 
-def open_index(component, stream):
+def open_kif(stream, executables):
+    from python.archives import catsystem2_int as kif
+
+    limits = dict(max_index_size=MAX_INDEX, max_entries=MAX_ENTRIES)
+    key_executable = None
+    if not kif.probe_int(stream, **limits).encrypted:
+        index = kif.read_int(stream, **limits)
+        validate_names(index.entries)
+    else:
+        if not 1 <= len(executables) <= 8:
+            raise ValueError("encrypted KIF requires a confirmed filename scheme and a matching executable")
+        tested, matches = set(), []
+        for name, executable in executables.items():
+            try:
+                password = kif.extract_exe_password(checked_path(executable), max_exe_size=16 << 20)
+                if not password or password in tested:
+                    continue
+                tested.add(password)
+                candidate = kif.read_int(stream, password=password, **limits)
+                validate_names(candidate.entries)
+                scripts = [entry for entry in candidate.entries if entry.name.lower().endswith(".cst")]
+                # A structurally valid index also parses with a wrong filename key.
+                if scripts and all(kif.probe_member(stream, entry, candidate.cipher, max_bytes=8) == b"CatScene"
+                                   for entry in scripts[:3]):
+                    matches.append((name, candidate))
+            except (OSError, ValueError):
+                continue
+        if len(matches) != 1:
+            raise ValueError("encrypted KIF needs one filename key verified against named CatScene members")
+        key_executable, index = matches[0]
+
+    def read(entry, maximum):
+        return kif.read_member(stream, entry, index.cipher, max_member=maximum)
+
+    return ("encrypted" if index.encrypted else "plain"), index.entries, read, key_executable
+
+
+def open_index(component, stream, *, key_executable=None):
     """Return the format revision, index entries, and a bounded member reader."""
     limits = dict(max_index_size=MAX_INDEX, max_entries=MAX_ENTRIES)
     if component == "archive.bgi":
@@ -167,15 +205,9 @@ def open_index(component, stream):
 
         version, entries = index.version, index.entries
     elif component == "archive.kif":
-        from python.archives import catsystem2_int as kif
-        if kif.probe_int(stream, **limits).encrypted:
-            raise ValueError("encrypted KIF requires a confirmed filename scheme; use the pinned INT API with explicit parameters")
-        index = kif.read_int(stream, **limits)
-
-        def read(entry, maximum):
-            return kif.read_member(stream, entry, max_member=maximum)
-
-        version, entries = "plain", index.entries
+        executables = {key_executable: key_executable} if key_executable else {}
+        version, entries, read, _ = open_kif(stream, executables)
+        return version, entries, read
     elif component == "archive.ypf482":
         from python.archives import yuris_482 as ypf
         _, entries, _ = ypf.read_index(stream, **limits)
@@ -361,6 +393,64 @@ def check_pfs8_replacement(source, output, changed):
                 offset += len(left)
 
 
+def rebuild_bgi(request, source):
+    from python.archives import bgi, bgi_writer
+    from python.engines.bgi import MAGIC
+
+    output = checked_path(request["outputFile"])
+    separate(source, output)
+    original = read_file(source, MAX_FILE)
+    stream = io.BytesIO(original)
+    index = bgi.read_index(stream, max_entries=MAX_ENTRIES, max_index_size=MAX_INDEX)
+    validate_names(index.entries)
+    entries = {entry.name: entry for entry in index.entries}
+    replacements = request.get("replacements")
+    if replacements is None:
+        replacements = {}
+    if not isinstance(replacements, dict) or replacements.keys() - entries.keys():
+        raise ValueError("invalid BGI replacement mapping")
+
+    budget, changed = MAX_FILE, {}
+    for name, path in replacements.items():
+        replacement = checked_path(path)
+        separate(replacement, output)
+        new = read_file(replacement, budget)
+        budget -= len(new)
+        stored = bgi.read_member(stream, index, entries[name], max_stored_size=MAX_FILE)
+        old = bgi.decode_member(stored, max_output_size=MAX_FILE, max_symbols=MAX_FILE)
+        if not old.startswith(MAGIC) or not new.startswith(MAGIC):
+            raise ValueError("BGI replacement requires decoded headered V1 scripts")
+        if new != old:
+            if stored.codec == "dsc":
+                seed, = struct.unpack_from("<I", stored.stored_data, 0x10)
+                changed[name] = bgi_writer.pack_member(new, seed=seed, max_output_size=MAX_FILE)
+            else:
+                changed[name] = new
+
+    result = original
+    if changed:
+        kept = [(entry.name, original[entry.offset:entry.offset + entry.size], entry.extra)
+                for entry in index.entries]
+        limits = dict(version=index.version, max_total_size=MAX_FILE - index.index_end)
+        if bgi_writer.build_archive(kept, verify=False, **limits) != original:
+            raise ValueError("BGI index or member layout cannot be reproduced byte for byte")
+        result = bgi_writer.build_archive([(name, changed.get(name, data), extra)
+                                           for name, data, extra in kept], **limits)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    created = False
+    try:
+        with output.open("xb") as target:
+            created = True
+            target.write(result)
+    except OSError:
+        if created:
+            output.unlink(missing_ok=True)
+        raise
+    return dict(protocolVersion=VERSION, success=True, component="archive.bgi", operation="rebuild",
+                formatVersion=index.version, inputBytes=len(original), entryCount=len(entries),
+                outputSha256=digest(result), changedCount=len(changed), byteIdentical=not changed)
+
+
 def execute_indexed(request, source):
     operation, component = request["operation"], request["component"]
     if operation == "rebuild":
@@ -373,7 +463,7 @@ def execute_indexed(request, source):
         if not stat.S_ISREG(before.st_mode):
             raise ValueError("component input must be a regular file")
         stream = ArchiveInput(raw)
-        version, entries, read = open_index(component, stream)
+        version, entries, read = open_index(component, stream, key_executable=request.get("keyExecutable"))
         index_bytes = stream.bytes_read
         selected = select_entries(request, entries)
         hashes, extracted, decoded = {}, [], 0
@@ -414,7 +504,7 @@ def execute_indexed(request, source):
     return report
 
 
-def script_samples(format_name, source, output):
+def script_samples(format_name, source, output, executables=None):
     component, extensions = {
         "Ethornell": ("archive.bgi", {".bgi", ""}),
         "CatSystem": ("archive.kif", {".cst"}),
@@ -425,7 +515,11 @@ def script_samples(format_name, source, output):
     samples, errors = [], []
     with checked_path(source).open("rb") as raw:
         stream = ArchiveInput(raw)
-        version, entries, read = open_index(component, stream)
+        key_executable = None
+        if component == "archive.kif":
+            version, entries, read, key_executable = open_kif(stream, executables or {})
+        else:
+            version, entries, read = open_index(component, stream)
         index_bytes = stream.bytes_read
         by_name = {member_name(entry.name).casefold(): entry for entry in entries}
         eligible = [entry for entry in entries if 0 < entry.size <= maximum
@@ -465,8 +559,11 @@ def script_samples(format_name, source, output):
             if len(samples) == 3:
                 break
     status = "sampled" if samples else "sample-unavailable" if errors else "no-script-member"
-    return dict(status=status, version=version, indexBytes=index_bytes, samples=samples,
-                memberBytesRead=stream.bytes_read - index_bytes, diagnostics=errors[:3])
+    report = dict(status=status, version=version, indexBytes=index_bytes, samples=samples,
+                  memberBytesRead=stream.bytes_read - index_bytes, diagnostics=errors[:3])
+    if key_executable:
+        report["keyExecutable"] = key_executable
+    return report
 
 
 def rpa_index(module, stream):
@@ -801,6 +898,8 @@ def execute(request):
         return execute_rpa(request, source)
     if component == "archive.whale-dat":
         return execute_whale(request, source)
+    if component == "archive.bgi" and operation == "rebuild":
+        return rebuild_bgi(request, source)
     if component in INDEXED_COMPONENTS:
         return execute_indexed(request, source)
     data = read_file(source, MAX_ARCHIVE)

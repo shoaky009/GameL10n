@@ -21,7 +21,7 @@
 
 修复过程中重复查询没有带来新证据时，任务会停在待修的验收问题。点击“继续适配”会沿用已保存的失败详情、源码和小样，优先处理该问题。仅记录退出码的旧失败会在再次验收时刷新错误详情。
 
-首次调用模型前，宿主用已有资源清单挑选少量封包，按需读取脚本和伴随文件。EAGLS SCPACK、Artemis PFS v8、BGI、普通 KIF、YPF 482 和 NEKOPACK4A 的小样可检查提取、原文往返及译文回读。YSTB 试验需要同目录的 `ysc.ybn`。格式、编码或依赖不符时，后续调查可复用已通过的小样结果。[封包组件](templates.md#封包组件) · [EAGLS 脚本](engines/eagls-scpack.md) · [Artemis PFS](engines/artemis-pfs.md) · [NekoSDK](engines/nekosdk.md)
+首次调用模型前，宿主用已有资源清单挑选少量封包，按需读取脚本和伴随文件。EAGLS SCPACK、Artemis PFS v8、BGI、KIF、YPF 482 和 NEKOPACK4A 的小样可检查提取、原文往返及译文回读。CatSystem2 加密 KIF 需要可由同目录 EXE 和成员签名交叉验证的命名密钥。YSTB 试验需要同目录的 `ysc.ybn`。格式、编码或依赖不符时，后续调查可复用已通过的小样结果。[封包组件](templates.md#封包组件) · [EAGLS 脚本](engines/eagls-scpack.md) · [Artemis PFS](engines/artemis-pfs.md) · [NekoSDK](engines/nekosdk.md)
 
 NekoSDK 或 QLIE 封包小样通过原文往返后，宿主可在请求模型前组装适配器，验收提取及整卷原文回填。已有符合样本的中文回填配方时优先复用。需要处理译文编码、补充文字覆盖或确认游戏显示时，分析模型可以沿用已有实现和验收结果。[NekoSDK 适用范围](engines/nekosdk.md) · [QLIE 适用范围](engines/qlie-filepack3-systemfont.md#封包脚本模板)
 

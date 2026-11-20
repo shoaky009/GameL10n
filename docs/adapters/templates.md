@@ -8,14 +8,18 @@
 | --- | --- | --- |
 | `archive.rpa3` | `inspect`、`extract`、`rebuild` | 单分块 RPA/ARC 3.0，使用纯数据 Pickle 索引。 |
 | `archive.xp3` | `inspect`、`extract`、`rebuild` | 标准 XP3 v1，需先独立确认无过滤器并声明 `filter: "none"`。 |
-| `archive.bgi` | `inspect`、`extract` | PackFile 与 BURIKO ARC20，支持原始成员和 DSC 解码。 |
-| `archive.kif` | `inspect`、`extract` | CatSystem2 普通 KIF，独立确认加密命名方案后可用固定 INT API 调查加密变体。 |
+| `archive.bgi` | `inspect`、`extract`、`rebuild` | PackFile 与 BURIKO ARC20，支持原始成员和 DSC 解码。带头 V1 脚本可回填到布局能逐字节复现的原卷。 |
+| `archive.kif` | `inspect`、`extract` | CatSystem2 普通 KIF 和可由游戏 EXE 确认成员名的加密脚本卷。加密卷用 `keyExecutable` 指定已暂存的 EXE。 |
 | `archive.ypf482` | `inspect`、`extract` | YPF 482，成员名使用 Murmur2 校验和 FF 异或。 |
 | `archive.pfs8` | `inspect`、`extract` | Artemis PFS v8，使用索引派生的密钥读取成员。 |
 | `archive.nekopack4a` | `inspect`、`extract` | NEKOPACK4A，按索引读取选定成员并验证 zlib 解压长度。 |
 | `archive.whale-dat` | `inspect`、`extract`、`rebuild` | Whale DAT v2，脚本解码使用 `gameTitle`，媒体成员使用 `filenameManifest` 匹配 CRC64。重建适用于纯脚本卷。 |
 
 索引组件可以只读索引，再按成员名或扩展名提取。清单中的 `length` 为封包中的长度，已读取成员的 SHA-256 取解码后的字节。需要校验全部成员时用 `verifyContents: true`，适用组件的读取和解码预算。支持重建的组件按原成员名替换，并核对未修改成员。[封包接口与预算](../../adapters/components/engine_archive.py)
+
+CatSystem2 加密脚本卷从 EXE 的 PE 资源读取成员名密钥，以 `.cst` 成员和解码后的 `CatScene` 签名交叉验证。首次识别检查封包同目录的小量 EXE，选中结果包含可供组件复用的 EXE 路径。整卷回填或补丁覆盖顺序需要单独确认。
+
+BGI 重建接受按原成员名提交的已解码 V1 脚本。输入和输出封包各限 64 MiB。已改脚本沿用各自的原始或 DSC 封装，其余成员的存储字节、索引顺序及附加字段原样保留。中文编码和游戏加载仍需试译确认。
 
 ## 组合模板
 

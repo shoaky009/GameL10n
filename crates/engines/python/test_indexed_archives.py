@@ -1,4 +1,5 @@
 """Selected member reads over the pinned archive library."""
+from io import BytesIO
 import json
 from pathlib import Path
 import struct
@@ -12,7 +13,8 @@ PIN = json.loads((TOOLS / "current.json").read_text(encoding="utf-8"))
 sys.path[:0] = [str(ROOT), str(TOOLS / "references" / PIN["revision"] / "library.zip")]
 
 from adapters.components import engine_archive as archive
-from python.archives import bgi_writer, pfs, yuris_482
+from python.archives import bgi, bgi_writer, pfs, yuris_482
+from python.engines.bgi import MAGIC as BGI_SCRIPT_MAGIC
 
 
 def ypf482(members):
@@ -60,6 +62,41 @@ class IndexedArchivesTest(unittest.TestCase):
                 self.assertEqual((output / script.replace("\\", "/")).read_bytes(), b"script")
                 self.assertIsNone(result["entries"][1]["sha256"])
 
+    def test_bgi_rebuild_preserves_member_codec_and_index_metadata(self):
+        script = BGI_SCRIPT_MAGIC + b"original"
+        edited = BGI_SCRIPT_MAGIC + b"new script"
+        media = b"CompressedBG fixture image"
+        replacement = self.root / "replacement.bgi"
+        replacement.write_bytes(edited)
+        for version, compress in [(1, False), (2, True)]:
+            with self.subTest(version=version):
+                extra = b"Q" * bgi_writer.row_length(version)
+                data = bgi_writer.build_archive([
+                    ("story", bgi_writer.pack_member(script, compress=compress), extra),
+                    ("media", media, extra),
+                ], version=version)
+                self.source.write_bytes(data)
+                unchanged = self.root / f"unchanged-{version}.arc"
+                self.run_component("archive.bgi", "rebuild", outputFile=str(unchanged))
+                self.assertEqual(unchanged.read_bytes(), data)
+                output = self.root / f"updated-{version}.arc"
+                self.run_component("archive.bgi", "rebuild", outputFile=str(output),
+                                   replacements={"story": str(replacement)})
+                stream = BytesIO(output.read_bytes())
+                index = bgi.read_index(stream)
+                self.assertEqual(index.version, version)
+                self.assertEqual([(entry.name, entry.extra) for entry in index.entries],
+                                 [("story", extra), ("media", extra)])
+                stored = bgi.read_member(stream, index, index.entries[0])
+                self.assertEqual(stored.codec, "dsc" if compress else "raw")
+                self.assertEqual(bgi.decode_member(stored), edited)
+                self.assertEqual(bgi.read_member(stream, index, index.entries[1]).stored_data, media)
+
+        self.source.write_bytes(data + b"opaque trailing bytes")
+        with self.assertRaisesRegex(ValueError, "cannot be reproduced byte for byte"):
+            self.run_component("archive.bgi", "rebuild", outputFile=str(self.root / "refused.arc"),
+                               replacements={"story": str(replacement)})
+
     def test_plain_kif_samples_and_encrypted_kif_diagnostic(self):
         payload = b"CatScene" + bytes(16)
         directory = b"scene.cst".ljust(32, b"\0") + struct.pack("<II", 48, len(payload))
@@ -70,6 +107,10 @@ class IndexedArchivesTest(unittest.TestCase):
         self.source.write_bytes(b"KIF\0" + struct.pack("<I", 1) + b"__key__.dat\0".ljust(72, b"\0"))
         with self.assertRaisesRegex(ValueError, "confirmed filename scheme"):
             self.run_component("archive.kif", "inspect")
+        executable = self.root / "other.exe"
+        executable.write_bytes(b"MZ")
+        with self.assertRaisesRegex(ValueError, "verified against named CatScene"):
+            self.run_component("archive.kif", "inspect", keyExecutable=str(executable))
 
     def test_ypf_samples_keep_same_directory_command_table(self):
         script = (r"scenario\scene.ybn", b"YSTB" + bytes(28))

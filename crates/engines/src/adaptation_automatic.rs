@@ -1119,7 +1119,7 @@ pub(super) async fn inspect_archives(
 ) -> Result<(), EngineError> {
     let qlie = qlie::inspect(service, request, inventory, workspace, state, cancellation).await?;
     let mut reports = if state.total_turns == 0 && state.pending_calls.is_empty() {
-        inspect_archive_samples(service, request, workspace, state, cancellation).await?
+        inspect_archive_samples(service, request, inventory, workspace, state, cancellation).await?
     } else if let Some(Value::Array(mut saved)) = state.extra.remove("automaticArchiveTrials") {
         saved.retain(|report| report["format"] != qlie::FORMAT);
         saved
@@ -1142,6 +1142,7 @@ pub(super) async fn inspect_archives(
 async fn inspect_archive_samples(
     service: &EngineService,
     request: &AdaptationRequest<'_>,
+    inventory: &Inventory,
     workspace: &Path,
     state: &mut Session,
     cancellation: &CancellationToken,
@@ -1208,13 +1209,41 @@ async fn inspect_archive_samples(
                 .chain(index.as_deref().map(|index| ("index", index)))
                 .map(|(role, path)| Ok((role.to_owned(), request.inputs.file(&request.game_directory, path)?)))
                 .collect::<Result<BTreeMap<_, _>, EngineError>>()?;
+            let mut executables = if format == "CatSystem" {
+                let parent = Path::new(&archive).parent();
+                inventory
+                    .files
+                    .iter()
+                    .filter(|file| {
+                        file.length <= 16 << 20
+                            && Path::new(&file.path).parent() == parent
+                            && extension(&file.path) == "exe"
+                            && !request.inputs.excludes(&file.path)
+                    })
+                    .take(9)
+                    .filter_map(|file| {
+                        let path = request.inputs.file(&request.game_directory, &file.path).ok()?;
+                        Some((file.path.clone(), path))
+                    })
+                    .collect::<BTreeMap<_, _>>()
+            } else {
+                BTreeMap::new()
+            };
             let _inputs = crate::source::lock_inputs(&paths, token)?;
+            let _executables = match crate::source::lock_inputs(&executables, token) {
+                Ok(handles) => handles,
+                Err(error @ EngineError::Cancelled) => return Err(error),
+                Err(_) => {
+                    executables.clear();
+                    Vec::new()
+                }
+            };
             let reference = service.adaptation_reference(workspace, state)?;
             let library = service.reference_library(&reference)?;
             let scratch = tempfile::Builder::new().prefix("archive-samples-").tempdir()?;
             let mut report = service.helper(
                 &json!({"operation":"archive_samples","format":format,"archive":paths["archive"],
-                    "index":paths.get("index"),"directory":scratch.path(),"library":library,
+                    "index":paths.get("index"),"executables":executables,"directory":scratch.path(),"library":library,
                     "components":service.asset_root.join("adapters/components"),
                     "timeoutSeconds":10}),
                 token,
@@ -1297,8 +1326,21 @@ async fn inspect_archive_samples(
                 }
             }
             report["trials"] = json!(trials);
+            let sample_passed = crate::adaptation_context::archive_sample_passed(&report);
+            if format == "Ethornell" && sample_passed {
+                report["nextAction"] = json!("沿用已通过原文往返的 Ethornell 解析。带头 V1 脚本可用 archive.bgi 的 rebuild 回填到可逐字节复现布局的原卷，保留其余成员。继续验收译文编码与游戏加载");
+            }
+            if let Some(executable) = report["keyExecutable"].as_str() {
+                let next = report["nextAction"]
+                    .as_str()
+                    .unwrap_or("用已验证或保留的 CST 小样继续检查脚本回填")
+                    .trim_end_matches(['。', '.']);
+                report["nextAction"] = json!(format!(
+                    "已用 {executable} 验证加密 INT 的成员名。暂存对应 INT 和 EXE 后，用 archive.kif 的 keyExecutable 参数按成员提取。{next}"
+                ));
+            }
             if let Some(template) = template
-                && crate::adaptation_context::archive_sample_passed(&report)
+                && sample_passed
                 && !service.disabled_families.contains(&format!("template.{}", template.id))
             {
                 report["templateId"] = json!(template.id);

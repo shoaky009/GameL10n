@@ -1073,6 +1073,10 @@
               "type": "string",
               "description": "Whale DAT v2 only. A work/ JSON filename list, such as the manifest returned from script extraction."
             },
+            "keyExecutable": {
+              "type": "string",
+              "description": "Encrypted CatSystem2 script INT only. The staged EXE that provides the verified filename key."
+            },
             "replacements": {
               "type": "object",
               "maxProperties": 128,

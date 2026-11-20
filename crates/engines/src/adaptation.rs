@@ -2601,6 +2601,22 @@ impl EngineService {
             )
         );
         payload["verifyContents"] = json!(boolean(args, "verifyContents", false)?);
+        if args.get("keyExecutable").is_some() {
+            let relative = text(args, "keyExecutable")?.replace('\\', "/");
+            if component != "archive.kif"
+                || !relative.starts_with("resources/") && !relative.starts_with("work/")
+                || Path::new(&relative)
+                    .extension()
+                    .is_none_or(|ext| !ext.eq_ignore_ascii_case("exe"))
+            {
+                return Err(EngineError::Protocol(
+                    "keyExecutable 仅用于 archive.kif，须为 resources/ 或 work/ 下的 EXE".into(),
+                ));
+            }
+            let path = resources::file(workspace, state, &relative)?;
+            payload["keyExecutable"] = json!(path);
+            component_inputs.insert(relative, path);
+        }
         if args.get("filenameManifest").is_some() {
             if component != "archive.whale-dat" {
                 return Err(EngineError::Protocol(
@@ -3583,8 +3599,8 @@ fn describe_engine_components(args: &Value) -> Result<Value, EngineError> {
         "components":components,
         "dependencies":["Shared Python 3.14.10","Hash-pinned shared GalTransl library; standard library only, no pip or runtime downloads."],
         "limits":{"rpaArchiveMiB":2048,"xp3ArchiveMiB":512,"indexedArchiveIndexMiB":8,"selectedMemberMiB":64,"selectedTotalMiB":256,"entries":10000,"memberNamesMiB":2},
-        "input":"run_engine_component: id, operation, archive (resources/ or work/), output (new work/ directory). Optional members or lowercase extensions select extraction. Rebuild replacements map exact member names to work/ files. XP3 requires filter=none. Whale DAT v2 accepts gameTitle for scripts and filenameManifest under work/ for assets.",
-        "output":"Bounded summary plus work/<output>/manifest.json with resolved member names and lengths. Indexed components read only the index for inspection. Unread member SHA256 is null. verifyContents=true hashes members within the component's limits. readBytes records actual source reads. Extract writes files/. Supported rebuilds write rebuilt/<original filename> and verify member contents.",
+        "input":"run_engine_component: id, operation, archive (resources/ or work/), output (new work/ directory). Optional members or lowercase extensions select extraction. Rebuild replacements map exact member names to work/ files. XP3 requires filter=none. Encrypted KIF uses a staged keyExecutable. Whale DAT v2 accepts gameTitle for scripts and filenameManifest under work/ for assets.",
+        "output":"Bounded summary plus work/<output>/manifest.json with resolved member names and lengths. Inspection reads the index, plus a few member prefixes when verifying an encrypted KIF filename key. Unread member SHA256 is null. verifyContents=true hashes members within the component's limits. readBytes records actual source reads. Extract writes files/. Supported rebuilds write rebuilt/<original filename> and verify member contents.",
         "usage":"Stage a real archive, then call the component directly; no Python wrapper or model-generated parser is needed. Use try_builtin_adapter on extracted scripts. Component success is structural evidence, not runtime or adapter acceptance."
     }))
 }

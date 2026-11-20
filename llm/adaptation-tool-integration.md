@@ -10,7 +10,7 @@
 
 以真实高消耗案例中能省掉的工作量确定覆盖范围。覆盖外的格式和变体仍可通过现有调查、组件调用和适配器验证入口处理。格式专用条件尽量由现有组件注册、识别声明或适配器表达，使同类资源可以复用整条流程。[识别声明](../docs/adapters/recognition.md) · [适配器协议](../docs/adapters/protocol.md)
 
-优先打通 PFS v8 与 Artemis AST 的适配链路。现有小样已经能定位脚本，主要缺口是把完整资源上的文本、姓名和控制命令稳定映射到回填结果，并保留未改成员。BGI、普通 KIF 和已确认索引布局的 YPF 共用按成员读取入口，写入能力按格式的验收范围登记。
+优先让已通过小样的路线复用现成实现。Artemis PFS v8、受支持的 QLIE 和 NekoSDK 已有组合模板。BGI、KIF 和 YPF 按成员读取并试用脚本，整卷写入按已确认的容器与脚本组合登记。
 
 ## 技术路线
 
@@ -40,8 +40,9 @@
 | --- | --- | --- |
 | Ren’Py RPA3 / RPYC2、KiriKiri XP3 | 已有模板和 SMIL 适配器 | 复用路径、混合资源加载根、XP3 过滤器判定和原有文本身份继续通过验证 |
 | EAGLS SCPACK、Artemis PFS v8 | 已有首轮小样，Artemis 有覆盖卷参考 | 新接入复用已有小样和候选。Artemis 核对部分回填的小样复测和多卷覆盖条件 |
-| BGI PackFile / BURIKO ARC20 → Ethornell | 固定库已有按范围读取、DSC 处理和写回器，VNTextPatch 已有脚本解析器 | 代表性封包可只取脚本小样，重建复提匹配，CP932 脚本的运行显示有依据 |
-| CatSystem2 KIF / INT → CST | 固定库已有读取器，VNTextPatch 已有 CST 解析器 | 分别确认普通与加密变体的读取条件和写回去向。GARbro 的写入器产生普通 KIF，msg-tool 当前提供读取。需要写回加密包或通过覆盖加载的情况以实机证据为准 |
+| QLIE PACK 3.0、NEKOPACK4A | 已确认的小样可触发模板组装和整卷原文验收 | 继续确认实机中文编码、显示及脚本以外的文字覆盖 |
+| BGI PackFile / BURIKO ARC20 → Ethornell | 选择性读包、DSC 处理、Ethornell 小样、原布局保留的 V1 脚本重建 | 整卷模板需确认完整脚本范围、重名和变体，以及译文显示与补丁加载 |
+| CatSystem2 KIF / INT → CST | 普通 KIF 和可从 PE 资源确认密钥的加密脚本卷可按成员提取并试用 CST | 分别确认写回加密包或通过覆盖加载的条件。GARbro 的写入器产生普通 KIF，msg-tool 当前提供读取 |
 | YU-RIS YPF → YBN | 固定库提供选择性读取及特定版本写入，VNTextPatch 已有 YBN 解析器及 SJIS 隧道支持 | 核对封包版本、同目录命令表、补丁加载和映射稳定性 |
 
 [现有封包组件](../docs/adapters/templates.md) · [内置脚本解析器](../docs/adapters/engines/vntextpatch.md) · [KIF 写入器](https://github.com/morkt/GARbro/blob/b09ee4570ccb1daf6ac56710ee8934dc0b8baeb0/ArcFormats/CatSystem/ArcINT.cs#L287) · [YU-RIS 运行条件](../docs/adapters/engines/yuris.md)
@@ -80,17 +81,19 @@
 - 静态工具读取宿主授权的输入。支持只读句柄的读包器可直接做随机访问。仅支持文件路径的外部工具使用受限的工作副本，并把复制成本纳入试验。输出写入工作区，校验成员路径、输出大小、退出状态和生成文件，沿用超时和取消。可选调查工具缺失时返回原因并沿用现有调查路径，正式适配器的依赖或访问失败按现有协议处理。[执行隔离](../docs/adapters/execution-isolation.md) · [错误语义](../docs/adapters/protocol.md#请求与结果)
 - 新接入的无界面工具在 Windows SSH 下验证静态读写和失败处理。需要桌面组件的端到端检查及游戏显示、代理和补丁加载在交互式环境验收。发布包登记相应适配器实际使用的模块、工具及许可。[开发校验](../docs/development.md#检查)
 
-## 已接入能力
+## 当前能力覆盖
 
-| 来源 | 当前入口与边界 |
-| --- | --- |
-| GARbro | 通过固定工具库的格式实现复用 BGI、普通 KIF、YPF 482 和 PFS v8 的按成员能力。封包组件由索引确认布局，其他变体由现有调查入口处理。 |
-| msg-tool、SExtractor | 通过固定工具库复用 AST 2.0 文本和命令布局。PFS 模板直接提取、试写及回填，按 AST 字面量保留原布局。 |
-| KirikiriTools | 现有 VNTextPatch 和 SMIL 组件覆盖已确认的 KS、XP3 脚本路径。其他过滤器与覆盖加载方式按版本确认。 |
-| VNTextProxy | 现有固定 x86 代理及 SJIS 隧道组件，按具体适配器配置和运行验证调用。 |
-| UniversalInjectorFramework | 字体、转区及加载问题的参考资料。独立运行库的采用取决于分发许可与游戏端证据。 |
+| 来源 | 识别和适配可使用的能力 | 进一步采用的条件 |
+| --- | --- | --- |
+| GARbro | BGI、KIF、YPF 482 和 PFS v8 的选择性索引及成员读取。BGI 可用组件重建原布局可复现的 V1 脚本卷。符合条件的 QLIE 封包可直接组装模板 | YPF 其他版本分别确认索引布局、脚本命令表及写回。加密 KIF、XP3 私有过滤和各类补丁加载方式需要各自的样本与运行证据 |
+| msg-tool | 固定库包含 BGI 封包、DSC 和 V1 脚本规则，以及 CST 等有界读取能力。内置识别可用 BGI 和 CST 成员小样 | BGI V0、BP 及其他脚本格式按新增文字覆盖、回填结果和收益选用 |
+| SExtractor | Artemis PFS 模板利用 AST 字段结构提取与回填。固定库也提供 Ikura 等格式的调查入口 | 正则预设或独立解析器需有基于原字节的回填和复提证据，优先解决已观察到的高消耗案例 |
+| KirikiriTools | 复用现有 VNTextPatch 的 KS 去混淆和 SMIL 的 XP3 脚本路径。标准 XP3 在确认过滤条件后可以组合模板 | 其他过滤器、运行时读取和覆盖加载按变体确认 |
+| VNTextProxy | 固定 x86 代理、SJIS 隧道和映射组件按适配器配置调用 | 试译确认游戏实际使用的文字 API、字体和加载顺序 |
+| UniversalInjectorFramework | 文件加载、SJIS 替换和字体配置的运行诊断参考 | 引入独立运行库需明确分发条件和实机额外收益，具体方案按技术路线确认 |
+| mnakamura1337 | NekoSDK ADVSCRIPT2 小样通过可触发整卷模板，AI5V 字表式 MES 可试用组件，Whale DAT 可按脚本和媒体引用处理，BGI 和 Ikura 的格式资料用于比对 | AI5V 常见封包变体需确认索引和写回映射。Whale 压缩脚本需明确原始游戏标题。Ikura 的资源提取与文本回填各自验收 |
 
-[封包与模板](../docs/adapters/templates.md) · [Artemis 适用范围](../docs/adapters/engines/artemis-pfs.md) · [代理组件](../docs/adapters/components/vntextproxy-runtime.md)
+故事转换、素材整理和移植工具适用于各自的输出流程。适配入口采用其中能用原资源往返携带稳定文本身份的格式规则。[封包与模板](../docs/adapters/templates.md) · [具体引擎](../docs/adapters/README.md) · [代理组件](../docs/adapters/components/vntextproxy-runtime.md)
 
 ## 完成条件
 

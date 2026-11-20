@@ -1008,7 +1008,7 @@ def archive_samples(request):
     if format_name in ('Ethornell', 'CatSystem', 'Yuris', 'NekoSDK') and requested is None:
         sys.path.insert(0, request['components'])
         import engine_archive
-        return engine_archive.script_samples(format_name, archive, output)
+        return engine_archive.script_samples(format_name, archive, output, request.get('executables'))
     with archive.open('rb') as stream:
         if format_name == 'ArtemisAst':
             from python.archives import pfs
