@@ -138,6 +138,10 @@ The host checks source integrity, original-byte roundtrip, distinct Unicode chan
 and PE structure before publication. A self-reported passed flag alone is insufficient; runtime remains not-tested.
 Changed-text re-extraction can pass when encoder and decoder share an incorrect mapping. Verify translated bytes and
 expected glyph bitmaps independently; before PUA remapping, check the shipped EXE's string traversal and glyph lookup ranges.
+When translated script bytes require a substitute codepoint, a missing game-side glyph or decoder is a blocking
+validation issue. Keep the verified archive and text implementation and repair the display path. Reserve runtime
+checks for the appearance of a complete implementation. For supported QLIE ImoScripter fields the host reads
+the rebuilt script independently and checks the selected system fonts, their glyph aliases and the font launch route.
 Companion text indexes must match the output's actual string references or relocated command targets. Re-read those
 records and check index offsets against them; finding expected text in an unreferenced appended area is not a valid rebuild.
 Preserve the original font style by default. For GDI, verify the selected face and required glyphs; do not silently accept substitution.

@@ -101,6 +101,22 @@ def replace_value(text, matches, group, replacement):
     return "".join([*parts, text[cursor:]]) if parts else text
 
 
+def font_slots(config, table):
+    entries = FONT_LIST.findall(table)
+    lists = {(int(slot), int(index)): value for slot, index, value in entries}
+    primary = {slot: value for (slot, index), value in lists.items() if index == 0}
+    if (len(lists) != len(entries) or set(primary) != set(range(8))
+            or any(slot not in primary or index != 0 and value for (slot, index), value in lists.items())
+            or any(value for value in EXTERNAL_FONT.findall(table))):
+        raise ValueError("QLIE 字体表需要 0 到 7 号单层字体列表")
+    entries = FONT_NAME.findall(config)
+    names = {int(slot): face for slot, face in entries}
+    if set(names) != set(primary) or len(names) != len(entries):
+        raise ValueError("QLIE 外置配置缺少唯一的八个字体名称")
+    return [(slot, selector, names[slot]) for slot, selector in primary.items()
+            if (slot, selector) != (6, "外字")]
+
+
 @dataclass(frozen=True)
 class Layout:
     config_path: str
@@ -114,25 +130,11 @@ class Layout:
     @classmethod
     def read(cls, config_path, config_raw, volume, member, table_raw, mapping):
         config, table = cp932(config_raw), cp932(table_raw)
-        entries = FONT_LIST.findall(table)
-        lists = {(int(slot), int(index)): value for slot, index, value in entries}
-        primary = {slot: value for (slot, index), value in lists.items() if index == 0}
-        if (len(lists) != len(entries) or set(primary) != set(range(8))
-                or any(slot not in primary or index != 0 and value for (slot, index), value in lists.items())
-                or any(value for value in EXTERNAL_FONT.findall(table))):
-            raise ValueError("QLIE 字体表需要 0 到 7 号单层字体列表")
-        entries = FONT_NAME.findall(config)
-        names = {int(slot): face for slot, face in entries}
-        if set(names) != set(primary) or len(names) != len(entries):
-            raise ValueError("QLIE 外置配置缺少唯一的八个字体名称")
         supported = ({"system"} if mapping else {"system", "system_fix"})
         by_face = ({family(style, mapping) + " Regular": style for style in FONT_INPUTS}
                    if mapping else SYSTEM_FACES)
         styles, faces = {}, {}
-        for slot, selector in primary.items():
-            if slot == 6 and selector == "外字":
-                continue  # This slot uses its own bitmap, outside the system font glyph aliases.
-            original = names[slot]
+        for slot, selector, original in font_slots(config, table):
             lookup = original if mapping else unicodedata.normalize("NFKC", original).casefold()
             if selector not in supported or lookup not in by_face:
                 raise ValueError("QLIE 字体槽需要已识别的 MS Gothic 或 MS Mincho 系统布局")

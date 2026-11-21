@@ -2,7 +2,7 @@
 use super::*;
 use crate::protocol::{BuildMode, ProbeResult};
 
-pub(super) const VERIFIER_REVISION: u32 = 13;
+pub(super) use crate::service::VERIFIER_REVISION;
 
 fn legacy_exit_only_failure(cache: &Value) -> bool {
     cache["readsAdapterFailureResponse"] != true

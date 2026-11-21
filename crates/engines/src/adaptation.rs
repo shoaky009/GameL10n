@@ -2807,7 +2807,7 @@ impl EngineService {
             != Some(verification_context(request)?.as_str())
         {
             return Err(EngineError::Rejected(
-                "适配目标或已有文本基线发生变化，请重新完整验收。".into(),
+                "验收版本、适配目标或已有文本基线发生变化，请重新完整验收。".into(),
             ));
         }
         if state.verified_fingerprint.as_deref() != Some(&workspace_fingerprint(workspace, state)?)
@@ -3515,7 +3515,8 @@ fn workspace_fingerprint(workspace: &Path, state: &Session) -> Result<String, En
 fn verification_context(request: &AdaptationRequest<'_>) -> Result<String, EngineError> {
     let mut hash = Sha256::new();
     let mut serializer = serde_json::Serializer::new(&mut hash);
-    let mut context = serializer.serialize_map(Some(2))?;
+    let mut context = serializer.serialize_map(Some(3))?;
+    context.serialize_entry("verifierRevision", &verification::VERIFIER_REVISION)?;
     context.serialize_entry("objective", &request.objective)?;
     context.serialize_entry("baseline", request.baseline_units)?;
     context.end()?;

@@ -1,6 +1,9 @@
 //! UI-neutral engine execution and independent resource verification.
 
 mod discover;
+mod display;
+
+pub(crate) const VERIFIER_REVISION: u32 = 14;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -243,6 +246,7 @@ pub struct EngineService {
     excluded_adapters: BTreeSet<(String, String)>,
     preferred_adapter: Option<String>,
     ordered_packages_only: bool,
+    discovery_inputs: crate::adaptation::AdaptationInputs,
     pub(crate) build_identity: Option<(String, String)>,
     pub(crate) isolate_execution: bool,
 }
@@ -264,6 +268,7 @@ impl EngineService {
             excluded_adapters: BTreeSet::new(),
             preferred_adapter: None,
             ordered_packages_only: false,
+            discovery_inputs: Default::default(),
             build_identity: None,
             isolate_execution: cfg!(windows),
         }
@@ -288,6 +293,12 @@ impl EngineService {
     /// Checks supplied packages in their given order without built-in fallback.
     pub fn with_ordered_packages_only(mut self) -> Self {
         self.ordered_packages_only = true;
+        self
+    }
+
+    /// Probe and verify published packages against the original resources behind an installed patch.
+    pub fn with_discovery_inputs(mut self, inputs: crate::adaptation::AdaptationInputs) -> Self {
+        self.discovery_inputs = inputs;
         self
     }
 
@@ -1448,6 +1459,12 @@ impl EngineService {
         let mut issue = None;
         let mut phase_started = Instant::now();
         let adapter_fingerprint = verified_adapter_fingerprint(adapter)?;
+        let display_check = display::QlieDisplay::detect(
+            adapter,
+            source_directory,
+            resources,
+            &Default::default(),
+        )?;
         let mut verified_extraction = None;
         let verify = async {
             Self::report(
@@ -1701,6 +1718,15 @@ impl EngineService {
                     result.original_roundtrip_passed = true;
                     continue;
                 }
+                if let Some(check) = &display_check && stage != "原文回填" {
+                    record_verification_stage(&mut stage_timings_ms, phase, &mut phase_started);
+                    phase = if stage == "部分试译" {
+                        "partial-display-readback"
+                    } else {
+                        "full-display-readback"
+                    };
+                    check.verify(self, &built, &build, &units, cancellation).await?;
+                }
                 let mut extract = built.extraction_request(source_directory, &output, resources);
                 if let Some(probe) = probe {
                     extract.set_probe_context(probe);
@@ -1923,6 +1949,13 @@ impl EngineService {
             && let (Some(adapter_fingerprint), Some(extraction)) =
                 (adapter_fingerprint, verified_extraction)
         {
+            if display_check.is_some()
+                && let Some(probe) = probe
+            {
+                let key = discover::reuse_key(&adapter_fingerprint, &result.resource_hashes, probe);
+                // The verification report remains valid when the optional cache cannot be written.
+                let _ = write_json(&self.display_cache(&key), &key);
+            }
             result.verified_extraction = Some(Arc::new(VerifiedExtraction {
                 adapter_fingerprint,
                 resource_hashes: result.resource_hashes.clone(),

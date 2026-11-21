@@ -1224,6 +1224,10 @@ def execute(request):
     if operation == 'list_files': return list_files(request)
     if operation == 'archive_component': return archive_component(request)
     if operation == 'archive_template_probe': return archive_template_probe(request)
+    if operation == 'qlie_display':
+        sys.path[:0] = [str(Path(request['components']).parent), request['library']]
+        from components import qlie_display
+        return qlie_display.verify(request)
     if operation == 'archive_samples': return archive_samples(request)
     if operation == 'inspect_game_launch': return inspect_game_launch(request)
     if operation == 'decode_reference_html': return decode_reference_html(request)

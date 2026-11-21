@@ -125,6 +125,17 @@ pub(super) fn next(state: &mut Session, workspace: &Path) -> Result<Option<Step>
 }
 
 pub(super) fn recover(state: &mut Session) {
+    if state.verified_package.is_some()
+        && state
+            .extra
+            .get("verificationCache")
+            .is_some_and(|cache| cache["revision"] != verification::VERIFIER_REVISION)
+    {
+        state.verified_package = None;
+        state.verified_fingerprint = None;
+        state.workflow.last_attempt = None;
+        state.workflow.needs_verification = state.workflow.verification_args.is_some();
+    }
     if let Some(interrupted) = state.workflow.running.take() {
         state.workflow.last_attempt = Some(interrupted);
         state.workflow.needs_verification = false;

@@ -8,7 +8,7 @@ use serde_json::json;
 
 use super::{
     BuiltinAdapterProbeObservation, DiscoveryResult, DiscoveryVerification, EngineService,
-    GeneratedAdapterReuseFailure, ProgressCallback, hashes,
+    GeneratedAdapterReuseFailure, ProgressCallback,
 };
 use crate::{
     AdapterHandle, CancellationToken, EngineError, PackageManifest,
@@ -176,7 +176,9 @@ impl Discovery<'_> {
             }
             let (status, evidence) = self
                 .inventory
-                .recognize(self.source, manifest.recognition.as_ref());
+                .recognize_with(manifest.recognition.as_ref(), &|path| {
+                    self.service.discovery_inputs.file(self.source, path).ok()
+                });
             if status == RecognitionStatus::NoMatch {
                 continue;
             }
@@ -242,7 +244,7 @@ impl Discovery<'_> {
                         &handle,
                         self.source,
                         &candidate.resources,
-                        &crate::adaptation::AdaptationInputs::default(),
+                        &self.service.discovery_inputs,
                         self.cancellation,
                         PACKAGE_PROBE_BUDGET.saturating_sub(self.probe_elapsed),
                     )
@@ -257,7 +259,15 @@ impl Discovery<'_> {
                         &probe.required_files,
                     )?;
                 }
-                if self.verification == DiscoveryVerification::ProbeOnly {
+                if self.verification == DiscoveryVerification::ProbeOnly
+                    && super::display::QlieDisplay::detect(
+                        &handle,
+                        self.source,
+                        &probe.required_files,
+                        &self.service.discovery_inputs,
+                    )?
+                    .is_none()
+                {
                     return Ok(Some((handle, probe)));
                 }
                 let failure = self
@@ -350,7 +360,21 @@ impl Discovery<'_> {
             format!("{} 已识别资源，正在核对资源内容。", manifest.id),
         );
         tokio::task::yield_now().await;
-        let fingerprint = reuse_input_fingerprint(&candidate.directory, self.source, probe)?;
+        let inputs = &self.service.discovery_inputs;
+        let original_files = probe
+            .required_files
+            .iter()
+            .map(|path| Ok((path.clone(), inputs.file(self.source, path)?)))
+            .collect::<Result<_, EngineError>>()?;
+        let fingerprint = reuse_input_fingerprint(manifest, &original_files, probe)?;
+        if self.verification == DiscoveryVerification::ProbeOnly
+            && gamel10n_translation::files::read_json::<String>(
+                &self.service.display_cache(&fingerprint),
+            )
+            .is_ok_and(|key| key == fingerprint)
+        {
+            return Ok(None);
+        }
         if let Some(previous) = previous_failures.iter().find(|previous| {
             previous.id == manifest.id
                 && previous.version == manifest.version
@@ -368,11 +392,17 @@ impl Discovery<'_> {
         );
         tokio::task::yield_now().await;
         let work = tempfile::tempdir()?;
+        let original = crate::ReadOnlySource::open_excluding(
+            self.source,
+            &original_files,
+            &inputs.excluded,
+            self.cancellation,
+        )?;
         let verified = self
             .service
             .verify_probed(
                 handle,
-                self.source,
+                original.directory(),
                 probe,
                 work.path(),
                 &[],
@@ -393,7 +423,7 @@ impl Discovery<'_> {
             .unwrap_or(phase)
             .to_owned();
         let stable = verified.cacheable
-            && reuse_input_fingerprint(&candidate.directory, self.source, probe)
+            && reuse_input_fingerprint(manifest, &original_files, probe)
                 .ok()
                 .as_deref()
                 == Some(&fingerprint);
@@ -597,18 +627,34 @@ fn record_builtin_probe(
 }
 
 fn reuse_input_fingerprint(
-    package: &Path,
-    source: &Path,
+    manifest: &PackageManifest,
+    files: &std::collections::BTreeMap<String, PathBuf>,
     probe: &ProbeResult,
 ) -> Result<String, EngineError> {
-    let manifest_hash = hash_file(&package.join("package.json"))
-        .map_err(|error| EngineError::Protocol(error.to_string()))?;
+    let manifest_hash = hash_text(&serde_json::to_string(manifest)?);
+    let resources = files
+        .iter()
+        .map(|(relative, path)| {
+            hash_file(path)
+                .map(|hash| (relative.clone(), hash))
+                .map_err(|error| EngineError::Protocol(error.to_string()))
+        })
+        .collect::<Result<_, _>>()?;
+    Ok(reuse_key(&manifest_hash, &resources, probe))
+}
+
+pub(super) fn reuse_key(
+    manifest_hash: &str,
+    resources: &std::collections::BTreeMap<String, String>,
+    probe: &ProbeResult,
+) -> String {
     let inputs = json!({
-        "verifierRevision": 6,
-        "host": "rust-python-v2",
+        "verifierRevision": super::VERIFIER_REVISION,
         "manifest": manifest_hash,
-        "resources": hashes(source, &probe.required_files)?,
+        "resources": resources,
+        "resourceOrder":probe.required_files,
+        "originalExecutable":probe.original_executable,
         "buildHints": probe.build_hints,
     });
-    Ok(hash_text(&inputs.to_string()))
+    hash_text(&inputs.to_string())
 }

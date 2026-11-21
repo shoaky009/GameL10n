@@ -136,6 +136,7 @@ class Installation:
     font_layout: font.Layout | None
     font_diagnostic: str
     glyphs: dict[int, int]
+    font_resources: tuple[bytes, bytes] | None
 
     def read(self, path, entry, limit):
         return self.layout.read(*self.archives[path], entry, self.internal_keys[path], self.game_key, limit)
@@ -269,6 +270,7 @@ def locate(root, request, files, stack):
     companions = [path for path in files if exe and path.lower() == exe.lower() + ".le.config"]
     glyphs = {} if layout.unicode_scripts else font.old_mapping(root, files)
     font_layout = None
+    font_resources = None
     if font_source:
         config, raw, path, entry = font_source
         try:
@@ -277,6 +279,7 @@ def locate(root, request, files, stack):
             if len(key) < 256:
                 raise ValueError("QLIE 字体表所在卷的内部密钥长度不足")
             table = layout.read(*volume, entry, key, game_key, font.CONFIG_BYTES)
+            font_resources = raw, table
             font_layout = font.Layout.read(config, raw, path, entry.name, table, glyphs)
             local_keys[path] = key
             selected[path] = volume
@@ -290,7 +293,7 @@ def locate(root, request, files, stack):
     required = sorted([*selected, *filter(None, (key_file, exe)), *companions], key=str.casefold)
     index_bytes = sum(index.file_size - index.index_offset for _, index in indices.values())
     install = Installation(required, exe, layout, selected, game_key, external_key, local_keys,
-                           fingerprints, index_bytes, font_layout, font_diagnostic, glyphs)
+                           fingerprints, index_bytes, font_layout, font_diagnostic, glyphs, font_resources)
     support.script_profile(selected, install.read, layout)
     return install
 

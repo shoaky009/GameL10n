@@ -529,56 +529,68 @@ impl Application {
         let root = self.data_directory().to_path_buf();
         let game = crate::game_directory::validate(&project.game_directory)?;
         let game_id = id.to_owned();
+        let project_directory = self.project_directory(id)?;
+        let token = cancellation.clone();
         let pin = catalog_adapter(&project).map(|adapter| (adapter.adapter_id, adapter.version));
-        let (known_packages, packages, inventory, disabled, preferred_adapter, known_versions) =
-            tokio::task::spawn_blocking(move || -> Result<_, CoreError> {
-                let catalog = EngineCatalog::open(&root)?;
-                let inventory = gamel10n_engines::discovery::Inventory::scan(&game)?;
-                let mut candidates = catalog.discovery_candidates_for_game(
-                    &game_id,
-                    pin.as_ref()
-                        .map(|(id, version)| (id.as_str(), version.as_str())),
-                )?;
-                if known_only {
-                    candidates.retain(|candidate| candidate.is_known_game);
-                }
-                let preferred_adapter = pin.as_ref().map(|(id, _)| id.clone()).or_else(|| {
-                    candidates
-                        .iter()
-                        .find(|candidate| candidate.is_known_game)
-                        .map(|candidate| candidate.adapter_id.clone())
-                });
-                let known_versions = candidates
+        let (
+            known_packages,
+            packages,
+            inventory,
+            disabled,
+            preferred_adapter,
+            known_versions,
+            inputs,
+        ) = tokio::task::spawn_blocking(move || -> Result<_, CoreError> {
+            let catalog = EngineCatalog::open(&root)?;
+            let inputs = source_inputs(&project_directory, &game, None, &token, None)?;
+            let inventory =
+                inputs.inventory(gamel10n_engines::discovery::Inventory::scan(&game)?)?;
+            let mut candidates = catalog.discovery_candidates_for_game(
+                &game_id,
+                pin.as_ref()
+                    .map(|(id, version)| (id.as_str(), version.as_str())),
+            )?;
+            if known_only {
+                candidates.retain(|candidate| candidate.is_known_game);
+            }
+            let preferred_adapter = pin.as_ref().map(|(id, _)| id.clone()).or_else(|| {
+                candidates
                     .iter()
-                    .filter(|candidate| candidate.is_known_game && candidate.coverage_confirmed)
-                    .map(|candidate| (candidate.adapter_id.clone(), candidate.version.clone()))
-                    .collect::<BTreeSet<_>>();
-                let mut known_packages = Vec::new();
-                let mut packages = Vec::new();
-                for candidate in candidates {
-                    if !candidate.matches_inventory(&inventory) {
-                        continue;
-                    }
-                    if candidate.is_known_game {
-                        known_packages.push(candidate.directory);
-                    } else {
-                        packages.push(candidate.directory);
-                    }
+                    .find(|candidate| candidate.is_known_game)
+                    .map(|candidate| candidate.adapter_id.clone())
+            });
+            let known_versions = candidates
+                .iter()
+                .filter(|candidate| candidate.is_known_game && candidate.coverage_confirmed)
+                .map(|candidate| (candidate.adapter_id.clone(), candidate.version.clone()))
+                .collect::<BTreeSet<_>>();
+            let mut known_packages = Vec::new();
+            let mut packages = Vec::new();
+            for candidate in candidates {
+                if !candidate.matches_inventory(&inventory) {
+                    continue;
                 }
-                let mut disabled = catalog.disabled_family_ids()?;
-                if let Some((id, _)) = pin {
-                    disabled.remove(&id);
+                if candidate.is_known_game {
+                    known_packages.push(candidate.directory);
+                } else {
+                    packages.push(candidate.directory);
                 }
-                Ok((
-                    known_packages,
-                    packages,
-                    inventory,
-                    disabled,
-                    preferred_adapter,
-                    known_versions,
-                ))
-            })
-            .await??;
+            }
+            let mut disabled = catalog.disabled_family_ids()?;
+            if let Some((id, _)) = pin {
+                disabled.remove(&id);
+            }
+            Ok((
+                known_packages,
+                packages,
+                inventory,
+                disabled,
+                preferred_adapter,
+                known_versions,
+                inputs,
+            ))
+        })
+        .await??;
         self.progress(
             id,
             "recognize",
@@ -600,6 +612,7 @@ impl Application {
             }
             let mut service = self
                 .engine_service()?
+                .with_discovery_inputs(inputs.clone())
                 .with_disabled_families(disabled.clone())
                 .with_preferred_adapter(preferred_adapter.clone())
                 .with_excluded_adapters(excluded.clone());
