@@ -5,7 +5,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, OpenOptions},
     future::Future,
-    io::{Read, Write},
+    io::Write,
     path::{Path, PathBuf},
     pin::Pin,
     sync::Arc,
@@ -29,6 +29,8 @@ mod capability;
 mod components;
 #[path = "adaptation_decision.rs"]
 mod decision;
+#[path = "adaptation_editor.rs"]
+mod editor;
 #[path = "adaptation_failure.rs"]
 mod failure;
 #[path = "adaptation_flow.rs"]
@@ -1201,117 +1203,9 @@ impl EngineService {
                     progress,
                 )
             }
-            "write_file" => {
-                let normalized = text(args, "path")?.replace('\\', "/");
-                let relative = normalized.as_str();
-                let path = write_path(workspace, relative)?;
-                let content = match (args.get("content"), args.get("copyFrom")) {
-                    (Some(_), None) => Cow::Borrowed(text(args, "content")?),
-                    (None, Some(_)) => {
-                        let source = write_path(workspace, text(args, "copyFrom")?)?;
-                        let mut bytes = Vec::new();
-                        fs::File::open(source)?
-                            .take(512 * 1024 + 1)
-                            .read_to_end(&mut bytes)?;
-                        Cow::Owned(String::from_utf8(bytes).map_err(|_| {
-                            EngineError::Protocol(
-                                "copyFrom 必须是工作区中的 UTF-8 文本文件。".into(),
-                            )
-                        })?)
-                    }
-                    _ => {
-                        return Err(EngineError::Protocol(
-                            "content 与 copyFrom 必须且只能提供一项。".into(),
-                        ));
-                    }
-                };
-                if content.len() > 512 * 1024 {
-                    return Err(EngineError::Rejected(
-                        "单次源码写入过大，请拆分实现。".into(),
-                    ));
-                }
-                let release_files = written_selection(state, relative, args)?;
-                let test_arguments = args
-                    .get("testArguments")
-                    .map(|arguments| {
-                        if relative != "src/adapter.py" {
-                            return Err(EngineError::Protocol(
-                                "testArguments 只能随 src/adapter.py 登记。".into(),
-                            ));
-                        }
-                        serde_json::to_value(verification::TestArguments::parse(arguments)?)
-                            .map_err(EngineError::from)
-                    })
-                    .transpose()?;
-                if let Some(parent) = path.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-                let changed = fs::read(&path).ok().as_deref() != Some(content.as_bytes());
-                if changed {
-                    write_source_file(&path, content.as_bytes())?;
-                }
-                state.release_files = release_files;
-                if let Some(arguments) = test_arguments {
-                    workflow::register(state, arguments);
-                }
-                if changed {
-                    state.verified_fingerprint = None;
-                    if relative.starts_with("src/") {
-                        state
-                            .extra
-                            .insert("lastImplementationTurn".into(), json!(state.total_turns));
-                    }
-                }
-                Ok(
-                    json!({"path":args["path"],"bytes":content.len(),"changed":changed,"copyFrom":args.get("copyFrom"),"testArgumentsRegistered":args.get("testArguments").is_some(),"verificationConfigured":state.workflow.verification_args.is_some(),"nextAction":editing_next_action(state,relative)}),
-                )
-            }
-            "replace_text" => {
-                let relative = text(args, "path")?.replace('\\', "/");
-                let path = write_path(workspace, &relative)?;
-                if path.metadata()?.len() > 512 * 1024 {
-                    return Err(EngineError::Protocol(
-                        "局部编辑文件不得超过 512 KiB。".into(),
-                    ));
-                }
-                let original = fs::read_to_string(&path)?;
-                let old = text(args, "oldText")?;
-                if old.is_empty() || original.matches(old).count() != 1 {
-                    return Err(EngineError::Rejected("oldText 必须精确且唯一匹配。".into()));
-                }
-                let updated = original.replacen(old, text(args, "newText")?, 1);
-                if updated.len() > 512 * 1024 {
-                    return Err(EngineError::Protocol(
-                        "局部编辑结果不得超过 512 KiB。".into(),
-                    ));
-                }
-                let changed = updated != original;
-                if changed {
-                    write_source_file(&path, updated.as_bytes())?;
-                    state.verified_fingerprint = None;
-                    if relative.starts_with("src/") {
-                        state
-                            .extra
-                            .insert("lastImplementationTurn".into(), json!(state.total_turns));
-                    }
-                }
-                Ok(
-                    json!({"path":args["path"],"bytes":updated.len(),"changed":changed,"nextAction":editing_next_action(state,&relative)}),
-                )
-            }
-            "remove_file" => {
-                let normalized = text(args, "path")?.replace('\\', "/");
-                let relative = normalized.as_str();
-                let path = write_path(workspace, relative)?;
-                if path.exists() {
-                    fs::remove_file(path)?;
-                }
-                state
-                    .release_files
-                    .retain(|file| !workspace_file(&file.path).eq_ignore_ascii_case(relative));
-                state.verified_fingerprint = None;
-                Ok(json!({"removed":args["path"]}))
-            }
+            "write_file" => editor::write_file(workspace, state, args),
+            "replace_text" => editor::replace_text(workspace, state, args),
+            "remove_file" => editor::remove_file(workspace, state, args),
             "update_release_files" => {
                 let mut next = state.release_files.clone();
                 if let Some(files) = args.get("files") {
@@ -3367,18 +3261,6 @@ fn boolean(args: &Value, key: &str, default: bool) -> Result<bool, EngineError> 
         .transpose()
         .map(|value| value.unwrap_or(default))
 }
-fn write_source_file(path: &Path, content: &[u8]) -> Result<(), EngineError> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| EngineError::Protocol("文件路径缺少目录。".into()))?;
-    fs::create_dir_all(parent)?;
-    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
-    temporary.write_all(content)?;
-    temporary
-        .persist(path)
-        .map_err(|error| EngineError::Io(error.error))?;
-    Ok(())
-}
 fn strings(args: &Value, key: &str) -> Result<Vec<String>, EngineError> {
     let values: Vec<String> = serde_json::from_value(
         args.get(key)
@@ -3449,18 +3331,6 @@ fn write_path(root: &Path, relative: &str) -> Result<PathBuf, EngineError> {
     }
     resolve_relative(root, relative)
 }
-fn editing_next_action(state: &Session, relative: &str) -> &'static str {
-    if relative.starts_with("work/") && relative.ends_with(".py") {
-        "新建或更新探针可直接用 run_engine_python(script, content, reportFile) 合并写入与运行；已保存脚本可直接运行。"
-    } else if relative == "src/adapter.py" && state.workflow.verification_args.is_none() {
-        "正式入口已保存；用 write_file 的 testArguments 登记 kind/key/name/resourcePatterns，或调用 test_adapter 进入宿主验收。"
-    } else if state.workflow.needs_verification {
-        "本批编辑完成且所选文件与资源齐备后，宿主将按已登记参数验收。"
-    } else {
-        "继续已确定的编辑或验收；局部变化用 replace_text，复用已有代码可用 copyFrom。"
-    }
-}
-
 pub(crate) fn workspace_file(relative: &str) -> String {
     if relative.starts_with("tools/") {
         format!("src/{relative}")
@@ -3492,10 +3362,7 @@ fn written_selection(
                 purpose: text(args, "purpose")?.into(),
             },
         )?;
-    } else if relative.starts_with("src/")
-        && !relative.starts_with("src/tools/")
-        && relative.ends_with(".py")
-    {
+    } else if is_python_source(relative) {
         select_release(
             &mut next,
             ReleaseFile {
@@ -3520,22 +3387,19 @@ fn register_python(state: &mut Session, relative: &str) -> Result<(), EngineErro
 fn register_release(state: &mut Session, file: ReleaseFile) -> Result<(), EngineError> {
     select_release(&mut state.release_files, file)
 }
+
+fn is_python_source(path: &str) -> bool {
+    path.starts_with("src/") && !path.starts_with("src/tools/") && path.ends_with(".py")
+}
+
 fn select_release(files: &mut Vec<ReleaseFile>, file: ReleaseFile) -> Result<(), EngineError> {
     resolve_relative(Path::new("."), &file.path)?;
-    if file.purpose.trim().is_empty()
-        || file.purpose.encode_utf16().count() > 240
-        || !matches!(
-            file.role.as_str(),
-            "source" | "runtime" | "asset" | "license"
-        )
-        || if file.role == "source" {
-            !file.path.starts_with("src/")
-                || file.path.starts_with("src/tools/")
-                || !file.path.ends_with(".py")
-        } else {
-            !file.path.starts_with("tools/")
-        }
-    {
+    let valid_path = match file.role.as_str() {
+        "source" => is_python_source(&file.path),
+        "runtime" | "asset" | "license" => file.path.starts_with("tools/"),
+        _ => false,
+    };
+    if file.purpose.trim().is_empty() || file.purpose.encode_utf16().count() > 240 || !valid_path {
         return Err(EngineError::Protocol("发布路径、用途或角色无效。".into()));
     }
     if let Some(previous) = files
@@ -3543,12 +3407,12 @@ fn select_release(files: &mut Vec<ReleaseFile>, file: ReleaseFile) -> Result<(),
         .find(|previous| previous.path.eq_ignore_ascii_case(&file.path))
     {
         *previous = file;
-    } else {
-        if files.len() >= 512 {
-            return Err(EngineError::Protocol("最多选择 512 个发布输入。".into()));
-        }
-        files.push(file);
+        return Ok(());
     }
+    if files.len() >= 512 {
+        return Err(EngineError::Protocol("最多选择 512 个发布输入。".into()));
+    }
+    files.push(file);
     Ok(())
 }
 fn copy_unmodified(source: &Path, destination: &Path) -> Result<(), EngineError> {

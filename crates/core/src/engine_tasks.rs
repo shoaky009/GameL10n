@@ -91,6 +91,13 @@ struct ExistingRecognition {
     known_game: bool,
 }
 
+impl ExistingRecognition {
+    fn accepted_extraction(&self) -> Option<usize> {
+        self.extracted
+            .filter(|&count| count > 0 && (self.known_game || count >= SMALL_EXTRACTION_THRESHOLD))
+    }
+}
+
 fn catalog_adapter(project: &crate::GameProject) -> Option<AdapterVersion> {
     crate::adapter_feedback::current_adapter(&project.extra).filter(|adapter| {
         adapter.adapter_id.starts_with("engine.") || adapter.adapter_id.starts_with("template.")
@@ -404,17 +411,17 @@ impl Application {
         )
         .await;
         let result = async {
-            if continuing {
-                if recover_missing {
-                    let recovered = self.recognize_existing(id, &cancellation, true).await?;
-                    if let Some(count) = recovered.extracted.filter(|count| *count > 0 && (*count >= SMALL_EXTRACTION_THRESHOLD || recovered.known_game)) {
-                        self.metrics_details(id, None, Some("reused"), None).await;
-                        return Ok(RecognitionResult::Extracted(count));
-                    }
-                    operation = "adapt";
-                    self.progress(id, operation, "本地复用未恢复文本，正在续接上次智能适配。")
-                        .await;
+            if recover_missing {
+                let recovered = self.recognize_existing(id, &cancellation, true).await?;
+                if let Some(count) = recovered.accepted_extraction() {
+                    self.metrics_details(id, None, Some("reused"), None).await;
+                    return Ok(RecognitionResult::Extracted(count));
                 }
+                operation = "adapt";
+                self.progress(id, operation, "本地复用未恢复文本，正在续接上次智能适配。")
+                    .await;
+            }
+            if continuing {
                 let result = self.run_adaptation(
                     id,
                     instruction,
@@ -442,17 +449,17 @@ impl Application {
                 return Ok(RecognitionResult::Adapted(Box::new(result)));
             }
             let recognized = self.recognize_existing(id, &cancellation, false).await?;
-            let extracted = recognized.extracted;
-            let inventory = recognized.inventory;
             if cancellation.is_cancelled() {
                 return Err(gamel10n_engines::EngineError::Cancelled.into());
             }
-            if let Some(count) = extracted.filter(|count| *count > 0 && (*count >= SMALL_EXTRACTION_THRESHOLD || recognized.known_game)) {
-                if recognized.known_game { self.metrics_details(id, None, Some("reused"), None).await; }
+            if let Some(count) = recognized.accepted_extraction() {
+                if recognized.known_game {
+                    self.metrics_details(id, None, Some("reused"), None).await;
+                }
                 return Ok(RecognitionResult::Extracted(count));
             }
             operation = "adapt";
-            let (message, instruction, objective) = if let Some(count) = extracted {
+            let (message, instruction, objective) = if let Some(count) = recognized.extracted {
                 let message = format!("常规适配仅提取 {count} 条文本，已保留结果；正在智能检查文字覆盖，确认是否遗漏主要脚本。");
                 let instruction = format!("常规适配仅提取 {count} 条文本（少于 {SMALL_EXTRACTION_THRESHOLD} 条），尚不能确认文字覆盖。请核对已匹配解析器、提取来源和实际游戏资源；不要把说明文件、辅助文本或少量可解析文本误认为主要脚本已提取完成。数量只是检查线索；若确为小体量游戏，可根据资源证据确认，无需凑足文本数量。已有结果可用 inspect_existing_text 查看。\n\n{instruction}");
                 (message, instruction, AdaptationObjective::ExpandCoverage)
@@ -471,8 +478,8 @@ impl Application {
                     instruction,
                     AdaptationStart {
                         objective,
-                        inventory: Some(inventory),
-                        require_model_analysis: extracted.is_some(),
+                        inventory: Some(recognized.inventory),
+                        require_model_analysis: recognized.extracted.is_some(),
                     },
                     &cancellation,
                 )
@@ -548,12 +555,13 @@ impl Application {
                 let mut known_packages = Vec::new();
                 let mut packages = Vec::new();
                 for candidate in candidates {
-                    if candidate.matches_inventory(&inventory) {
-                        if candidate.is_known_game {
-                            known_packages.push(candidate.directory);
-                        } else {
-                            packages.push(candidate.directory);
-                        }
+                    if !candidate.matches_inventory(&inventory) {
+                        continue;
+                    }
+                    if candidate.is_known_game {
+                        known_packages.push(candidate.directory);
+                    } else {
+                        packages.push(candidate.directory);
                     }
                 }
                 let mut disabled = catalog.disabled_family_ids()?;

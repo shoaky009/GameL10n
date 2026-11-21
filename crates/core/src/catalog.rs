@@ -2038,7 +2038,7 @@ mod tests {
         assert!(catalog.discovery_candidates(None).unwrap().is_empty());
         assert_eq!(
             catalog.adaptation_reference_directories().unwrap(),
-            [package.clone()]
+            std::slice::from_ref(&package)
         );
         assert!(
             catalog
@@ -2056,7 +2056,7 @@ mod tests {
         let catalog = EngineCatalog::from_extensions_root(root.path()).unwrap();
         assert_eq!(
             catalog.adaptation_reference_directories().unwrap(),
-            [package.clone()]
+            std::slice::from_ref(&package)
         );
         assert_eq!(
             catalog
