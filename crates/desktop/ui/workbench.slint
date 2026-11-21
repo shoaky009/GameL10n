@@ -6,6 +6,29 @@ component SelectableText inherits ReportText {
     changed has-focus => { if self.has-focus { root.activated(); } }
 }
 
+component TextColumns inherits Rectangle {
+    out property <length> column-width: max(0px, (self.width - 16px) / 2);
+    out property <length> translation-x: self.column-width + 16px;
+}
+
+component TextCell inherits Rectangle {
+    in property <string> value;
+    in property <string> copy-label;
+    in property <color> text-color: Theme.ink;
+    callback activated;
+    callback copy(string);
+    clip: true;
+    SelectableText {
+        x: 0px; y: 0px; width: max(0px, parent.width - copy-button.width - 4px); height: parent.height;
+        text: root.value; color: root.text-color; enabled: !App.loading;
+        activated => { root.activated(); }
+    }
+    copy-button := CopyButton {
+        x: parent.width - self.width; y: 0px; label: root.copy-label; value: root.value;
+        copy(value) => { root.copy(value); }
+    }
+}
+
 export component Workbench inherits FocusScope {
     property <bool> selection-enabled: !App.loading && !App.selection-busy;
     property <bool> editor-details;
@@ -27,8 +50,8 @@ export component Workbench inherits FocusScope {
     VerticalLayout {
     spacing: 8px;
     HorizontalLayout { spacing: 12px;
+        Button { text: "全量翻译"; primary: App.selected-texts == 0; enabled: !App.busy && App.recognition != ""; clicked => { App.action("translate", "all"); } }
         Caption { text: App.counts; horizontal-stretch: 1; vertical-alignment: center; overflow: elide; wrap: no-wrap; }
-        CheckBox { text: "仅显示已选"; checked <=> App.only-selected; toggled => { App.action("texts", "0"); } }
     }
     HorizontalLayout { spacing: 8px;
         search-input := LineEdit { placeholder-text: "搜索原文、译文或位置"; text <=> App.text-query; edited => { App.action("texts", "0"); } horizontal-stretch: 1; min-width: 120px; }
@@ -37,10 +60,14 @@ export component Workbench inherits FocusScope {
         ComboBox { model: ["全部状态与来源", "未翻译", "待校对", "已校对", "已保护译文", "格式问题", "翻译失败", "有候选", "自动译文", "人工译文", "历史来源未记录"]; current-index <=> App.status-filter; width: 156px; selected => { App.action("texts", "0"); } }
     }
     HorizontalLayout { spacing: 8px; height: 32px;
-        Link { text: App.selected-texts > 0 ? "取消选择" : "选本页"; enabled: root.selection-enabled && (App.selected-texts > 0 || App.texts.length > 0); clicked => { App.action(App.selected-texts > 0 ? "select-clear" : "select-page", ""); } }
-        if App.selected-texts == 0: Link { text: "全选匹配"; enabled: root.selection-enabled && App.text-total > 0; clicked => { App.action("select-matching", ""); } }
+        VerticalLayout { alignment: center; horizontal-stretch: 0;
+            HorizontalLayout { spacing: 12px;
+                Link { text: App.selected-texts > 0 ? "取消选择" : "选本页"; enabled: root.selection-enabled && (App.selected-texts > 0 || App.texts.length > 0); clicked => { App.action(App.selected-texts > 0 ? "select-clear" : "select-page", ""); } }
+                if App.selected-texts == 0: Link { text: "全选匹配"; enabled: root.selection-enabled && App.text-total > 0; clicked => { App.action("select-matching", ""); } }
+            }
+        }
+        CheckBox { text: "仅显示已选"; checked <=> App.only-selected; toggled => { App.action("texts", "0"); } }
         if App.selected-texts > 0 || App.selection-busy: Caption { text: App.selection-busy ? "更新中…" : "已选 " + App.selected-texts; vertical-alignment: center; wrap: no-wrap; }
-        Button { text: "全量翻译"; primary: App.selected-texts == 0; enabled: !App.busy && App.recognition != ""; clicked => { App.action("translate", "all"); } }
         if App.selected-texts > 0: Button { text: "翻译所选"; primary: true; enabled: root.selection-enabled && !App.busy; clicked => { App.action("translate", "selected"); } }
         if App.selected-texts > 0: Button { text: "重新翻译所选"; enabled: root.selection-enabled && !App.busy; clicked => { App.action("retranslate-dialog", ""); } }
         if App.selected-texts > 0: Button { text: "试译并生成补丁"; enabled: root.selection-enabled && !App.busy; clicked => { App.action("translate", "trial"); } }
@@ -49,49 +76,54 @@ export component Workbench inherits FocusScope {
     }
     HorizontalLayout { spacing: 12px;
         VerticalLayout { spacing: 8px; horizontal-stretch: 2;
-            HorizontalLayout { padding-left: 38px; spacing: 16px; Caption { text: "原文"; horizontal-stretch: 1; } Caption { text: "译文"; horizontal-stretch: 1; } }
-            if App.texts.length > 0: ListView { vertical-stretch: 1; content-y <=> App.text-scroll-y;
-                for row in App.texts: Rectangle {
-                    height: 132px; background: row.id == App.editor-id ? Theme.tint : Theme.surface;
-                    HorizontalLayout { padding: 8px; spacing: 8px;
-                        CheckBox { checked: row.selected; enabled: root.selection-enabled; toggled => { App.action("toggle-text", row.id); } }
-                        Rectangle { horizontal-stretch: 1;
-                            VerticalLayout { spacing: 3px;
-                                Rectangle { height: 18px;
-                                    Caption { text: row.location; width: parent.width; height: parent.height; overflow: elide; wrap: no-wrap; }
-                                    TouchArea { enabled: !App.loading; mouse-cursor: pointer; clicked => { App.action("edit-text", row.id); } }
-                                }
-                                HorizontalLayout { spacing: 6px; height: 24px;
-                                    Badge { text: row.translation == "" ? "未翻译" : row.origin == 1 ? "自动" : row.origin == 2 ? "人工" : "来源未知"; tone: row.translation == "" ? 0 : row.origin; }
-                                    if row.invalid || row.translation != "": Badge { text: row.invalid ? "格式问题" : row.reviewed ? "已校对" : "待校对"; tone: row.invalid ? 5 : row.reviewed ? 3 : 4; }
-                                    if row.failed: Badge { text: "请求失败"; tone: 5; }
-                                    if row.candidate: Badge { text: "有候选"; tone: 1; }
-                                    Rectangle { horizontal-stretch: 1; }
-                                }
-                                HorizontalLayout { spacing: 16px; height: 44px;
-                                    Rectangle { horizontal-stretch: 1; min-width: 0px; clip: true;
-                                        SelectableText {
-                                            text: row.source; color: Theme.secondary; width: parent.width - copy-source.width - 4px; height: parent.height; enabled: !App.loading;
-                                            activated => { if row.id != App.editor-id { App.action("edit-text", row.id); } }
-                                        }
-                                        copy-source := CopyButton { x: parent.width - self.width; label: "复制原文"; value: row.source; copy(value) => { clipboard.copy-text(value); } }
+            if App.texts.length > 0: VerticalLayout { spacing: 8px;
+                Rectangle { height: source-heading.preferred-height;
+                    TextColumns { x: 34px; width: text-list.visible-width - self.x - 8px; height: parent.height;
+                        source-heading := Caption { x: 0px; width: parent.column-width; text: "原文"; wrap: no-wrap; }
+                        Caption { x: parent.translation-x; width: parent.column-width; text: "译文"; wrap: no-wrap; }
+                    }
+                }
+                text-list := ListView { vertical-stretch: 1; content-y <=> App.text-scroll-y; horizontal-scrollbar-policy: always-off;
+                    for row in App.texts: Rectangle {
+                        width: text-list.visible-width; height: 132px; background: row.id == App.editor-id ? Theme.tint : Theme.surface;
+                        HorizontalLayout { padding: 8px; spacing: 8px;
+                            CheckBox { width: 18px; checked: row.selected; enabled: root.selection-enabled; toggled => { App.action("toggle-text", row.id); } }
+                            Rectangle { horizontal-stretch: 1; min-width: 0px;
+                                VerticalLayout { spacing: 3px;
+                                    Rectangle { height: 18px;
+                                        Caption { text: row.location; width: parent.width; height: parent.height; overflow: elide; wrap: no-wrap; }
+                                        TouchArea { enabled: !App.loading; mouse-cursor: pointer; clicked => { App.action("edit-text", row.id); } }
                                     }
-                                    Rectangle { horizontal-stretch: 1; min-width: 0px; clip: true;
-                                        SelectableText {
-                                            text: row.translation; width: parent.width - copy-translation.width - 4px; height: parent.height; enabled: !App.loading;
-                                            activated => { if row.id != App.editor-id { App.action("edit-text", row.id); } }
-                                        }
-                                        copy-translation := CopyButton { x: parent.width - self.width; label: "复制译文"; value: row.translation; copy(value) => { clipboard.copy-text(value); } }
+                                    HorizontalLayout { spacing: 6px; height: 24px;
+                                        Badge { text: row.translation == "" ? "未翻译" : row.origin == 1 ? "自动" : row.origin == 2 ? "人工" : "来源未知"; tone: row.translation == "" ? 0 : row.origin; }
+                                        if row.invalid || row.translation != "": Badge { text: row.invalid ? "格式问题" : row.reviewed ? "已校对" : "待校对"; tone: row.invalid ? 5 : row.reviewed ? 3 : 4; }
+                                        if row.failed: Badge { text: "请求失败"; tone: 5; }
+                                        if row.candidate: Badge { text: "有候选"; tone: 1; }
+                                        Rectangle { horizontal-stretch: 1; }
                                     }
-                                }
-                                Rectangle { height: 16px;
-                                    Caption { text: row.metadata; width: parent.width; height: parent.height; overflow: elide; wrap: no-wrap; }
-                                    TouchArea { enabled: !App.loading; mouse-cursor: pointer; clicked => { App.action("edit-text", row.id); } }
+                                    TextColumns { height: 44px;
+                                        TextCell {
+                                            x: 0px; width: parent.column-width; height: parent.height;
+                                            value: row.source; text-color: Theme.secondary; copy-label: "复制原文";
+                                            activated => { if row.id != App.editor-id { App.action("edit-text", row.id); } }
+                                            copy(value) => { clipboard.copy-text(value); }
+                                        }
+                                        TextCell {
+                                            x: parent.translation-x; width: parent.column-width; height: parent.height;
+                                            value: row.translation; copy-label: "复制译文";
+                                            activated => { if row.id != App.editor-id { App.action("edit-text", row.id); } }
+                                            copy(value) => { clipboard.copy-text(value); }
+                                        }
+                                    }
+                                    Rectangle { height: 16px;
+                                        Caption { text: row.metadata; width: parent.width; height: parent.height; overflow: elide; wrap: no-wrap; }
+                                        TouchArea { enabled: !App.loading; mouse-cursor: pointer; clicked => { App.action("edit-text", row.id); } }
+                                    }
                                 }
                             }
                         }
+                        Rectangle { y: parent.height - 1px; height: 1px; background: Theme.line; }
                     }
-                    Rectangle { y: parent.height - 1px; height: 1px; background: Theme.line; }
                 }
             }
             if App.texts.length == 0: VerticalLayout { padding: 12px; spacing: 8px; alignment: start; vertical-stretch: 1;
