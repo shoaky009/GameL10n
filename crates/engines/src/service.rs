@@ -17,7 +17,7 @@ use std::{
 
 use gamel10n_translation::{
     TokenUsage, TranslationUnit,
-    files::{hash_file, hash_text, read_json, write_json},
+    files::{hash_file, read_json, write_json},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -179,11 +179,12 @@ impl VerifiedExtraction {
     /// The caller supplies freshly checked snapshot hashes. Changed inputs use normal extraction.
     pub fn into_matching_extraction(
         self: Arc<Self>,
+        service: &EngineService,
         adapter: &AdapterHandle,
         resource_hashes: &BTreeMap<String, String>,
     ) -> Result<Option<ExtractionResult>, EngineError> {
         if &self.resource_hashes != resource_hashes
-            || verified_adapter_fingerprint(adapter)?.as_deref()
+            || verified_adapter_fingerprint(service, adapter)?.as_deref()
                 != Some(self.adapter_fingerprint.as_str())
         {
             return Ok(None);
@@ -192,7 +193,10 @@ impl VerifiedExtraction {
     }
 }
 
-fn verified_adapter_fingerprint(adapter: &AdapterHandle) -> Result<Option<String>, EngineError> {
+fn verified_adapter_fingerprint(
+    service: &EngineService,
+    adapter: &AdapterHandle,
+) -> Result<Option<String>, EngineError> {
     let AdapterHandle::Python {
         package_directory: Some(directory),
         id,
@@ -218,7 +222,9 @@ fn verified_adapter_fingerprint(adapter: &AdapterHandle) -> Result<Option<String
     {
         return Ok(None);
     }
-    Ok(Some(hash_text(&serde_json::to_string(&manifest)?)))
+    service
+        .verification_package_hash(&manifest, directory)
+        .map(Some)
 }
 
 #[derive(Serialize)]
@@ -1460,7 +1466,7 @@ impl EngineService {
         let mut phase = "initial-extraction";
         let mut issue = None;
         let mut phase_started = Instant::now();
-        let adapter_fingerprint = verified_adapter_fingerprint(adapter)?;
+        let adapter_fingerprint = verified_adapter_fingerprint(self, adapter)?;
         let display_check = display::QlieDisplay::detect(
             adapter,
             source_directory,

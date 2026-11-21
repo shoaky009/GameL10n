@@ -25,7 +25,7 @@
 
 工作区 `src/tools/` 发布到包内 `tools/`。选入全部间接依赖及适用许可。包只发布通用实现和必要运行素材，游戏原件与修改后的游戏文件分别作为资源输入和补丁输出。
 
-`verification.json` 记录资源验收结果，可选的 `capability-profile.json` 提供复用与复验资料。以新版本发布修改后的源码或依赖，已有项目保留其固定版本。声明 VNTextPatch 依赖的包须使用匹配的工具版本。纯 Python 适配器可以只声明 Python 和共享库依赖。[发布实现](../../crates/engines/src/adaptation_verification.rs)
+`verification.json` 记录资源验收结果，可选的 `capability-profile.json` 提供复用与复验资料。以新版本发布修改后的源码或依赖，已有项目保留其适配器版本。声明 VNTextPatch 依赖的包记录验收时的工具哈希，执行时使用当前安装的原生工具。纯 Python 适配器可以只声明 Python 和共享库依赖。[发布实现](../../crates/engines/src/adaptation_verification.rs)
 
 引擎库中的“验证发布包…”可用空闲项目的原文和提取基线单独验收某个版本。结果可在版本详情或项目任务中查看。[引擎库管理](README.md#引擎库管理)
 

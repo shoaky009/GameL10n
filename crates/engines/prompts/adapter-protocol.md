@@ -16,12 +16,12 @@ Request: {protocolVersion:1,operation:"probe"|"extract"|"build"|"validate",sourc
   probeReadLimits,responseFile,translationsFile,translations,validationContextFile,toolPaths,adapterDirectory}.
 tools/engine-reference.json pins the shared Python source library and interpreter; test_adapter prepares it automatically.
 use_engine_reference also supplies tools/gamel10n_host.py. For direct NativeAOT calls pass nativeTools=true.
-Built-in templates and copied components declare their own dependencies. The native pin supplies
+Built-in templates and copied components declare their own dependencies. Declaring the native runtime supplies
 vnTextPatch, vnTextPatchCommand and hostCommand in toolPaths.
 Python can call existing python.engines/python.archives modules without rewriting their algorithms.
-from tools.gamel10n_host import parser, component accesses pinned parsers and precompiled font/encoding components.
+from tools.gamel10n_host import parser, component accesses the installed parsers and precompiled font/encoding components.
 Implement bounded probe in Python; full-file parsers must never run against truncated probe input.
-test_adapter and published operations use the same pinned files. The host supplies registered public assets on demand.
+Native tool hashes record the build used for verification. Published adapters use the installed native runtime. The host supplies registered public assets on demand.
 Never hardcode these paths, download libraries from adapter code, or copy shared runtimes into game output.
 Always enumerate the current resourceFiles or sourceDirectory; filenames from the development game must not be pinned.
 Resource discovery patterns accept *, ? and ** with / separators (e.g. **/*.dat), and form a union, not required-file conditions.

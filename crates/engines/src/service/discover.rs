@@ -425,7 +425,7 @@ impl Discovery<'_> {
             .iter()
             .map(|path| Ok((path.clone(), inputs.file(self.source, path)?)))
             .collect::<Result<_, EngineError>>()?;
-        let fingerprint = reuse_input_fingerprint(manifest, &original_files, probe)?;
+        let fingerprint = reuse_input_fingerprint(self.service, candidate, &original_files, probe)?;
         if self.verification == DiscoveryVerification::ProbeOnly
             && gamel10n_translation::files::read_json::<String>(
                 &self.service.display_cache(&fingerprint),
@@ -482,7 +482,7 @@ impl Discovery<'_> {
             .unwrap_or(phase)
             .to_owned();
         let stable = verified.cacheable
-            && reuse_input_fingerprint(manifest, &original_files, probe)
+            && reuse_input_fingerprint(self.service, candidate, &original_files, probe)
                 .ok()
                 .as_deref()
                 == Some(&fingerprint);
@@ -739,11 +739,13 @@ fn record_builtin_probe(
 }
 
 fn reuse_input_fingerprint(
-    manifest: &PackageManifest,
+    service: &EngineService,
+    candidate: &PackageCandidate,
     files: &std::collections::BTreeMap<String, PathBuf>,
     probe: &ProbeResult,
 ) -> Result<String, EngineError> {
-    let manifest_hash = hash_text(&serde_json::to_string(manifest)?);
+    let manifest_hash =
+        service.verification_package_hash(&candidate.manifest, &candidate.directory)?;
     let resources = files
         .iter()
         .map(|(relative, path)| {

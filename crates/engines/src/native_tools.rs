@@ -1,20 +1,20 @@
-//! Verify package pins against the current application-provided native runtime.
+//! Resolve native dependencies and record the runtime used for adapter verification.
 
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
 };
 
-use gamel10n_translation::files::hash_file;
+use gamel10n_translation::files::{hash_file, hash_text, read_json};
 use serde_json::{Value, json};
 
-use crate::{EngineError, EngineService, discovery::resolve_relative};
+use crate::{EngineError, EngineService, PackageManifest, discovery::resolve_relative};
 
 const EXECUTABLE: &str = "GameL10n.VnTextPatch.exe";
 const RUNTIME_FILES: [&str; 2] = [EXECUTABLE, "capstone.dll"];
 const RUNTIME_MANIFEST: &str = "runtime.json";
 pub(crate) const PIN_PATH: &str = "tools/vntextpatch-reference.json";
-pub(crate) const PIN_PURPOSE: &str = "固定原生脚本、编码与字体组件宿主。";
+pub(crate) const PIN_PURPOSE: &str = "记录验收时使用的原生解析器与组件宿主版本。";
 
 struct NativePin {
     files: BTreeMap<String, String>,
@@ -72,74 +72,82 @@ impl NativePin {
         }
         Ok(Self { files: hashes })
     }
+
+    fn required_files(&self) -> impl Iterator<Item = &str> {
+        RUNTIME_FILES.into_iter().chain(
+            self.files
+                .keys()
+                .map(String::as_str)
+                .filter(|name| !RUNTIME_FILES.contains(name)),
+        )
+    }
 }
 
 fn runtime_pin(files: &BTreeMap<String, String>) -> Value {
     json!({"schemaVersion":2,"runtime":"native","entryPoint":EXECUTABLE,"files":files})
 }
 
-fn file_hash(root: &Path, relative: &str) -> Result<String, EngineError> {
+fn required_file(root: &Path, relative: &str) -> Result<PathBuf, EngineError> {
     let path = resolve_relative(root, relative)?;
     if !path.is_file() {
         return Err(EngineError::ToolMissing(path));
     }
-    hash_file(&path).map_err(|error| EngineError::Protocol(error.to_string()))
+    Ok(path)
+}
+
+fn file_hash(root: &Path, relative: &str) -> Result<String, EngineError> {
+    hash_file(&required_file(root, relative)?)
+        .map_err(|error| EngineError::Protocol(error.to_string()))
 }
 
 impl EngineService {
+    fn native_hashes<'a>(
+        &self,
+        files: impl IntoIterator<Item = &'a str>,
+    ) -> Result<BTreeMap<String, String>, EngineError> {
+        let current = self.tools.root.join("vntextpatch");
+        files
+            .into_iter()
+            .map(|name| Ok((name.to_owned(), file_hash(&current, name)?)))
+            .collect()
+    }
+
     pub(crate) fn create_native_pin(&self) -> Result<Value, EngineError> {
-        let source = self.tools.root.join("vntextpatch");
-        let mut files = BTreeMap::new();
-        for relative in RUNTIME_FILES {
-            files.insert(relative.into(), file_hash(&source, relative)?);
+        Ok(runtime_pin(&self.native_hashes(RUNTIME_FILES)?))
+    }
+
+    pub(super) fn verification_package_hash(
+        &self,
+        manifest: &PackageManifest,
+        directory: &Path,
+    ) -> Result<String, EngineError> {
+        let path = directory.join(PIN_PATH);
+        if !path.try_exists()? {
+            return Ok(hash_text(&serde_json::to_string(manifest)?));
         }
-        Ok(runtime_pin(&files))
+        // Cached extraction and validation results belong to the runtime that produced them.
+        let value = read_json(&path).map_err(crate::adaptation::file_error)?;
+        let files = self.native_hashes(NativePin::parse(&value)?.required_files())?;
+        Ok(hash_text(&serde_json::to_string(&(manifest, files))?))
     }
 
     pub(crate) fn resolve_native_tools(&self, value: &Value) -> Result<PathBuf, EngineError> {
         let pin = NativePin::parse(value)?;
         let current = self.tools.root.join("vntextpatch");
-        for relative in RUNTIME_FILES {
-            let path = resolve_relative(&current, relative)?;
-            if !path.is_file() {
-                return Err(EngineError::ToolMissing(path));
-            }
+        // Hashes identify the build used for verification. Compatible adapters use the installed runtime.
+        for relative in pin.required_files() {
+            required_file(&current, relative)?;
         }
-        for (relative, expected) in &pin.files {
-            let path = resolve_relative(&current, relative)?;
-            if !path.is_file() || file_hash(&current, relative)? != *expected {
-                return Err(EngineError::Incompatible {
-                    stage: "runtime",
-                    message:
-                        "适配器固定的原生工具与当前版本不同，请重新识别游戏并使用当前工具重新验收"
-                            .into(),
-                });
-            }
-        }
-        resolve_relative(&current, EXECUTABLE)
+        Ok(self.tools.vntextpatch())
     }
 
     pub(super) fn updated_native_pin(&self, value: &Value) -> Result<Option<Value>, EngineError> {
         if NativePin::schema(value) == Some(1) {
             return self.create_native_pin().map(Some);
         }
-        match self.resolve_native_tools(value) {
-            Ok(_) => return Ok(None),
-            Err(EngineError::Incompatible {
-                stage: "runtime", ..
-            }) => {}
-            Err(error) => return Err(error),
-        }
-        // A draft can be reverified against a new build of the same native runtime.
-        let mut files = NativePin::parse(value)?.files;
-        for relative in RUNTIME_FILES {
-            files.entry(relative.into()).or_default();
-        }
-        let current = self.tools.root.join("vntextpatch");
-        for (relative, hash) in &mut files {
-            *hash = file_hash(&current, relative)?;
-        }
-        Ok(Some(runtime_pin(&files)))
+        let pin = NativePin::parse(value)?;
+        let current = self.native_hashes(pin.required_files())?;
+        Ok((pin.files != current).then(|| runtime_pin(&current)))
     }
 }
 
@@ -147,7 +155,7 @@ impl EngineService {
 mod tests {
     use super::*;
     use crate::{CancellationToken, ToolPaths};
-    use gamel10n_translation::files::{hash_text, write_json};
+    use gamel10n_translation::files::write_json;
     use std::fs;
 
     fn service(root: &Path) -> EngineService {
@@ -191,7 +199,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_upgrade_rejects_retained_old_runtime_without_rewriting_the_package() {
+    async fn published_package_uses_the_upgraded_runtime_and_keeps_its_verification_record() {
         let temporary = tempfile::tempdir().expect("fixture");
         let service = service(temporary.path());
         let source = service.tools.root.join("vntextpatch");
@@ -199,6 +207,15 @@ mod tests {
         let pin = old_pin(&source);
         let package = package(&temporary.path().join("package"), &pin);
         let original = fs::read(package.join("tools/vntextpatch-reference.json")).expect("pin");
+        let manifest: PackageManifest = serde_json::from_value(
+            json!({"id":"engine.fixture","version":"1","manifestVersion":4}),
+        )
+        .unwrap();
+        let previous = service
+            .verification_package_hash(&manifest, &package)
+            .unwrap();
+        retained_runtime(&service, &pin);
+        native_runtime(&source, b"new executable");
         let paths = service
             .tool_paths(Some(&package), &CancellationToken::new())
             .await
@@ -211,35 +228,25 @@ mod tests {
             let [program]: [PathBuf; 1] = serde_json::from_value(paths[key].clone()).expect(key);
             assert_eq!(program, executable);
         }
-        retained_runtime(&service, &pin);
-        native_runtime(&source, b"new executable");
-        let error = service
-            .tool_paths(Some(&package), &CancellationToken::new())
-            .await
-            .expect_err("obsolete runtime");
-        assert!(
-            matches!(error, EngineError::Incompatible { stage: "runtime", message } if message.contains("重新识别"))
+        assert_ne!(
+            service
+                .verification_package_hash(&manifest, &package)
+                .unwrap(),
+            previous
         );
         assert_eq!(
             fs::read(package.join("tools/vntextpatch-reference.json")).expect("unchanged pin"),
             original
         );
-        let new_pin = service.create_native_pin().expect("current pin");
-        assert_eq!(
-            service.resolve_native_tools(&new_pin).expect("new runtime"),
-            executable
-        );
     }
 
     #[tokio::test]
-    async fn discovery_skips_obsolete_package_before_launching_its_adapter() {
+    async fn discovery_skips_unsupported_dll_packages_before_launching_the_adapter() {
         let temporary = tempfile::tempdir().expect("fixture");
         let service = service(temporary.path()).with_ordered_packages_only();
         let source = service.tools.root.join("vntextpatch");
-        native_runtime(&source, b"old executable");
-        let pin = old_pin(&source);
-        retained_runtime(&service, &pin);
         native_runtime(&source, b"new executable");
+        let pin = json!({"schemaVersion":1,"runtime":"dll"});
         let package = package(&temporary.path().join("package"), &pin);
         fs::create_dir_all(package.join("src")).expect("source directory");
         fs::write(
@@ -270,7 +277,7 @@ mod tests {
     }
 
     #[test]
-    fn both_pin_shapes_remain_readable_and_complete_pins_verify_the_companion() {
+    fn both_pin_shapes_run_after_a_companion_update() {
         let temporary = tempfile::tempdir().expect("fixture");
         let service = service(temporary.path());
         let source = service.tools.root.join("vntextpatch");
@@ -280,6 +287,7 @@ mod tests {
         assert_eq!(complete["schemaVersion"], 2);
         assert_eq!(complete["runtime"], "native");
         assert!(complete["files"]["capstone.dll"].is_string());
+        fs::write(source.join("capstone.dll"), b"changed companion").expect("change companion");
         for pin in [&old, &complete] {
             assert_eq!(
                 service.resolve_native_tools(pin).expect("current runtime"),
@@ -287,14 +295,10 @@ mod tests {
             );
         }
         assert!(!service.shared_directory.exists());
-        fs::write(source.join("capstone.dll"), b"changed companion").expect("change companion");
-        assert!(matches!(
-            service.resolve_native_tools(&complete),
-            Err(EngineError::Incompatible {
-                stage: "runtime",
-                ..
-            })
-        ));
+        assert_eq!(
+            service.updated_native_pin(&complete).unwrap(),
+            Some(service.create_native_pin().unwrap())
+        );
     }
 
     #[test]

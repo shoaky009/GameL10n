@@ -971,8 +971,9 @@ impl Application {
         if cancellation.is_cancelled() {
             return Err(gamel10n_engines::EngineError::Cancelled.into());
         }
+        let service = self.engine_service()?;
         let verified = verified_extraction
-            .map(|verified| verified.into_matching_extraction(&adapter, &hashes))
+            .map(|verified| verified.into_matching_extraction(&service, &adapter, &hashes))
             .transpose()?
             .flatten();
         let mut extraction = if let Some(extraction) = verified {
@@ -985,7 +986,6 @@ impl Application {
             request.set_probe_context(&probe);
             self.progress(id, &operation, "正在提取并校验文本身份。")
                 .await;
-            let service = self.engine_service()?;
             let mut extraction = service
                 .execute(&adapter, &request, cancellation)
                 .await?

@@ -14,7 +14,7 @@
 
 智能体可以用 `list_adapters` 检索内置和已发布的能力，用 `inspect_builtin_adapter` 查看相关解析器的限制、调用说明及指定源码片段。`try_builtin_adapter` 直接处理工作副本中的少量脚本，不需要先生成调用程序：每次最多 12 个文件、合计 64 MiB，返回提取数量、少量文本预览、具体解析错误，以及默认执行的原文逐字节回填检查。伴随文件也应纳入样本。这个限制只约束开发阶段的快速试验，不限制正式任务规模。
 
-解析器兼容时，`copy_adapter` 写入 Python 调用辅助模块和固定依赖清单，VNTextPatch NativeAOT EXE 与许可文件按内容哈希跨项目共享。`src/adapter.py` 调用预编译组件，补充资源包、格式变体或中文运行支持；新增逻辑统一使用 Python，不复制可编译 C# 源码。上游源码可按需读取结构参考。探测只使用文件头和有界范围，完整脚本解析用于提取、回填和结构验证。
+解析器兼容时，`copy_adapter` 写入 Python 调用辅助模块和依赖清单，各项目使用宿主提供的 VNTextPatch NativeAOT EXE。`src/adapter.py` 调用预编译组件，补充资源包、格式变体或中文运行支持；新增逻辑统一使用 Python，不复制可编译 C# 源码。上游源码可按需读取结构参考。探测只使用文件头和有界范围，完整脚本解析用于提取、回填和结构验证。
 
 候选线索及最近样本试验保存在现有 `session.json`，包含观察时间和试验输入哈希；继续适配和压缩上下文后仍可使用，不另建逐次报告。资源变化后可通过 `list_adapters` 的 `refreshCandidates` 刷新线索，必要时重新试验。样本检查不替代完整 `test_adapter` 验收，也不代表中文字体或游戏启动已经验证。
 
@@ -70,7 +70,7 @@ RPYC2 编译脚本优先使用 `loose-renpy-rpyc` 或 `rpa3-renpy-rpyc`，直接
 
 `inspect_engine_reference` 按精确引擎 ID 读取指南，支持按路径、关键词和字符范围读取所需 API。发行包附带固定 commit 的工具库，将 Python 源码、目录、指南和许可文件保留在一个共享 ZIP 中。`run_engine_python` 自动提供便携 Python，直接运行 `work/*.py` 或 `src/tools/*.py` 连接脚本，复用 `python.archives` / `python.engines`，无需将已有算法重新实现为 C#。不同引擎和版本的函数接口不统一，仍需按指南选择并用样本验证。
 
-`use_engine_reference` 将固定依赖记录与 Python 辅助模块写入适配器源码。通过 `parser(request, format)` 或 `component(...)` 直接调用预编译宿主时，使用 `nativeTools: true` 固定 VNTextPatch。内置模板和复制的组件会登记所需工具。实现 `src/adapter.py` 的 JSON 协议、资源选择及确实缺失的版本处理，再执行 `test_adapter`。发布后的适配器使用固定依赖，常规提取与回填无需模型。继续适配保留现有源码，VNTextPatch 更新后可按已有验收配置复验。缺失工具应从完整发行包或共享工具恢复。
+`use_engine_reference` 将依赖记录与 Python 辅助模块写入适配器源码。通过 `parser(request, format)` 或 `component(...)` 直接调用预编译宿主时，使用 `nativeTools: true` 声明 VNTextPatch 依赖。内置模板和复制的组件会登记所需工具。实现 `src/adapter.py` 的 JSON 协议、资源选择及确实缺失的版本处理，再执行 `test_adapter`。发布后的适配器使用当前安装的原生工具，常规提取与回填无需模型。继续适配保留现有源码，VNTextPatch 更新后可按已有验收配置复验。缺失工具应从完整发行包或共享工具恢复。
 
 未命中时可继续查询格式目录和上游注册清单。`fetch_url` 支持 `query` 关键词定位及 `offset` / `length` 字符分页，大型目录在本地搜索，只将相关片段交给模型；读取完整条目后再判断能力。GitHub 仓库搜索只查仓库元数据，不查源码正文。Bishop 的 GSC 资料与 BSScript Rev.6 等不同格式不能因厂商相同而直接混用。
 

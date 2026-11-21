@@ -2258,10 +2258,11 @@ impl EngineService {
             pin["nativePinRequired"] = json!(true);
         }
         let native_pin_path = resolve_relative(workspace, &workspace_file(native_tools::PIN_PATH))?;
-        let native_pin = if native_pin_path.try_exists()? {
+        let has_native_pin = native_pin_path.try_exists()?;
+        let uses_native = has_native_pin || require_native;
+        let new_native_pin = if has_native_pin {
             let pin: Value = read_json(&native_pin_path).map_err(file_error)?;
-            self.resolve_native_tools(&pin)?;
-            Some(pin)
+            self.updated_native_pin(&pin)?
         } else if require_native {
             Some(self.create_native_pin()?)
         } else {
@@ -2286,15 +2287,12 @@ impl EngineService {
             ),
             (
                 "tools/gamel10n_host.py",
-                "调用固定原生解析器的 Python 协议桥。",
+                "调用宿主原生解析器的 Python 协议桥。",
             ),
         ]
         .into_iter()
-        .chain(
-            native_pin
-                .as_ref()
-                .map(|_| (native_tools::PIN_PATH, native_tools::PIN_PURPOSE)),
-        ) {
+        .chain(uses_native.then_some((native_tools::PIN_PATH, native_tools::PIN_PURPOSE)))
+        {
             select_release(
                 &mut selection,
                 ReleaseFile {
@@ -2310,15 +2308,13 @@ impl EngineService {
         if existing.is_none() {
             write_json(&reference_path, &pin).map_err(file_error)?;
         }
-        if let Some(native_pin) = &native_pin
-            && !native_pin_path.try_exists()?
-        {
+        if let Some(native_pin) = &new_native_pin {
             write_json(&native_pin_path, native_pin).map_err(file_error)?;
         }
         copy_unmodified(&helper_source, &helper_path)?;
         state.release_files = selection;
         Ok(
-            json!({"success":true,"dependency":pin,"nativeTools":native_pin.is_some(),"helper":"tools/gamel10n_host.py","usage":"Import shared Python modules from python.engines or python.archives. For the NativeAOT parser or components, declare nativeTools=true and call parser(request, format) or component from tools.gamel10n_host."}),
+            json!({"success":true,"dependency":pin,"nativeTools":uses_native,"helper":"tools/gamel10n_host.py","usage":"Import shared Python modules from python.engines or python.archives. For the NativeAOT parser or components, declare nativeTools=true and call parser(request, format) or component from tools.gamel10n_host."}),
         )
     }
 
@@ -4697,7 +4693,6 @@ mod tests {
         let workspace = project.join("adaptation/current");
         let pin_path = workspace.join("src/tools/vntextpatch-reference.json");
         write_json(&pin_path, &pin).expect("old workspace pin");
-        let original = fs::read(&pin_path).expect("original pin");
         for relative in [
             "game.json",
             "extraction/native.json",
@@ -4725,24 +4720,6 @@ mod tests {
         state.workflow.verification_args = Some(
             json!({"kind":"engine","key":"fixture","name":"Fixture","resourcePatterns":["*.dat"]}),
         );
-        let error = service
-            .bind_reference(
-                &workspace,
-                &mut state,
-                Some(json!({"kind":"siglus","revision":"fixture"})),
-                false,
-                &CancellationToken::new(),
-            )
-            .expect_err("obsolete dependency");
-        assert!(matches!(
-            error,
-            EngineError::Incompatible {
-                stage: "runtime",
-                ..
-            }
-        ));
-        assert_eq!(fs::read(&pin_path).expect("preserved pin"), original);
-        assert!(state.release_files.is_empty());
         let session = workspace.join("session.json");
         assert!(
             service
@@ -4778,24 +4755,31 @@ mod tests {
         })).expect("published manifest");
         request.package_directories.push(package);
         let new_workspace = root.path().join("reuse-workspace");
-        let error = service
+        let mut copied_state = Session::default();
+        service
             .copy_adapter(
                 &request,
                 &new_workspace,
-                &mut state,
+                &mut copied_state,
                 &json!({"id":"engine.reuse-fixture","version":"1"}),
                 &CancellationToken::new(),
             )
             .await
-            .expect_err("cannot copy obsolete runtime into a new workspace");
-        assert!(matches!(
-            error,
-            EngineError::Incompatible {
-                stage: "runtime",
-                ..
-            }
-        ));
-        assert!(!new_workspace.exists());
+            .expect("copy published adapter");
+        service
+            .bind_reference(
+                &new_workspace,
+                &mut copied_state,
+                Some(json!({"kind":"siglus","revision":"fixture"})),
+                false,
+                &CancellationToken::new(),
+            )
+            .expect("prepare copied adapter for verification");
+        assert_eq!(
+            read_json::<Value>(&new_workspace.join("src/tools/vntextpatch-reference.json"))
+                .unwrap(),
+            service.create_native_pin().unwrap()
+        );
         for relative in [
             "game.json",
             "extraction/native.json",

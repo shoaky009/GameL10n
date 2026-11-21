@@ -104,6 +104,7 @@ async fn automatic_recognition_verifies_pfs_replacement_before_model_calls() {
         .verified_extraction
         .expect("verified extraction")
         .into_matching_extraction(
+            &service,
             result.adapter.as_ref().expect("published adapter"),
             &BTreeMap::from([("story.pfs".into(), originals[0].clone())]),
         )
