@@ -116,7 +116,10 @@ pub(super) fn recover(state: &mut Session, request: &AdaptationRequest<'_>, iden
     let changed_objective =
         !request.objective.is_empty() && !request.objective.eq_ignore_ascii_case(&state.objective);
     let changed_instruction = request.user_instruction.trim() != state.user_instruction;
-    if changed_objective || changed_instruction {
+    let changed_task = changed_objective
+        || changed_instruction
+        || request.inputs.repair_issue != state.repair_issue;
+    if changed_task {
         state.workflow.needs_verification = false;
         decision::reset_problem(state);
         for call in std::mem::take(&mut state.pending_calls) {
@@ -131,7 +134,7 @@ pub(super) fn recover(state: &mut Session, request: &AdaptationRequest<'_>, iden
     }
     state.extra.remove("contextBoundary");
     state.extra.remove("preferredOutputTokens");
-    if changed_objective || changed_instruction {
+    if changed_task {
         state.extra.remove("contextVerificationPhases");
     }
     if changed_instruction {
@@ -156,6 +159,7 @@ pub(super) fn recover(state: &mut Session, request: &AdaptationRequest<'_>, iden
         state.objective.clone_from(&request.objective);
     }
     state.user_instruction = request.user_instruction.trim().into();
+    state.repair_issue = request.inputs.repair_issue;
 }
 
 pub(super) fn native_runtime_changed(state: &mut Session) {
@@ -620,9 +624,13 @@ pub(super) async fn run(
     .trim()
     .to_owned();
     let instructions = format!(
-        "{}\n{}",
+        "{}\n{}{}",
         include_str!("../prompts/adaptation.md"),
-        tool_group_context()
+        tool_group_context(),
+        request
+            .inputs
+            .repair_issue
+            .map_or("", RepairIssue::guidance)
     );
     let instruction_fingerprint = hash_text(&instructions);
     let tool_definitions = serde_json::to_string(&all)?;

@@ -1103,6 +1103,10 @@
         "parameters": {
           "type": "object",
           "properties": {
+            "refreshRuntime": {
+              "type": "boolean",
+              "description": "Repair an existing automatically composed template using its current bundled runtime modules. Requires the same template and entry. Earlier differing modules remain in work/previous-template-runtime by content hash. Verify the result with test_adapter."
+            },
             "id": {
               "type": "string"
             },

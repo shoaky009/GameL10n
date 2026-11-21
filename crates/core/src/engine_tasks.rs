@@ -6,6 +6,7 @@ use crate::{
     logs::{FileProgress, LogSource},
     patching::{PAYLOAD_DIRECTORY, PatchInstaller, build_manifest, remove_unchanged_files},
 };
+pub use gamel10n_engines::adaptation::RepairIssue;
 use gamel10n_engines::{
     AdapterHandle, EngineProgress, EngineService, PackageManifest, ReadOnlySource,
     VerificationResult, VerifiedExtraction,
@@ -80,6 +81,7 @@ enum ExtractionCoverage {
 }
 
 struct AdaptationStart {
+    repair_issue: Option<RepairIssue>,
     objective: AdaptationObjective,
     inventory: Option<Inventory>,
     require_model_analysis: bool,
@@ -427,6 +429,7 @@ impl Application {
                     id,
                     instruction,
                     AdaptationStart {
+                        repair_issue: None,
                         objective: self.recognition_objective(id).await?,
                         inventory: None,
                         require_model_analysis: false,
@@ -441,6 +444,7 @@ impl Application {
                     id,
                     instruction,
                     AdaptationStart {
+                        repair_issue: None,
                         objective: AdaptationObjective::Develop,
                         inventory: None,
                         require_model_analysis: true,
@@ -478,6 +482,7 @@ impl Application {
                     id,
                     instruction,
                     AdaptationStart {
+                        repair_issue: None,
                         objective,
                         inventory: Some(recognized.inventory),
                         require_model_analysis: recognized.extracted.is_some(),
@@ -1042,6 +1047,17 @@ impl Application {
         instruction: String,
         objective: Option<AdaptationObjective>,
     ) -> Result<AdaptationResult, CoreError> {
+        self.adapt_with_issue(id, instruction, objective, None)
+            .await
+    }
+
+    pub async fn adapt_with_issue(
+        &self,
+        id: &str,
+        instruction: String,
+        objective: Option<AdaptationObjective>,
+        repair_issue: Option<RepairIssue>,
+    ) -> Result<AdaptationResult, CoreError> {
         let objective = match objective {
             Some(objective) => objective,
             None => self.adaptation_objective(id, &instruction).await?,
@@ -1057,6 +1073,7 @@ impl Application {
                     objective,
                     inventory: None,
                     require_model_analysis: false,
+                    repair_issue,
                 },
                 &cancellation,
             )
@@ -1132,7 +1149,7 @@ impl Application {
         let game = project.game_directory.clone();
         let sources = baseline.clone();
         let token = cancellation.clone();
-        let inputs = self
+        let mut inputs = self
             .run_file_task(id, "adapt", move |progress| {
                 let baseline = sources
                     .as_ref()
@@ -1148,6 +1165,13 @@ impl Application {
             })
             .await?;
         let previous = if objective == AdaptationObjective::Repair {
+            inputs.repair_issue = start
+                .repair_issue
+                .or_else(|| serde_json::from_value(project.extra.get("repairIssue")?.clone()).ok());
+            inputs.repair_patch = self
+                .repair_patch_evidence(id, baseline.as_deref())
+                .await
+                .unwrap_or_else(|error| Some(json!({"readError":error.to_string()})));
             self.repair_predecessor(id).await?
         } else {
             None
@@ -1161,6 +1185,9 @@ impl Application {
             project
                 .extra
                 .insert("adaptationObjective".into(), json!(objective));
+            if let Some(issue) = inputs.repair_issue {
+                project.extra.insert("repairIssue".into(), json!(issue));
+            }
             self.store.save(&project).await?;
             project
         };
@@ -1750,6 +1777,38 @@ impl Application {
         fs::rename(patch.path(), &path)?;
         write_json(&root.join("latest-result.json"), &result)?;
         Ok::<_, CoreError>(path)
+    }
+
+    async fn repair_patch_evidence(
+        &self,
+        id: &str,
+        baseline: Option<&crate::application::CachedAnalysis>,
+    ) -> Result<Option<Value>, CoreError> {
+        let Some(patch) = self.latest_patch(id).await? else {
+            return Ok(None);
+        };
+        let mut samples = Vec::new();
+        let page = Self::patch_text_page(patch.patch_directory, 0).await;
+        if let (Some(baseline), Ok(page)) = (baseline, &page) {
+            for unit in &baseline.extraction().units {
+                if let Some(expected) = page.texts.get(&unit.id).and_then(Value::as_str) {
+                    let excerpt = |value: &str| value.chars().take(200).collect::<String>();
+                    samples.push(json!({"id":unit.id,"resource":unit.resource_path,
+                        "locator":excerpt(&unit.locator),"source":excerpt(&unit.source_text),
+                        "expected":excerpt(expected)}));
+                    if samples.len() == 3 {
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(Some(
+            json!({"adapter":patch.extra.get("adapterVersionRef"),"trial":patch.is_trial,
+            "translatedUnits":patch.translated_units,"launchExecutable":patch.launch_executable,
+            "runtimeStatus":patch.validation.get("runtimeStatus"),"warnings":patch.warnings.iter()
+                .take(4).map(|s|s.chars().take(200).collect::<String>()).collect::<Vec<_>>(),
+            "samples":samples,"sampleReadError":page.err().map(|e|e.to_string())}),
+        ))
     }
 
     pub async fn latest_patch(&self, id: &str) -> Result<Option<PatchResult>, CoreError> {
@@ -3788,6 +3847,7 @@ mod tests {
                 &project.id,
                 String::new(),
                 AdaptationStart {
+                    repair_issue: None,
                     objective: AdaptationObjective::ExpandCoverage,
                     inventory: None,
                     require_model_analysis: false,

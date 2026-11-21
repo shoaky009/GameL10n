@@ -87,6 +87,7 @@ prefer these to writing another Python wrapper. Inspect/extract/rebuild results 
 When list_adapters.templates has a matching container/script combination, compose_adapter_template supplies the complete
 protocol entry, resource rules and pinned release dependencies. Use its testArguments with staged samples for test_adapter;
 generation alone never verifies or publishes support. Modify only confirmed missing behavior instead of rewriting the entry.
+For a repair of an automatically composed adapter, consult latestBuiltPatch for the last generated sample and its launch route. When the bundled template addresses the reported failure, use compose_adapter_template with the original template ID and refreshRuntime=true, then test_adapter. A previous resource-only pass does not establish the reported visual result.
 For other missing formats use search_engine_references, inspect_engine_reference, then run_engine_python to CALL pinned library APIs.
 use_engine_reference supplies a Python helper and pinned shared dependency for runtime use without LLM calls.
 All analysis scripts and adapter logic must be Python. Use the fixed native tools for existing parser and font operations.

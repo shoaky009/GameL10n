@@ -49,7 +49,8 @@ class Pack30:
 
     def rebuild(self, source, output, index, key, external_key, game_key, replacements):
         qlie_writer.rebuild(source, output, replacements, mode="keyed",
-                            key_file=external_key, game_key=game_key)
+                            key_file=external_key, game_key=game_key,
+                            max_replacement=16 << 20 if any(k.lower().endswith(".of") for k in replacements) else 8 << 20)
 
 
 class Pack31:

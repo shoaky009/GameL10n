@@ -213,6 +213,7 @@ impl QlieDisplay {
             "library":service.reference_library(&service.current_reference()?)?, "output":output,
             "template":self.template, "source":request.source_directory, "resources":request.resource_files,
             "mode":build.mode, "files":build.files, "samplesFile":samples.path(), "launcher":launcher,
+            "toolPaths":{"hostCommand":[service.tools.vntextpatch()]},
         }), cancellation).await?)?;
         if evidence.aliases.is_empty() {
             return Ok(());

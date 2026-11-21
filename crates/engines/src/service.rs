@@ -3,7 +3,7 @@
 mod discover;
 mod display;
 
-pub(crate) const VERIFIER_REVISION: u32 = 17;
+pub(crate) const VERIFIER_REVISION: u32 = 18;
 
 use std::{
     collections::{BTreeMap, BTreeSet},

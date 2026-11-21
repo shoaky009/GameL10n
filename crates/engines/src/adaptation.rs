@@ -55,6 +55,32 @@ mod workflow;
 pub use failure::{AdaptationFailure, AdaptationFailureCategory};
 pub use resources::AdaptationInputs;
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum RepairIssue {
+    Crash,
+    Font,
+    PatchNotApplied,
+    Other,
+}
+
+impl RepairIssue {
+    fn guidance(self) -> &'static str {
+        match self {
+            Self::Crash => {
+                "\nRepair focus: game crash. Start with the reported launch route, failure stage and any actual error. Compare the affected original and patched inputs, loader dependencies, archive structure and script encoding. Narrow the change that explains the failure. Record runtime confirmation separately."
+            }
+            Self::Font => {
+                "\nRepair focus: font display. Start with the actual trial text in latestBuiltPatch and any reported or pictured characters. Trace their script bytes through the active font slot, game substitution rules, bitmap or system font, and launch route. Distinguish icons, missing glyphs and mismatched weight using evidence. An unspecified font problem does not establish a weight problem. Prefer verified native rendering capabilities across engine versions. Check the rebuilt field and its actual glyph resource."
+            }
+            Self::PatchNotApplied => {
+                "\nRepair focus: patch has no visible effect. Follow a translated sample from latestBuiltPatch into the installed files and the resource the selected executable actually loads. Check installation, archive precedence, duplicate script members and the alternate or locale-emulated launch route. Verify the effective member contains the intended translation."
+            }
+            Self::Other => "",
+        }
+    }
+}
+
 /// Extraction size below which the main text sources need an explicit coverage review.
 pub const SMALL_EXTRACTION_THRESHOLD: usize = 1_000;
 
@@ -191,6 +217,7 @@ pub(crate) struct Session {
     pub game_directory: PathBuf,
     pub objective: String,
     pub user_instruction: String,
+    pub repair_issue: Option<RepairIssue>,
     #[serde(default, skip_serializing)]
     pub messages: Vec<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -568,6 +595,10 @@ impl EngineService {
         }
         normalize_messages(&mut state.messages);
         flow::recover(&mut state, request, provider.identity());
+        state.extra.remove("repairPatch");
+        if let Some(patch) = &request.inputs.repair_patch {
+            state.extra.insert("repairPatch".into(), patch.clone());
+        }
         if !cancellation.is_cancelled()
             && self
                 .refresh_workspace_native_pin(&workspace, &path, &mut state)
@@ -2611,11 +2642,41 @@ impl EngineService {
         let archive_template = crate::adaptation_assets::ARCHIVE_TEMPLATES
             .iter()
             .find(|template| template.id == id);
+        let module = if let Some(template) = archive_template {
+            template.module
+        } else if id == "renpy-mixed" {
+            "renpy_mixed_adapter"
+        } else if id.contains("rpyc") {
+            "renpy_rpyc_adapter"
+        } else {
+            "script_template"
+        };
+        let main_args = if module == "qlie_pack_adapter" {
+            format!("{id:?}")
+        } else {
+            String::new()
+        };
+        let entry =
+            format!("import sys\nfrom tools.{module} import main\nsys.exit(main({main_args}))\n");
+        let refresh = args["refreshRuntime"] == true;
+        if refresh
+            && (!state.objective.eq_ignore_ascii_case("repair")
+                || state
+                    .extra
+                    .get("automaticTemplate")
+                    .and_then(|v| v["templateId"].as_str())
+                    != Some(id)
+                || fs::read(workspace.join("src/adapter.py"))? != entry.as_bytes())
+        {
+            return Err(EngineError::Rejected(
+                "更新共享组件需要同一组合模板的修复任务和原有模板入口。".into(),
+            ));
+        }
         self.bind_reference(
             workspace,
             state,
             None,
-            archive_template.is_none(),
+            archive_template.is_none_or(|template| template.module == "qlie_pack_adapter"),
             cancellation,
         )?;
         let patterns = args
@@ -2635,15 +2696,6 @@ impl EngineService {
                 },
             )?;
         }
-        let module = if let Some(template) = archive_template {
-            template.module
-        } else if id == "renpy-mixed" {
-            "renpy_mixed_adapter"
-        } else if id.contains("rpyc") {
-            "renpy_rpyc_adapter"
-        } else {
-            "script_template"
-        };
         let mut components = Vec::new();
         if id != crate::adaptation_assets::FLASH_POOL_TEMPLATE {
             components.push("engine_archive.py".to_owned());
@@ -2663,10 +2715,19 @@ impl EngineService {
             ]);
         }
         for file in components {
-            copy_unmodified(
-                &self.asset_root.join("adapters/components").join(&file),
-                &workspace.join("src/tools").join(&file),
-            )?;
+            let source = self.asset_root.join("adapters/components").join(&file);
+            let target = workspace.join("src/tools").join(&file);
+            if refresh && target.is_file() && fs::read(&source)? != fs::read(&target)? {
+                let hash = gamel10n_translation::files::hash_file(&target).map_err(file_error)?;
+                let previous = workspace
+                    .join("work/previous-template-runtime")
+                    .join(hash)
+                    .join(&file);
+                copy_unmodified(&target, &previous)?;
+                fs::copy(&source, &target)?;
+            } else {
+                copy_unmodified(&source, &target)?;
+            }
             register_release(
                 state,
                 ReleaseFile {
@@ -2693,13 +2754,6 @@ impl EngineService {
                 },
             )?;
         }
-        let main_args = if module == "qlie_pack_adapter" {
-            format!("{id:?}")
-        } else {
-            String::new()
-        };
-        let entry =
-            format!("import sys\nfrom tools.{module} import main\nsys.exit(main({main_args}))\n");
         write_unmodified(&workspace.join("src/adapter.py"), &entry)?;
         register_python(state, "src/adapter.py")?;
         state.resource_patterns = serde_json::from_value(patterns)?;

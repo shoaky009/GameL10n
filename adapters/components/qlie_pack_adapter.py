@@ -11,6 +11,7 @@ from python.archives import qlie_keys
 
 from . import engine_archive as archive
 from . import qlie_archive as pack
+from . import qlie_bitmap as bitmap
 from . import qlie_samples as support
 from . import qlie_script as script_format
 from . import qlie_systemfont as font
@@ -148,6 +149,7 @@ class Installation:
     font_diagnostic: str
     glyphs: dict[int, int]
     font_resources: font.Resources | None
+    bitmap_font: bitmap.BitmapFont | None = None
 
     def read(self, path, entry, limit):
         return self.layout.read(*self.archives[path], entry, self.internal_keys[path], self.game_key, limit)
@@ -322,6 +324,8 @@ def locate(root, request, files, stack):
     install = Installation(required, exe, layout, selected, game_key, external_key, local_keys,
                            fingerprints, index_bytes, font_layout, font_diagnostic, glyphs, font_resources)
     support.script_profile(selected, install.read, layout)
+    if not views:
+        install.bitmap_font = bitmap.BitmapFont.find(install)
     return install
 
 
@@ -402,12 +406,15 @@ def read_scripts(install):
             yield path, entry.name, script, encoding, bom
 
 
-def scripts(install, sources, translations=None, mapping=None, faces=None, *, native_unicode=False):
+def scripts(install, sources, translations=None, mapping=None, faces=None, *, native_unicode=False, bitmap_chars=None):
     units, changes, used = [], {}, set()
     changed = 0
     text_changed = False
     mapping = install.glyphs if mapping is None else mapping
     reverse = {code: slot for slot, code in mapping.items()}
+    if bitmap_chars:
+        reverse.update({ord(c): bitmap.token(c) for c in bitmap_chars})
+    native_font = install.bitmap_font
     options = dict(unicode_scripts=install.layout.unicode_scripts)
     for path, member, script, encoding, bom in sources:
         try:
@@ -416,6 +423,8 @@ def scripts(install, sources, translations=None, mapping=None, faces=None, *, na
             for number, record in enumerate(script_format.scan(script, **options)):
                 row = record.row()
                 decoded = {field: value.translate(install.glyphs) for field, value in row.items()} if cp932 and install.glyphs else row
+                if cp932 and native_font and native_font.rules:
+                    decoded = {field: native_font.decode(value) for field, value in decoded.items()}
                 for field, unit in text_units(path, member, number, record, decoded, **options):
                     if translations is None:
                         units.append(unit)
@@ -424,7 +433,11 @@ def scripts(install, sources, translations=None, mapping=None, faces=None, *, na
                         replacement = translations[unit["id"]]
                         if replacement != decoded[field]:
                             encoded = replacement.translate(reverse) if cp932 else replacement
-                            if cp932 and encoded.translate(mapping) != replacement:
+                            if cp932 and native_font and (bitmap_chars or native_font.rules) and bitmap.TOKEN.search(replacement):
+                                raise ValueError("译文含与 QLIE 外字标签冲突的字串")
+                            if bitmap_chars and record.parts[0].kind == "save-title" and bitmap.TOKEN.search(encoded):
+                                raise ValueError("QLIE 存档标题尚未确认外字替换入口")
+                            if cp932 and not bitmap_chars and encoded.translate(mapping) != replacement:
                                 raise ValueError("译文与 QLIE 字形码位冲突")
                             row[field] = encoded
                             modified = True
@@ -460,7 +473,7 @@ def scripts(install, sources, translations=None, mapping=None, faces=None, *, na
 def check_volume(install, path, output, changes):
     source, before = install.archives[path]
     support.check_rebuild(install.layout, source, before, output, install.internal_keys[path],
-                          install.game_key, changes, limit=MAX_SCRIPT)
+                          install.game_key, changes, limit=max(MAX_SCRIPT, max(map(len, changes.values()))))
 
 
 def execute(request):
@@ -540,10 +553,11 @@ def rebuild(root, request, install, translations, warnings):
                 units, _ = scripts(install, legacy)
                 characters = {char for unit in units for char in translations.get(unit["id"], "")}
                 needed = font.glyphs_needed(characters, mapping)
+    native_bitmap = install.bitmap_font if not mapping and needed else None
     runtime, faces = {}, {}
     if native_unicode:
         faces = dict.fromkeys(layout.faces, font.UNICODE_FACE)
-    elif needed:
+    elif needed and not native_bitmap:
         if not layout:
             raise ValueError(f"QLIE 译文需要已确认的中文编码与字体方案（{install.font_diagnostic}）")
         if font.LAUNCHER.casefold() == install.executable.casefold():
@@ -553,7 +567,14 @@ def rebuild(root, request, install, translations, warnings):
         mapping = font.plan(layout, mapping, needed, occupied, characters)
         faces = {face: font.family(style, mapping) + " Regular" for face, style in layout.faces.items()}
         runtime = font.make_runtime(layout, install.executable, mapping, assets)
-    _, changes = scripts(install, sources, translations, mapping, faces, native_unicode=native_unicode)
+    if native_bitmap:
+        new_tokens = {bitmap.token(c) for c in needed} - native_bitmap.rules.keys()
+        if any(m[0] in new_tokens for _, _, script, _, _ in sources for m in bitmap.TOKEN.finditer(script)):
+            raise ValueError("QLIE 中文外字标签与原剧本字串冲突")
+    _, changes = scripts(install, sources, translations, mapping, faces, native_unicode=native_unicode,
+                         bitmap_chars=needed if native_bitmap else None)
+    if native_bitmap and changes:
+        native_bitmap.add_edits(changes, needed, request.get("toolPaths") or {})
     if faces and changes:
         for doc, raw in layout.resource_edits(faces, native_unicode):
             if doc.member is None:
@@ -601,6 +622,8 @@ def rebuild(root, request, install, translations, warnings):
                                 raise ValueError(f"QLIE 未翻译资源发生变化：{path}")
     if operation == "build":
         build = dict(files=files, mode="replace", warnings=warnings)
+        if native_bitmap and changes:
+            build["warnings"] = [*warnings, "译文使用剧本替换表和游戏内置外字位图，沿用原游戏启动方式。"]
         if native_unicode and changes:
             build["warnings"] = [*warnings, "译文使用原生 UTF-16 剧本和微软雅黑对白字体，请使用原游戏的日语转区配置启动。"]
         if mapping:

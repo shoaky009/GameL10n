@@ -116,23 +116,20 @@ impl Application {
             .latest_patch(id)
             .await?
             .ok_or_else(|| CoreError::InvalidData("尚未生成补丁。".into()))?;
+        Self::patch_text_page(patch.patch_directory, offset).await
+    }
+
+    pub(crate) async fn patch_text_page(
+        directory: std::path::PathBuf,
+        offset: usize,
+    ) -> Result<PatchTextPage, CoreError> {
         tokio::task::spawn_blocking(move || {
-            let path = patch
-                .patch_directory
-                .parent()
-                .unwrap_or(&patch.patch_directory)
-                .join(format!(
-                    "{}.texts.json",
-                    patch
-                        .patch_directory
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                ));
+            let name = directory.file_name().unwrap_or_default().to_string_lossy();
+            let path = directory.with_file_name(format!("{name}.texts.json"));
             let (path, legacy) = if path.try_exists()? {
                 (path, false)
             } else {
-                let legacy = patch.patch_directory.join("translation-snapshot.json");
+                let legacy = directory.join("translation-snapshot.json");
                 if !legacy.try_exists()? {
                     return Err(CoreError::InvalidData(
                         "这份旧补丁没有保存可浏览的译文快照。".into(),

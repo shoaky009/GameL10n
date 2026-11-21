@@ -1,7 +1,7 @@
 use crate::{Context, UiInput, refresh_projects, settings_ui, show_dialog, view::App};
 use gamel10n_core::{
     CoreError,
-    engine_tasks::{AdaptationObjective, RecognitionMode},
+    engine_tasks::{AdaptationObjective, RecognitionMode, RepairIssue},
     patching::PatchInstaller,
     workflow::{WorkflowChoice, WorkflowFinish, WorkflowPreset},
 };
@@ -146,10 +146,18 @@ async fn adapt(ctx: &Context, input: &UiInput) -> Result<bool, CoreError> {
                 .await?;
         }
     } else {
-        app.adapt_project_with_objective(
+        let repair_issue =
+            (objective == AdaptationObjective::Repair).then(|| match input.repair_issue {
+                0 => RepairIssue::Crash,
+                1 => RepairIssue::Font,
+                2 => RepairIssue::PatchNotApplied,
+                _ => RepairIssue::Other,
+            });
+        app.adapt_with_issue(
             &input.project_id,
             input.instruction.clone(),
             Some(objective),
+            repair_issue,
         )
         .await?;
     }
@@ -416,6 +424,12 @@ async fn handle_project_action(
             settings_ui::refresh(ctx, Some(&input.project_id)).await?;
             let host = ctx.app().await;
             let objective = host.recognition_objective(&input.project_id).await?;
+            let issue = host
+                .open_project(&input.project_id)
+                .await?
+                .extra
+                .get("repairIssue")
+                .and_then(|v| serde_json::from_value::<RepairIssue>(v.clone()).ok());
             let (choice, has_custom) = host.workflow_preferences(&input.project_id).await?;
             let id = input.project_id.clone();
             let context = ctx.clone();
@@ -425,6 +439,12 @@ async fn handle_project_action(
                     return;
                 }
                 app.set_force_intelligent(false);
+                app.set_repair_issue(match issue {
+                    Some(RepairIssue::Crash) => 0,
+                    Some(RepairIssue::Font) => 1,
+                    Some(RepairIssue::PatchNotApplied) => 2,
+                    _ => 3,
+                });
                 load_workflow_preferences(&app, choice, has_custom);
                 app.set_adaptation_objective(match objective {
                     AdaptationObjective::Develop => 0,

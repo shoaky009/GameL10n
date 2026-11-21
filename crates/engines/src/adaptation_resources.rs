@@ -11,6 +11,9 @@ pub struct AdaptationInputs {
     /// Digests checked by the host when binding these inputs for the current run.
     pub hashes: BTreeMap<String, String>,
     pub excluded: BTreeSet<String>,
+    /// Evidence from the latest built patch, distinct from the original files used for repair.
+    pub repair_patch: Option<Value>,
+    pub repair_issue: Option<RepairIssue>,
 }
 
 impl AdaptationInputs {

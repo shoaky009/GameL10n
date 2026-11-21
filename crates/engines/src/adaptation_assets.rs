@@ -28,6 +28,7 @@ pub(crate) const QLIE_PACK31_TEMPLATE: &str = "qlie-pack31-imos";
 pub(crate) const FLASH_POOL_TEMPLATE: &str = "flash-avm1-pool";
 const QLIE_TEMPLATE_SOURCES: &[&str] = &[
     "qlie_archive.py",
+    "qlie_bitmap.py",
     "qlie_pack31.py",
     "qlie_samples.py",
     "qlie_script.py",
@@ -123,7 +124,7 @@ pub(crate) const ARCHIVE_TEMPLATES: &[ArchiveTemplate] = &[
         sample_component: None,
         prepare_for_model: true,
         distinct_volume_names: false,
-        limitations: "需要同一启动目录的 EXE 图标密钥、外部与各卷内部密钥、HashVer1.3 和一致的脚本配置。匹配系统字体布局时可生成中文脚本及配套字体，系统文本和游戏内显示需单独验收",
+        limitations: "需要同一启动目录的 EXE 图标密钥、外部与各卷内部密钥、HashVer1.3 和一致的脚本配置。匹配 ImoScripter 替换表、第 6 号外字槽和 OF 字库时将中文写入游戏位图，沿用原启动方式。其余系统字体布局可生成配套字体，游戏内显示需单独验收",
     },
     ArchiveTemplate {
         id: QLIE_PACK31_TEMPLATE,
@@ -145,7 +146,7 @@ pub(crate) const ARCHIVE_TEMPLATES: &[ArchiveTemplate] = &[
         sample_component: None,
         prepare_for_model: true,
         distinct_volume_names: false,
-        limitations: "支持带首项卷内密钥的 FilePack 3.1 和 HashVer1.4。按脚本原编码回填。匹配系统字体布局和游戏转区配置时可为 CP932 脚本生成中文字体及启动器。系统文本、卷覆盖顺序和游戏显示需单独验收",
+        limitations: "支持带首项卷内密钥的 FilePack 3.1 和 HashVer1.4。确认原生 Unicode 对白和启动字体表时使用 UTF-16 和微软雅黑。其他布局按替换表、外字槽及系统字体资源选择显示方案。系统文本、卷覆盖顺序和游戏显示需单独验收",
     },
 ];
 

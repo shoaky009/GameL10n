@@ -5,6 +5,7 @@ from pathlib import Path
 from xml.etree import ElementTree
 
 from . import engine_archive as archive
+from . import qlie_bitmap as bitmap
 from . import qlie_pack_adapter as pack
 from . import qlie_script
 from . import qlie_systemfont as font
@@ -105,12 +106,17 @@ def verify(request):
         base = pack.unicode_dialogue(root, install, patched=True) if samples and request["template"] else set()
         if base and base | install.font_resources.selected_faces() != {font.UNICODE_FACE}:
             raise ValueError("QLIE 启动字体表与对白基础字体没有统一使用微软雅黑")
-        aliases, script_faces = {}, set()
+        aliases, script_faces, bitmap_chars = {}, set(), set()
         for raw, expected, faces, encoding in trial_fields(install, samples, overlay):
             if base and (not encoding.startswith("utf-16") or raw != expected
                          or faces - font.INHERITED - {font.UNICODE_FACE}):
                 raise ValueError("QLIE 译文字段需要直接写入 UTF-16 剧本并使用统一的对白字体")
             if raw == expected:
+                continue
+            if install.bitmap_font and bitmap.TOKEN.search(raw):
+                if install.bitmap_font.decode(raw) != expected:
+                    raise ValueError("QLIE 试译字段的外字替换表与目标文字不一致")
+                bitmap_chars.update(chr(int(m[1], 16)) for m in bitmap.TOKEN.finditer(raw))
                 continue
             if len(raw) != len(expected):
                 raise ValueError("QLIE 脚本字段长度与宿主试译不一致，需核对游戏实际解码方式")
@@ -120,10 +126,19 @@ def verify(request):
                 if ord(slot) not in font.SLOTS or aliases.setdefault(slot, char) != char:
                     raise ValueError(f"QLIE 试译字符「{char}」在游戏脚本中读为 U+{ord(slot):04X}，缺少一致的解码或字形映射")
             script_faces.update(faces)
+        if bitmap_chars:
+            native = install.bitmap_font
+            native.routes()
+            atlas = bitmap.Atlas(native.read(bitmap.ATLAS, bitmap.LIMIT))
+            for char, expected in bitmap.rasterize(bitmap_chars, request["toolPaths"]):
+                if atlas.mask(native.rules[bitmap.token(char)]) != expected:
+                    raise ValueError(f"QLIE 外字位图中的「{char}」与目标汉字的字形不一致")
         if not aliases:
             return dict(fonts=[], aliases={})
         slot, char = next(iter(aliases.items()))
         evidence = f"QLIE 试译字符「{char}」在游戏脚本中写为 U+{ord(slot):04X}"
+        if install.bitmap_font:
+            raise ValueError(f"{evidence}，游戏含外字图标槽，缺少该私用码位实际绘制目标汉字的证据")
         if not install.font_resources:
             raise ValueError(f"{evidence}，缺少可核验的系统字体选择：{install.font_diagnostic}")
         if (not request["launcher"] or "/" in request["launcher"] or request["launcher"] not in files

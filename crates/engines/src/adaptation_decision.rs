@@ -456,6 +456,7 @@ fn snapshot(
     });
     let mut result = json!({
         "objective":state.objective,"userInstruction":state.user_instruction,
+        "latestBuiltPatch":state.extra.get("repairPatch"),
         "problem":state.decision.current_problem,"modelHypotheses":state.decision.hypotheses,
         "objectiveGuidance":flow::objective_context(&state.objective),
         "references":state.decision.references,

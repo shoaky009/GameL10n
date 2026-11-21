@@ -263,6 +263,7 @@ pub struct UiInput {
     pub isolate_llm_execution: bool,
     pub instruction: String,
     pub adaptation_objective: i32,
+    pub repair_issue: i32,
     pub force_intelligent: bool,
     pub delete_files: bool,
     pub cleanup_categories: Vec<gamel10n_core::cleanup::CleanupCategory>,
@@ -374,6 +375,7 @@ impl UiInput {
             isolate_llm_execution: a.get_isolate_llm_execution(),
             instruction: a.get_instruction().into(),
             adaptation_objective: a.get_adaptation_objective(),
+            repair_issue: a.get_repair_issue(),
             force_intelligent: a.get_force_intelligent(),
             delete_files: a.get_delete_files(),
             cleanup_categories: a
