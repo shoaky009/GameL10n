@@ -527,7 +527,13 @@ impl Application {
                         ..Default::default()
                     };
                     let result = self
-                        .translate_in_task(id, options.clone(), "translate", cancellation)
+                        .translate_in_task(
+                            id,
+                            options.clone(),
+                            "translate",
+                            crate::translation_tasks::TranslationInput::Committed,
+                            cancellation,
+                        )
                         .await?;
                     if result.failed != 0 || result.completed != result.total {
                         return Err(CoreError::InvalidData(format!(

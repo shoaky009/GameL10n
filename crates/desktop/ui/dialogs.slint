@@ -165,10 +165,10 @@ export component DialogLayer inherits Rectangle {
                         App.api-key = "";
                     }
                 }
-                if App.modal == "resume-translation": Button { text: "改为全量翻译"; clicked => { App.modal = ""; App.action("translate", "force-all"); } }
+                if App.modal == "resume-translation": Button { text: "翻译当前全部文本"; enabled: (!App.busy && App.recognition != "") || App.translation-preview; clicked => { App.modal = ""; App.action("translate", "force-all"); } }
                 if App.modal != "game-check" && App.modal != "patch-texts" && App.modal != "engine-review" && App.modal != "feedback": Button {
                     text: App.modal == "launch" && App.launch-conflict-revision != "" ? "确认覆盖"
-                        : App.modal == "resume-translation" ? "继续原选区"
+                        : App.modal == "resume-translation" ? "继续上次翻译"
                         : App.modal == "install" ? "安装补丁"
                         : App.modal == "project-adapter" ? "执行并提取文本"
                         : App.modal == "cleanup" ? "清理所选文件"

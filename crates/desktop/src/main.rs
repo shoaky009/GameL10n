@@ -612,14 +612,13 @@ fn install_actions(ui: &MainWindow, context: &Context) {
                 let app = ctx.app().await;
                 let message = error.to_string();
                 let state = app.task_state(&input.project_id).await;
-                if state
+                if matches!(
+                    &error,
+                    CoreError::Engine(gamel10n_engines::EngineError::Cancelled)
+                ) || state
                     .as_ref()
                     .is_some_and(|s| !s.running && s.succeeded.is_none())
-                    && (message.contains("暂停")
-                        || matches!(
-                            &error,
-                            CoreError::Engine(gamel10n_engines::EngineError::Cancelled)
-                        ))
+                    && message.contains("暂停")
                 {
                     return;
                 }

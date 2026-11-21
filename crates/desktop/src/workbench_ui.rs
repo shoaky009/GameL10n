@@ -847,16 +847,17 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
             if input.argument == "all"
                 && let Some(scope) = app.translation_scope(&input.project_id).await?
                 && !scope.completed
-                && let Some(ids) = scope.unit_ids
+                && (scope.unit_ids.is_some() || scope.preview_slot.is_some())
             {
+                let range = scope.unit_ids.as_ref().map_or_else(
+                    || "开始翻译时已提取的全部文本".into(),
+                    |ids| format!("所选的 {} 条文本", ids.len()),
+                );
                 show_dialog(
                     ctx,
                     "resume-translation",
                     "继续上次翻译",
-                    format!(
-                        "上次任务选择了 {} 条文本。继续原选区时只处理尚未成功的文本，已完成结果不会重复请求。",
-                        ids.len()
-                    ),
+                    format!("上次翻译范围为{range}。继续时会复用已保存的有效译文。"),
                 );
                 return Ok(true);
             }

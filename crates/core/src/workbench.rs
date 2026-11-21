@@ -174,6 +174,56 @@ pub struct Workbench {
     kinds: Vec<String>,
     last_access: std::time::Instant,
 }
+pub(crate) struct TranslationSource<'a> {
+    analysis: &'a Arc<CachedAnalysis>,
+    policy: &'a TranslationPolicy,
+    by_id: std::sync::OnceLock<HashMap<&'a str, &'a TranslationUnit>>,
+}
+
+impl<'a> TranslationSource<'a> {
+    pub(crate) fn new(analysis: &'a Arc<CachedAnalysis>, policy: &'a TranslationPolicy) -> Self {
+        Self {
+            analysis,
+            policy,
+            by_id: Default::default(),
+        }
+    }
+
+    pub(crate) fn apply(
+        &self,
+        workbench: &mut Workbench,
+        progress: &mut gamel10n_translation::execution::TranslationProgress,
+        options: &gamel10n_translation::execution::TranslationOptions,
+    ) {
+        if !workbench.matches_input(self.analysis, self.policy) {
+            let Some(current) = workbench.analysis.upgrade() else {
+                return;
+            };
+            let units = &current.extraction().units;
+            // A later extraction may reuse an ID for a different translation input.
+            let by_id = self.by_id.get_or_init(|| {
+                self.analysis
+                    .extraction()
+                    .units
+                    .iter()
+                    .map(|unit| (unit.id.as_str(), unit))
+                    .collect()
+            });
+            let compatible = |id: &str| {
+                let Some(old) = by_id.get(id) else {
+                    return false;
+                };
+                workbench.index(units, id).is_some_and(|index| {
+                    memory_key(old, self.policy) == memory_key(&units[index], &workbench.policy)
+                })
+            };
+            progress.updates.retain(|id, _| compatible(id));
+            progress.failure_updates.retain(|id, _| compatible(id));
+        }
+        workbench.apply_progress(progress, options);
+    }
+}
+
 impl Workbench {
     fn load(
         directory: PathBuf,
@@ -243,6 +293,10 @@ impl Workbench {
             kinds: kinds.into_iter().map(str::to_owned).collect(),
             last_access: std::time::Instant::now(),
         })
+    }
+
+    fn matches_input(&self, analysis: &Arc<CachedAnalysis>, policy: &TranslationPolicy) -> bool {
+        self.policy == *policy && self.analysis.ptr_eq(&Arc::downgrade(analysis))
     }
 
     fn index(&self, units: &[TranslationUnit], id: &str) -> Option<usize> {
@@ -542,16 +596,23 @@ impl Application {
         &self,
         id: &str,
     ) -> Result<(Arc<CachedAnalysis>, Arc<Mutex<Workbench>>), CoreError> {
-        let analysis = self
-            .cached_analysis(id)
-            .await?
-            .ok_or_else(|| CoreError::InvalidData("请先识别并提取游戏文本。".into()))?;
+        let analysis = self.workbench_analysis(id).await?;
+        self.workbench_for(id, analysis).await
+    }
+
+    async fn workbench_for(
+        &self,
+        id: &str,
+        analysis: Option<Arc<CachedAnalysis>>,
+    ) -> Result<(Arc<CachedAnalysis>, Arc<Mutex<Workbench>>), CoreError> {
+        let analysis =
+            analysis.ok_or_else(|| CoreError::InvalidData("请先识别并提取游戏文本。".into()))?;
         let project = self.store.get(id).await?;
         let policy = validated_policy(&project.settings)?;
         let analysis_key = Arc::downgrade(&analysis);
         if let Some(workbench) = self.workbenches.lock().await.get(id).cloned() {
             let mut current = workbench.lock().await;
-            if current.policy == policy && current.analysis.ptr_eq(&analysis_key) {
+            if current.matches_input(&analysis, &policy) {
                 current.last_access = std::time::Instant::now();
                 drop(current);
                 return Ok((analysis, workbench));
@@ -559,6 +620,9 @@ impl Application {
         }
         let directory = self.store.directory(id)?;
         let legacy = self.data_directory().join("memory").join(id);
+        let revision = self
+            .workbench_revision
+            .load(std::sync::atomic::Ordering::Relaxed);
         let cached = Arc::clone(&analysis);
         let workbench = tokio::task::spawn_blocking(move || {
             Workbench::load(directory, legacy, &cached, policy)
@@ -574,6 +638,14 @@ impl Application {
                 drop(current_data);
                 return Ok((analysis, current));
             }
+        }
+        // A load that overlapped the last batch can still contain drafts from before the commit.
+        if revision
+            != self
+                .workbench_revision
+                .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return Ok((analysis, Arc::new(Mutex::new(workbench))));
         }
         cache.remove(id);
         let incoming = workbench.retained_bytes();
@@ -602,10 +674,11 @@ impl Application {
         offset: usize,
         limit: usize,
     ) -> Result<WorkbenchPage, CoreError> {
-        if self.cached_analysis(id).await?.is_none() {
+        let analysis = self.workbench_analysis(id).await?;
+        if analysis.is_none() {
             return Ok(WorkbenchPage::default());
         }
-        let (analysis, workbench) = self.workbench(id).await?;
+        let (analysis, workbench) = self.workbench_for(id, analysis).await?;
         let filter = filter.clone();
         tokio::task::spawn_blocking(move || {
             workbench
@@ -705,7 +778,7 @@ impl Application {
     }
     pub async fn workbench_context(&self, id: &str, unit_id: &str) -> Result<String, CoreError> {
         let analysis = self
-            .cached_analysis(id)
+            .workbench_analysis(id)
             .await?
             .ok_or_else(|| CoreError::InvalidData("请先提取游戏文本。".into()))?;
         let units = &analysis.extraction().units;
@@ -746,7 +819,7 @@ impl Application {
         if selection.is_empty() {
             return Ok(selection);
         }
-        let Some(analysis) = self.cached_analysis(id).await? else {
+        let Some(analysis) = self.workbench_analysis(id).await? else {
             return Ok(Vec::new());
         };
         let mut remaining: HashSet<_> = analysis
@@ -768,7 +841,7 @@ impl Application {
         let _project = self.lock_project(id).await?;
         self.store.ensure_writable().await?;
         let analysis = self
-            .cached_analysis(id)
+            .workbench_analysis(id)
             .await?
             .ok_or_else(|| CoreError::InvalidData("请先提取游戏文本。".into()))?;
         let mut remaining: HashSet<_> = analysis
@@ -792,7 +865,7 @@ impl Application {
             task.running
                 && matches!(
                     task.operation.as_str(),
-                    "retranslate" | "extract" | "recognize"
+                    "retranslate" | "extract" | "recognize" | "adapt" | "workflow"
                 )
         }) {
             return Err(CoreError::ProjectBusy);
@@ -986,7 +1059,9 @@ impl Application {
         id: &str,
         copies: &BTreeMap<String, String>,
     ) -> Result<(), CoreError> {
-        let (analysis, workbench) = self.workbench(id).await?;
+        let (analysis, workbench) = self
+            .workbench_for(id, self.cached_analysis(id).await?)
+            .await?;
         let workbench = workbench.lock().await;
         let units = &analysis.extraction().units;
         for (id, text) in copies {
@@ -1014,7 +1089,9 @@ impl Application {
         unit_ids: Option<&[String]>,
         reviewed_only: bool,
     ) -> Result<BTreeMap<String, String>, CoreError> {
-        let (analysis, workbench) = self.workbench(id).await?;
+        let (analysis, workbench) = self
+            .workbench_for(id, self.cached_analysis(id).await?)
+            .await?;
         let workbench = workbench.lock().await;
         let selected: Option<HashSet<_>> =
             unit_ids.map(|ids| ids.iter().map(String::as_str).collect());

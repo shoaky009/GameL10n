@@ -3,7 +3,7 @@
 mod discover;
 mod display;
 
-pub(crate) const VERIFIER_REVISION: u32 = 18;
+pub(crate) const VERIFIER_REVISION: u32 = 19;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -35,6 +35,8 @@ pub type ProgressCallback<'a> = Option<&'a (dyn Fn(EngineProgress) + Send + Sync
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EngineProgress {
+    #[serde(skip)]
+    pub translation_preview: Option<Arc<ExtractionResult>>,
     pub stage: String,
     pub message: String,
     /// The message is model-authored and retains its punctuation in project logs.
@@ -172,7 +174,7 @@ impl ArchiveMemberRetry {
 pub struct VerifiedExtraction {
     adapter_fingerprint: String,
     resource_hashes: BTreeMap<String, String>,
-    extraction: ExtractionResult,
+    extraction: Arc<ExtractionResult>,
 }
 
 impl VerifiedExtraction {
@@ -189,7 +191,9 @@ impl VerifiedExtraction {
         {
             return Ok(None);
         }
-        Ok(Some(Arc::unwrap_or_clone(self).extraction))
+        Ok(Some(Arc::unwrap_or_clone(
+            Arc::unwrap_or_clone(self).extraction,
+        )))
     }
 }
 
@@ -1362,6 +1366,7 @@ impl EngineService {
             &Value::Null,
             None,
             None,
+            None,
             cancellation,
             progress,
         )
@@ -1391,6 +1396,7 @@ impl EngineService {
             &Value::Null,
             None,
             Some(probe),
+            None,
             cancellation,
             progress,
         )
@@ -1411,6 +1417,7 @@ impl EngineService {
         coverage: &Value,
         expected_source_hashes: Option<&BTreeMap<String, String>>,
         probe: Option<&ProbeResult>,
+        preview: Option<&(dyn Fn(Arc<ExtractionResult>) + Send + Sync)>,
         cancellation: &CancellationToken,
         progress: ProgressCallback<'_>,
     ) -> Result<VerificationResult, EngineError> {
@@ -1492,18 +1499,16 @@ impl EngineService {
                 adapter,
                 AdapterHandle::Python { .. } | AdapterHandle::BuiltinKirikiriSmil
             ) && response.validation_context_version == Some(1);
-            let extracted = response
+            let mut extracted = response
                 .extraction
                 .ok_or_else(|| EngineError::Protocol("缺少提取结果。".into()))?;
-            let units: Vec<_> = extracted
-                .units
-                .into_iter()
-                .filter(|unit| !unit.source_text.trim().is_empty())
-                .collect();
-            gamel10n_translation::validate_units(&units)
+            extracted.units.retain(|unit| !unit.source_text.trim().is_empty());
+            let extracted = Arc::new(extracted);
+            let units = extracted.units.as_slice();
+            gamel10n_translation::validate_units(units)
                 .map_err(|error| EngineError::Rejected(error.to_string()))?;
             let mut sources = BTreeMap::new();
-            for unit in &units {
+            for unit in units {
                 *sources.entry(unit.resource_path.as_str()).or_default() += 1;
             }
             result.extracted_sources = sources.into_iter().map(|(path, count)| (path.to_owned(), count)).collect();
@@ -1581,6 +1586,7 @@ impl EngineService {
                 if let Some(unit) = units.iter().find(|unit| {
                     repeated.get(unit.id.as_str()).is_none_or(|again| {
                         again.source_text != unit.source_text
+                            || again.context != unit.context
                             || again.resource_path != unit.resource_path
                             || again.locator != unit.locator
                             || again.kind != unit.kind
@@ -1597,7 +1603,7 @@ impl EngineService {
                         unit,
                         repeated.get(unit.id.as_str()).copied(),
                         &unit.source_text,
-                        false,
+                        true,
                         true,
                     );
                     let fields = mismatch.field_names();
@@ -1607,6 +1613,9 @@ impl EngineService {
                         unit.id
                     )));
                 }
+            }
+            if let Some(publish) = preview {
+                publish(Arc::clone(&extracted));
             }
             let mut changed = BTreeMap::new();
             for stage in ["原文回填", "部分试译", "中文修改"] {
@@ -1733,7 +1742,7 @@ impl EngineService {
                     } else {
                         "full-display-readback"
                     };
-                    check.verify(self, &built, &build, &units, cancellation).await?;
+                    check.verify(self, &built, &build, units, cancellation).await?;
                 }
                 let mut extract = built.extraction_request(source_directory, &output, resources);
                 if let Some(probe) = probe {
@@ -1784,7 +1793,7 @@ impl EngineService {
                     );
                     return Err(EngineError::Rejected(format!("{stage}改变了文本数量。")));
                 }
-                for unit in &units {
+                for unit in units {
                     let actual = after.get(&verification_key(adapter, unit)).ok_or_else(|| {
                         issue = Some(
                             crate::VerificationIssue::new(
@@ -1822,7 +1831,7 @@ impl EngineService {
                             .unit_difference(unit, Some(actual), &expected, overlay, !builtin_sfa);
                         if phase == "partial-translation-re-extraction" && !overlay {
                             result.archive_member_retry = ArchiveMemberRetry::for_speaker_difference(
-                                &mismatch, unit, &units, &translations,
+                                &mismatch, unit, units, &translations,
                             );
                         }
                         let fields = mismatch.field_names();
@@ -1855,7 +1864,7 @@ impl EngineService {
                             output_directory: &output,
                             resource_files: resources,
                             output_files: &built.files,
-                            original_units: &units,
+                            original_units: units,
                             output_units: &reextracted.units,
                         },
                     )
@@ -1888,10 +1897,7 @@ impl EngineService {
                     result.original_roundtrip_passed = true;
                 }
             }
-            verified_extraction = Some(ExtractionResult {
-                units,
-                warnings: extracted.warnings,
-            });
+            verified_extraction = Some(extracted);
             Ok::<_, EngineError>(())
         }
         .await;
@@ -2215,6 +2221,7 @@ else:
                 &Value::Null,
                 Some(&expected),
                 None,
+                None,
                 &cancellation,
                 None,
             )
@@ -2239,6 +2246,7 @@ else:
                 &[],
                 &Value::Null,
                 Some(&expected),
+                None,
                 None,
                 &cancellation,
                 Some(&inspect_input),

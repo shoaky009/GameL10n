@@ -3147,6 +3147,7 @@ fn report_knowledge(
     };
     if let Some(progress) = progress {
         progress(EngineProgress {
+            translation_preview: None,
             stage: if tool.is_some() {
                 "复用经验工具"
             } else {

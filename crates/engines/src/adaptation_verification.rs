@@ -1214,6 +1214,17 @@ pub(super) async fn test_adapter(
                 callback(state.progress(event));
             }
         };
+        let publish_preview = |extraction: Arc<crate::protocol::ExtractionResult>| {
+            forward(EngineProgress {
+                stage: "验收文本提取".into(),
+                message: format!(
+                    "已核对 {} 条原文，可在翻译与校对中查看。",
+                    extraction.units.len()
+                ),
+                translation_preview: Some(extraction),
+                ..Default::default()
+            });
+        };
         let result = service
             .verify_with_coverage(
                 &handle,
@@ -1224,6 +1235,8 @@ pub(super) async fn test_adapter(
                 &coverage,
                 Some(&fingerprint.staged_hashes),
                 probe.as_ref(),
+                (trial.is_none() && discovery.complete && callback.is_some())
+                    .then_some(&publish_preview),
                 cancellation,
                 Some(&forward),
             )
@@ -1577,6 +1590,65 @@ mod tests {
                 .next()
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn only_full_resource_verification_exposes_original_text_for_translation() {
+        let root = tempfile::tempdir().unwrap();
+        let (service, request, workspace, mut state) = fixture(root.path());
+        if !service.tools.python().is_file() {
+            return;
+        }
+        let token = CancellationToken::new();
+        resources::stage(
+            &request,
+            &workspace,
+            &mut state,
+            &["text.json".into()],
+            false,
+            &token,
+            None,
+        )
+        .unwrap();
+        for (extra, expected) in [
+            (json!({"discoveryOnly":true}), false),
+            (json!({"trialFiles":["text.json"]}), false),
+            (json!({}), true),
+        ] {
+            let mut args = arguments();
+            args.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let preview = std::sync::OnceLock::new();
+            let observe = |event: EngineProgress| {
+                if let Some(input) = event.translation_preview {
+                    preview.set(input).unwrap();
+                }
+            };
+            let report = test_adapter(
+                &service,
+                &request,
+                &workspace,
+                &mut state,
+                &args,
+                &token,
+                Some(&observe),
+            )
+            .await
+            .unwrap();
+            assert_eq!(report["passed"], true, "{report}");
+            assert_eq!(preview.get().is_some(), expected, "{args}");
+            if let Some(input) = preview.get() {
+                assert_eq!(
+                    input
+                        .units
+                        .iter()
+                        .map(|unit| unit.source_text.as_str())
+                        .collect::<Vec<_>>(),
+                    ["原文", "second"]
+                );
+            }
+        }
     }
 
     #[tokio::test]

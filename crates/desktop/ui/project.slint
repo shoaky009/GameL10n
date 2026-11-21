@@ -40,6 +40,12 @@ export component TaskFeedback inherits Rectangle {
             stop-label: App.task-operation == "translate" || App.task-operation == "retranslate" || App.task-operation == "candidate" ? "暂停翻译" : "停止任务";
             stop => { App.action("cancel", ""); }
         }
+        if App.preview-translation-running && App.task-operation != "translate": RunningTask {
+            title: "正在翻译"; message: App.preview-translation-message;
+            api: App.task-api-for("translate", App.task-api-summary);
+            usage: App.preview-translation-usage; progress: App.preview-translation-progress;
+            stop-label: "暂停翻译"; stop => { App.action("cancel-preview-translation", ""); }
+        }
         if root.show-task && root.show-review: Divider {}
         if root.show-review: RunningTask {
             title: "正在总结经验"; message: App.review-message;
@@ -193,9 +199,9 @@ export component Recognition inherits VerticalLayout {
     spacing: 12px;
     HorizontalLayout { spacing: 20px;
         HorizontalLayout { spacing: 8px; horizontal-stretch: 0;
-            if App.can-resume-adaptation: Button { text: "继续智能识别"; primary: true; enabled: !App.busy && !App.review-running; clicked => { App.action("resume-adaptation", ""); } }
+            if App.can-resume-adaptation: Button { text: "继续智能识别"; primary: true; enabled: (!App.busy || (App.preview-translation-running && App.task-operation == "translate")) && !App.review-running; clicked => { App.action("resume-adaptation", ""); } }
             Button { text: App.recognition-ready || App.can-resume-adaptation ? "重新识别…" : "识别与适配"; primary: !App.recognition-ready && !App.can-resume-adaptation; enabled: !App.busy; clicked => { App.action("adapt-dialog", ""); } }
-            Button { text: App.recognition-ready ? "查看文本并试译" : "查看保留文本"; primary: App.recognition-ready && !App.can-resume-adaptation; enabled: App.recognition != ""; clicked => { App.action("tab", "1"); } }
+            Button { text: App.translation-preview ? "查看已提取文本" : App.recognition-ready ? "查看文本并试译" : "查看保留文本"; primary: App.translation-preview || (App.recognition-ready && !App.can-resume-adaptation); enabled: App.has-workbench-text; clicked => { App.action("tab", "1"); } }
         }
         Rectangle { width: 1px;
             Rectangle { width: 1px; height: 20px; y: (parent.height - self.height) / 2; background: Theme.line; }

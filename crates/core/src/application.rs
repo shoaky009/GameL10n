@@ -52,6 +52,9 @@ pub enum AppEvent {
     ProjectsChanged,
     EngineLibraryChanged,
     TaskChanged(TaskState),
+    PreviewChanged {
+        project_id: String,
+    },
     ReviewChanged {
         project_id: String,
         state: crate::ReviewState,
@@ -59,6 +62,7 @@ pub enum AppEvent {
     TranslationChanged {
         project_id: String,
         progress: gamel10n_translation::execution::TranslationProgress,
+        parallel: bool,
     },
     Log {
         project_id: String,
@@ -100,6 +104,7 @@ pub struct TextPage {
 pub(crate) enum CachedAnalysis {
     Native(Box<StoredAnalysis>),
     Legacy(ExtractionResult),
+    Preview(Arc<ExtractionResult>),
 }
 
 impl CachedAnalysis {
@@ -107,12 +112,16 @@ impl CachedAnalysis {
         match self {
             Self::Native(native) => &native.extraction,
             Self::Legacy(extraction) => extraction,
+            Self::Preview(extraction) => extraction,
         }
     }
 
     pub(crate) fn native(&self) -> Result<&StoredAnalysis, CoreError> {
         match self {
             Self::Native(native) => Ok(native),
+            Self::Preview(_) => Err(CoreError::InvalidData(
+                "补丁需要已完成识别的正式文本。".into(),
+            )),
             Self::Legacy(_) => Err(CoreError::InvalidData(
                 "已有旧版提取结果可浏览；对应引擎的补丁构建尚未迁入，不能改用通用脚本格式回填。"
                     .into(),
@@ -177,13 +186,47 @@ impl AnalysisCache {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct PreviewTranslationStatus {
+    pub task: TaskState,
+    pub completed: usize,
+    pub total: usize,
+    pub usage: gamel10n_translation::TokenUsage,
+}
+
+struct PreviewTranslation {
+    cancellation: CancellationToken,
+    status: PreviewTranslationStatus,
+}
+
 struct TaskEntry {
+    preview: Option<Arc<CachedAnalysis>>,
+    translation: Option<PreviewTranslation>,
     state: TaskState,
     writes_review_evidence: bool,
     terminal_persisted: bool,
     summary: Option<serde_json::Value>,
     cancellation: CancellationToken,
     order: u64,
+}
+
+impl TaskEntry {
+    fn clear_preview(&mut self, events: &broadcast::Sender<AppEvent>) {
+        if self.preview.take().is_some() {
+            let _ = events.send(AppEvent::PreviewChanged {
+                project_id: self.state.project_id.clone(),
+            });
+        }
+    }
+
+    fn visible_state(&self) -> &TaskState {
+        if !self.state.running
+            && let Some(run) = &self.translation
+        {
+            return &run.status.task;
+        }
+        &self.state
+    }
 }
 
 #[derive(Clone)]
@@ -203,6 +246,7 @@ pub struct Application {
     pub(crate) session_keys: Arc<Mutex<HashMap<String, String>>>,
     pub(crate) tools: ToolPaths,
     pub(crate) workbenches: Arc<Mutex<HashMap<String, Arc<Mutex<crate::workbench::Workbench>>>>>,
+    pub(crate) workbench_revision: Arc<AtomicU64>,
     pub(crate) translation_scheduler: Arc<crate::translation_tasks::TranslationScheduler>,
     pub(crate) game_check_errors: Arc<Mutex<Vec<crate::game_check::protocol::ErrorWindow>>>,
 }
@@ -226,6 +270,7 @@ impl Application {
             session_keys: Arc::new(Mutex::new(HashMap::new())),
             tools: tools.clone(),
             workbenches: Arc::new(Mutex::new(HashMap::new())),
+            workbench_revision: Default::default(),
             translation_scheduler: Arc::new(
                 crate::translation_tasks::TranslationScheduler::default(),
             ),
@@ -256,7 +301,7 @@ impl Application {
         projects.sort_by_cached_key(|project| {
             let task_order = tasks
                 .get(&project.id)
-                .filter(|entry| entry.state.running)
+                .filter(|entry| entry.visible_state().running)
                 .map_or(u64::MAX, |entry| entry.order);
             (
                 task_order.min(
@@ -288,8 +333,8 @@ impl Application {
         let _lifecycle = self.project_lifecycle.lock().await;
         let mut project = self.store.get(id).await?;
         let cached = self.tasks.lock().await.get(id).and_then(|entry| {
-            (entry.state.running || entry.terminal_persisted).then(|| StoredTaskState {
-                state: entry.state.clone(),
+            (entry.visible_state().running || entry.terminal_persisted).then(|| StoredTaskState {
+                state: entry.visible_state().clone(),
                 task_summary: entry.summary.clone(),
             })
         });
@@ -348,6 +393,8 @@ impl Application {
             self.tasks.lock().await.insert(
                 id.into(),
                 TaskEntry {
+                    preview: None,
+                    translation: None,
                     state: saved.state.clone(),
                     writes_review_evidence: false,
                     terminal_persisted: true,
@@ -396,7 +443,7 @@ impl Application {
             .lock()
             .await
             .iter()
-            .map(|(id, entry)| (id.clone(), entry.state.clone()))
+            .map(|(id, entry)| (id.clone(), entry.visible_state().clone()))
             .collect()
     }
 
@@ -405,12 +452,28 @@ impl Application {
             .lock()
             .await
             .values()
-            .any(|task| task.state.running)
+            .any(|task| task.visible_state().running)
     }
 
     pub async fn cancel(&self, id: &str) {
         if let Some(entry) = self.tasks.lock().await.get(id) {
-            entry.cancellation.cancel();
+            if entry.state.running {
+                entry.cancellation.cancel();
+            } else if let Some(run) = &entry.translation {
+                run.cancellation.cancel();
+            }
+        }
+    }
+
+    pub async fn cancel_preview_translation(&self, id: &str) {
+        if let Some(run) = self
+            .tasks
+            .lock()
+            .await
+            .get(id)
+            .and_then(|task| task.translation.as_ref())
+        {
+            run.cancellation.cancel();
         }
     }
 
@@ -419,7 +482,7 @@ impl Application {
             .lock()
             .await
             .get(id)
-            .map(|entry| entry.state.clone())
+            .map(|entry| entry.visible_state().clone())
     }
 
     pub(crate) async fn writing_review_evidence(&self, id: &str) -> bool {
@@ -433,15 +496,15 @@ impl Application {
     /// Requests cancellation of all active project tasks and reviews before closing the host.
     pub async fn cancel_all_tasks(&self) -> bool {
         let mut active = false;
-        for task in self
-            .tasks
-            .lock()
-            .await
-            .values()
-            .filter(|task| task.state.running)
-        {
-            task.cancellation.cancel();
-            active = true;
+        for task in self.tasks.lock().await.values() {
+            if task.state.running {
+                task.cancellation.cancel();
+                active = true;
+            }
+            if let Some(run) = &task.translation {
+                run.cancellation.cancel();
+                active = true;
+            }
         }
         for review in self
             .review_tasks()
@@ -518,6 +581,163 @@ impl Application {
         Ok(Some(stored))
     }
 
+    pub(crate) async fn workbench_analysis(
+        &self,
+        id: &str,
+    ) -> Result<Option<Arc<CachedAnalysis>>, CoreError> {
+        if let Some(preview) = self
+            .tasks
+            .lock()
+            .await
+            .get(id)
+            .and_then(|task| task.preview.clone())
+        {
+            return Ok(Some(preview));
+        }
+        self.cached_analysis(id).await
+    }
+
+    pub(crate) async fn publish_translation_preview(
+        &self,
+        id: &str,
+        extraction: Arc<ExtractionResult>,
+    ) {
+        let mut tasks = self.tasks.lock().await;
+        if let Some(task) = tasks.get_mut(id)
+            && task.state.running
+            && !task.cancellation.is_cancelled()
+            && !extraction.units.is_empty()
+            && task
+                .preview
+                .as_ref()
+                .is_none_or(|old| old.extraction().units != extraction.units)
+        {
+            task.preview = Some(Arc::new(CachedAnalysis::Preview(extraction)));
+            let _ = self.events.send(AppEvent::PreviewChanged {
+                project_id: id.into(),
+            });
+        }
+    }
+
+    pub(crate) async fn project_task_snapshot(
+        &self,
+        id: &str,
+    ) -> (Option<TaskState>, bool, Option<PreviewTranslationStatus>) {
+        let tasks = self.tasks.lock().await;
+        let task = tasks.get(id);
+        (
+            task.map(|entry| entry.state.clone()),
+            task.is_some_and(|entry| entry.preview.is_some()),
+            task.and_then(|entry| entry.translation.as_ref().map(|run| run.status.clone())),
+        )
+    }
+
+    pub(crate) async fn begin_preview_translation(
+        &self,
+        id: &str,
+        resuming: bool,
+    ) -> Result<Option<(CancellationToken, Option<Arc<CachedAnalysis>>)>, CoreError> {
+        let _project = self.lock_project(id).await?;
+        if resuming {
+            self.store.ensure_writable().await?;
+            if self.store.get(id).await?.is_removed {
+                return Err(CoreError::ProjectMissing(id.into()));
+            }
+        }
+        let mut tasks = self.tasks.lock().await;
+        let Some(entry) = tasks.get_mut(id) else {
+            return Ok(None);
+        };
+        if entry.translation.is_some() {
+            return Err(CoreError::ProjectBusy);
+        }
+        if entry.state.running {
+            if !matches!(entry.state.operation.as_str(), "adapt" | "recognize")
+                || (!resuming && entry.preview.is_none())
+            {
+                return Err(CoreError::ProjectBusy);
+            }
+        } else if !resuming {
+            return Ok(None);
+        }
+        let state = TaskState {
+            project_id: id.into(),
+            operation: "translate".into(),
+            running: true,
+            message: "翻译任务等待执行。".into(),
+            succeeded: None,
+            workflow: None,
+        };
+        let cancellation = CancellationToken::new();
+        entry.translation = Some(PreviewTranslation {
+            cancellation: cancellation.clone(),
+            status: PreviewTranslationStatus {
+                task: state,
+                completed: 0,
+                total: 0,
+                usage: Default::default(),
+            },
+        });
+        let _ = self.events.send(AppEvent::PreviewChanged {
+            project_id: id.into(),
+        });
+        Ok(Some((cancellation, entry.preview.clone())))
+    }
+
+    pub(crate) async fn preview_translation_progress(
+        &self,
+        id: &str,
+        message: &str,
+        progress: Option<&gamel10n_translation::execution::TranslationProgress>,
+    ) {
+        if let Some(run) = self
+            .tasks
+            .lock()
+            .await
+            .get_mut(id)
+            .and_then(|entry| entry.translation.as_mut())
+        {
+            run.status.task.message = message.into();
+            if let Some(progress) = progress {
+                run.status.completed = progress.completed;
+                run.status.total = progress.total;
+                run.status.usage = progress.usage.clone();
+            }
+        }
+        self.log_task_message(id, message).await;
+    }
+
+    pub(crate) async fn finish_preview_translation(
+        &self,
+        id: &str,
+        result: Result<String, String>,
+    ) -> Result<(), CoreError> {
+        let project = self.lock_project(id).await?;
+        let message = {
+            let mut tasks = self.tasks.lock().await;
+            let Some(run) = tasks.get_mut(id).and_then(|entry| entry.translation.take()) else {
+                return Ok(());
+            };
+            let _ = self.events.send(AppEvent::PreviewChanged {
+                project_id: id.into(),
+            });
+            if run.cancellation.is_cancelled() {
+                "翻译已暂停。".into()
+            } else {
+                result.unwrap_or_else(|error| {
+                    self.report_task_warning(id, &error);
+                    error
+                })
+            }
+        };
+        self.log_task_message(id, &message).await;
+        drop(project);
+        if let Err(error) = self.clean_replaced_adapters().await {
+            self.report_task_warning(id, &format!("旧适配器版本暂未清理：{error}"));
+        }
+        Ok(())
+    }
+
     pub async fn text_page(
         &self,
         id: &str,
@@ -525,7 +745,7 @@ impl Application {
         offset: usize,
         limit: usize,
     ) -> Result<TextPage, CoreError> {
-        let Some(analysis) = self.cached_analysis(id).await? else {
+        let Some(analysis) = self.workbench_analysis(id).await? else {
             return Ok(TextPage {
                 total: 0,
                 offset: 0,
@@ -783,6 +1003,9 @@ impl Application {
             .lock()
             .await
             .insert(id, Arc::new(CachedAnalysis::Native(Box::new(stored))));
+        if let Some(entry) = self.tasks.lock().await.get_mut(id) {
+            entry.clear_preview(&self.events);
+        }
         self.workbenches.lock().await.remove(id);
         self.store.save(&project).await?;
         let _ = self.events.send(AppEvent::ProjectsChanged);
@@ -851,13 +1074,10 @@ impl Application {
             return Err(CoreError::ProjectMissing(id.into()));
         }
         self.store.ensure_writable().await?;
-        if self
-            .tasks
-            .lock()
-            .await
-            .get(id)
-            .is_some_and(|entry| entry.state.running)
-        {
+        if self.tasks.lock().await.get(id).is_some_and(|entry| {
+            entry.state.running
+                || (entry.translation.is_some() && !matches!(operation, "adapt" | "recognize"))
+        }) {
             return Err(CoreError::ProjectBusy);
         }
         if writes_review_evidence && self.review_running(id) {
@@ -878,9 +1098,13 @@ impl Application {
         let saved = state.clone();
         tokio::task::spawn_blocking(move || write_json(&path, &saved)).await??;
         let order = self.next_task_order.fetch_add(1, Ordering::Relaxed);
-        self.tasks.lock().await.insert(
+        let mut tasks = self.tasks.lock().await;
+        let translation = tasks.get_mut(id).and_then(|entry| entry.translation.take());
+        tasks.insert(
             id.into(),
             TaskEntry {
+                preview: None,
+                translation,
                 state: state.clone(),
                 writes_review_evidence,
                 terminal_persisted: false,
@@ -889,6 +1113,7 @@ impl Application {
                 order,
             },
         );
+        drop(tasks);
         self.start_metrics(id, operation).await;
         let _ = self.events.send(AppEvent::TaskChanged(state));
         drop(_lifecycle);
@@ -946,6 +1171,8 @@ impl Application {
             let entry = tasks
                 .get_mut(id)
                 .ok_or_else(|| CoreError::InvalidData("自动流程任务不存在。".into()))?;
+            // A custom failure branch may continue with the last committed extraction.
+            entry.clear_preview(&self.events);
             entry.state.operation = "workflow".into();
             entry.state.message = format!(
                 "全自动汉化 · {}（{}）",
@@ -1056,6 +1283,7 @@ impl Application {
             state.succeeded = Some(false);
         }
         if let Some(entry) = self.tasks.lock().await.get_mut(id) {
+            entry.clear_preview(&self.events);
             entry.state = state.clone();
             entry.terminal_persisted = persisted.is_ok();
             entry.summary = Some(summary.clone());

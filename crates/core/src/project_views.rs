@@ -10,6 +10,9 @@ use crate::{Application, CoreError, GameProject, TaskState};
 pub struct ProjectSnapshot {
     pub project: GameProject,
     pub task: Option<TaskState>,
+    pub translation_preview: bool,
+    pub preview_translation: Option<crate::PreviewTranslationStatus>,
+    pub preview_translation_resumable: bool,
     pub progress: Value,
     pub adaptation: Value,
     pub can_resume_adaptation: bool,
@@ -73,7 +76,7 @@ impl Application {
     /// Optional diagnostic details cannot prevent opening valid project data.
     pub async fn project_snapshot(&self, id: &str) -> Result<ProjectSnapshot, CoreError> {
         let project = self.open_project(id).await?;
-        let task = self.task_state(id).await;
+        let (task, translation_preview, preview_translation) = self.project_task_snapshot(id).await;
         let directory = self.project_directory(id)?;
         tokio::task::spawn_blocking(move || {
             let mut warnings = Vec::new();
@@ -106,7 +109,20 @@ impl Application {
                     }
                 }
             };
+            let preview_translation_resumable = preview_translation.is_none()
+                && crate::translation_tasks::saved_preview_slot(&directory).is_some();
+            let task = if task.as_ref().is_some_and(|task| task.running) {
+                task
+            } else {
+                preview_translation
+                    .as_ref()
+                    .map(|run| run.task.clone())
+                    .or(task)
+            };
             Ok(ProjectSnapshot {
+                translation_preview,
+                preview_translation,
+                preview_translation_resumable,
                 project,
                 task,
                 progress,

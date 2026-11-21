@@ -676,6 +676,7 @@ pub(super) async fn run(
             let args = serde_json::from_str::<Value>(&call.arguments);
             if let Some(progress) = progress {
                 progress(EngineProgress {
+                    translation_preview: None,
                     stage: "执行适配工具".into(),
                     message: crate::tool_activity::message(
                         &call.name,
@@ -943,6 +944,7 @@ pub(super) async fn run(
         }
         if let Some(progress) = progress {
             progress(EngineProgress {
+                translation_preview: None,
                 stage: "智能适配".into(),
                 message: match &retry {
                     Some((_, reason, _)) => {

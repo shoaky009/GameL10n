@@ -488,7 +488,7 @@ impl Application {
         } else {
             let project = self.open_project(id).await?;
             let directory = self.project_directory(id)?;
-            let task = self.task_state(id).await;
+            let (task, _, _) = self.project_task_snapshot(id).await;
             crate::projects::extraction_coverage_pending(&project.extra)
                 || tokio::task::spawn_blocking(move || {
                     has_unfinished_adaptation(&directory, task.as_ref())
@@ -1211,7 +1211,7 @@ impl Application {
     pub async fn resume_adaptation(&self, id: &str) -> Result<AdaptationResult, CoreError> {
         let project = self.open_project(id).await?;
         let directory = self.project_directory(id)?;
-        let task = self.task_state(id).await;
+        let (task, _, _) = self.project_task_snapshot(id).await;
         let saved =
             tokio::task::spawn_blocking(move || resumable_adaptation(&directory, task.as_ref()))
                 .await??
@@ -1539,8 +1539,11 @@ impl Application {
         &self,
         id: &str,
         operation: &str,
-        progress: EngineProgress,
+        mut progress: EngineProgress,
     ) -> Result<(), CoreError> {
+        if let Some(preview) = progress.translation_preview.take() {
+            self.publish_translation_preview(id, preview).await;
+        }
         self.checkpoint_metrics(id, operation).await;
         if self
             .update_task_progress(id, operation, &progress.message)

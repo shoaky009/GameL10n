@@ -324,6 +324,9 @@ async fn handle_project_action(
                 a.set_task_usage(Default::default());
                 a.set_source_materials_cleared(false);
                 a.set_can_resume_adaptation(false);
+                a.set_translation_preview(false);
+                a.set_preview_translation_running(false);
+                a.set_preview_translation_resumable(false);
                 crate::recognition_ui::clear(&a);
                 crate::workbench_ui::restore_view(&a, &workbench_view);
                 a.set_texts(ModelRc::default());
@@ -578,6 +581,12 @@ async fn handle_project_action(
                     });
                 }
             }
+        }
+        "cancel-preview-translation" => {
+            ctx.app()
+                .await
+                .cancel_preview_translation(&input.project_id)
+                .await
         }
         "cancel-review" => ctx.app().await.cancel_review(&input.project_id),
         "cancel" => {
@@ -973,6 +982,10 @@ pub async fn refresh_project(ctx: &Context, id: &str, opening: bool) -> Result<(
     let host = ctx.app().await;
     let snapshot = host.project_snapshot(id).await?;
     let project_files_path = host.project_directory(id)?.display().to_string();
+    let preview = snapshot.translation_preview;
+    let preview_run = snapshot.preview_translation;
+    let preview_resumable = snapshot.preview_translation_resumable;
+
     let project = snapshot.project;
     let state = snapshot.task;
     crate::log_ui::refresh(ctx, id).await?;
@@ -1021,6 +1034,32 @@ pub async fn refresh_project(ctx: &Context, id: &str, opening: bool) -> Result<(
                 .is_some_and(|value| value["sourceResourcesCleared"] == true),
         );
         a.set_project_path(project.game_directory.display().to_string().into());
+        a.set_translation_preview(preview);
+        a.set_preview_translation_running(preview_run.is_some());
+        a.set_preview_translation_resumable(preview_resumable);
+        if let Some(run) = &preview_run {
+            let fraction = if run.total == 0 {
+                0.0
+            } else {
+                run.completed as f32 / run.total as f32
+            };
+            let usage = crate::token_ui::usage(
+                run.usage.input_tokens,
+                run.usage.output_tokens,
+                run.usage.cached_tokens.unwrap_or(0),
+            );
+            a.set_preview_translation_message(run.task.message.as_str().into());
+            a.set_preview_translation_progress(fraction);
+            a.set_preview_translation_usage(usage.clone());
+            if state
+                .as_ref()
+                .is_some_and(|task| task.operation == "translate")
+            {
+                a.set_task_message(run.task.message.as_str().into());
+                a.set_progress(fraction);
+                a.set_task_usage(usage);
+            }
+        }
         a.set_busy(state.as_ref().is_some_and(|s| s.running));
         a.set_task_operation(
             state
@@ -1055,7 +1094,7 @@ pub async fn refresh_project(ctx: &Context, id: &str, opening: bool) -> Result<(
             !s.running
                 || !matches!(
                     s.operation.as_str(),
-                    "retranslate" | "extract" | "recognize" | "workflow"
+                    "retranslate" | "extract" | "recognize" | "adapt" | "workflow"
                 )
         }));
         if opening || a.get_page() != 0 || a.get_tab() != 1 {

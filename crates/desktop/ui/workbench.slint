@@ -50,8 +50,8 @@ export component Workbench inherits FocusScope {
     VerticalLayout {
     spacing: 8px;
     HorizontalLayout { spacing: 12px;
-        Button { text: "全量翻译"; primary: App.selected-texts == 0; enabled: !App.busy && App.recognition != ""; clicked => { App.action("translate", "all"); } }
-        Caption { text: App.counts; horizontal-stretch: 0; min-width: 0px; vertical-alignment: center; overflow: elide; wrap: no-wrap; }
+        Button { text: App.preview-translation-resumable && !App.preview-translation-running ? "继续翻译…" : "全量翻译"; primary: App.selected-texts == 0; enabled: App.can-start-translation && (App.has-workbench-text || App.preview-translation-resumable); clicked => { App.action("translate", "all"); } }
+        Caption { text: (App.translation-preview ? (App.task-operation == "workflow" ? "识别中 · 自动汉化将在定位后试译 · " : "识别中 · ") : "") + App.counts; horizontal-stretch: 0; min-width: 0px; vertical-alignment: center; overflow: elide; wrap: no-wrap; }
         Rectangle { horizontal-stretch: 1; }
     }
     HorizontalLayout { spacing: 8px;
@@ -69,7 +69,7 @@ export component Workbench inherits FocusScope {
         }
         CheckBox { text: "仅显示已选"; checked <=> App.only-selected; enabled: App.selected-texts > 0 || App.only-selected; toggled => { App.action("texts", "0"); } }
         if App.selected-texts > 0 || App.selection-busy: Caption { text: App.selection-busy ? "更新中…" : "已选 " + App.selected-texts; vertical-alignment: center; wrap: no-wrap; }
-        if App.selected-texts > 0: Button { text: "翻译所选"; primary: true; enabled: root.selection-enabled && !App.busy; clicked => { App.action("translate", "selected"); } }
+        if App.selected-texts > 0: Button { text: "翻译所选"; primary: true; enabled: root.selection-enabled && App.can-start-translation && (!App.busy || App.translation-preview); clicked => { App.action("translate", "selected"); } }
         if App.selected-texts > 0: Button { text: "重新翻译所选"; enabled: root.selection-enabled && !App.busy; clicked => { App.action("retranslate-dialog", ""); } }
         Button { text: "生成补丁"; enabled: App.selected-texts > 0 && root.selection-enabled && !App.busy; clicked => { App.action("translate", "trial"); }
             Tooltip { text: @markdown("使用所选文本生成补丁，缺少的译文会先自动翻译。"); }
@@ -135,13 +135,14 @@ export component Workbench inherits FocusScope {
             if App.texts.length == 0: VerticalLayout { padding: 12px; spacing: 8px; alignment: start; vertical-stretch: 1;
                 Caption {
                     text: App.loading ? "正在加载文本…"
-                        : App.recognition == "" ? (App.recognition-running
-                            ? "正在识别与提取文本，完成后可在这里翻译与校对。"
+                        : !App.has-workbench-text ? (App.preview-translation-resumable ? "可继续上次翻译。识别完成后可查看正式文本。"
+                            : App.preview-translation-running ? "正在翻译上次提取的文本。识别完成后可查看正式文本。"
+                            : App.recognition-running || (App.busy && App.task-operation == "workflow") ? "正在识别游戏。原文通过重复提取检查后会显示在这里。"
                             : "尚未提取文本，请先进行识别与适配。")
                         : "没有符合条件的文本。";
                 }
-                if !App.loading && !App.recognition-running && App.recognition == "": Link { text: "前往识别与适配"; clicked => { App.action("tab", "0"); } }
-                if !App.loading && App.recognition != "" && (App.text-query != "" || App.resource-filter > 0 || App.kind-filter > 0 || App.status-filter > 0 || App.only-selected): Link {
+                if !App.loading && !App.busy && !App.has-workbench-text: Link { text: "前往识别与适配"; clicked => { App.action("tab", "0"); } }
+                if !App.loading && App.has-workbench-text && (App.text-query != "" || App.resource-filter > 0 || App.kind-filter > 0 || App.status-filter > 0 || App.only-selected): Link {
                     text: "清除筛选";
                     clicked => {
                         App.text-query = ""; App.resource-filter = 0; App.kind-filter = 0; App.status-filter = 0; App.only-selected = false;
