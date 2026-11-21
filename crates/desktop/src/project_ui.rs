@@ -120,8 +120,18 @@ pub fn handle<'a>(
 async fn adapt(ctx: &Context, input: &UiInput) -> Result<bool, CoreError> {
     let app = ctx.app().await;
     let project = app.open_project(&input.project_id).await?;
+    let reopen = || {
+        let id = input.project_id.clone();
+        let context = ctx.clone();
+        ctx.update(move |ui| {
+            let app = ui.global::<App>();
+            if app.get_project_id().as_str() == id && context.is_requested_project(&id) {
+                app.set_modal("adapt".into());
+            }
+        });
+    };
     if !confirm_game_directory(project.game_directory).await? {
-        ctx.update(|ui| ui.global::<App>().set_modal("adapt".into()));
+        reopen();
         return Ok(true);
     }
     let (goal, objective) = match input.adaptation_objective {
@@ -147,7 +157,7 @@ async fn adapt(ctx: &Context, input: &UiInput) -> Result<bool, CoreError> {
     }
     .await;
     if let Err(error) = saved {
-        ctx.update(|ui| ui.global::<App>().set_modal("adapt".into()));
+        reopen();
         return Err(error);
     }
     if objective == AdaptationObjective::Develop {
@@ -295,7 +305,13 @@ async fn handle_project_action(
                 a.set_project_files_path("".into());
                 a.set_patch_path("".into());
                 a.set_patch_is_trial(false);
-                if a.get_modal() == "install" {
+                if a.get_project_id().as_str() != requested {
+                    a.set_instruction("".into());
+                }
+                if matches!(
+                    a.get_modal().as_str(),
+                    "install" | "adapt" | "project-adapter"
+                ) {
                     a.set_modal("".into());
                 }
                 a.set_project_id(requested.into());
@@ -485,7 +501,7 @@ async fn handle_project_action(
                     _ => 3,
                 });
                 load_workflow_preferences(&app, choice, has_custom);
-                app.set_adaptation_objective(goal);
+                app.invoke_select_adaptation_objective(goal);
                 app.set_modal_title("识别与适配".into());
                 app.set_modal_message(
                     "优先复用已有适配器，必要时继续智能适配。也可选择修复或补全已有结果。".into(),
@@ -720,13 +736,20 @@ async fn handle_project_action(
             if input.argument == "failed" && feedback.can_repair_current {
                 settings_ui::refresh(ctx, Some(&input.project_id)).await?;
                 let notes = input.runtime_note.clone();
+                let id = input.project_id.clone();
+                let context = ctx.clone();
                 ctx.update(move |ui| {
                     let app = ui.global::<App>();
-                    app.set_adaptation_objective(1);
+                    if app.get_project_id().as_str() != id || !context.is_requested_project(&id) {
+                        return;
+                    }
+                    app.invoke_select_adaptation_objective(1);
                     app.set_instruction(notes.into());
                     app.set_error("".into());
+                    app.set_modal_title("修复游戏显示问题".into());
+                    app.set_modal_message("修复当前补丁对应的适配器。确认新版补丁效果正常后，会自动清理未被其他项目使用的历史版本。".into());
+                    app.set_modal("adapt".into());
                 });
-                show_dialog(ctx, "adapt", "修复游戏显示问题", "修复当前补丁对应的适配器。确认新版补丁效果正常后，会自动清理未被其他项目使用的历史版本。".into());
             }
         }
         "patch-texts" | "patch-texts-page" => {

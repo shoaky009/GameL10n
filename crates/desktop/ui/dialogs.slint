@@ -98,7 +98,11 @@ export component DialogLayer inherits Rectangle {
             if App.modal == "adapt": ScrollView { height: min(adapt-fields.preferred-height, min(460px, root.height - 280px)); horizontal-scrollbar-policy: always-off; content-width: self.visible-width;
               adapt-fields := VerticalLayout { spacing: 8px; padding-right: 12px; alignment: start;
                 Caption { text: "本次目标"; }
-                ComboBox { model: ["识别游戏", "修复现有问题", "补全遗漏文字", "自动汉化"]; current-index <=> App.adaptation-objective; }
+                ComboBox {
+                    model: ["识别游戏", "修复现有问题", "补全遗漏文字", "自动汉化"];
+                    current-index: App.adaptation-objective;
+                    selected => { App.select-adaptation-objective(self.current-index); }
+                }
                 if App.adaptation-objective == 1: HorizontalLayout {
                     spacing: 10px;
                     Caption { text: "问题类型"; vertical-alignment: center; }

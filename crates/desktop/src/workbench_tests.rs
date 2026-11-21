@@ -552,7 +552,13 @@ fn project_actions_keep_settings_selection_and_saved_edits_in_sync_across_tabs()
         assert_eq!(app.get_modal().as_str(), "adapt");
         assert_eq!(app.get_workflow_finish(), 1);
         assert!(app.get_workflow_use_existing_text());
-        app.set_adaptation_objective(3);
+        app.invoke_select_adaptation_objective(1);
+        app.set_instruction("人物名换行异常".into());
+        app.invoke_select_adaptation_objective(1);
+        assert_eq!(app.get_instruction(), "人物名换行异常");
+        app.invoke_select_adaptation_objective(3);
+        assert!(app.get_instruction().is_empty());
+        app.set_instruction("先处理当前项目的序章".into());
         app.set_modal("".into());
 
         app.set_text_query("line 100".into());
@@ -564,6 +570,7 @@ fn project_actions_keep_settings_selection_and_saved_edits_in_sync_across_tabs()
         ctx.refresh_texts(&project.id);
         wait_for_actions(&ui, &ctx, "previous project refresh").await;
         assert_eq!(app.get_project_id().as_str(), other_project.id);
+        assert!(app.get_instruction().is_empty());
         assert_eq!(
             app.get_project_files_path().as_str(),
             ctx.app()
