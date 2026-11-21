@@ -11,8 +11,20 @@ TOOLS = REPO / "third_party/engine-tools"
 PIN = json.loads((TOOLS / "current.json").read_text(encoding="utf-8"))
 sys.path[:0] = [str(REPO), str(TOOLS / "references" / PIN["revision"] / "library.zip")]
 
-from adapters.components import qlie_pack_adapter, qlie_samples
+from adapters.components import qlie_bitmap, qlie_pack_adapter, qlie_samples
 from crates.engines.python.fixtures.qlie_installation import make_installation, make_installation31
+
+
+class QlieBitmapTest(unittest.TestCase):
+    def test_dialogue_strokes_grow_around_their_center_and_stay_inside_the_cell(self):
+        rows = [0] * 64
+        rows[0] = 1 << 63
+        rows[32] = 1 << 30
+        mask = qlie_bitmap.dialogue_mask(b"".join(row.to_bytes(8, "big") for row in rows))
+        pixels = {(x, y) for y in range(64) for x in range(64)
+                  if mask[y * 8 + x // 8] & (128 >> (x % 8))}
+        self.assertEqual(pixels, {(x, y) for x in range(64) for y in range(64)
+                                  if x + y <= 2 or abs(x - 33) + abs(y - 32) <= 2})
 
 
 class QliePackAdapterTest(unittest.TestCase):

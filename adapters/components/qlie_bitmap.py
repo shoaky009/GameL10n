@@ -1,5 +1,6 @@
 """ImoScripter replacement strings and indexed OF glyph sheets."""
 import base64
+from collections import Counter
 from dataclasses import dataclass
 import re
 import struct
@@ -46,6 +47,21 @@ def tile_rows(tile):
     y, x = divmod(tile, COLUMNS)
     start = PIXELS + y * CELL * CELL * COLUMNS + x * CELL
     return range(start, start + PAGE // COLUMNS, CELL * COLUMNS)
+
+
+def dialogue_mask(mask):
+    # A one-pixel hairline in the 64px OF cell can vanish at dialogue size.
+    # Grow the stroke equally on both sides without moving the glyph or its advance.
+    rows = [int.from_bytes(mask[i:i + 8], "big") for i in range(0, len(mask), 8)]
+    narrow = [row | row << 1 | row >> 1 for row in rows]
+    wide = [row | row << 1 | row >> 1 for row in narrow]
+    edge = [0, 0, *rows, 0, 0]
+    adjacent = [0, *narrow, 0]
+    result = bytearray()
+    for y, center in enumerate(wide):
+        stroke = edge[y] | adjacent[y] | center | adjacent[y + 2] | edge[y + 4]
+        result.extend((stroke & ((1 << CELL) - 1)).to_bytes(8, "big"))
+    return bytes(result)
 
 
 class Atlas:
@@ -202,8 +218,6 @@ class BitmapFont:
     def add_edits(self, changes, chars, paths):
         self.routes(changes)
         fresh = {c for c in chars if token(c) not in self.rules}
-        if not fresh:
-            return
         if any(ord(c) > 0xffff for c in fresh):
             raise ValueError("QLIE 中文外字当前只支持 BMP 字符")
         atlas = Atlas(self.read(ATLAS, LIMIT))
@@ -212,15 +226,38 @@ class BitmapFont:
                      if 0x40 <= n % 256 <= 0xfc and n % 256 != 0x7f and not atlas.tiles[n - 0x8000])
         lines = []
         tile = max(atlas.tiles)
-        for char, mask in rasterize(fresh, paths):
+        # Older patches may already have assigned slots. Reuse them when updating
+        # their strokes, including translated fields outside the current selection.
+        existing = {chr(int(tag[3:-1], 16)) for tag in self.rules}
+        uses = Counter(atlas.tiles) if existing else {}
+        atlas_changed = False
+        for char, original in rasterize(fresh | existing, paths):
+            mask = dialogue_mask(original)
+            if char in existing:
+                target = self.rules[token(char)]
+                previous = atlas.mask(target)
+                if previous == mask:
+                    continue
+                if previous != original:
+                    raise ValueError(f"QLIE 外字「{char}」的已登记字形与替换表不一致")
+                slot = atlas.tiles[code_index(target)]
+                if uses[slot] > 1:
+                    tile += 1
+                    slot = tile
+                atlas.draw(target, slot, mask)
+                atlas_changed = True
+                continue
             target = next(available, None)
             if not target:
                 raise ValueError("QLIE 外字没有足够的空闲字符")
             tile += 1
             atlas.draw(target, tile, mask)
             lines.append(f"{token(char)}=[f,6]{target}[f]")
-        path, entry = self.members[ATLAS][0]
-        changes.setdefault(path, {})[entry.name] = bytes(atlas.data)
+        if lines or atlas_changed:
+            path, entry = self.members[ATLAS][0]
+            changes.setdefault(path, {})[entry.name] = bytes(atlas.data)
+        if not lines:
+            return
         text = self.table.text
         nl = "\r\n" if "\r\n" in text else "\n"
         if text and not text.endswith("\n"):

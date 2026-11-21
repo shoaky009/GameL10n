@@ -131,7 +131,9 @@ def verify(request):
             native.routes()
             atlas = bitmap.Atlas(native.read(bitmap.ATLAS, bitmap.LIMIT))
             for char, expected in bitmap.rasterize(bitmap_chars, request["toolPaths"]):
-                if atlas.mask(native.rules[bitmap.token(char)]) != expected:
+                actual = atlas.mask(native.rules[bitmap.token(char)])
+                # Published adapters can still produce the original regular-weight OF glyph.
+                if actual != expected and actual != bitmap.dialogue_mask(expected):
                     raise ValueError(f"QLIE 外字位图中的「{char}」与目标汉字的字形不一致")
         if not aliases:
             return dict(fonts=[], aliases={})
