@@ -101,31 +101,31 @@ async fn adapt(ctx: &Context, input: &UiInput) -> Result<bool, CoreError> {
         ctx.update(|ui| ui.global::<App>().set_modal("adapt".into()));
         return Ok(true);
     }
-    let objective = match input.adaptation_objective {
-        0 | 3 => AdaptationObjective::Develop,
-        1 => AdaptationObjective::Repair,
-        2 => AdaptationObjective::ExpandCoverage,
+    let (goal, objective) = match input.adaptation_objective {
+        0 => ("recognize", AdaptationObjective::Develop),
+        1 => ("repair", AdaptationObjective::Repair),
+        2 => ("expandCoverage", AdaptationObjective::ExpandCoverage),
+        3 => ("workflow", AdaptationObjective::Develop),
         _ => return Err(CoreError::InvalidData("请选择本次适配目标。".into())),
     };
     let workflow = (input.adaptation_objective == 3)
         .then(|| workflow_choice(input))
         .transpose()?;
-    if !matches!(
-        workflow,
-        Some(WorkflowChoice::Preset(WorkflowPreset {
-            use_existing_text: true,
-            ..
-        }))
-    ) {
-        let saved = async {
-            let updates = settings_ui::adaptation_budget_updates(input)?;
-            app.save_project_settings(&input.project_id, updates).await
-        }
-        .await;
-        if let Err(error) = saved {
-            ctx.update(|ui| ui.global::<App>().set_modal("adapt".into()));
-            return Err(error);
-        }
+    let saved = async {
+        let mut updates = match workflow {
+            Some(WorkflowChoice::Preset(WorkflowPreset {
+                use_existing_text: true,
+                ..
+            })) => serde_json::json!({}),
+            _ => settings_ui::adaptation_budget_updates(input)?,
+        };
+        updates["recognitionGoal"] = goal.into();
+        app.save_project_settings(&input.project_id, updates).await
+    }
+    .await;
+    if let Err(error) = saved {
+        ctx.update(|ui| ui.global::<App>().set_modal("adapt".into()));
+        return Err(error);
     }
     if objective == AdaptationObjective::Develop {
         let mode = if input.force_intelligent {
@@ -423,10 +423,19 @@ async fn handle_project_action(
         "adapt-dialog" => {
             settings_ui::refresh(ctx, Some(&input.project_id)).await?;
             let host = ctx.app().await;
-            let objective = host.recognition_objective(&input.project_id).await?;
-            let issue = host
-                .open_project(&input.project_id)
-                .await?
+            let project = host.open_project(&input.project_id).await?;
+            let goal = match project.settings["recognitionGoal"].as_str() {
+                Some("recognize") => 0,
+                Some("repair") => 1,
+                Some("expandCoverage") => 2,
+                Some("workflow") => 3,
+                _ => match host.recognition_objective(&input.project_id).await? {
+                    AdaptationObjective::Develop => 0,
+                    AdaptationObjective::Repair => 1,
+                    AdaptationObjective::ExpandCoverage => 2,
+                },
+            };
+            let issue = project
                 .extra
                 .get("repairIssue")
                 .and_then(|v| serde_json::from_value::<RepairIssue>(v.clone()).ok());
@@ -446,11 +455,7 @@ async fn handle_project_action(
                     _ => 3,
                 });
                 load_workflow_preferences(&app, choice, has_custom);
-                app.set_adaptation_objective(match objective {
-                    AdaptationObjective::Develop => 0,
-                    AdaptationObjective::Repair => 1,
-                    AdaptationObjective::ExpandCoverage => 2,
-                });
+                app.set_adaptation_objective(goal);
                 app.set_modal_title("识别与适配".into());
                 app.set_modal_message(
                     "优先复用已有适配器，必要时继续智能适配。也可选择修复或补全已有结果。".into(),

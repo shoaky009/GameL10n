@@ -165,18 +165,23 @@ fn saved_adaptation_objective(
         #[serde(default)]
         objective: Value,
     }
-    match read_json::<SavedObjective>(&directory.join("adaptation/current/session.json")) {
-        Ok(saved) => AdaptationObjective::from_saved(&saved.objective),
-        Err(gamel10n_translation::files::FileError::Io { source, .. })
-            if source.kind() == std::io::ErrorKind::NotFound =>
-        {
-            Ok(None)
-        }
-        Err(gamel10n_translation::files::FileError::Json { source, .. }) if !source.is_io() => {
-            Ok(None)
-        }
-        Err(error) => Err(error.into()),
-    }
+    let saved =
+        match read_json::<SavedObjective>(&directory.join("adaptation/current/session.json")) {
+            Ok(saved) => AdaptationObjective::from_saved(&saved.objective)?,
+            Err(gamel10n_translation::files::FileError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound =>
+            {
+                None
+            }
+            Err(gamel10n_translation::files::FileError::Json { source, .. }) if !source.is_io() => {
+                None
+            }
+            Err(error) => return Err(error.into()),
+        };
+    Ok(saved.or_else(|| {
+        crate::projects::extraction_coverage_pending(&project.extra)
+            .then_some(AdaptationObjective::ExpandCoverage)
+    }))
 }
 
 fn has_unfinished_adaptation(
@@ -1012,9 +1017,6 @@ impl Application {
         instruction: &str,
     ) -> Result<AdaptationObjective, CoreError> {
         let project = self.store.get(id).await?;
-        if crate::projects::extraction_coverage_pending(&project.extra) {
-            return Ok(AdaptationObjective::ExpandCoverage);
-        }
         let saved = saved_adaptation_objective(&project, &self.project_directory(id)?)?;
         let has_error = self
             .task_state(id)
@@ -1032,9 +1034,6 @@ impl Application {
     /// Keep the last explicit goal when continuing; new projects start with regular recognition.
     pub async fn recognition_objective(&self, id: &str) -> Result<AdaptationObjective, CoreError> {
         let project = self.store.get(id).await?;
-        if crate::projects::extraction_coverage_pending(&project.extra) {
-            return Ok(AdaptationObjective::ExpandCoverage);
-        }
         Ok(
             saved_adaptation_objective(&project, &self.project_directory(id)?)?
                 .unwrap_or(AdaptationObjective::Develop),
