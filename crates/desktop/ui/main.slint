@@ -1,5 +1,5 @@
 import { Button, LineEdit, CheckBox, SpinBox, ScrollView, ListView } from "std-widgets.slint";
-import { App, Theme, Label, Caption, Heading, SectionHeading, ReportText, Divider, ProjectRow, TextRow, NamedRow, EngineRow, TermRow, TokenDisplay, CleanupRow, NavigationButton, Link, CopyButton, ClipboardBuffer, ListPanel, SelectableListRow } from "state.slint";
+import { App, Theme, Label, Caption, Heading, SectionHeading, ReportText, Divider, ProjectRow, TextRow, NamedRow, EngineRow, TermRow, TokenDisplay, CleanupRow, NavigationButton, Link, HelpButton, CopyButton, ClipboardBuffer, ListPanel, SelectableListRow } from "state.slint";
 import { ProjectSettings, GlobalApis } from "settings.slint";
 import { Workbench } from "workbench.slint";
 import { Recognition, PatchPage, TaskFeedback } from "project.slint";
@@ -107,15 +107,24 @@ export component MainWindow inherits Window {
             if App.page == 5: ConsumptionMetrics {}
             if App.page == 3: VerticalLayout { spacing: 18px;
                 Heading { text: "程序设置"; font-size: 26px; }
-                Label { text: "数据保存位置"; font-weight: 600; }
+                HorizontalLayout { spacing: 4px; alignment: start;
+                    Label { text: "数据保存位置"; font-weight: 600; vertical-alignment: center; }
+                    HelpButton { topic: "数据保存位置"; description: "更换位置时可以迁移现有数据，也可以直接切换目录。运行中的任务会先暂停并保存进度，切换完成后立即生效。"; }
+                }
                 LineEdit { text: App.data-directory; read-only: true; }
                 HorizontalLayout { Button { text: "更换保存位置"; clicked => { App.action("directory-dialog", ""); } } Button { text: "打开数据目录"; clicked => { App.action("open", "data"); } } Rectangle { horizontal-stretch: 1; } }
-                Caption { text: "可迁移现有数据或仅切换目录，完成后立即生效。运行中的任务会先暂停并保存进度。"; }
                 Divider {} Label { text: "同时翻译的游戏数量"; }
                 HorizontalLayout { SpinBox { value <=> App.concurrency; minimum: 1; maximum: 8; } Rectangle { horizontal-stretch: 1; } }
-                Divider {} Label { text: "LLM 执行隔离"; }
-                CheckBox { text: "隔离执行 LLM 脚本与生成适配器"; checked <=> App.isolate-llm-execution; enabled: App.isolation-supported; }
-                Caption { text: App.isolation-supported ? "默认开启，保存后用于后续执行。关闭后，LLM 生成的脚本和适配器将以当前用户权限运行，恶意指令或提示词投毒可能导致文件泄露、修改或删除。" : "当前平台暂不支持执行隔离。LLM 脚本和生成适配器以当前用户权限运行。"; }
+                Divider {}
+                HorizontalLayout { spacing: 4px; alignment: start;
+                    CheckBox { text: "LLM 执行隔离"; checked <=> App.isolate-llm-execution; enabled: App.isolation-supported; }
+                    HelpButton { topic: "LLM 执行隔离";
+                        description: App.isolation-supported
+                            ? "默认开启。隔离环境限制模型生成的脚本和适配器可以读写的文件。关闭后，它们将以当前用户权限运行，可能泄露、修改或删除文件。保存后对后续执行生效。"
+                            : "当前平台不支持执行隔离。模型生成的脚本和适配器会以当前用户权限运行。";
+                    }
+                    if !App.isolation-supported: Caption { text: "当前平台不支持"; vertical-alignment: center; }
+                }
                 HorizontalLayout { Button { text: "保存程序设置"; primary: true; clicked => { App.action("save-application", ""); } } Rectangle { horizontal-stretch: 1; } }
                 Rectangle { vertical-stretch: 1; }
             }

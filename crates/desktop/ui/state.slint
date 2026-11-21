@@ -379,6 +379,32 @@ export component Link inherits LinkControl {
         }
     }
 }
+export component HelpButton inherits LinkControl {
+    in property <string> topic;
+    in property <string> description;
+    width: 24px; height: 24px;
+    accessible-label: root.topic + "说明";
+    accessible-description: root.description;
+    Rectangle {
+        x: 4px; y: 4px; width: 16px; height: 16px; border-radius: 8px;
+        border-width: 1px; border-color: root.highlighted ? Theme.accent : Theme.muted;
+        Text {
+            text: "?"; font-size: 12px; font-weight: 600; color: parent.border-color;
+            horizontal-alignment: center; vertical-alignment: center;
+            accessible-role: none;
+        }
+    }
+    clicked => { details.show(); }
+    details := PopupWindow {
+        x: 0px; y: root.height + 4px; width: 324px; height: explanation.preferred-height + 20px;
+        close-policy: close-on-click-outside;
+        Rectangle {
+            background: Theme.surface; border-width: 1px; border-color: Theme.line; border-radius: 5px;
+            explanation := Label { x: 12px; y: 10px; width: parent.width - 24px; height: self.preferred-height; text: root.description; }
+        }
+    }
+}
+
 export component CopyButton inherits LinkControl {
     in property <string> label;
     in property <string> value;
