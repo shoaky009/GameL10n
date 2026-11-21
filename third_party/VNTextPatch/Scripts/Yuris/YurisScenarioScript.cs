@@ -261,7 +261,7 @@ namespace VNTextPatch.Shared.Scripts.Yuris
                     }
                 }
 
-                IEnumerable<YurisAttribute> commandStringAttrs = GetStringAttributes(command, commandAttrs).Where(a => a.ValueLength > 0);
+                IEnumerable<YurisAttribute> commandStringAttrs = GetStringAttributes(command, commandAttrs, sources).Where(a => a.ValueLength > 0);
                 if (command.Id == _wordCommandId ||
                     // command.Id == _returnCodeCommandId && commandAttrs[0].ValueLength == 0 && gameUsesPageBreaks ||
                     command.Id == _evalCommandId && commandAttrs.Count > 0 && !(GetAttributeValue(commandAttrs[0]) ?? "").Contains("\\p"))
@@ -290,7 +290,8 @@ namespace VNTextPatch.Shared.Scripts.Yuris
                 yield return stringAttrs;
         }
 
-        private IEnumerable<YurisAttribute> GetStringAttributes(YurisCommand command, List<YurisAttribute> attrs)
+        private IEnumerable<YurisAttribute> GetStringAttributes(YurisCommand command, List<YurisAttribute> attrs,
+            Dictionary<int, YurisAttributeSource>? sources)
         {
             if (attrs.Count == 0)
                 yield break;
@@ -320,6 +321,11 @@ namespace VNTextPatch.Shared.Scripts.Yuris
                     if (string.IsNullOrEmpty(GetAttributeValue(attrs[i])))
                         break;
 
+                    if (sources is not null)
+                    {
+                        int offset = attrs[i].DescriptorOffset;
+                        sources[offset] = sources[offset] with { Subroutine = subName };
+                    }
                     yield return attrs[i];
                 }
             }
@@ -502,7 +508,8 @@ namespace VNTextPatch.Shared.Scripts.Yuris
             if (str.Contains("`"))
                 throw new InvalidDataException($"Message can't contain backticks [{str}]");
 
-            str = StringUtil.EscapeC(str);
+            // Escape literal backslashes before encoding control characters such as newlines.
+            str = StringUtil.EscapeC(str.Replace("\\", "\\\\"));
             return $"`{str}`";
         }
 

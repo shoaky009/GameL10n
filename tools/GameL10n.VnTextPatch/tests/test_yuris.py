@@ -148,6 +148,19 @@ class YurisTests(unittest.TestCase):
                         self.assertEqual(expected, self.units(source=output))
                         self.assertEqual(script.read_bytes(), data)
 
+    def test_choice_expression_preserves_literal_backslashes_and_newlines(self):
+        script = self.source / 'scene.ybn'
+        script.write_bytes(scenario([('GOSUB', [expression('ES.SEL.SET'), expression('選択肢', 1)])]))
+        unit, = self.units(includeYurisSources=True)
+        self.assertEqual(unit['yurisSource']['attributes'][0]['subroutine'], 'ES.SEL.SET')
+        text = '選択\\n\\表\r\n末尾\\'
+        output = self.root / 'out'
+        self.invoke('build', outputDirectory=str(output), translations={unit['id']: text})
+        result, = self.units(source=output)
+        self.assertEqual((result['id'], result['sourceText']), (unit['id'], text))
+        value = attribute_values((output / 'scene.ybn').read_bytes())[1]
+        self.assertEqual(value[3:], ('\x60選択\\\\n\\\\表\\n末尾\\\\\x60').encode('cp932'))
+
     def test_mismatch_reports_two_bounded_locators(self):
         (self.source / 'scene.ybn').write_bytes(scenario([('WORD', [raw('元の文')])]))
         unit = self.units()[0]

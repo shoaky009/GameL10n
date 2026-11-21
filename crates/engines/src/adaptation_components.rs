@@ -263,6 +263,12 @@ fn source(name: &str) -> Result<&'static [u8], EngineError> {
             "../../../adapters/components/nekosdk_script.py"
         )),
         "ai5v_mes.py" => Ok(include_bytes!("../../../adapters/components/ai5v_mes.py")),
+        "yuris_ypf474.py" => Ok(include_bytes!(
+            "../../../adapters/components/yuris_ypf474.py"
+        )),
+        "willplus_wsc.py" => Ok(include_bytes!(
+            "../../../adapters/components/willplus_wsc.py"
+        )),
         "engine_archive.py" => Ok(include_bytes!(
             "../../../adapters/components/engine_archive.py"
         )),

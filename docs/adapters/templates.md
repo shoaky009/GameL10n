@@ -11,6 +11,8 @@
 | `archive.bgi` | `inspect`、`extract`、`rebuild` | PackFile 与 BURIKO ARC20，支持原始成员和 DSC 解码。带头 V1 脚本可回填到布局能逐字节复现的原卷。 |
 | `archive.kif` | `inspect`、`extract` | CatSystem2 普通 KIF 和可由游戏 EXE 确认成员名的加密脚本卷。加密卷用 `keyExecutable` 指定已暂存的 EXE。 |
 | `archive.ypf482` | `inspect`、`extract` | YPF 482，成员名使用 Murmur2 校验和 FF 异或。 |
+| `archive.ypf474` | `inspect`、`extract`、`rebuild` | 32 位偏移、FF 文件名异或、名称 CRC32 和成员 Adler32。支持最多 64 MiB 的脚本卷回填。 |
+| `archive.will-v1` | `inspect`、`extract`、`rebuild` | 按扩展名分组、13 字节基础名。保留成员的存储字节，最多 64 MiB 的卷可回填。 |
 | `archive.pfs8` | `inspect`、`extract` | Artemis PFS v8，使用索引派生的密钥读取成员。 |
 | `archive.nekopack4a` | `inspect`、`extract` | NEKOPACK4A，按索引读取选定成员并验证 zlib 解压长度。 |
 | `archive.whale-dat` | `inspect`、`extract`、`rebuild` | Whale DAT v2，脚本解码使用 `gameTitle`，媒体成员使用 `filenameManifest` 匹配 CRC64。重建适用于纯脚本卷。 |

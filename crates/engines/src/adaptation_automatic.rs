@@ -1366,7 +1366,7 @@ async fn inspect_archive_samples(
                     }
                 }
                 let relative = format!("{directory}/{}", files.first().ok_or_else(|| reject("封包未返回样本"))?);
-                let component = if format == "eagls-script" {
+                let component = if matches!(format, "eagls-script" | "willplus-wsc") {
                     Some(format)
                 } else {
                     template.and_then(|template| template.sample_component)
@@ -1395,6 +1395,12 @@ async fn inspect_archive_samples(
             }
             report["trials"] = json!(trials);
             let sample_passed = crate::adaptation_context::archive_sample_passed(&report);
+            if format == "willplus-wsc" && sample_passed {
+                report["nextAction"] = json!("复制 willplus-wsc 组件，复用对白、姓名、选项和跳转回填，以及 archive.will-v1 的封包读写。有回想标题等独立界面文本时，取含空格的标题与带控制符的对白试写，核对扩展汉字和字体后执行整卷验收。");
+            }
+            if format == "Yuris" && report["version"] == 474 && sample_passed {
+                report["nextAction"] = json!("复制 yuris-ypf474 组件复用该布局的封包读写，脚本沿用内置 Yuris 解析器。用 includeYurisSources 在小样中核对对白、选项、菜单及内部路径和字体，再扩大到全包。");
+            }
             if format == "Ethornell" && sample_passed {
                 report["nextAction"] = json!("沿用已通过原文往返的 Ethornell 解析。带头 V1 脚本可用 archive.bgi 的 rebuild 回填到可逐字节复现布局的原卷，保留其余成员。继续验收译文编码与游戏加载");
             }

@@ -47,6 +47,33 @@
     "engineFamilies": ["nekosdk"]
   },
   {
+    "id": "willplus-wsc",
+    "name": "WillPlus ARC v1 / WSC v2 脚本",
+    "scope": "13 字节基础名的 ARC v1；WSC 成员按字节旋转，FileEnd 带 8 字节参数。完整指令与跳转边界须匹配已支持的子集。",
+    "origin": "Will 封包读取复用固定 GARbro 参考库，WSC 按 Ws2Explorer 的指令布局和实测成员实现。",
+    "api": "tools.willplus_wsc.ScriptText(stored, decode=None).fields 提供 path、kind、text；build({path: text}, encode=None) 重定位跳转并返回完整存储成员。默认 CP932，可传入已验证的解码和编码函数。tools.engine_archive.execute 的 archive.will-v1 支持 inspect、extract、rebuild。回想列表、字体与运行编码需另验。",
+    "example": "try_builtin_adapter(format=\"willplus-wsc\", directory=\"work\", files=[\"sample.wsc\"])",
+    "sampleCheck": "willplus_wsc.py",
+    "files": [
+      {"name": "willplus_wsc.py", "path": "src/tools/willplus_wsc.py", "binary": false},
+      {"name": "engine_archive.py", "path": "src/tools/engine_archive.py", "binary": false}
+    ],
+    "engineFamilies": ["willplus", "will", "wsc", "advhd"]
+  },
+  {
+    "id": "yuris-ypf474",
+    "name": "YU-RIS YPF 474 脚本卷",
+    "scope": "32 位偏移、FF 文件名异或、CRC32 名称和 Adler32 存储成员校验。支持 raw/zlib。",
+    "origin": "参考 GARbro 的 YPF 索引与校验，复用固定库的长度表和成员解压。",
+    "api": "tools.engine_archive.execute(request) 的 archive.ypf474 支持 inspect、extract、rebuild，替换对象为解压后的完整成员。YSTB 与同目录 ysc.ybn 交给内置 Yuris 解析器。",
+    "example": "run_engine_component(id=\"archive.ypf474\", operation=\"inspect\", archive=\"resources/script.ypf\", output=\"work/index\")",
+    "files": [
+      {"name": "engine_archive.py", "path": "src/tools/engine_archive.py", "binary": false},
+      {"name": "yuris_ypf474.py", "path": "src/tools/yuris_ypf474.py", "binary": false}
+    ],
+    "engineFamilies": ["yuris", "yu-ris"]
+  },
+  {
     "id": "ai5v-mes",
     "name": "AI5V / SILV 字表式 MES",
     "scope": "完整、已解包的 MES。按 0x80 字表和已知字节码读取内联 CP932 文本，支持变长回填及复提。其他 MES 方言按各自组件检查。",

@@ -6,13 +6,14 @@ import struct
 import sys
 import tempfile
 import unittest
+import zlib
 
 ROOT = Path(__file__).resolve().parents[3]
 TOOLS = ROOT / "third_party/engine-tools"
 PIN = json.loads((TOOLS / "current.json").read_text(encoding="utf-8"))
 sys.path[:0] = [str(ROOT), str(TOOLS / "references" / PIN["revision"] / "library.zip")]
 
-from adapters.components import engine_archive as archive
+from adapters.components import engine_archive as archive, willplus_wsc
 from python.archives import bgi, bgi_writer, pfs, yuris_482
 from python.engines.bgi import MAGIC as BGI_SCRIPT_MAGIC
 
@@ -123,6 +124,51 @@ class IndexedArchivesTest(unittest.TestCase):
         result = archive.script_samples("Yuris", self.source, self.root)
         self.assertEqual(result["status"], "sample-unavailable")
         self.assertIn("ysc.ybn", result["diagnostics"][0])
+
+    def test_ypf474_rebuild_preserves_the_other_member_and_checks_stored_adler32(self):
+        names = (b"a.ybn", b"b.ybn")
+        start = 32 + sum(23 + len(name) for name in names)
+        header = bytearray(struct.pack("<4sIII", b"YPF\0", 474, 2, start).ljust(32, b"\0"))
+        payload = bytearray()
+        for name in names:
+            stored = zlib.compress(name)
+            header.extend(struct.pack("<IB", zlib.crc32(name), len(name) ^ 255))
+            header.extend(b ^ 255 for b in name)
+            header.extend(struct.pack("<BBIIII", 0, 1, len(name), len(stored), start + len(payload),
+                                      zlib.adler32(stored)))
+            payload.extend(stored)
+        self.source.write_bytes(header + payload)
+        replacement = self.root / "replacement"
+        replacement.write_bytes(bytes(range(128)))
+        output = self.root / "new.ypf"
+        result = self.run_component("archive.ypf474", "rebuild", outputFile=str(output),
+                                    replacements={"a.ybn": str(replacement)})
+        self.assertEqual(result["changedCount"], 1)
+        with output.open("rb") as stream:
+            _, entries, read = archive.open_index("archive.ypf474", stream)
+            self.assertEqual([read(e, 1024) for e in entries], [replacement.read_bytes(), b"b.ybn"])
+        payload[-1] ^= 1
+        self.source.write_bytes(header + payload)
+        with self.assertRaisesRegex(ValueError, "Adler32"):
+            self.run_component("archive.ypf474", "inspect", verifyContents=True)
+
+    def test_wsc_length_change_relocates_forward_and_backward_branches(self):
+        dialogue = b"\x41\0\0\0\0A\0"
+        end = 11 + len(dialogue) + 6
+        conditional = b"\x01" + bytes(5) + struct.pack("<iB", end - 11, 0)
+        jump = b"\x06" + struct.pack("<IB", end + 11, 0)
+        trailer = b"\xff" + bytes(range(8))
+        # A backward relative branch after the edited field moves its base, but keeps its target.
+        back = b"\x01" + bytes(5) + struct.pack("<iB", -(end + 11), 0)
+        stored = (conditional + dialogue + jump + back + trailer).translate(willplus_wsc.ENCODE)
+        script = willplus_wsc.ScriptText(stored)
+        rebuilt = script.build({"cmd:1:text": "ABCDE"}).translate(willplus_wsc.DECODE)
+        self.assertEqual(struct.unpack_from("<i", rebuilt, 6)[0], end - 11 + 4)
+        self.assertEqual(struct.unpack_from("<I", rebuilt, end - 6 + 4 + 1)[0], end + 11 + 4)
+        self.assertEqual(struct.unpack_from("<i", rebuilt, end + 4 + 6)[0], -(end + 4 + 11))
+        self.assertEqual(rebuilt[-9:], trailer)
+        with self.assertRaises(ValueError):
+            willplus_wsc.ScriptText(stored[:-8])
 
     def test_pfs_rejects_unsafe_index_before_any_extraction(self):
         self.source.write_bytes(pfs.build([("scene.ast", b"script"), ("../other", b"bad")]))

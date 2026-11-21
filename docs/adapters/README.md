@@ -12,6 +12,7 @@
 | [LiLiM SFA16 / AOS v2](engines/sfa16-aos-v2.md) | 内置适配器 | AOS v2 剧情脚本，中文入口须匹配运行程序 |
 | [Ren’Py RPYC2 与混合资源](engines/renpy-rpyc.md) | 组合模板 | 松散脚本、RPA/ARC 3.0 与无路径冲突的源码组合 |
 | [YU-RIS](engines/yuris.md) | 内置解析器 | YSTB、YSCF、命令表及可选 SJIS 隧道 |
+| [WillPlus WSC](../../adapters/components/willplus_wsc.py) | 封包与脚本组件 | ARC v1 中带八字节结束参数的 WSC v2 子集，支持对白、姓名、选项与变长跳转回填。[指令格式参考](https://github.com/kevlu123/VN-Patching-Tools/blob/766c2565c6acbdc2f31f58fa99f3bae72dd85dea/Ws2Explorer/Ws2Explorer/Scripts/lib/wsc_op_list.py) |
 | [EAGLS / ALIS SCPACK](engines/eagls-scpack.md) | 脚本组件 | 完整成员的解析与回填，封包和中文运行另行确认 |
 | [Flash AVM1](engines/flash-avm1.md) | 脚本组件与组合模板 | FWS/CWS 顶层动作的 UTF-8 常量池，支持变长回填和分支重定位 |
 | [Unity SerializedFile](engines/unity-serialized-text.md) | 容器组件 | Unity 2022 小端 v22，TextAsset 文本布局另行确认 |

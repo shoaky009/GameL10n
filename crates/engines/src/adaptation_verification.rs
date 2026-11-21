@@ -616,6 +616,18 @@ fn refresh_result(mut result: Value, state: &Session, reused: bool) -> Value {
     result["runtimeTested"] = json!(false);
     result["pendingCoverage"] = json!(coverage_list(state, "pending"));
     result["runtimeChecks"] = json!(coverage_list(state, "runtimeChecks"));
+    if result["passed"] == false
+        && matches!(
+            result["issues"]
+                .get(0)
+                .and_then(|issue| issue["stage"].as_str()),
+            Some("partial-translation-build" | "full-translation-build")
+        )
+    {
+        result["nextAction"] = json!(
+            "优先用诊断中的原始成员、伴随文件和出错译文局部复现。修复后比对写入与复提结果，覆盖同一失败条件，再执行完整 test_adapter。"
+        );
+    }
     if reused {
         for key in ["compileMs", "discoveryMs", "verificationMs"] {
             result[key] = json!(0);

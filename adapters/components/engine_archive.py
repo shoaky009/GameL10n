@@ -25,7 +25,8 @@ MAX_TOTAL = 256 << 20
 MAX_ENTRIES = 10_000
 RPA_MAX_ARCHIVE = 2 << 30
 MAX_INDEX = 8 << 20
-INDEXED_COMPONENTS = ("archive.bgi", "archive.kif", "archive.ypf482", "archive.pfs8", "archive.nekopack4a")
+INDEXED_COMPONENTS = ("archive.bgi", "archive.kif", "archive.ypf474", "archive.ypf482",
+                      "archive.will-v1", "archive.pfs8", "archive.nekopack4a")
 
 
 class ArchiveInput:
@@ -192,6 +193,11 @@ def open_kif(stream, executables):
     return ("encrypted" if index.encrypted else "plain"), index.entries, read, key_executable
 
 
+def script_volume_profile(component):
+    module = {"archive.will-v1": "willplus_wsc", "archive.ypf474": "yuris_ypf474"}[component]
+    return importlib.import_module(f"{__package__}.{module}" if __package__ else module)
+
+
 def open_index(component, stream, *, key_executable=None):
     """Return the format revision, index entries, and a bounded member reader."""
     limits = dict(max_index_size=MAX_INDEX, max_entries=MAX_ENTRIES)
@@ -208,6 +214,14 @@ def open_index(component, stream, *, key_executable=None):
         executables = {key_executable: key_executable} if key_executable else {}
         version, entries, read, _ = open_kif(stream, executables)
         return version, entries, read
+    elif component in ("archive.will-v1", "archive.ypf474"):
+        profile = script_volume_profile(component)
+        index = profile.read_index(stream, **limits)
+        version, entries = index.version, index.entries
+
+        def read(entry, maximum):
+            return profile.read_member(stream, index, entry, maximum)
+
     elif component == "archive.ypf482":
         from python.archives import yuris_482 as ypf
         _, entries, _ = ypf.read_index(stream, **limits)
@@ -451,6 +465,84 @@ def rebuild_bgi(request, source):
                 outputSha256=digest(result), changedCount=len(changed), byteIdentical=not changed)
 
 
+def rebuild_script_volume(request, source):
+    component = request["component"]
+    profile = script_volume_profile(component)
+    output = checked_path(request["outputFile"])
+    separate(source, output)
+    with source.open("rb") as stream:
+        size = os.fstat(stream.fileno()).st_size
+        if size > MAX_FILE:
+            raise ValueError("script volume exceeds the rebuild budget")
+        records = []
+        index = profile.read_index(stream, max_entries=MAX_ENTRIES, max_index_size=MAX_INDEX,
+                                   record_offsets=records)
+        stream.seek(0)
+        header = bytearray(stream.read(index.index_end))
+        validate_names(index.entries)
+        replacements = request.get("replacements", {})
+        if not isinstance(replacements, dict) or replacements.keys() - {e.name for e in index.entries}:
+            raise ValueError("unknown member in archive replacement mapping")
+
+        cursor, changed, budget = index.index_end, {}, MAX_FILE
+        output.parent.mkdir(parents=True, exist_ok=True)
+        target = output.open("x+b")
+        try:
+            with target:
+                target.write(header)
+                for entry in sorted(index.entries, key=lambda e: (e.offset, e.size)):
+                    if entry.offset < cursor:
+                        raise ValueError("overlapping members cannot be rebuilt")
+                    copy_range(stream, target, cursor, entry.offset - cursor)
+                    offset = target.tell()
+                    record = records[entry.ordinal]
+                    replacement = None
+                    if entry.name in replacements:
+                        path = checked_path(replacements[entry.name])
+                        separate(path, output)
+                        plain = read_file(path, budget)
+                        budget -= len(plain)
+                        if plain != profile.read_member(stream, index, entry, MAX_FILE):
+                            replacement = plain
+                            changed[entry.name] = digest(plain)
+                    stored = profile.patch_record(header, record, offset, entry, replacement)
+                    length = len(stored) if stored is not None else entry.size
+                    if offset + length > MAX_FILE:
+                        raise ValueError("rebuilt script volume exceeds the byte budget")
+                    if stored is None:
+                        copy_range(stream, target, entry.offset, length)
+                    else:
+                        target.write(stored)
+                    cursor = entry.offset + entry.size
+                if target.tell() + size - cursor > MAX_FILE:
+                    raise ValueError("rebuilt script volume exceeds the byte budget")
+                copy_range(stream, target, cursor, size - cursor)
+                length = target.tell()
+                target.seek(0)
+                target.write(header)
+                checksum = hash_range(target, 0, length)
+                if changed:
+                    target.seek(0)
+                    _, rebuilt, read = open_index(component, target)
+                    for before, after in zip(index.entries, rebuilt, strict=True):
+                        if before.name != after.name:
+                            raise ValueError("rebuilt archive changed the member order or names")
+                        if after.name in changed:
+                            if digest(read(after, MAX_FILE)) != changed[after.name]:
+                                raise ValueError(f"replacement readback differs: {after.name}")
+                        elif (before.size != after.size or hash_range(stream, before.offset, before.size)
+                              != hash_range(target, after.offset, after.size)):
+                            raise ValueError(f"unchanged member differs: {after.name}")
+                elif checksum != hash_range(stream, 0, size):
+                    raise ValueError("unchanged archive differs from its source")
+        except BaseException:
+            output.unlink(missing_ok=True)
+            raise
+    return dict(protocolVersion=VERSION, success=True, component=component, operation="rebuild",
+                formatVersion=index.version, inputBytes=size, entryCount=len(index.entries),
+                outputSha256=checksum, changedCount=len(changed), byteIdentical=not changed)
+
+
 def execute_indexed(request, source):
     operation, component = request["operation"], request["component"]
     if operation == "rebuild":
@@ -508,13 +600,23 @@ def script_samples(format_name, source, output, executables=None):
     component, extensions = {
         "Ethornell": ("archive.bgi", {".bgi", ""}),
         "CatSystem": ("archive.kif", {".cst"}),
-        "Yuris": ("archive.ypf482", {".ybn"}),
+        "Yuris": (None, {".ybn"}),
+        "willplus-wsc": ("archive.will-v1", {".wsc"}),
         "NekoSDK": ("archive.nekopack4a", {".txt"}),
     }[format_name]
     maximum = 2 << 20
     samples, errors = [], []
     with checked_path(source).open("rb") as raw:
         stream = ArchiveInput(raw)
+        if format_name == "Yuris":
+            header = stream.read(8)
+            stream.seek(0)
+            if len(header) != 8 or header[:4] != b"YPF\0":
+                raise ValueError("expected a YPF header")
+            version, = struct.unpack_from("<I", header, 4)
+            if version not in (474, 482):
+                raise ValueError("unsupported YPF sample version")
+            component = f"archive.ypf{version}"
         key_executable = None
         if component == "archive.kif":
             version, entries, read, key_executable = open_kif(stream, executables or {})
@@ -522,11 +624,16 @@ def script_samples(format_name, source, output, executables=None):
             version, entries, read = open_index(component, stream)
         index_bytes = stream.bytes_read
         by_name = {member_name(entry.name).casefold(): entry for entry in entries}
-        eligible = [entry for entry in entries if 0 < entry.size <= maximum
-                    and Path(member_name(entry.name)).suffix.lower() in extensions
-                    and Path(member_name(entry.name)).name.lower() != "ysc.ybn"]
-        eligible.sort(key=lambda entry: (abs(entry.size - (64 << 10)), entry.name))
-        for entry in eligible[:6 if format_name == "Ethornell" else 3]:
+        eligible = []
+        for entry in entries:
+            # The parser sees the unpacked script. A large system script can look small on disk.
+            script_size = getattr(entry, "unpacked_size", entry.size)
+            name = Path(member_name(entry.name))
+            if (0 < entry.size <= maximum and 0 < script_size <= maximum
+                    and name.suffix.lower() in extensions and name.name.lower() != "ysc.ybn"):
+                eligible.append((abs(script_size - (64 << 10)), entry))
+        eligible.sort(key=lambda item: (item[0], item[1].name))
+        for _, entry in eligible[:6 if format_name == "Ethornell" else 3]:
             name = member_name(entry.name)
             try:
                 data = read(entry, maximum)
@@ -900,6 +1007,8 @@ def execute(request):
         return execute_whale(request, source)
     if component == "archive.bgi" and operation == "rebuild":
         return rebuild_bgi(request, source)
+    if component in ("archive.ypf474", "archive.will-v1") and operation == "rebuild":
+        return rebuild_script_volume(request, source)
     if component in INDEXED_COMPONENTS:
         return execute_indexed(request, source)
     data = read_file(source, MAX_ARCHIVE)

@@ -16,7 +16,7 @@ use crate::{
     vntextpatch::{BUILTIN_FORMATS, BuiltinFormat},
 };
 
-pub(crate) const DISCOVERY_REVISION: u64 = 19;
+pub(crate) const DISCOVERY_REVISION: u64 = 20;
 const CONTAINERS: &[&str] = &[
     "xp3", "rpa", "rpyc", "pack", "pak", "arc", "ypf", "int", "pfs",
 ];
@@ -130,6 +130,20 @@ fn whale_dat_header(head: &[u8]) -> bool {
         return false;
     };
     (1..=10_000).contains(&count) && head.len() >= 25 && (head[12] ^ head[4]) <= 2
+}
+
+fn will_wsc_directory(head: &[u8]) -> bool {
+    let Some((count, directory)) = head.split_first_chunk::<4>() else {
+        return false;
+    };
+    let groups = u32::from_le_bytes(*count) as usize;
+    (1..=255).contains(&groups)
+        && directory.chunks_exact(12).take(groups).any(|row| {
+            row[..4].eq_ignore_ascii_case(b"WSC\0")
+                && row[4..8] != [0; 4]
+                && u32::from_le_bytes([row[8], row[9], row[10], row[11]]) as usize
+                    >= 4 + groups * 12
+        })
 }
 
 fn diagnostic(error: impl std::fmt::Display) -> String {
@@ -671,8 +685,14 @@ fn inspect_builtin_files(
                 Some("Ethornell")
             } else if head.starts_with(b"KIF\0") {
                 Some("CatSystem")
-            } else if head.starts_with(b"YPF\0") && head.get(4..8) == Some(&482_u32.to_le_bytes()) {
+            } else if head.starts_with(b"YPF\0")
+                && [474_u32, 482]
+                    .iter()
+                    .any(|v| head.get(4..8) == Some(&v.to_le_bytes()))
+            {
                 Some("Yuris")
+            } else if extension(path) == "arc" && will_wsc_directory(&head) {
+                Some("willplus-wsc")
             } else if head.starts_with(b"NEKOPACK4A") {
                 Some("NekoSDK")
             } else {
