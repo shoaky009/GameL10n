@@ -99,20 +99,24 @@ def _script_trial(entry, raw, layout):
         raise ValueError('脚本原文回填字节发生变化')
 
     translated = original.copy()
-    lines = original[row]['message'].split('\n')
-    lines[-1] += '汉'
-    translated[row] = dict(original[row], message='\n'.join(lines))
+    message = original[row]['message']
+    translated[row] = dict(original[row], message=message + '汉')
     changed = script_format.patch(script, translated, **options)
     trial = dict(member=entry.name, bytes=len(raw), unitCount=len(original), parseStatus='passed',
                  roundtripStatus='passed', scriptTranslationStatus='passed', encoding=encoding)
     try:
         encoded = bom + changed.encode(encoding)
     except UnicodeEncodeError:
-        return dict(trial, translationStatus='failed', errorType='UnicodeEncodeError'), None
+        # Exercise the archive writer independently of the system-font trial.
+        trial.update(translationStatus='failed', errorType='UnicodeEncodeError')
+        translated[row] = dict(original[row], message=message + '字')
+        encoded = bom + script_format.patch(script, translated, **options).encode(encoding)
+    else:
+        trial['translationStatus'] = 'passed'
     decoded, _, _ = script_format.decode(encoded, **options)
     if [record.row() for record in script_format.scan(decoded, **options)] != translated:
         raise ValueError('编码后的脚本回读与请求译文不符')
-    return dict(trial, translationStatus='passed'), encoded
+    return trial, encoded
 
 
 def check_rebuild(layout, source, before, output, key, game_key, changes, *, limit):
@@ -235,8 +239,6 @@ def trial_volumes(request, report, layout, volumes):
         try:
             layout.tail(stream, index)
             if layout.unicode_scripts:
-                if replacement is None:
-                    raise ValueError('当前脚本编码无法完成中文回填小样')
                 changes = {entry.name: replacement}
                 with tempfile.TemporaryFile() as output:
                     layout.rebuild(stream, output, index, keys[path], external_key, game_key, changes)

@@ -102,16 +102,15 @@ def verify(request):
         evidence = f"QLIE 试译字符「{char}」在游戏脚本中写为 U+{ord(slot):04X}"
         if not install.font_resources:
             raise ValueError(f"{evidence}，缺少可核验的系统字体选择：{install.font_diagnostic}")
-        if not request["launcher"] or "/" in request["launcher"] or font.LAUNCH not in effective_files:
+        if (not request["launcher"] or "/" in request["launcher"] or request["launcher"] not in files
+                or font.LAUNCH not in effective_files or not install.executable):
             raise ValueError(f"{evidence}，补丁启动入口缺少加载配套字体的配置")
         launch = ElementTree.fromstring(archive.read_file(root / font.LAUNCH, font.CONFIG_BYTES))
         if launch.tag != "launch" or launch.get("executable") != install.executable:
             raise ValueError(f"{evidence}，字体启动配置未指向当前游戏 EXE")
-        slots = font.font_slots(*(font.cp932(raw) for raw in install.font_resources))
-        if any(selector not in {"system", "system_fix"} for _, selector, _ in slots):
-            raise ValueError(f"{evidence}，字体表使用了尚未确认的字形选择方式")
-        fixed = {face for _, selector, face in slots if selector == "system_fix"}
-        selected = {face for _, _, face in slots} | (script_faces - {"外字"})
+        slots = install.font_resources.slots().values()
+        fixed = {face for selector, face in slots if selector == "system_fix"}
+        selected = {face for _, face in slots} | install.font_resources.selected_faces() | (script_faces - font.INHERITED)
         registered = {}
         for node in launch.findall("font"):
             face = node.get("face")

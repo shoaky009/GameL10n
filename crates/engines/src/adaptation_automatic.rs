@@ -1803,8 +1803,8 @@ pub(super) async fn run_template(
             report["identicalArchiveCopies"] = json!(identical_copies);
         }
         supported(remaining,&template,template["archiveComponent"] == "archive.rpa3",false)?;
-        if uninstall_archive.is_some() {
-            candidate_files.extend(paths.keys().filter(|path| qlie::uninstall_companion(path)).cloned());
+        if let Some(archive) = uninstall_archive {
+            candidate_files.push(archive.clone());
         }
         let lengths: BTreeMap<_, _> = if let Some(profile) = archive_template {
             report["stage"] = json!(if flash { "swf-inspection" } else { "archive-inspection" });

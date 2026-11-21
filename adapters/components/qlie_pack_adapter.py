@@ -136,7 +136,7 @@ class Installation:
     font_layout: font.Layout | None
     font_diagnostic: str
     glyphs: dict[int, int]
-    font_resources: tuple[bytes, bytes] | None
+    font_resources: font.Resources | None
 
     def read(self, path, entry, limit):
         return self.layout.read(*self.archives[path], entry, self.internal_keys[path], self.game_key, limit)
@@ -146,23 +146,30 @@ def system_font(root, request, files, indices):
     config = next((path for path in files if path.casefold() == font.CONFIG), None)
     if config is None:
         return None, "缺少外置的 QLIE 系统字体配置"
-    tables = [(path, entry) for path, (_, index) in indices.items() for entry in index.entries
-              if entry.name.replace("\\", "/").casefold() == font.TABLE]
+    members = {name: [] for name in (font.TABLE, font.TEXT_TABLE, font.FONT_LIST_FILE, font.SETTINGS_FILE)}
+    for path, (_, index) in indices.items():
+        for entry in index.entries:
+            name = entry.name.replace("\\", "/").casefold()
+            if name in members:
+                members[name].append((path, entry))
+    tables = members[font.TABLE] + members[font.TEXT_TABLE]
     if len(tables) != 1:
         return None, "需要唯一的 QLIE 系统字体表"
-    path, entry = tables[0]
-    _, index = indices[path]
-    key = index.entries[0]
-    if (max(entry.size, entry.unpacked_size) > font.CONFIG_BYTES
-            or max(key.size, key.unpacked_size) > pack.KEY_BYTES
+    documents = [*tables, *members[font.FONT_LIST_FILE], *members[font.SETTINGS_FILE]]
+    if (len(documents) > 16 or any(max(e.size, e.unpacked_size) > font.CONFIG_BYTES for _, e in documents)
             or any(info["path"] == config and info["length"] > font.CONFIG_BYTES
                    for info in request.get("probeFiles", []))):
-        return None, "QLIE 系统字体表或伴随配置超出读取范围"
+        return None, "QLIE 字体表或伴随配置超出读取范围"
     try:
         raw = archive.read_file(root / config, font.CONFIG_BYTES)
+        for path in {path for path, _ in documents}:
+            _, index = indices[path]
+            key = index.entries[0]
+            if max(key.size, key.unpacked_size) > pack.KEY_BYTES:
+                raise ValueError("QLIE 字体表所在卷的密钥超出读取范围")
+        return (font.Document.read(config, None, raw), documents), ""
     except ValueError as error:
         return None, str(error)
-    return (config, raw, path, entry), ""
 
 
 def locate(root, request, files, stack):
@@ -227,14 +234,15 @@ def locate(root, request, files, stack):
     profile = {path: list(support.profile_members(index, layout)) for path, (_, index) in indices.items()}
     scripts = {path: script_members(index) for path, (_, index) in indices.items()}
     selected = {path: entry for path, entry in indices.items() if scripts[path] or profile[path]}
-    font_source, font_diagnostic = ((None, "") if layout.unicode_scripts
-                                    else system_font(root, request, files, indices))
-    if font_source and font_source[2] not in selected:
-        path = font_source[2]
-        try:
-            layout.tail(*indices[path])
-        except ValueError as error:
-            font_source, font_diagnostic = None, str(error)
+    font_source, font_diagnostic = system_font(root, request, files, indices)
+    if font_source and not exe:
+        profiles = {path.casefold() for path in files if path.lower().endswith(".exe.le.config")}
+        paired = [path for path in executables if path.casefold() != font.LAUNCHER.casefold()
+                  and path.casefold() + ".le.config" in profiles]
+        if len(paired) == 1:
+            exe = paired[0]
+        else:
+            font_source, font_diagnostic = None, "需要唯一带 Locale Emulator 配置的原游戏 EXE"
     if not any(scripts.values()):
         raise ValueError("QLIE 封包没有 ImoScripter 脚本成员")
     if sum(map(len, profile.values())) > 8:
@@ -244,16 +252,17 @@ def locate(root, request, files, stack):
         if path in selected:
             layout.tail(stream, index)
         fingerprints[path] = archive.hash_range(stream, index.index_offset, index.file_size - index.index_offset)
-    probe_targets = selected.copy()
+    font_entries = {}
     if font_source:
-        path = font_source[2]
-        probe_targets[path] = indices[path]
-    for path, (stream, index) in probe_targets.items():
+        for path, entry in font_source[1]:
+            font_entries.setdefault(path, []).append(entry)
+    for path in sorted(selected.keys() | font_entries.keys()):
+        stream, index = indices[path]
         if not isinstance(stream, ProbeFile):
             continue
-        reads = [(index.entries[0], pack.KEY_BYTES), *((entry, 64 << 10) for entry, _ in profile[path])]
-        if font_source and font_source[2] == path:
-            reads.append((font_source[3], font.CONFIG_BYTES))
+        reads = [(index.entries[0], pack.KEY_BYTES), *((entry, font.CONFIG_BYTES) for entry, _ in profile[path])]
+        known = {entry.name for entry, _ in reads}
+        reads.extend((entry, font.CONFIG_BYTES) for entry in font_entries.get(path, []) if entry.name not in known)
         for entry, limit in reads:
             if entry.size > limit or entry.unpacked_size > limit:
                 raise ValueError("QLIE 密钥或脚本配置超出读取范围")
@@ -267,30 +276,37 @@ def locate(root, request, files, stack):
                   for path, volume in selected.items()}
     if any(len(key) < 256 for key in local_keys.values()):
         raise ValueError("QLIE 封包内部密钥长度不足")
-    companions = [path for path in files if exe and path.lower() == exe.lower() + ".le.config"]
-    glyphs = {} if layout.unicode_scripts else font.old_mapping(root, files)
+    companions = []
+    glyphs = font.old_mapping(root, files)
     font_layout = None
     font_resources = None
     if font_source:
-        config, raw, path, entry = font_source
+        config, entries = font_source
         try:
-            volume = indices[path]
-            key = local_keys.get(path) or layout.key(*volume, external_key, game_key)
-            if len(key) < 256:
-                raise ValueError("QLIE 字体表所在卷的内部密钥长度不足")
-            table = layout.read(*volume, entry, key, game_key, font.CONFIG_BYTES)
-            font_resources = raw, table
-            font_layout = font.Layout.read(config, raw, path, entry.name, table, glyphs)
-            local_keys[path] = key
-            selected[path] = volume
-            companions.append(config)
+            docs = []
+            for path, entry in entries:
+                volume = indices[path]
+                if path not in local_keys:
+                    layout.tail(*volume)
+                    local_keys[path] = layout.key(*volume, external_key, game_key)
+                raw = layout.read(*volume, entry, local_keys[path], game_key, font.CONFIG_BYTES)
+                docs.append(font.Document.read(path, entry.name, raw))
+            font_resources = font.Resources(config, docs[0], docs[1:])
+            font_layout = font.Layout.read(font_resources, glyphs)
+            selected.update((path, indices[path]) for path in font_entries)
+            companions.append(config.path)
         except ValueError as error:
             font_diagnostic = str(error)
     if glyphs:
         if not font_layout or not set(font_layout.runtime_files()) <= set(files):
             raise ValueError("QLIE 中文补丁的字体配置、字形映射或伴随文件不完整")
         companions.extend(font_layout.runtime_files())
-    required = sorted([*selected, *filter(None, (key_file, exe)), *companions], key=str.casefold)
+    if exe and (font_layout or key_file):
+        companions.append(exe)
+        companions.extend(path for path in files if path.casefold() == exe.casefold() + ".le.config")
+    if key_file:
+        companions.append(key_file)
+    required = sorted([*selected, *companions], key=str.casefold)
     index_bytes = sum(index.file_size - index.index_offset for _, index in indices.values())
     install = Installation(required, exe, layout, selected, game_key, external_key, local_keys,
                            fingerprints, index_bytes, font_layout, font_diagnostic, glyphs, font_resources)
@@ -329,20 +345,19 @@ def read_scripts(install):
             yield path, entry.name, script, encoding, bom
 
 
-def scripts(install, sources, translations=None, mapping=None):
+def scripts(install, sources, translations=None, mapping=None, faces=None):
     units, changes, used = [], {}, set()
     changed = 0
     mapping = install.glyphs if mapping is None else mapping
     reverse = {code: slot for slot, code in mapping.items()}
-    faces = ({face: font.family(style, mapping) + " Regular" for face, style in install.font_layout.faces.items()}
-             if mapping != install.glyphs else {})
     options = dict(unicode_scripts=install.layout.unicode_scripts)
     for path, member, script, encoding, bom in sources:
         try:
+            cp932 = encoding == 'cp932'
             rows, modified = [], False
             for number, record in enumerate(script_format.scan(script, **options)):
                 row = record.row()
-                decoded = {field: value.translate(install.glyphs) for field, value in row.items()} if install.glyphs else row
+                decoded = {field: value.translate(install.glyphs) for field, value in row.items()} if cp932 and install.glyphs else row
                 for field, unit in text_units(path, member, number, record, decoded, **options):
                     if translations is None:
                         units.append(unit)
@@ -350,8 +365,8 @@ def scripts(install, sources, translations=None, mapping=None):
                         used.add(unit["id"])
                         replacement = translations[unit["id"]]
                         if replacement != decoded[field]:
-                            encoded = replacement.translate(reverse)
-                            if encoded.translate(mapping) != replacement:
+                            encoded = replacement.translate(reverse) if cp932 else replacement
+                            if cp932 and encoded.translate(mapping) != replacement:
                                 raise ValueError("译文与 QLIE 字形码位冲突")
                             row[field] = encoded
                             modified = True
@@ -400,8 +415,8 @@ def execute(request):
             return dict(probe=None, diagnostic=str(error)[:400])
         if isinstance(install, dict):
             return install
-        warnings = [UNICODE_WARNING if install.layout.unicode_scripts else
-                    FONT_WARNING if install.font_layout else WARNING]
+        warnings = [FONT_WARNING if install.font_layout else
+                    UNICODE_WARNING if install.layout.unicode_scripts else WARNING]
         if operation == "probe":
             entries = [entry for _, index in install.archives.values() for entry in script_members(index)]
             distinct_names = {entry.name.replace("\\", "/").casefold() for entry in entries}
@@ -415,7 +430,8 @@ def execute(request):
                         systemFont=dict(matched=install.font_layout is not None, diagnostic=install.font_diagnostic),
                         probe=dict(engineId="qlie", adapterId=f"template.{install.layout.template}", adapterVersion="1",
                                    description="QLIE 封包内的 ImoScripter FormatType=1 脚本",
-                                   requiredFiles=install.files, originalExecutable=install.executable,
+                                   requiredFiles=install.files,
+                                   originalExecutable=install.executable if install.executable in install.files else None,
                                    warnings=warnings))
         if set(files) != set(install.files):
             raise ValueError("请选择 QLIE 探测返回的必需资源")
@@ -442,24 +458,33 @@ def rebuild(root, request, install, translations, warnings):
     mapping = install.glyphs
     layout = install.font_layout
     characters = {char for text in translations.values() for char in text}
-    needed = set() if install.layout.unicode_scripts else font.glyphs_needed(characters, mapping)
-    assets = {}
+    needed = font.glyphs_needed(characters, mapping)
+    if needed:
+        sources = list(sources)
+        if install.layout.unicode_scripts:
+            legacy = [item for item in sources if item[3] == "cp932"]
+            if len(legacy) != len(sources):
+                units, _ = scripts(install, legacy)
+                characters = {char for unit in units for char in translations.get(unit["id"], "")}
+                needed = font.glyphs_needed(characters, mapping)
+    runtime, faces = {}, {}
     if needed:
         if not layout:
             raise ValueError(f"QLIE 译文需要已确认的中文编码与字体方案（{install.font_diagnostic}）")
-        assets = font.resolve_assets(request, layout)
-        sources = list(sources)
-        occupied = {char for _, _, script, _, _ in sources for char in font.PRIVATE_CHARS.findall(script)}
-        mapping = font.plan(layout, mapping, needed, occupied, characters)
-    _, changes = scripts(install, sources, translations, mapping)
-    runtime = {}
-    if mapping != install.glyphs:
         if font.LAUNCHER.casefold() == install.executable.casefold():
             raise ValueError("QLIE 补丁启动器与原游戏 EXE 同名")
-        config, table = layout.resource_edits(mapping)
-        changes.setdefault(layout.table_volume, {})[layout.table_member] = table
+        assets = font.resolve_assets(request, layout)
+        occupied = {char for _, _, script, _, _ in sources for char in font.PRIVATE_CHARS.findall(script)}
+        mapping = font.plan(layout, mapping, needed, occupied, characters)
+        faces = {face: font.family(style, mapping) + " Regular" for face, style in layout.faces.items()}
         runtime = font.make_runtime(layout, install.executable, mapping, assets)
-        runtime[layout.config_path] = config
+    _, changes = scripts(install, sources, translations, mapping, faces)
+    if faces:
+        for doc, raw in layout.resource_edits(faces):
+            if doc.member is None:
+                runtime[doc.path] = raw
+            else:
+                changes.setdefault(doc.path, {})[doc.member] = raw
     files = sorted(set(install.files) | set(runtime), key=str.casefold)
     operation = request["operation"]
     if operation == "validate":
