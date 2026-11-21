@@ -118,7 +118,22 @@ fn find<'a>(components: &'a [Component], id: &str) -> Result<&'a Component, Engi
         .iter()
         .find(|component| component.id.eq_ignore_ascii_case(id))
         .ok_or_else(|| {
-            EngineError::Rejected("未知复用组件，请从 list_adapters 的 components 中选择。".into())
+            let prefix = id.trim().to_ascii_lowercase();
+            let candidates: Vec<_> = components
+                .iter()
+                .map(|component| component.id.as_str())
+                .filter(|candidate| !prefix.is_empty() && candidate.starts_with(&prefix))
+                .collect();
+            if candidates.is_empty() {
+                EngineError::Rejected(
+                    "未知复用组件，请从 list_adapters 的 components 中选择。".into(),
+                )
+            } else {
+                EngineError::Rejected(format!(
+                    "请使用完整的组件 ID，可选：{}。",
+                    candidates.join("、")
+                ))
+            }
         })
 }
 
@@ -616,6 +631,40 @@ mod tests {
             related[1]["inspectCall"],
             json!({"tool":"inspect_adapter_component","arguments":{"id":"xp3-adler"}})
         );
+    }
+
+    #[test]
+    fn inspect_suggests_the_full_component_id_for_a_short_name() {
+        let root = tempfile::tempdir().expect("fixture");
+        let service = service(root.path());
+        let cancellation = CancellationToken::new();
+        let error = inspect(&service, &json!({"id":"vntextproxy"}), &cancellation)
+            .expect_err("short name requires a full ID");
+        assert!(error.to_string().contains("vntextproxy-runtime"));
+        let description = inspect(
+            &service,
+            &json!({"id":"vntextproxy-runtime"}),
+            &cancellation,
+        )
+        .expect("suggested component");
+        assert_eq!(description["id"], "vntextproxy-runtime");
+    }
+
+    #[test]
+    fn copy_reports_ambiguous_ids_before_writing_any_components() {
+        let root = tempfile::tempdir().expect("workspace");
+        let mut state = Session::default();
+        let error = copy(
+            &service(root.path()),
+            root.path(),
+            &mut state,
+            &json!({"ids":["eagls-script","XP3"]}),
+        )
+        .expect_err("ambiguous component");
+        let message = error.to_string();
+        assert!(message.contains("xp3-adler") && message.contains("xp3-smil"));
+        assert!(!root.path().join("src").exists());
+        assert!(state.release_files.is_empty());
     }
 
     #[test]

@@ -13,6 +13,8 @@
 
 每个组件的参数、示例和限制随注册条目维护。[组件注册表](../../crates/engines/prompts/adapter-components.json)
 
+查询和复制组件时使用完整 ID。只给出 ID 前缀时，工具会列出匹配的完整 ID，供下次调用选择。
+
 ## 接入与版本管理
 
 用 `copy_adapter_components` 取得所需组件。分析探针放在 `work/`，正式依赖放在 `src/tools/` 并登记发布清单。需要 VNTextPatch 的组件会自动绑定该工具。使用 `use_engine_reference` 固定共享库。预编译组件由项目工具准备脚本构建。[正式适配器](artifacts.md#正式适配器) · [工具准备](../development.md#工具准备)
