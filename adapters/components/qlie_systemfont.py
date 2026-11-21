@@ -31,6 +31,12 @@ FONT_LIST = re.compile(r"^Font\[(\d+)\]\.List\[(\d+)\]=([^\r\n]*)", re.I | re.M)
 EXTERNAL_FONT = re.compile(r"^ExtFont\[\d+\]=([^\r\n]*)", re.I | re.M)
 FONT_NAME = re.compile(r"^Font\[(\d+)\]\.Name=([^\r\n]*)", re.I | re.M)
 FONT_COMMAND = re.compile(r'^[ \t]*(?:\\scp,[^\s,]+[ \t]+)?\\fn2,[^,\r\n]+,"([^"\r\n]*)"', re.I | re.M)
+SETUP_MEMBER = "misc/misc.s"
+SETUP_ROUTINE = re.compile(r"^@@!Misc_FontSetup[ \t]*\r?\n(.*?)(?=^[ \t]*\\ret\b|^@@|\Z)", re.I | re.M | re.S)
+CONFIG_SCOPE = re.compile(r"^[ \t]*\\scp,cfg[ \t]*(\r?\n)", re.I | re.M)
+INHERIT_BASE = re.compile(r"^([ \t]*)\\\?fn[ \t]+\\fn2,\w+,ResultStr\[0\][ \t]*\r?$", re.I | re.M)
+SET_BASE = re.compile(r'\\fn2,0,"([^"\r\n]+)"', re.I)
+FACE_TEST = re.compile(r'\\if,ResultStr\[0\]=="[^"]+"(?: \|\| ResultStr\[0\]=="[^"]+")*\\then')
 INHERITED = {"", "base", "外字"}
 SYSTEM_FACES = {
     "ms gothic": "Sans",
@@ -112,6 +118,36 @@ def replace_value(text, matches, group, replacement):
         parts.extend((text[cursor:start], value))
         cursor = end
     return "".join([*parts, text[cursor:]]) if parts else text
+
+
+def base_selection(script):
+    """Find the cfg block that copies the player-selected base face into dialogue slots."""
+    routine = SETUP_ROUTINE.search(script)
+    if not routine:
+        return None
+    copy = INHERIT_BASE.search(script, routine.start(1), routine.end(1))
+    if not copy:
+        return None
+    scopes = list(CONFIG_SCOPE.finditer(script, routine.start(1), copy.start()))
+    if not scopes:
+        raise ValueError("QLIE 对白继承了基础字体，但未确认其配置作用域")
+    scope = scopes[-1]
+    return scope.end(), copy.start(), copy[1], scope[1]
+
+
+def base_faces(commands):
+    lines = [line.strip() for line in commands.splitlines() if line.strip()]
+    if not lines:
+        return set()
+    if (len(lines) == 6 and lines[0] == r"\?fn" and FACE_TEST.fullmatch(lines[1])
+            and lines[3] == r"\else" and lines[5] == r"\end"):
+        lines = [lines[2], lines[4]]
+    elif len(lines) != 1:
+        raise ValueError("QLIE 基础字体继承前含未识别的设置指令")
+    assignments = [SET_BASE.fullmatch(line) for line in lines]
+    if not all(assignments):
+        raise ValueError("QLIE 对白的基础字体无法从设置脚本确认")
+    return {match[1] for match in assignments}
 
 
 @dataclass
@@ -200,6 +236,27 @@ class Layout:
             return faces[original]
 
         return replace_value(script, FONT_COMMAND.finditer(script), 1, face)
+
+    def restore_base(self, script, faces):
+        selection = base_selection(script)
+        if selection is None:
+            return script
+        start, end, indent, newline = selection
+        base_faces(script[start:end])
+        default = faces[self.slots[0][1]]
+        lines = [f'\\fn2,0,"{default}"']
+        alternate = next((name for name in faces.values() if name != default), None)
+        if alternate:
+            # The game can restore an MS font from the player's settings, including after the title screen.
+            # Every branch selects a registered face before the existing slot inheritance runs.
+            stock = (["ＭＳ ゴシック", "MS Gothic", "ＭＳ Ｐゴシック", "MS PGothic", "MS UI Gothic"]
+                     if alternate.startswith("QlieSans") else ["ＭＳ 明朝", "MS Mincho", "ＭＳ Ｐ明朝", "MS PMincho"])
+            originals = sorted(name for name, target in faces.items() if target == alternate)
+            names = dict.fromkeys([*stock, *originals, alternate])
+            condition = " || ".join(f'ResultStr[0]=="{name}"' for name in names)
+            lines = [r"\?fn", f"\\if,{condition}\\then", f'\t\\fn2,0,"{alternate}"',
+                     r"\else", f'\t\\fn2,0,"{default}"', r"\end"]
+        return script[:start] + "".join(indent + line + newline for line in lines) + script[end:]
 
     def runtime_files(self):
         files = [MAPPING, LAUNCH, LAUNCHER]

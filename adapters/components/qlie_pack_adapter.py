@@ -20,7 +20,7 @@ from .gamel10n_host import write_response
 WARNING = "支持已识别的 ImoScripter 脚本字段与严格 CP932 回填，中文编码、系统文本和游戏显示需另行验收"
 UNICODE_WARNING = "按脚本原编码回填已识别的 ImoScripter 字段，保留注音标签，系统文本和游戏内显示需另行验收"
 FONT_WARNING = "已识别 QLIE 系统字体布局，脚本以外的文字及游戏内中文显示需要单独确认"
-LAUNCH_WARNING = "通过 QlieLauncher.exe 启动以加载补丁字体，保留原游戏的日语转区配置"
+LAUNCH_WARNING = "译文使用了 CP932 私用字形，请通过 QlieLauncher.exe 加载配套字体并启动游戏。启动器会沿用原 EXE 的转区配置"
 MAX_SCRIPT = 8 << 20
 MAX_TOTAL = 64 << 20
 MAX_EXE = 64 << 20
@@ -374,6 +374,8 @@ def scripts(install, sources, translations=None, mapping=None, faces=None):
             patched = script_format.patch(script, rows, **options) if modified else script
             if faces:
                 patched = install.font_layout.script_faces(patched, faces)
+                if member.replace("\\", "/").casefold() == font.SETUP_MEMBER:
+                    patched = install.font_layout.restore_base(patched, faces)
             if patched != script:
                 encoded = patched.encode(encoding)
                 if encoded.decode(encoding) != patched:

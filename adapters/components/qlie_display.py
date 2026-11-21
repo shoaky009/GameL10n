@@ -57,6 +57,24 @@ def locate_samples(source, samples):
     return matched
 
 
+def inherited_faces(install):
+    selected = set()
+    for volume, (_, index) in install.archives.items():
+        for entry in pack.script_members(index):
+            if entry.name.replace("\\", "/").casefold() != font.SETUP_MEMBER:
+                continue
+            raw = install.read(volume, entry, pack.MAX_SCRIPT)
+            script, _, _ = qlie_script.decode(raw, unicode_scripts=install.layout.unicode_scripts)
+            selection = font.base_selection(script)
+            if selection:
+                start, end, _, _ = selection
+                faces = font.base_faces(script[start:end])
+                if not faces:
+                    raise ValueError(f"{volume}/{entry.name} 的对白会继承玩家保存的字体，尚未在继承前选用配套字体")
+                selected.update(faces)
+    return selected
+
+
 class EffectiveResources:
     def __init__(self, original, output, files):
         self.original, self.output, self.files = original, output, set(files)
@@ -111,6 +129,7 @@ def verify(request):
         slots = install.font_resources.slots().values()
         fixed = {face for selector, face in slots if selector == "system_fix"}
         selected = {face for _, face in slots} | install.font_resources.selected_faces() | (script_faces - font.INHERITED)
+        selected.update(inherited_faces(install))
         registered = {}
         for node in launch.findall("font"):
             face = node.get("face")
