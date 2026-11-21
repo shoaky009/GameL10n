@@ -1,4 +1,4 @@
-use crate::view::{App, MainWindow, ProjectRow, TextRow, TokenDisplay};
+use crate::view::{App, MainWindow, NamedRow, ProjectRow, TextRow, TokenDisplay};
 use slint::{
     ComponentHandle, Model, ModelRc, VecModel,
     platform::{
@@ -399,5 +399,30 @@ fn render_desktop_preview_fixtures() {
         app.set_check_scene(1);
         capture(&format!("workflow-scene{suffix}"), 1120, 720);
         app.set_modal("".into());
+        app.set_page(2);
+        app.set_engine_name("QLIE PACK 3.0 + ImoScripter FormatType=1".into());
+        app.set_engine_tab(3);
+        let entry = NamedRow {
+            id: "filepack".into(),
+            name: "QLIE FilePack 3.0 封包和 ImoScripter FormatType=1 脚本可以复用同一套提取与回填流程。中文试译需要核对 CP932 私用码位、字体选择和配套启动器。".into(),
+            detail: "已启用 · 0 个工具".into(),
+            enabled: true,
+        };
+        app.set_knowledge_id("".into());
+        app.set_knowledge(ModelRc::new(VecModel::from(vec![entry.clone()])));
+        capture(&format!("engine-knowledge{suffix}"), 1420, 900);
+        app.set_knowledge_id(entry.id.clone());
+        app.set_knowledge_enabled(true);
+        app.set_knowledge(ModelRc::new(VecModel::from(vec![
+            entry,
+            NamedRow {
+                id: "font".into(),
+                name: "核对字体与转区配置。".into(),
+                detail: "已停用 · 1 个工具".into(),
+                enabled: false,
+            },
+        ])));
+        capture(&format!("engine-knowledge-selected{suffix}"), 1120, 720);
+        app.set_page(0);
     }
 }

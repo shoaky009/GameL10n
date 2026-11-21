@@ -47,8 +47,26 @@ export component EngineLibrary inherits VerticalLayout {
                     }
                 } }
             }
-            if App.engine-tab == 3: VerticalLayout {
-                ListView { height: 170px; for knowledge in App.knowledge: Rectangle { height: 66px; background: App.knowledge-id == knowledge.id ? Theme.tint : Theme.surface; VerticalLayout { padding: 8px; Label { text: knowledge.name; } Caption { text: knowledge.detail; } } TouchArea { clicked => { App.action("knowledge", knowledge.id); } } } }
+            if App.engine-tab == 3: VerticalLayout { spacing: 8px;
+                if App.knowledge.length > 0: ScrollView {
+                    height: min(170px, entries.preferred-height);
+                    horizontal-scrollbar-policy: always-off;
+                    content-width: self.visible-width;
+                    content-height: entries.preferred-height;
+                    entries := VerticalLayout { spacing: 4px; alignment: start;
+                        for knowledge in App.knowledge: Rectangle {
+                            height: entry-content.preferred-height;
+                            background: App.knowledge-id == knowledge.id ? Theme.tint : Theme.surface;
+                            border-radius: 4px;
+                            entry-content := VerticalLayout {
+                                width: parent.width; padding: 12px; spacing: 4px; alignment: start;
+                                Label { text: knowledge.name; }
+                                Caption { text: knowledge.detail; }
+                            }
+                            TouchArea { clicked => { App.action("knowledge", knowledge.id); } }
+                        }
+                    }
+                }
                 CheckBox { text: "用于后续智能识别与适配"; checked <=> App.knowledge-enabled; enabled: App.knowledge-id != ""; toggled => { App.action("knowledge-enable", ""); } }
                 ScrollView { horizontal-scrollbar-policy: always-off; content-width: self.visible-width;
                     VerticalLayout { alignment: start; spacing: 12px;
