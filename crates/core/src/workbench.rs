@@ -1,12 +1,13 @@
 //! UI-independent text browsing, saved edits, review state and candidates.
 
-use crate::{Application, CoreError};
+use crate::{Application, CoreError, application::CachedAnalysis};
 use gamel10n_translation::{
     TranslationUnit, ValidationIssue,
     edits::EditChanges,
     execution::load_issues,
     storage::{
-        TranslationEdit, TranslationMemory, TranslationOrigin, TranslationPolicy, memory_key,
+        TranslationEdit, TranslationEdits, TranslationMemory, TranslationOrigin, TranslationPolicy,
+        memory_key,
     },
     text,
 };
@@ -15,7 +16,7 @@ use serde_json::Value;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     path::PathBuf,
-    sync::Arc,
+    sync::{Arc, LazyLock, Weak},
 };
 use tokio::sync::Mutex;
 
@@ -65,16 +66,55 @@ pub struct WorkbenchPage {
     pub kinds: Vec<String>,
 }
 
+#[derive(Default)]
 struct RowState {
-    index: usize,
     model: Option<String>,
-    edit: Option<TranslationEdit>,
-    candidate: Option<TranslationEdit>,
+    edit: Option<RowEdit>,
+    candidate: Option<String>,
     issues: Vec<ValidationIssue>,
     failure: Option<String>,
     previous_edit: Option<String>,
 }
+
+struct RowEdit {
+    text: String,
+    reviewed: bool,
+    generated: bool,
+    origin: TranslationOrigin,
+}
+
 impl RowState {
+    fn is_empty(&self) -> bool {
+        self.text().is_none()
+            && self.candidate.is_none()
+            && self.failure.is_none()
+            && self.previous_edit.is_none()
+    }
+
+    fn read_edits(&mut self, edits: &TranslationEdits, unit: &TranslationUnit, language: &str) {
+        self.edit = edits.find(unit, language).map(|edit| RowEdit {
+            text: edit.text.clone(),
+            reviewed: edit.reviewed,
+            generated: edit.is_generated,
+            origin: edit.origin(),
+        });
+        self.previous_edit = if self.edit.is_none() {
+            edits.entries.get(&unit.id).map(|edit| edit.text.clone())
+        } else {
+            None
+        };
+        self.candidate = edits
+            .candidate(unit, language)
+            .map(|edit| edit.text.clone());
+        self.validate(unit);
+    }
+
+    fn validate(&mut self, unit: &TranslationUnit) {
+        self.issues = self
+            .text()
+            .map(|text| text::validate(unit, text))
+            .unwrap_or_default();
+    }
     fn text(&self) -> Option<&str> {
         self.edit
             .as_ref()
@@ -88,12 +128,12 @@ impl RowState {
         self.failure.as_deref()
     }
     fn edited(&self) -> bool {
-        self.edit.as_ref().is_some_and(|edit| !edit.is_generated)
+        self.edit.as_ref().is_some_and(|edit| !edit.generated)
     }
     fn origin(&self) -> TranslationOrigin {
         self.edit
             .as_ref()
-            .map(TranslationEdit::origin)
+            .map(|edit| edit.origin)
             .unwrap_or(if self.model.is_some() {
                 TranslationOrigin::Automatic
             } else {
@@ -105,7 +145,7 @@ impl RowState {
             unit: unit.clone(),
             text: self.text().map(str::to_owned),
             model_text: self.model.clone(),
-            candidate: self.candidate.as_ref().map(|edit| edit.text.clone()),
+            candidate: self.candidate.clone(),
             reviewed: self.reviewed(),
             edited: self.edited(),
             origin: self.origin(),
@@ -124,9 +164,11 @@ impl RowState {
 
 /// Holds drafts and edit metadata only; source units stay in the application's extraction cache.
 pub struct Workbench {
-    pub(crate) analysis_key: usize,
-    pub(crate) policy: TranslationPolicy,
-    rows: HashMap<String, RowState>,
+    analysis: Weak<CachedAnalysis>,
+    policy: TranslationPolicy,
+    // Ordinals belong to this extraction only. Rows with no translation or review state share an empty view.
+    by_id: Vec<usize>,
+    rows: HashMap<usize, RowState>,
     edits: Arc<gamel10n_translation::edits::EditStore>,
     resources: Vec<String>,
     kinds: Vec<String>,
@@ -136,10 +178,10 @@ impl Workbench {
     fn load(
         directory: PathBuf,
         legacy_memory: PathBuf,
-        units: &[TranslationUnit],
+        analysis: &Arc<CachedAnalysis>,
         policy: TranslationPolicy,
-        analysis_key: usize,
     ) -> Result<Self, CoreError> {
+        let units = &analysis.extraction().units;
         let mut memory = TranslationMemory::load(directory.join("memory"), Some(&legacy_memory))
             .map_err(storage_error)?;
         let edits =
@@ -148,68 +190,76 @@ impl Workbench {
             .into_iter()
             .filter_map(|issue| issue.unit_id.clone().map(|id| (id, issue)))
             .collect();
-        let mut rows = HashMap::with_capacity(units.len());
+        let mut rows = HashMap::new();
         let mut resources = std::collections::BTreeSet::new();
         let mut kinds = std::collections::BTreeSet::new();
-        let mut ordered: Vec<_> = units.iter().enumerate().collect();
-        ordered.sort_by_cached_key(|(_, unit)| memory_key(unit, &policy));
+        let mut ordered: Vec<_> = units
+            .iter()
+            .enumerate()
+            .map(|(index, unit)| (memory_key(unit, &policy), index))
+            .collect();
+        ordered.sort_unstable();
         edits
             .read(|edits| -> Result<(), CoreError> {
-                for (index, unit) in ordered {
-                    let model = memory
-                        .find(unit, &policy)
-                        .map_err(storage_error)?
-                        .map(str::to_owned);
-                    let edit = edits.find(unit, &policy.target_language).cloned();
-                    let candidate = edits.candidate(unit, &policy.target_language).cloned();
-                    let previous_edit = if edit.is_none() {
-                        edits.entries.get(&unit.id).map(|edit| edit.text.clone())
-                    } else {
-                        None
-                    };
-                    let text = edit
-                        .as_ref()
-                        .map(|edit| edit.text.as_str())
-                        .or(model.as_deref());
-                    let issues = text
-                        .map(|text| text::validate(unit, text))
-                        .unwrap_or_default();
+                for (key, index) in ordered {
+                    let unit = &units[index];
                     let failure = failures
                         .get(&unit.id)
                         .filter(|issue| {
                             issue
                                 .memory_key
                                 .as_ref()
-                                .is_none_or(|key| *key == memory_key(unit, &policy))
+                                .is_none_or(|failed_key| *failed_key == key)
                         })
                         .map(|issue| issue.message.clone());
-                    rows.insert(
-                        unit.id.clone(),
-                        RowState {
-                            index,
-                            model,
-                            edit,
-                            candidate,
-                            issues,
-                            failure,
-                            previous_edit,
-                        },
-                    );
-                    resources.insert(unit.resource_path.clone());
-                    kinds.insert(unit.kind.clone());
+                    let model = memory
+                        .find_with_key(unit, &policy, key)
+                        .map_err(storage_error)?
+                        .map(str::to_owned);
+                    let mut row = RowState {
+                        model,
+                        failure,
+                        ..Default::default()
+                    };
+                    row.read_edits(edits, unit, &policy.target_language);
+                    if !row.is_empty() {
+                        rows.insert(index, row);
+                    }
+                    resources.insert(unit.resource_path.as_str());
+                    kinds.insert(unit.kind.as_str());
                 }
                 Ok(())
             })
             .map_err(storage_error)??;
+        let mut by_id: Vec<_> = (0..units.len()).collect();
+        by_id.sort_unstable_by(|&a, &b| units[a].id.cmp(&units[b].id));
         Ok(Self {
             policy,
-            analysis_key,
+            analysis: Arc::downgrade(analysis),
+            by_id,
             rows,
             edits,
-            resources: resources.into_iter().collect(),
-            kinds: kinds.into_iter().collect(),
+            resources: resources.into_iter().map(str::to_owned).collect(),
+            kinds: kinds.into_iter().map(str::to_owned).collect(),
             last_access: std::time::Instant::now(),
         })
+    }
+
+    fn index(&self, units: &[TranslationUnit], id: &str) -> Option<usize> {
+        self.by_id
+            .binary_search_by(|&index| units[index].id.as_str().cmp(id))
+            .ok()
+            .map(|pos| self.by_id[pos])
+    }
+
+    fn selected_index(&self, units: &[TranslationUnit], id: &str) -> Result<usize, CoreError> {
+        self.index(units, id)
+            .ok_or_else(|| CoreError::InvalidData("找不到所选文本。".into()))
+    }
+
+    fn state(&self, index: usize) -> &RowState {
+        static EMPTY: LazyLock<RowState> = LazyLock::new(RowState::default);
+        self.rows.get(&index).unwrap_or_else(|| &EMPTY)
     }
     fn retained_bytes(&self) -> usize {
         let edit_bytes = |edit: &TranslationEdit| {
@@ -219,17 +269,17 @@ impl Workbench {
                 + edit.updated_at.len()
                 + edit.retranslation_id.as_ref().map_or(0, String::len)
         };
-        self.rows.capacity() * std::mem::size_of::<(String, RowState)>()
+        self.by_id.capacity() * std::mem::size_of::<usize>()
+            + self.rows.capacity() * std::mem::size_of::<(usize, RowState)>()
             + self
                 .rows
-                .iter()
-                .map(|(id, row)| {
-                    id.len()
-                        + row.model.as_ref().map_or(0, String::len)
+                .values()
+                .map(|row| {
+                    row.model.as_ref().map_or(0, String::len)
                         + row.previous_edit.as_ref().map_or(0, String::len)
                         + row.failure.as_ref().map_or(0, String::len)
-                        + row.edit.as_ref().map_or(0, &edit_bytes)
-                        + row.candidate.as_ref().map_or(0, &edit_bytes)
+                        + row.edit.as_ref().map_or(0, |edit| edit.text.len())
+                        + row.candidate.as_ref().map_or(0, String::len)
                         + row
                             .issues
                             .iter()
@@ -278,10 +328,8 @@ impl Workbench {
         let mut rows = Vec::new();
         let mut summary = WorkbenchSummary::default();
         let limit = limit.clamp(1, 500);
-        for unit in units {
-            let Some(row) = self.rows.get(&unit.id) else {
-                continue;
-            };
+        for (index, unit) in units.iter().enumerate() {
+            let row = self.state(index);
             summary.total += 1;
             summary.translated += usize::from(row.text().is_some());
             summary.reviewed += usize::from(row.reviewed());
@@ -313,21 +361,13 @@ impl Workbench {
             kinds: self.kinds.clone(),
         }
     }
-    fn refresh_row(&mut self, unit: &TranslationUnit) -> Result<(), CoreError> {
+    fn refresh_row(&mut self, index: usize, unit: &TranslationUnit) -> Result<(), CoreError> {
         self.edits
             .read(|edits| {
-                if let Some(row) = self.rows.get_mut(&unit.id) {
-                    row.edit = edits.find(unit, &self.policy.target_language).cloned();
-                    row.previous_edit = if row.edit.is_none() {
-                        edits.entries.get(&unit.id).map(|edit| edit.text.clone())
-                    } else {
-                        None
-                    };
-                    row.candidate = edits.candidate(unit, &self.policy.target_language).cloned();
-                    row.issues = row
-                        .text()
-                        .map(|text| text::validate(unit, text))
-                        .unwrap_or_default();
+                let row = self.rows.entry(index).or_default();
+                row.read_edits(edits, unit, &self.policy.target_language);
+                if row.is_empty() {
+                    self.rows.remove(&index);
                 }
             })
             .map_err(storage_error)?;
@@ -335,42 +375,44 @@ impl Workbench {
     }
     pub(crate) fn apply_progress(
         &mut self,
-        units: &[TranslationUnit],
         progress: &gamel10n_translation::execution::TranslationProgress,
         options: &gamel10n_translation::execution::TranslationOptions,
     ) {
+        let Some(analysis) = self.analysis.upgrade() else {
+            return;
+        };
+        let units = &analysis.extraction().units;
         for (id, text) in &progress.updates {
-            let Some(row) = self.rows.get_mut(id) else {
+            let Some(index) = self.index(units, id) else {
                 continue;
             };
-            let Some(unit) = units.get(row.index) else {
-                continue;
-            };
+            let row = self.rows.entry(index).or_default();
             if options.candidate_only {
-                let mut edit =
-                    TranslationEdit::new(unit, &self.policy.target_language, text.clone(), false);
-                edit.is_generated = true;
-                edit.origin = gamel10n_translation::storage::TranslationOrigin::Automatic;
-                row.candidate = Some(edit);
+                row.candidate = Some(text.clone());
             } else if options.retranslation_id.is_some() {
-                let mut edit =
-                    TranslationEdit::new(unit, &self.policy.target_language, text.clone(), false);
-                edit.is_generated = true;
-                edit.origin = gamel10n_translation::storage::TranslationOrigin::Automatic;
-                edit.retranslation_id = options.retranslation_id.clone();
-                row.edit = Some(edit);
+                row.edit = Some(RowEdit {
+                    text: text.clone(),
+                    reviewed: false,
+                    generated: true,
+                    origin: TranslationOrigin::Automatic,
+                });
                 row.candidate = None;
             } else {
                 row.model = Some(text.clone());
             }
-            row.issues = row
-                .text()
-                .map(|text| text::validate(unit, text))
-                .unwrap_or_default();
+            row.validate(&units[index]);
         }
         for (id, failure) in &progress.failure_updates {
-            if let Some(row) = self.rows.get_mut(id) {
-                row.failure = failure.clone();
+            let Some(index) = self.index(units, id) else {
+                continue;
+            };
+            if let Some(failure) = failure {
+                self.rows.entry(index).or_default().failure = Some(failure.clone());
+            } else if let Some(row) = self.rows.get_mut(&index) {
+                row.failure = None;
+                if row.is_empty() {
+                    self.rows.remove(&index);
+                }
             }
         }
     }
@@ -499,23 +541,17 @@ impl Application {
     async fn workbench(
         &self,
         id: &str,
-    ) -> Result<
-        (
-            Arc<crate::application::CachedAnalysis>,
-            Arc<Mutex<Workbench>>,
-        ),
-        CoreError,
-    > {
+    ) -> Result<(Arc<CachedAnalysis>, Arc<Mutex<Workbench>>), CoreError> {
         let analysis = self
             .cached_analysis(id)
             .await?
             .ok_or_else(|| CoreError::InvalidData("请先识别并提取游戏文本。".into()))?;
         let project = self.store.get(id).await?;
         let policy = validated_policy(&project.settings)?;
-        let analysis_key = Arc::as_ptr(&analysis) as usize;
+        let analysis_key = Arc::downgrade(&analysis);
         if let Some(workbench) = self.workbenches.lock().await.get(id).cloned() {
             let mut current = workbench.lock().await;
-            if current.policy == policy && current.analysis_key == analysis_key {
+            if current.policy == policy && current.analysis.ptr_eq(&analysis_key) {
                 current.last_access = std::time::Instant::now();
                 drop(current);
                 return Ok((analysis, workbench));
@@ -525,19 +561,14 @@ impl Application {
         let legacy = self.data_directory().join("memory").join(id);
         let cached = Arc::clone(&analysis);
         let workbench = tokio::task::spawn_blocking(move || {
-            Workbench::load(
-                directory,
-                legacy,
-                &cached.extraction().units,
-                policy,
-                analysis_key,
-            )
+            Workbench::load(directory, legacy, &cached, policy)
         })
         .await??;
         let mut cache = self.workbenches.lock().await;
         if let Some(current) = cache.get(id).cloned() {
             let mut current_data = current.lock().await;
-            if current_data.policy == workbench.policy && current_data.analysis_key == analysis_key
+            if current_data.policy == workbench.policy
+                && current_data.analysis.ptr_eq(&analysis_key)
             {
                 current_data.last_access = std::time::Instant::now();
                 drop(current_data);
@@ -587,17 +618,9 @@ impl Application {
     pub async fn workbench_row(&self, id: &str, unit_id: &str) -> Result<WorkbenchRow, CoreError> {
         let (analysis, workbench) = self.workbench(id).await?;
         let workbench = workbench.lock().await;
-        let unit = analysis
-            .extraction()
-            .units
-            .iter()
-            .find(|unit| unit.id == unit_id)
-            .ok_or_else(|| CoreError::InvalidData("找不到所选文本。".into()))?;
-        workbench
-            .rows
-            .get(unit_id)
-            .map(|row| row.row(unit))
-            .ok_or_else(|| CoreError::InvalidData("找不到所选文本。".into()))
+        let units = &analysis.extraction().units;
+        let index = workbench.selected_index(units, unit_id)?;
+        Ok(workbench.state(index).row(&units[index]))
     }
     pub async fn matching_text_ids(
         &self,
@@ -619,20 +642,19 @@ impl Application {
                 .extraction()
                 .units
                 .iter()
-                .filter(|unit| {
-                    workbench.rows.get(&unit.id).is_some_and(|row| {
-                        matches_filter(
-                            unit,
-                            row,
-                            &filter,
-                            &query,
-                            &source,
-                            &translation,
-                            selected.as_ref(),
-                        )
-                    })
+                .enumerate()
+                .filter(|(index, unit)| {
+                    matches_filter(
+                        unit,
+                        workbench.state(*index),
+                        &filter,
+                        &query,
+                        &source,
+                        &translation,
+                        selected.as_ref(),
+                    )
                 })
-                .map(|unit| unit.id.clone())
+                .map(|(_, unit)| unit.id.clone())
                 .collect()
         })
         .await
@@ -655,20 +677,18 @@ impl Application {
         let query = filter.query.to_lowercase();
         let source = filter.source_query.to_lowercase();
         let translation = filter.translation_query.to_lowercase();
-        let current_index = workbench.rows.get(current).map(|row| row.index);
+        let current_index = workbench.index(units, current);
         let previous = direction < 0;
-        let matches = units.iter().filter_map(|unit| {
-            let row = workbench.rows.get(&unit.id)?;
+        let matches = units.iter().enumerate().filter(|(index, unit)| {
             matches_filter(
                 unit,
-                row,
+                workbench.state(*index),
                 filter,
                 &query,
                 &source,
                 &translation,
                 selected.as_ref(),
             )
-            .then_some((row.index, unit))
         });
         let mut adjacent = None;
         for (rank, (index, unit)) in matches.enumerate() {
@@ -792,12 +812,9 @@ impl Application {
         let unit_id = unit_id.to_owned();
         tokio::task::spawn_blocking(move || {
             let mut workbench = workbench.blocking_lock();
-            let unit = analysis
-                .extraction()
-                .units
-                .iter()
-                .find(|unit| unit.id == unit_id)
-                .ok_or_else(|| CoreError::InvalidData("找不到所选文本。".into()))?;
+            let units = &analysis.extraction().units;
+            let index = workbench.selected_index(units, &unit_id)?;
+            let unit = &units[index];
             if reviewed && !text::validate(unit, &text).is_empty() {
                 return Err(CoreError::InvalidData(
                     "译文存在格式问题，修正后才能标记为已校对。".into(),
@@ -807,7 +824,7 @@ impl Application {
                 let mut changes = EditChanges::default();
                 let origin = workbench
                     .rows
-                    .get(&unit_id)
+                    .get(&index)
                     .filter(|row| row.text() == Some(text.as_str()))
                     .map(RowState::origin)
                     .unwrap_or(TranslationOrigin::Manual);
@@ -820,7 +837,7 @@ impl Application {
                 changes.entries.insert(unit_id, Some(edit));
                 Ok(((), changes))
             })?;
-            workbench.refresh_row(unit)?;
+            workbench.refresh_row(index, unit)?;
             Ok(())
         })
         .await?
@@ -842,7 +859,8 @@ impl Application {
                 .extraction()
                 .units
                 .iter()
-                .filter(|unit| ids.contains(unit.id.as_str()))
+                .enumerate()
+                .filter(|(_, unit)| ids.contains(unit.id.as_str()))
                 .collect();
             if ids.is_empty() || selected.len() != ids.len() {
                 return Err(CoreError::InvalidData("文本选区为空或已失效。".into()));
@@ -850,8 +868,8 @@ impl Application {
             let count = workbench.edits.update(|edits| -> Result<_, CoreError> {
                 let mut changes = EditChanges::default();
                 let mut count = 0;
-                for unit in &selected {
-                    let Some(row) = workbench.rows.get(&unit.id) else {
+                for &(index, unit) in &selected {
+                    let Some(row) = workbench.rows.get(&index) else {
                         continue;
                     };
                     let Some(text) = row.text() else {
@@ -883,8 +901,8 @@ impl Application {
                 }
                 Ok((count, changes))
             })?;
-            for unit in selected {
-                workbench.refresh_row(unit)?;
+            for (index, unit) in selected {
+                workbench.refresh_row(index, unit)?;
             }
             Ok(count)
         })
@@ -897,19 +915,16 @@ impl Application {
         let unit_id = unit_id.to_owned();
         tokio::task::spawn_blocking(move || {
             let mut workbench = workbench.blocking_lock();
-            let unit = analysis
-                .extraction()
-                .units
-                .iter()
-                .find(|unit| unit.id == unit_id)
-                .ok_or_else(|| CoreError::InvalidData("找不到所选文本。".into()))?;
+            let units = &analysis.extraction().units;
+            let index = workbench.selected_index(units, &unit_id)?;
+            let unit = &units[index];
             workbench.edits.update(|_| -> Result<_, CoreError> {
                 let mut changes = EditChanges::default();
                 changes.entries.insert(unit_id.clone(), None);
                 changes.candidates.insert(unit_id, None);
                 Ok(((), changes))
             })?;
-            workbench.refresh_row(unit)?;
+            workbench.refresh_row(index, unit)?;
             Ok(())
         })
         .await?
@@ -921,12 +936,9 @@ impl Application {
         let unit_id = unit_id.to_owned();
         tokio::task::spawn_blocking(move || {
             let mut workbench = workbench.blocking_lock();
-            let unit = analysis
-                .extraction()
-                .units
-                .iter()
-                .find(|unit| unit.id == unit_id)
-                .ok_or_else(|| CoreError::InvalidData("找不到所选文本。".into()))?;
+            let units = &analysis.extraction().units;
+            let index = workbench.selected_index(units, &unit_id)?;
+            let unit = &units[index];
             workbench.edits.update(|edits| -> Result<_, CoreError> {
                 let mut changes = EditChanges::default();
                 let mut candidate = edits
@@ -944,7 +956,7 @@ impl Application {
                 changes.candidates.insert(unit_id, None);
                 Ok(((), changes))
             })?;
-            workbench.refresh_row(unit)?;
+            workbench.refresh_row(index, unit)?;
             Ok(())
         })
         .await?
@@ -956,18 +968,15 @@ impl Application {
         let unit_id = unit_id.to_owned();
         tokio::task::spawn_blocking(move || {
             let mut workbench = workbench.blocking_lock();
-            let unit = analysis
-                .extraction()
-                .units
-                .iter()
-                .find(|unit| unit.id == unit_id)
-                .ok_or_else(|| CoreError::InvalidData("找不到所选文本。".into()))?;
+            let units = &analysis.extraction().units;
+            let index = workbench.selected_index(units, &unit_id)?;
+            let unit = &units[index];
             workbench.edits.update(|_| -> Result<_, CoreError> {
                 let mut changes = EditChanges::default();
                 changes.candidates.insert(unit_id, None);
                 Ok(((), changes))
             })?;
-            workbench.refresh_row(unit)?;
+            workbench.refresh_row(index, unit)?;
             Ok(())
         })
         .await?
@@ -979,13 +988,17 @@ impl Application {
     ) -> Result<(), CoreError> {
         let (analysis, workbench) = self.workbench(id).await?;
         let workbench = workbench.lock().await;
+        let units = &analysis.extraction().units;
         for (id, text) in copies {
-            let row = workbench
-                .rows
-                .get(id)
+            let index = workbench
+                .index(units, id)
                 .ok_or_else(|| CoreError::InvalidData("脚本副本与提取记录不一致。".into()))?;
-            if row.text().is_some_and(|saved| saved != text) {
-                let unit = &analysis.extraction().units[row.index];
+            if workbench
+                .state(index)
+                .text()
+                .is_some_and(|saved| saved != text)
+            {
+                let unit = &units[index];
                 return Err(CoreError::InvalidData(format!(
                     "{} · {} 的脚本副本已有不同译文，请明确选择各副本的译文。",
                     unit.resource_path, unit.locator
@@ -1007,7 +1020,7 @@ impl Application {
             unit_ids.map(|ids| ids.iter().map(String::as_str).collect());
         let mut result = BTreeMap::new();
         let mut selected_count = 0;
-        for unit in &analysis.extraction().units {
+        for (index, unit) in analysis.extraction().units.iter().enumerate() {
             if selected
                 .as_ref()
                 .is_some_and(|ids| !ids.contains(unit.id.as_str()))
@@ -1015,7 +1028,7 @@ impl Application {
                 continue;
             }
             selected_count += 1;
-            let Some(row) = workbench.rows.get(&unit.id) else {
+            let Some(row) = workbench.rows.get(&index) else {
                 continue;
             };
             if reviewed_only && !row.reviewed() {
@@ -1049,7 +1062,6 @@ impl Application {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gamel10n_translation::storage::TranslationEdits;
     async fn fixture() -> (tempfile::TempDir, Application, String, Vec<TranslationUnit>) {
         let root = tempfile::tempdir().unwrap();
         let game = root.path().join("game");
@@ -1147,6 +1159,90 @@ mod tests {
             ])
         );
     }
+    #[tokio::test]
+    async fn candidate_only_row_can_be_found_and_adopted_from_an_old_snapshot() {
+        let (_root, app, id, units) = fixture().await;
+        let unit = &units[2];
+        let mut edits = TranslationEdits::default();
+        edits.candidates.insert(
+            unit.id.clone(),
+            TranslationEdit::new(unit, "简体中文", "选项".into(), false),
+        );
+        edits.save(&app.project_directory(&id).unwrap()).unwrap();
+        let filter = WorkbenchFilter {
+            status: "candidate".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            app.matching_text_ids(&id, &filter).await.unwrap(),
+            [unit.id.clone()]
+        );
+        app.adopt_candidate(&id, &unit.id).await.unwrap();
+        let row = app.workbench_row(&id, &unit.id).await.unwrap();
+        assert_eq!(row.text.as_deref(), Some("选项"));
+        assert!(row.candidate.is_none());
+    }
+
+    #[tokio::test]
+    async fn untranslated_row_retains_old_edits_and_candidates_until_discarded() {
+        let (_root, app, id, units) = fixture().await;
+        let unit = &units[2];
+        let language = &policy(&Value::Null).target_language;
+        let mut edits = TranslationEdits::default();
+        let mut old_unit = unit.clone();
+        old_unit.source_text = "Previous source".into();
+        edits.entries.insert(
+            unit.id.clone(),
+            TranslationEdit::new(&old_unit, language, "历史译文".into(), true),
+        );
+        edits.candidates.insert(
+            unit.id.clone(),
+            TranslationEdit::new(unit, language, "候选译文".into(), false),
+        );
+        edits.save(&app.project_directory(&id).unwrap()).unwrap();
+
+        let row = app.workbench_row(&id, &unit.id).await.unwrap();
+        assert!(row.text.is_none() && !row.reviewed);
+        assert_eq!(row.previous_edit.as_deref(), Some("历史译文"));
+        assert_eq!(row.candidate.as_deref(), Some("候选译文"));
+        app.discard_candidate(&id, &unit.id).await.unwrap();
+        assert_eq!(
+            app.workbench_row(&id, &unit.id)
+                .await
+                .unwrap()
+                .previous_edit
+                .as_deref(),
+            Some("历史译文")
+        );
+        app.undo_translation_edit(&id, &unit.id).await.unwrap();
+
+        let (_, workbench) = app.workbench(&id).await.unwrap();
+        assert_eq!(workbench.lock().await.rows.len(), 2);
+        let missing = WorkbenchFilter {
+            status: "missing".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            app.matching_text_ids(&id, &missing).await.unwrap(),
+            [unit.id.clone()]
+        );
+        assert!(app.workbench_row(&id, "absent").await.is_err());
+        app.check_patch_copies(&id, &BTreeMap::from([(unit.id.clone(), "试译".into())]))
+            .await
+            .unwrap();
+        app.save_translation_edit(&id, &unit.id, "新译文".into(), true)
+            .await
+            .unwrap();
+        assert_eq!(
+            app.saved_translations(&id, Some(std::slice::from_ref(&unit.id)), true)
+                .await
+                .unwrap()
+                .get(&unit.id)
+                .map(String::as_str),
+            Some("新译文")
+        );
+    }
+
     #[tokio::test]
     async fn proofreading_rejects_invalid_review_and_preserves_model_draft_on_undo() {
         let (_root, app, id, _) = fixture().await;
@@ -1253,7 +1349,6 @@ mod tests {
 
         let (_, workbench) = app.workbench(&id).await.unwrap();
         workbench.lock().await.apply_progress(
-            &units,
             &gamel10n_translation::execution::TranslationProgress {
                 stage: "翻译".into(),
                 completed: 1,

@@ -493,12 +493,12 @@ impl Application {
                 tokio::select! {
                     result = &mut run => break result,
                     Some(progress) = progress_rx.recv() => {
-                        self.translation_progress(id, operation, &analysis, &options, progress).await;
+                        self.translation_progress(id, operation, &options, progress).await;
                     },
                 }
             };
             while let Ok(progress) = progress_rx.try_recv() {
-                self.translation_progress(id, operation, &analysis, &options, progress)
+                self.translation_progress(id, operation, &options, progress)
                     .await;
             }
             self.workbenches.lock().await.remove(id);
@@ -588,16 +588,12 @@ impl Application {
         &self,
         id: &str,
         operation: &str,
-        analysis: &crate::application::CachedAnalysis,
         options: &TranslationOptions,
         progress: gamel10n_translation::execution::TranslationProgress,
     ) {
         let workbench = self.workbenches.lock().await.get(id).cloned();
         if let Some(workbench) = workbench {
-            workbench
-                .lock()
-                .await
-                .apply_progress(&analysis.extraction().units, &progress, options);
+            workbench.lock().await.apply_progress(&progress, options);
         }
         self.progress(id, operation, &progress.message).await;
         let _ = self.events.send(crate::AppEvent::TranslationChanged {

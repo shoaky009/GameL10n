@@ -471,7 +471,7 @@ impl TranslationEngine {
         let edit_store = tokio::task::spawn_blocking(move || EditStore::open(&directory))
             .await
             .map_err(|error| ExecutionError::Invalid(error.to_string()))??;
-        let mut history_units = edit_store.read(|edits| -> Result<Vec<_>, ExecutionError> {
+        let history_units = edit_store.read(|edits| -> Result<Vec<_>, ExecutionError> {
             let mut history_units = Vec::new();
             for unit in &units {
                 cancelled(cancellation)?;
@@ -498,10 +498,14 @@ impl TranslationEngine {
             Ok(history_units)
         })??;
         // Visit each prefix together so a bounded cache does not reread it for every source row.
-        history_units.sort_by_cached_key(|unit| memory_key(unit, policy));
-        for unit in history_units {
+        let mut keyed_units: Vec<_> = history_units
+            .into_iter()
+            .map(|unit| (memory_key(unit, policy), unit))
+            .collect();
+        keyed_units.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+        for (key, unit) in keyed_units {
             cancelled(cancellation)?;
-            if let Some(text) = memory.find(unit, policy)?
+            if let Some(text) = memory.find_with_key(unit, policy, key)?
                 && text::validate(unit, text).is_empty()
             {
                 completed.insert(&unit.id, text)?;

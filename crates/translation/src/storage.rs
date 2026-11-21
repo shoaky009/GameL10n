@@ -250,7 +250,19 @@ impl TranslationMemory {
         unit: &TranslationUnit,
         policy: &TranslationPolicy,
     ) -> Result<Option<&str>, StorageError> {
-        let mut key = memory_key(unit, policy);
+        self.find_with_key(unit, policy, memory_key(unit, policy))
+    }
+
+    /// Uses the primary key already computed for this unit and policy during shard ordering.
+    pub fn find_with_key(
+        &mut self,
+        unit: &TranslationUnit,
+        policy: &TranslationPolicy,
+        mut key: String,
+    ) -> Result<Option<&str>, StorageError> {
+        if !valid_key(&key) {
+            return Err(StorageError::Invalid("缓存键无效".into()));
+        }
         let emphasis = emphasis_groups(&unit.source_text);
         let primary = self.shard(&key[..2])?.contains_key(&key);
         if !primary {
