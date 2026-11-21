@@ -319,25 +319,35 @@ impl EngineCatalog {
             .or_insert_with(|| json!({"enabled":true,"releases":[],"excludedVersions":[]}));
         let mut lifecycle = lifecycle(setting, &adapter.version)?;
         lifecycle.feedback.insert(game_id.into(), feedback.clone());
-        // Release order is authoritative: version names may be content hashes,
-        // and confirming an older patch must never retire a newer release.
+        // Release order is shared by every game in the family. Only this game's
+        // earlier publications can be inferred as predecessors of its confirmed release.
         if feedback.status == "passed"
+            && lifecycle.requires_confirmation
             && let Some(releases) = setting["releases"].as_array()
             && let Some(position) = releases
                 .iter()
                 .position(|release| release["version"].as_str() == Some(&adapter.version))
+            && releases[position]["gameId"].as_str() == Some(game_id)
         {
             let predecessors = lifecycle.replaces.entry(game_id.into()).or_default();
-            for release in &releases[..position] {
+            for release in releases[..position]
+                .iter()
+                .filter(|release| release["gameId"].as_str() == Some(game_id))
+            {
                 let Some(version) = release["version"].as_str().filter(|version| {
                     *version != adapter.version
                         && family
                             .versions
                             .get(*version)
-                            .is_some_and(|entry| entry.source != 0)
+                            .is_some_and(|entry| entry.source == 1)
                 }) else {
                     continue;
                 };
+                if setting["versionLifecycle"][version]["requiresConfirmation"].as_bool()
+                    != Some(true)
+                {
+                    continue;
+                }
                 let previous = AdapterVersion {
                     adapter_id: adapter.adapter_id.clone(),
                     version: version.into(),

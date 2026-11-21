@@ -465,7 +465,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     {
         let ctx = context.clone();
         runtime.spawn(async move {
-            events::subscribe_events(ctx.clone()).await;
+            events::connect(ctx.clone()).await;
             if let Err(error) = refresh_projects(&ctx, "").await {
                 ctx.show_error("", error.to_string());
             }

@@ -196,6 +196,19 @@ impl ProjectStore {
             .collect()
     }
 
+    pub(crate) async fn pending_adapter_retirements(&self) -> Vec<String> {
+        self.index
+            .lock()
+            .await
+            .projects
+            .iter()
+            .filter(|p| {
+                p.extra.contains_key("adapterRetirements") || p.extra.contains_key("adapterRepair")
+            })
+            .map(|p| p.id.clone())
+            .collect()
+    }
+
     pub async fn save(&self, project: &GameProject) -> Result<(), CoreError> {
         validate_project(project, &project.id)?;
         self.ensure_writable().await?;

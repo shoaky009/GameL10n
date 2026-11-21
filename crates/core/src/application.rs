@@ -400,6 +400,14 @@ impl Application {
             .collect()
     }
 
+    pub(crate) async fn has_running_tasks(&self) -> bool {
+        self.tasks
+            .lock()
+            .await
+            .values()
+            .any(|task| task.state.running)
+    }
+
     pub async fn cancel(&self, id: &str) {
         if let Some(entry) = self.tasks.lock().await.get(id) {
             entry.cancellation.cancel();
@@ -815,14 +823,6 @@ impl Application {
         Ok(gate.lock_owned().await)
     }
 
-    pub(crate) async fn project_access_active(&self) -> bool {
-        self.project_access
-            .lock()
-            .await
-            .values()
-            .any(|gate| gate.strong_count() > 0)
-    }
-
     pub(crate) async fn begin(
         &self,
         id: &str,
@@ -1087,14 +1087,11 @@ impl Application {
                 &format!("任务结果已保存，项目列表摘要暂未更新：{error}"),
             );
         }
-        if operation != "cleanup" {
-            let _lifecycle = self.project_lifecycle.lock().await;
-            if let Err(error) = self.clean_replaced_adapters().await {
-                self.report_task_warning(
-                    id,
-                    &format!("任务结果已保存，旧适配器版本暂未清理：{error}"),
-                );
-            }
+        if let Err(error) = self.clean_replaced_adapters().await {
+            self.report_task_warning(
+                id,
+                &format!("任务结果已保存，旧适配器版本暂未清理：{error}"),
+            );
         }
         Ok(())
     }

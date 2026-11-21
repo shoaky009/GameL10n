@@ -192,7 +192,7 @@ pub enum LibrarySort {
     CompatibleGames,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct EngineLibraryDeleteResult {
     pub deleted: bool,
     pub references: Vec<EngineLibraryReference>,
@@ -1090,8 +1090,6 @@ impl EngineCatalog {
         version: &str,
         runtime_references: &[EngineLibraryReference],
     ) -> Result<EngineLibraryDeleteResult, CoreError> {
-        let _write = write_gate()?;
-        let path = self.package_path(adapter_id, version)?;
         let used: Vec<_> = runtime_references
             .iter()
             .filter(|reference| {
@@ -1108,10 +1106,56 @@ impl EngineCatalog {
                 diagnostics: Vec::new(),
             });
         }
+        let _write = write_gate()?;
+        self.delete_version_locked(adapter_id, version, load_state(&self.root)?, None)
+    }
+
+    pub(crate) fn retire_project_version(
+        &self,
+        previous: &AdapterVersion,
+        game_id: &str,
+        in_use: bool,
+    ) -> Result<Option<EngineLibraryDeleteResult>, CoreError> {
+        let _write = write_gate()?;
+        let state = load_state(&self.root)?;
+        // Older queues included unrelated releases from the same family. Require
+        // positive ownership evidence before removing any files or references.
+        let family = &state["families"][&previous.adapter_id];
+        let releases = family["releases"].as_array();
+        let mut matching = releases
+            .into_iter()
+            .flatten()
+            .filter(|release| release["version"].as_str() == Some(&previous.version))
+            .peekable();
+        if !lifecycle(family, &previous.version)?.requires_confirmation
+            || matching.peek().is_none()
+            || !matching.all(|r| r["gameId"].as_str() == Some(game_id))
+        {
+            return Ok(None);
+        }
+        if in_use {
+            return Ok(Some(EngineLibraryDeleteResult::default()));
+        }
+        self.delete_version_locked(
+            &previous.adapter_id,
+            &previous.version,
+            state,
+            Some(game_id),
+        )
+        .map(Some)
+    }
+
+    fn delete_version_locked(
+        &self,
+        adapter_id: &str,
+        version: &str,
+        mut state: Value,
+        retiring_project: Option<&str>,
+    ) -> Result<EngineLibraryDeleteResult, CoreError> {
+        let path = self.package_path(adapter_id, version)?;
         let mut cached = self.lock()?;
         let mut index = load_index(&self.root)?;
-        if cached
-            .index
+        if index
             .families
             .get(adapter_id)
             .and_then(|family| family.versions.get(version))
@@ -1121,6 +1165,25 @@ impl EngineCatalog {
         }
         let mut writes: Vec<(PathBuf, Option<Value>)> = Vec::new();
         plan_reference_removal(&self.root, adapter_id, Some(version), &mut writes)?;
+        if let Some(game_id) = retiring_project {
+            let own_pins = self.root.join("games").join(hash_text(game_id));
+            // A runtime migration or another game's legacy pin still needs this package.
+            let shared_reference = writes
+                .iter()
+                .any(|(file, _)| file.parent() != Some(own_pins.as_path()));
+            let used_by_other_game = index.families.get(adapter_id).is_some_and(|family| {
+                family
+                    .games
+                    .iter()
+                    .any(|g| g.game_id != game_id && g.adapter_version == version)
+            }) || lifecycle(&state["families"][adapter_id], version)?
+                .feedback
+                .iter()
+                .any(|(id, feedback)| id != game_id && feedback.status == "passed");
+            if shared_reference || used_by_other_game {
+                return Ok(EngineLibraryDeleteResult::default());
+            }
+        }
         let catalog_dir = safe_path(&self.root, &format!("catalog/{adapter_id}"))?;
         for file in json_files(&catalog_dir)? {
             let mut record: Value = read_bounded_json(&file, 16 * 1024 * 1024)?;
@@ -1139,7 +1202,6 @@ impl EngineCatalog {
                 writes.push((file, None));
             }
         }
-        let mut state = load_state(&self.root)?;
         if let Some(family) = state
             .get_mut("families")
             .and_then(|value| value.get_mut(adapter_id))
@@ -1173,6 +1235,9 @@ impl EngineCatalog {
         })();
         let mut diagnostics = Vec::new();
         if let Err(error) = payload_result {
+            if retiring_project.is_some() {
+                return Err(error);
+            }
             diagnostics.push(format!(
                 "版本文件未能删除，请关闭占用程序或检查目录权限后手动删除（{}）：{error}",
                 path.display()
@@ -1295,6 +1360,7 @@ fn plan_reference_removal(
             .get_mut("entries")
             .and_then(Value::as_object_mut)
             .ok_or_else(|| invalid("适配器运行包映射索引无效。"))?;
+        let previous_count = entries.len();
         entries.retain(|source, entry| {
             !matches(source)
                 && !entry
@@ -1302,7 +1368,9 @@ fn plan_reference_removal(
                     .and_then(Value::as_str)
                     .is_some_and(matches)
         });
-        writes.push((mapping_path, Some(mappings)));
+        if entries.len() != previous_count {
+            writes.push((mapping_path, Some(mappings)));
+        }
     }
     for directory in directories(&safe_path(root, "games")?)? {
         for name in ["active.json", "previous.json"] {

@@ -155,12 +155,19 @@ impl Application {
         } else if !is_current {
             "已记录这份补丁对应旧版本的运行反馈。项目已切换版本，请生成并试用当前版本的补丁。"
         } else if status == "passed" {
-            "已记录当前游戏效果正常，此版本可供其他项目匹配复用；历史版本将自动清理，其他项目仍在使用的版本保留。"
+            if !project.extra.contains_key("adapterRetirements") {
+                "已记录当前游戏效果正常，此版本可供其他项目匹配复用。"
+            } else if self.has_running_tasks().await {
+                "已记录当前游戏效果正常。其他任务结束后，会自动清理本游戏已替换的版本，保留其他游戏使用的版本。"
+            } else {
+                "已记录当前游戏效果正常。将自动清理本游戏已替换的版本，保留其他游戏使用的版本。"
+            }
         } else {
             "已记录问题。修复并确认新版效果正常后，会自动清理未被其他项目使用的历史版本。"
         }
         .to_string();
         self.log(id, &message).await?;
+        drop(_lifecycle);
         drop(_project);
         if registered
             && is_current
@@ -226,22 +233,22 @@ impl Application {
         self.store.save(&project).await
     }
 
-    /// Called with project_lifecycle held and no project guard. New tasks cannot start during cleanup.
-    pub(crate) async fn clean_replaced_adapters(&self) -> Result<(), CoreError> {
-        if self.project_access_active().await
-            || self.task_states().await.values().any(|state| state.running)
-        {
-            return Ok(());
-        }
-        let projects = self.store.list("").await;
-        if !projects.iter().any(|project| {
-            project.extra.contains_key("adapterRetirements")
-                || project.extra.contains_key("adapterRepair")
-        }) {
-            return Ok(());
-        }
-        let catalog = EngineCatalog::open(self.data_directory())?;
-        for summary in &projects {
+    /// Retries confirmed retirements after a task finishes or the desktop reopens the library.
+    pub async fn clean_replaced_adapters(&self) -> Result<(), CoreError> {
+        for id in self.store.pending_adapter_retirements().await {
+            // Refreshing a project after a task finishes races this cleanup. Wait for its
+            // short project lock before taking the lifecycle lock, just as task startup does.
+            let _project = self.lock_project(&id).await?;
+            let _lifecycle = self.project_lifecycle.lock().await;
+            if self.has_running_tasks().await {
+                return Ok(());
+            }
+            self.ensure_writable().await?;
+            let projects = self.store.list("").await;
+            let Some(summary) = projects.iter().find(|p| p.id == id) else {
+                continue;
+            };
+            let catalog = EngineCatalog::open(self.data_directory())?;
             let mut retirements =
                 saved::<Vec<Retirement>>(&summary.extra, "adapterRetirements")?.unwrap_or_default();
             // Recover the small commit window between saving the extracted version
@@ -268,12 +275,6 @@ impl Application {
             }
             let mut remaining = Vec::new();
             for mut retirement in retirements {
-                if projects.iter().any(|project| {
-                    current_adapter(&project.extra).as_ref() == Some(&retirement.previous)
-                }) {
-                    remaining.push(retirement);
-                    continue;
-                }
                 if catalog.version_lifecycle(&retirement.previous)?.is_none() {
                     continue;
                 }
@@ -296,14 +297,19 @@ impl Application {
                     remaining.push(retirement);
                     continue;
                 }
+                let in_use = projects.iter().any(|project| {
+                    current_adapter(&project.extra).as_ref() == Some(&retirement.previous)
+                });
+                let game_id = summary.id.clone();
                 let retired = retirement.previous.clone();
                 let library = catalog.clone();
                 match tokio::task::spawn_blocking(move || {
-                    library.delete_version(&retired.adapter_id, &retired.version, &[])
+                    library.retire_project_version(&retired, &game_id, in_use)
                 })
                 .await?
                 {
-                    Ok(result) if result.deleted => {
+                    Ok(None) => continue,
+                    Ok(Some(result)) if result.deleted => {
                         let _ = self.events.send(crate::AppEvent::EngineLibraryChanged);
                         self.log(
                             &summary.id,
@@ -330,6 +336,9 @@ impl Application {
                         remaining.push(retirement);
                     }
                 }
+            }
+            if !recovered && summary.extra.get("adapterRetirements") == Some(&json!(remaining)) {
+                continue;
             }
             let mut project = self.store.get(&summary.id).await?;
             if recovered {
@@ -578,14 +587,142 @@ mod tests {
         app.record_patch_feedback(&id, &patch, "passed", "显示正常")
             .await
             .unwrap();
-        {
-            let _lock = app.project_lifecycle.lock().await;
-            app.clean_replaced_adapters().await.unwrap();
-        }
+        app.clean_replaced_adapters().await.unwrap();
 
         assert!(oldest.is_dir());
         assert!(old.is_dir());
         assert!(current.is_dir());
+    }
+
+    #[tokio::test]
+    async fn confirmation_preserves_other_games_compatibility_pins_and_runtime_packages() {
+        let (_temp, app, id) = fixture().await;
+        let shared = register(&app, &id, "shared", None);
+        register(&app, "other", "shared", None);
+        let pinned = register(&app, &id, "pinned", None);
+        let runtime = register(&app, &id, "runtime", None);
+        let superseded = register(&app, &id, "superseded", None);
+        register(&app, &id, "current", None);
+        pin(&app, &id, "current").await;
+        let extensions = app.data_directory().join("extensions");
+        let pin_file = extensions
+            .join("games")
+            .join(hash_text("other"))
+            .join("active.json");
+        let mapping_file = extensions.join("runtime-migrations.json");
+        write_json(
+            &pin_file,
+            &json!({"id":"engine.fixture","version":"pinned"}),
+        )
+        .unwrap();
+        write_json(
+            &mapping_file,
+            &json!({"schemaVersion":1,"entries":{
+                "engine.fixture/legacy":{"target":"engine.fixture/runtime"}
+            }}),
+        )
+        .unwrap();
+
+        app.record_patch_feedback(&id, &patch(&app, &id, "current"), "passed", "")
+            .await
+            .unwrap();
+        assert!(!superseded.exists());
+        assert!(shared.is_dir() && pinned.is_dir() && runtime.is_dir());
+        assert!(pin_file.is_file());
+        let mappings: Value = gamel10n_translation::files::read_json(&mapping_file).unwrap();
+        assert_eq!(
+            mappings["entries"]["engine.fixture/legacy"]["target"],
+            "engine.fixture/runtime"
+        );
+    }
+
+    #[tokio::test]
+    async fn reopening_a_legacy_queue_retires_only_the_confirmed_games_own_releases() {
+        let (temp, app, id) = fixture().await;
+        let other_game = temp.path().join("other-game");
+        fs::create_dir(&other_game).unwrap();
+        let other = app.add_project(&other_game).await.unwrap().id;
+        let old = register(&app, &id, "v1", None);
+        let foreign = register(&app, &other, "other-v1", None);
+        let unknown = register(&app, &id, "legacy", None);
+        let imported = register(&app, &id, "imported", None);
+        let confirmed = register(&app, &id, "v2", None);
+        let other_current = register(&app, &other, "other-v2", None);
+        pin(&app, &id, "v2").await;
+        pin(&app, &other, "other-v2").await;
+        let data = app.data_directory().to_owned();
+        let state_path = data.join("extensions/library-state.json");
+        let read_state = || gamel10n_translation::files::read_json::<Value>(&state_path).unwrap();
+        let mut state = read_state();
+        let family = &mut state["families"]["engine.fixture"];
+        let legacy = family["releases"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|r| r["version"] == "legacy")
+            .unwrap();
+        legacy.as_object_mut().unwrap().remove("gameId");
+        family["versionLifecycle"]["imported"]["requiresConfirmation"] = json!(false);
+        write_json(&state_path, &state).unwrap();
+
+        app.begin(&other, "translate", "running").await.unwrap();
+        let patch = patch(&app, &id, "v2");
+        app.record_patch_feedback(&id, &patch, "passed", "")
+            .await
+            .unwrap();
+        let mut state = read_state();
+        let predecessors =
+            &mut state["families"]["engine.fixture"]["versionLifecycle"]["v2"]["replaces"][&id];
+        assert_eq!(*predecessors, json!([adapter("v1")]));
+
+        // Older registries inferred all earlier family releases, even without a game ID.
+        let history = [
+            adapter("v1"),
+            adapter("other-v1"),
+            adapter("legacy"),
+            adapter("imported"),
+        ];
+        *predecessors = json!(history);
+        write_json(&state_path, &state).unwrap();
+        let mut project = app.store.get(&id).await.unwrap();
+        project.extra.insert(
+            "adapterRetirements".into(),
+            json!(history.map(|previous| Retirement {
+                previous,
+                replacement: adapter("v2")
+            })),
+        );
+        app.store.save(&project).await.unwrap();
+        let reopened = Application::open(data.clone(), &ToolPaths::new("missing"))
+            .await
+            .unwrap();
+        assert!(reopened.clean_replaced_adapters().await.is_err());
+        assert!(old.is_dir());
+        drop(app);
+        reopened.clean_replaced_adapters().await.unwrap();
+        assert!(!old.exists());
+        for retained in [foreign, unknown, imported, confirmed, other_current, patch] {
+            assert!(retained.is_dir(), "{}", retained.display());
+        }
+        let library = EngineCatalog::open(&data).unwrap();
+        assert!(library.version_lifecycle(&adapter("v1")).unwrap().is_none());
+        for version in ["other-v1", "legacy", "imported", "v2", "other-v2"] {
+            assert!(
+                library
+                    .version_lifecycle(&adapter(version))
+                    .unwrap()
+                    .is_some()
+            );
+        }
+        assert!(
+            !reopened
+                .store
+                .get(&id)
+                .await
+                .unwrap()
+                .extra
+                .contains_key("adapterRetirements")
+        );
     }
 
     #[tokio::test]
@@ -597,10 +734,7 @@ mod tests {
         app.record_patch_feedback(&id, &old_patch, "failed", "乱码")
             .await
             .unwrap();
-        {
-            let _lock = app.project_lifecycle.lock().await;
-            app.clean_replaced_adapters().await.unwrap();
-        }
+        app.clean_replaced_adapters().await.unwrap();
         assert!(
             old.is_dir(),
             "a failed repair must retain the original version"
@@ -612,10 +746,7 @@ mod tests {
         let replacement = register(&app, &id, "v2", Some(&adapter("v1")));
         pin(&app, &id, "v2").await;
         // Simulate interruption after publication, before saving retirement metadata.
-        {
-            let _lock = app.project_lifecycle.lock().await;
-            app.clean_replaced_adapters().await.unwrap();
-        }
+        app.clean_replaced_adapters().await.unwrap();
         assert!(
             old.is_dir(),
             "a different project's current reference protects the version"
@@ -629,24 +760,34 @@ mod tests {
                 .contains_key("adapterRetirements")
         );
         pin(&app, &other, "v2").await;
-        {
-            let _lock = app.project_lifecycle.lock().await;
-            app.clean_replaced_adapters().await.unwrap();
-        }
+        app.clean_replaced_adapters().await.unwrap();
         assert!(old.is_dir(), "publication alone is not user confirmation");
         app.begin(&other, "translate", "running").await.unwrap();
         let confirmed_patch = patch(&app, &id, "v2");
         app.record_patch_feedback(&id, &confirmed_patch, "passed", "显示正常")
             .await
             .unwrap();
-        {
-            let _lock = app.project_lifecycle.lock().await;
-            app.clean_replaced_adapters().await.unwrap();
-        }
+        app.clean_replaced_adapters().await.unwrap();
         assert!(old.is_dir(), "cleanup must wait for running tasks");
-        app.finish(&other, "translate", Ok("done".into()))
-            .await
-            .unwrap();
+        let third_game = temp.path().join("third-game");
+        fs::create_dir(&third_game).unwrap();
+        let third = app.add_project(&third_game).await.unwrap().id;
+        let _unrelated_reader = app.lock_project(&third).await.unwrap();
+        let project_reader = app.lock_project(&id).await.unwrap();
+        let mut events = app.subscribe();
+        let (finished, ()) = tokio::join!(
+            app.finish(&other, "translate", Ok("done".into())),
+            async {
+                while let Ok(event) = events.recv().await {
+                    if matches!(event, crate::AppEvent::TaskChanged(s) if !s.running && s.project_id == other)
+                    {
+                        break;
+                    }
+                }
+                drop(project_reader);
+            }
+        );
+        finished.unwrap();
         assert!(!old.exists());
         assert!(replacement.is_dir());
         assert!(
@@ -688,10 +829,7 @@ mod tests {
         app.remember_adapter_replacement(&id, &adapter("v2"))
             .await
             .unwrap();
-        {
-            let _lock = app.project_lifecycle.lock().await;
-            app.clean_replaced_adapters().await.unwrap();
-        }
+        app.clean_replaced_adapters().await.unwrap();
         assert!(
             middle.is_dir(),
             "keep intermediate repairs until confirmation"
@@ -702,10 +840,7 @@ mod tests {
         assert!(old.is_dir());
         assert!(!middle.exists());
         pin(&app, &other, "v3").await;
-        {
-            let _lock = app.project_lifecycle.lock().await;
-            app.clean_replaced_adapters().await.unwrap();
-        }
+        app.clean_replaced_adapters().await.unwrap();
         assert!(
             !old.exists(),
             "removing v2 must not orphan the deferred cleanup of v1"

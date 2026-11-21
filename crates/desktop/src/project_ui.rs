@@ -878,7 +878,7 @@ async fn handle_project_action(
             *ctx.host.write().await = next;
             *ctx.catalog.lock().unwrap_or_else(|e| e.into_inner()) = None;
             *ctx.session.lock().unwrap_or_else(|e| e.into_inner()) = Default::default();
-            crate::events::subscribe_events(ctx.clone()).await;
+            crate::events::connect(ctx.clone()).await;
             drop(switching);
             ctx.update(move |ui| {
                 let a = ui.global::<App>();

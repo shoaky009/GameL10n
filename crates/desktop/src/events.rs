@@ -8,11 +8,15 @@ use tokio::sync::broadcast::error::RecvError;
 
 use crate::{App, Context, recognition_ui, token_ui};
 
-pub(super) async fn subscribe_events(ctx: Context) {
+pub(super) async fn connect(ctx: Context) {
     let app = ctx.app().await;
     let mut events = app.subscribe();
     let epoch = ctx.root_generation.load(Ordering::Relaxed);
     ctx.runtime.clone().spawn(async move {
+        if let Err(error) = app.clean_replaced_adapters().await {
+            ctx.show_error("", format!("历史适配器暂未清理：{error}"));
+        }
+        drop(app);
         loop {
             let event = match events.recv().await {
                 Ok(event) => event,
