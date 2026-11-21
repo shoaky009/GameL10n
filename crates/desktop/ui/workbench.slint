@@ -52,9 +52,6 @@ export component Workbench inherits FocusScope {
     HorizontalLayout { spacing: 12px;
         Button { text: "全量翻译"; primary: App.selected-texts == 0; enabled: !App.busy && App.recognition != ""; clicked => { App.action("translate", "all"); } }
         Caption { text: App.counts; horizontal-stretch: 0; min-width: 0px; vertical-alignment: center; overflow: elide; wrap: no-wrap; }
-        if App.patch-is-trial: VerticalLayout { alignment: center; horizontal-stretch: 0;
-            Link { text: "安装最近的试译补丁…"; enabled: App.can-install-patch; clicked => { App.modal = "install"; } }
-        }
         Rectangle { horizontal-stretch: 1; }
     }
     HorizontalLayout { spacing: 8px;
@@ -74,9 +71,14 @@ export component Workbench inherits FocusScope {
         if App.selected-texts > 0 || App.selection-busy: Caption { text: App.selection-busy ? "更新中…" : "已选 " + App.selected-texts; vertical-alignment: center; wrap: no-wrap; }
         if App.selected-texts > 0: Button { text: "翻译所选"; primary: true; enabled: root.selection-enabled && !App.busy; clicked => { App.action("translate", "selected"); } }
         if App.selected-texts > 0: Button { text: "重新翻译所选"; enabled: root.selection-enabled && !App.busy; clicked => { App.action("retranslate-dialog", ""); } }
-        if App.selected-texts > 0: Button { text: "试译并生成补丁"; enabled: root.selection-enabled && !App.busy; clicked => { App.action("translate", "trial"); } }
         if App.selected-texts > 0: Button { text: "批量确认校对"; enabled: root.selection-enabled && App.editor-editable; clicked => { App.action("bulk-review", ""); } }
         Rectangle { horizontal-stretch: 1; }
+        Button { text: "生成补丁"; enabled: App.selected-texts > 0 && root.selection-enabled && !App.busy; clicked => { App.action("translate", "trial"); }
+            Tooltip { text: @markdown("使用所选文本生成补丁，缺少的译文会先自动翻译。"); }
+        }
+        Button { text: "安装补丁"; enabled: App.can-install-patch; clicked => { App.modal = "install"; }
+            Tooltip { text: @markdown("安装本项目最近生成的补丁。"); }
+        }
     }
     HorizontalLayout { spacing: 12px;
         VerticalLayout { spacing: 8px; horizontal-stretch: 2;

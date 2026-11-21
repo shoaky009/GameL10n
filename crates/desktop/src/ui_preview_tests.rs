@@ -187,7 +187,6 @@ fn render_desktop_preview_fixtures() {
     app.set_editor_validation("文本格式检查通过。".into());
     app.set_editor_context("相邻文本：\n门口的风铃轻轻响起。\n角色：店员".into());
     app.set_patch_summary("已生成试译补丁 · 24 条译文 · 资源结构检查通过".into());
-    app.set_patch_is_trial(true);
     app.set_patch_path("D:\\GameL10n Data\\games\\fixture\\patches\\current".into());
     app.set_launch_summary("Game.exe · 使用游戏目录作为工作目录".into());
     app.set_launch_can_run(true);
@@ -269,7 +268,7 @@ fn render_desktop_preview_fixtures() {
         for (width, height) in [(1120, 720), (1420, 900)] {
             capture(&format!("workbench-unselected{suffix}"), width, height);
             if width == 1120 {
-                click(790.0, 155.0);
+                click(1060.0, 235.0);
                 assert_eq!(app.get_modal(), "install");
                 capture(&format!("workbench-install{suffix}"), width, height);
                 app.set_modal("".into());

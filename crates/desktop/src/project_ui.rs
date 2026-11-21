@@ -304,7 +304,6 @@ async fn handle_project_action(
                 a.set_project_path("".into());
                 a.set_project_files_path("".into());
                 a.set_patch_path("".into());
-                a.set_patch_is_trial(false);
                 if a.get_project_id().as_str() != requested {
                     a.set_instruction("".into());
                 }
@@ -1154,7 +1153,6 @@ pub async fn refresh_patch(ctx: &Context, id: &str) -> Result<(), CoreError> {
         if a.get_project_id().as_str() != id {
             return;
         }
-        a.set_patch_is_trial(result.as_ref().is_some_and(|patch| patch.is_trial));
         if let Some(p) = result {
             a.set_patch_path(p.patch_directory.display().to_string().into());
             a.set_patch_summary(

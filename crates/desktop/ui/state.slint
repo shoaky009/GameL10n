@@ -224,7 +224,6 @@ export global App {
     in-out property <string> candidate;
     in-out property <string> patch-summary;
     in-out property <string> patch-path;
-    in-out property <bool> patch-is-trial;
     out property <bool> can-install-patch: !busy && patch-path != "" && project-path != "";
     in-out property <string> patch-launch;
     in-out property <string> runtime-check;

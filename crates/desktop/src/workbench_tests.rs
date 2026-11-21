@@ -750,7 +750,7 @@ fn project_actions_keep_settings_selection_and_saved_edits_in_sync_across_tabs()
         ).unwrap();
         invoke_action(&ui, &ctx, "refresh-project", "").await;
         invoke_action(&ui, &ctx, "tab", "1").await;
-        assert!(app.get_patch_is_trial());
+        assert!(app.get_can_install_patch());
         assert_eq!(app.get_selected_texts(), 0);
         let editor_id = app.get_editor_id();
         app.set_editor_text("试译生成后的新修改".into());
