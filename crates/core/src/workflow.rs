@@ -354,7 +354,15 @@ impl Application {
             }
         };
         let cancellation = self
-            .begin(id, "workflow", "正在开始全自动汉化流程。")
+            .begin_with_review_evidence(
+                id,
+                "workflow",
+                "正在开始全自动汉化流程。",
+                definition
+                    .steps
+                    .iter()
+                    .any(|step| step.action == WorkflowAction::Recognize),
+            )
             .await?;
         let mut context = RunContext::default();
         let mut position = definition

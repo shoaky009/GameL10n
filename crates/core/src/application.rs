@@ -52,6 +52,10 @@ pub enum AppEvent {
     ProjectsChanged,
     EngineLibraryChanged,
     TaskChanged(TaskState),
+    ReviewChanged {
+        project_id: String,
+        state: crate::ReviewState,
+    },
     TranslationChanged {
         project_id: String,
         progress: gamel10n_translation::execution::TranslationProgress,
@@ -175,6 +179,7 @@ impl AnalysisCache {
 
 struct TaskEntry {
     state: TaskState,
+    writes_review_evidence: bool,
     terminal_persisted: bool,
     summary: Option<serde_json::Value>,
     cancellation: CancellationToken,
@@ -187,7 +192,8 @@ pub struct Application {
     parser: VnTextPatch,
     analysis: Arc<Mutex<AnalysisCache>>,
     tasks: Arc<Mutex<HashMap<String, TaskEntry>>>,
-    next_task_order: Arc<AtomicU64>,
+    pub(crate) reviews: Arc<std::sync::Mutex<HashMap<String, crate::engine_review::ReviewTask>>>,
+    pub(crate) next_task_order: Arc<AtomicU64>,
     pub(crate) events: broadcast::Sender<AppEvent>,
     pub(crate) settings_gate: Arc<Mutex<()>>,
     pub(crate) project_lifecycle: Arc<Mutex<()>>,
@@ -209,6 +215,7 @@ impl Application {
             parser: VnTextPatch::new(tools),
             analysis: Arc::new(Mutex::new(AnalysisCache::default())),
             tasks: Arc::new(Mutex::new(HashMap::new())),
+            reviews: Default::default(),
             next_task_order: Arc::new(AtomicU64::new(0)),
             events,
             settings_gate: Arc::new(Mutex::new(())),
@@ -245,13 +252,19 @@ impl Application {
     pub async fn list_projects(&self, query: &str) -> Vec<ProjectSummary> {
         let mut projects = self.store.list(query.trim()).await;
         let tasks = self.tasks.lock().await;
+        let reviews = self.review_tasks();
         projects.sort_by_cached_key(|project| {
             let task_order = tasks
                 .get(&project.id)
                 .filter(|entry| entry.state.running)
                 .map_or(u64::MAX, |entry| entry.order);
             (
-                task_order,
+                task_order.min(
+                    reviews
+                        .get(&project.id)
+                        .filter(|review| review.state.running)
+                        .map_or(u64::MAX, |review| review.order),
+                ),
                 std::cmp::Reverse(project.updated_at()),
                 project.name.to_lowercase(),
                 project.id.clone(),
@@ -336,6 +349,7 @@ impl Application {
                 id.into(),
                 TaskEntry {
                     state: saved.state.clone(),
+                    writes_review_evidence: false,
                     terminal_persisted: true,
                     summary: saved.task_summary.clone(),
                     cancellation: CancellationToken::new(),
@@ -398,6 +412,38 @@ impl Application {
             .await
             .get(id)
             .map(|entry| entry.state.clone())
+    }
+
+    pub(crate) async fn writing_review_evidence(&self, id: &str) -> bool {
+        self.tasks
+            .lock()
+            .await
+            .get(id)
+            .is_some_and(|entry| entry.state.running && entry.writes_review_evidence)
+    }
+
+    /// Requests cancellation of all active project tasks and reviews before closing the host.
+    pub async fn cancel_all_tasks(&self) -> bool {
+        let mut active = false;
+        for task in self
+            .tasks
+            .lock()
+            .await
+            .values()
+            .filter(|task| task.state.running)
+        {
+            task.cancellation.cancel();
+            active = true;
+        }
+        for review in self
+            .review_tasks()
+            .values()
+            .filter(|review| review.state.running)
+        {
+            review.cancellation.cancel();
+            active = true;
+        }
+        active
     }
 
     pub(crate) async fn cached_analysis(
@@ -718,6 +764,7 @@ impl Application {
         drop(cache);
         self.workbenches.lock().await.remove(id);
         self.tasks.lock().await.remove(id);
+        self.review_tasks().remove(id);
     }
 
     /// Excludes deletion and short writes for one project without blocking other projects.
@@ -755,6 +802,22 @@ impl Application {
         operation: &str,
         message: &str,
     ) -> Result<CancellationToken, CoreError> {
+        self.begin_with_review_evidence(
+            id,
+            operation,
+            message,
+            matches!(operation, "recognize" | "adapt"),
+        )
+        .await
+    }
+
+    pub(crate) async fn begin_with_review_evidence(
+        &self,
+        id: &str,
+        operation: &str,
+        message: &str,
+        writes_review_evidence: bool,
+    ) -> Result<CancellationToken, CoreError> {
         let _project = self.lock_project(id).await?;
         let _lifecycle = self.project_lifecycle.lock().await;
         if self.store.get(id).await?.is_removed {
@@ -769,6 +832,11 @@ impl Application {
             .is_some_and(|entry| entry.state.running)
         {
             return Err(CoreError::ProjectBusy);
+        }
+        if writes_review_evidence && self.review_running(id) {
+            return Err(CoreError::InvalidData(
+                "经验总结正在读取适配资料，请在总结结束或停止后重试。".into(),
+            ));
         }
         let cancellation = CancellationToken::new();
         let state = TaskState {
@@ -787,6 +855,7 @@ impl Application {
             id.into(),
             TaskEntry {
                 state: state.clone(),
+                writes_review_evidence,
                 terminal_persisted: false,
                 summary: None,
                 cancellation: cancellation.clone(),
@@ -945,7 +1014,7 @@ impl Application {
             Ok(summary) => (summary, None),
             Err(error) => (task_summary(&state), Some(error)),
         };
-        self.finish_metrics(id, state.succeeded).await;
+        self.finish_metrics(id, operation, state.succeeded).await;
         let path = self.store.directory(id)?.join("rust-task.json");
         let saved = StoredTaskState {
             state: state.clone(),

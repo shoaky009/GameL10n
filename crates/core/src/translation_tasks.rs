@@ -137,6 +137,7 @@ mod tests {
         let permit = app.translation_permit(&token).await.unwrap();
         // Loading while queued would fail before cancellation reaches the waiting task.
         std::fs::write(&extraction, b"invalid extraction JSON").unwrap();
+        let review = app.begin_review(&id).await.unwrap();
         let mut events = app.subscribe();
         let run = app.translate_project(&id, options);
         tokio::pin!(run);
@@ -172,6 +173,14 @@ mod tests {
         let resumed = app.resume_translation(&id, true).await.unwrap();
         assert_eq!((resumed.completed, resumed.cache_hits), (1, 1));
         assert_eq!(resumed.translations["line-1"], "你好");
+        assert!(!review.is_cancelled());
+        assert!(app.review_running(&id));
+        app.cancel_review(&id);
+        assert!(review.is_cancelled());
+        app.finish_review(&id, Err("cancelled".into()))
+            .await
+            .unwrap();
+        assert_eq!(app.task_state(&id).await.unwrap().succeeded, Some(true));
     }
 
     #[tokio::test]

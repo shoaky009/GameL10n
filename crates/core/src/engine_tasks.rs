@@ -405,6 +405,7 @@ impl Application {
         };
         self.metrics_details(
             id,
+            operation,
             Some("recognize"),
             continuing.then_some("continued"),
             None,
@@ -414,7 +415,7 @@ impl Application {
             if recover_missing {
                 let recovered = self.recognize_existing(id, &cancellation, true).await?;
                 if let Some(count) = recovered.accepted_extraction() {
-                    self.metrics_details(id, None, Some("reused"), None).await;
+                    self.metrics_details(id, operation, None, Some("reused"), None).await;
                     return Ok(RecognitionResult::Extracted(count));
                 }
                 operation = "adapt";
@@ -454,7 +455,7 @@ impl Application {
             }
             if let Some(count) = recognized.accepted_extraction() {
                 if recognized.known_game {
-                    self.metrics_details(id, None, Some("reused"), None).await;
+                    self.metrics_details(id, operation, None, Some("reused"), None).await;
                 }
                 return Ok(RecognitionResult::Extracted(count));
             }
@@ -513,7 +514,7 @@ impl Application {
                         .is_ok(),
                 )
             };
-            self.finish_metrics(id, succeeded).await;
+            self.finish_metrics(id, operation, succeeded).await;
         }
         result
     }
@@ -1082,7 +1083,7 @@ impl Application {
         // Validate configuration before creating an adaptation workspace or changing its state.
         let (provider, limits) = self.analysis_provider(id).await?;
         let objective = start.objective;
-        self.metrics_provider(id, &provider).await;
+        self.metrics_provider(id, "adapt", &provider).await;
         let task = match objective {
             AdaptationObjective::Repair => Some("repair"),
             AdaptationObjective::ExpandCoverage => Some("expand"),
@@ -1092,7 +1093,7 @@ impl Application {
             .project_directory(id)?
             .join("adaptation/current/session.json")
             .is_file();
-        self.metrics_details(id, task, continuing.then_some("continued"), None)
+        self.metrics_details(id, "adapt", task, continuing.then_some("continued"), None)
             .await;
         let improve_existing = improving_existing(&project);
         let instruction =
@@ -1299,6 +1300,7 @@ impl Application {
         };
         self.metrics_details(
             id,
+            "adapt",
             None,
             (result.status == gamel10n_engines::AdaptationStatus::Reused).then_some("reused"),
             Some(status),
@@ -1317,7 +1319,7 @@ impl Application {
         operation: &str,
         progress: EngineProgress,
     ) -> Result<(), CoreError> {
-        self.checkpoint_metrics(id).await;
+        self.checkpoint_metrics(id, operation).await;
         if self
             .update_task_progress(id, operation, &progress.message)
             .await
@@ -1341,50 +1343,6 @@ impl Application {
             progress,
         });
         Ok(())
-    }
-
-    pub async fn review_engine(
-        &self,
-        id: &str,
-    ) -> Result<gamel10n_engines::review::EngineReviewResult, CoreError> {
-        if !self
-            .project_directory(id)?
-            .join("adaptation/current/session.json")
-            .is_file()
-        {
-            return Err(CoreError::InvalidData(
-                "此项目没有可用于总结的适配记录，或相关工作文件已清理。已有经验总结仍可查看。"
-                    .into(),
-            ));
-        }
-        let (provider, limits) = self.analysis_provider(id).await?;
-        let cancellation = self
-            .begin(id, "review", "正在总结可供同类引擎复用的经验。")
-            .await?;
-        self.metrics_provider(id, &provider).await;
-        let result=async {
-            let (tx,mut rx)=tokio::sync::mpsc::unbounded_channel::<EngineProgress>();let report=move|p|{let _=tx.send(p);};let service=self.engine_service()?;let directory=self.project_directory(id)?;let knowledge=self.data_directory().join("extensions/engine-knowledge");
-            let api = self.task_api_summary(id).await?;
-            self.log_task_message(id, api.lines().next().unwrap_or("分析 API 已选择。")).await;
-            let future=service.review(&directory,&knowledge,&provider,&limits,&cancellation,Some(&report));tokio::pin!(future);
-            let result=loop {tokio::select! {result=&mut future=>break result?,Some(progress)=rx.recv()=>{self.engine_progress(id,"review",progress).await?;}}};
-            while let Ok(progress)=rx.try_recv(){self.engine_progress(id,"review",progress).await?;}
-            if result.reused { self.metrics_details(id, None, Some("reused"), None).await; }
-            write_json(&directory.join("engine-review-result.json"),&result)?;
-            if let Some(entry) = &result.entry_id { EngineCatalog::open(self.data_directory())?.register_knowledge(entry)?; }
-            Ok::<_,CoreError>(result)
-        }.await;
-        self.finish_with_log_source(
-            id,
-            "review",
-            result
-                .as_ref()
-                .map(|r| r.summary.clone())
-                .map_err(ToString::to_string),
-            LogSource::from_model(result.is_ok()),
-        )
-        .await?;
-        result
     }
 
     async fn build_source(
@@ -2493,7 +2451,19 @@ mod tests {
             .await
             .unwrap();
 
+        let translation = app
+            .begin(&project.id, "translate", "正在翻译。")
+            .await
+            .unwrap();
         let error = app.review_engine(&project.id).await.unwrap_err();
+        let task = app.task_state(&project.id).await.unwrap();
+        assert!(task.running && task.operation == "translate");
+        assert!(!translation.is_cancelled());
+        assert_eq!(
+            app.review_state(&project.id).unwrap().succeeded,
+            Some(false)
+        );
+        assert!(!directory.join("adaptation-progress.json").exists());
         assert!(error.to_string().contains("Token 预算不足"), "{error}");
         let requests = server.await;
         assert_eq!(requests.len(), 3);

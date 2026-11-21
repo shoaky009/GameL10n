@@ -116,7 +116,19 @@ impl Application {
         if categories.is_empty() {
             return Err(CoreError::InvalidData("请至少选择一类项目文件。".into()));
         }
-        let cancellation = self.begin(id, "cleanup", "正在清理所选项目文件。").await?;
+        let cancellation = self
+            .begin_with_review_evidence(
+                id,
+                "cleanup",
+                "正在清理所选项目文件。",
+                categories.iter().any(|category| {
+                    matches!(
+                        category,
+                        CleanupCategory::Adaptation | CleanupCategory::Diagnostics
+                    )
+                }),
+            )
+            .await?;
         let result = self
             .cleanup_materials_in_task(id, categories, expected_patch, &cancellation)
             .await;

@@ -1,6 +1,6 @@
 use crate::view::{App, MainWindow, ProjectRow, TextRow, TokenDisplay};
 use slint::{
-    ComponentHandle, ModelRc, VecModel,
+    ComponentHandle, Model, ModelRc, VecModel,
     platform::{
         Platform, WindowAdapter,
         software_renderer::{MinimalSoftwareWindow, RepaintBufferType},
@@ -304,11 +304,33 @@ fn render_desktop_preview_fixtures() {
         capture(&format!("recognition-running{suffix}"), 1120, 720);
         app.set_recognition_running(false);
         app.set_adaptation_running(false);
-        app.set_task_operation("review".into());
-        app.set_status("正在总结经验".into());
-        app.set_activity("正在整理同类引擎的验证经验。".into());
-        app.set_task_message("正在整理同类引擎的验证经验。".into());
+        app.set_tab(1);
+        app.set_task_operation("translate".into());
+        app.set_status("正在翻译".into());
+        app.set_activity("".into());
+        app.set_task_message("正在翻译对白。".into());
+        app.set_review_running(true);
+        app.set_review_message("正在整理同类引擎的验证经验。".into());
+        let projects = app.get_projects();
+        let initial = projects.row_data(0).unwrap();
+        let mut row = initial.clone();
+        row.status = app.get_status();
+        row.running = true;
+        row.review_running = true;
+        projects.set_row_data(0, row.clone());
+        capture(
+            &format!("workbench-translation-and-review{suffix}"),
+            1120,
+            720,
+        );
+        app.set_busy(false);
+        app.set_tab(0);
+        row.running = false;
+        projects.set_row_data(0, row);
         capture(&format!("recognition-reviewing{suffix}"), 1120, 720);
+        projects.set_row_data(0, initial);
+        app.set_review_running(false);
+        app.set_review_message("".into());
         app.set_busy(false);
         app.set_activity("".into());
         app.set_page(1);

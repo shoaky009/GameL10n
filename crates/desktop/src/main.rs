@@ -509,11 +509,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 let stopped = tokio::time::timeout(std::time::Duration::from_secs(60), async {
                     loop {
-                        let states = app.task_states().await;
-                        for state in states.values().filter(|state| state.running) {
-                            app.cancel(&state.project_id).await;
-                        }
-                        if !states.values().any(|state| state.running)
+                        if !app.cancel_all_tasks().await
                             && ctx.active_actions.load(Ordering::Acquire) == 0
                         {
                             break;
@@ -757,6 +753,7 @@ pub async fn refresh_projects(ctx: &Context, query: &str) -> Result<(), CoreErro
             name: p.name.into(),
             path: p.game_directory.display().to_string().into(),
             running: state.as_ref().is_some_and(|s| s.running),
+            review_running: app.review_running(&p.id),
             status: status.into(),
             selected: false,
         });

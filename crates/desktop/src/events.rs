@@ -51,8 +51,8 @@ fn dispatch(ctx: &Context, event: AppEvent) {
                 .invoke_action("projects".into(), "".into());
         }),
         AppEvent::TaskChanged(state) => {
-            let catalog_changed = !state.running
-                && matches!(state.operation.as_str(), "adapt" | "review" | "recognize");
+            let catalog_changed =
+                !state.running && matches!(state.operation.as_str(), "adapt" | "recognize");
             if catalog_changed {
                 *ctx.catalog
                     .lock()
@@ -60,6 +60,23 @@ fn dispatch(ctx: &Context, event: AppEvent) {
             }
             ctx.update(move |ui| update_task(&ui.global::<App>(), state, catalog_changed));
         }
+        AppEvent::ReviewChanged { project_id, state } => ctx.update(move |ui| {
+            let app = ui.global::<App>();
+            let projects = app.get_projects();
+            if let Some((index, mut row)) = projects
+                .iter()
+                .enumerate()
+                .find(|(_, row)| row.id.as_str() == project_id)
+                && row.review_running != state.running
+            {
+                row.review_running = state.running;
+                projects.set_row_data(index, row);
+                app.invoke_action("projects".into(), "".into());
+            }
+            if app.get_project_id().as_str() == project_id {
+                update_review(&app, &state);
+            }
+        }),
         AppEvent::TranslationChanged {
             project_id,
             progress,
@@ -182,6 +199,27 @@ fn update_current_task(app: &App, state: TaskState) {
         }
     }
     app.invoke_action("refresh-project".into(), "".into());
+}
+
+pub(super) fn update_review(app: &App, state: &gamel10n_core::ReviewState) {
+    app.set_review_running(state.running);
+    if state.succeeded == Some(true) {
+        app.set_review_summary(state.message.as_str().into());
+        app.set_review_message("".into());
+    } else {
+        app.set_review_message(state.message.as_str().into());
+    }
+    if let Some(progress) = &state.progress {
+        app.set_review_usage(token_ui::analysis_usage(
+            progress.usage.input_tokens,
+            progress.usage.output_tokens,
+            progress.usage.cached_tokens.unwrap_or(0),
+            progress.api_requests,
+            progress.api_requests_estimated,
+        ));
+    } else {
+        app.set_review_usage(Default::default());
+    }
 }
 
 fn update_translation(app: &App, progress: TranslationProgress) {

@@ -5,6 +5,7 @@ pub mod adapter_feedback;
 mod application;
 pub mod catalog;
 pub mod cleanup;
+mod engine_review;
 pub mod engine_tasks;
 pub mod game_check;
 pub mod game_directory;
@@ -24,6 +25,7 @@ pub mod workflow;
 use thiserror::Error;
 
 pub use application::{AppEvent, Application, StoredAnalysis, TaskState, TextPage};
+pub use engine_review::ReviewState;
 pub use gamel10n_engines::{CancellationToken, ToolPaths};
 pub use gamel10n_translation::TranslationUnit;
 pub use project_views::{PatchTextPage, ProjectSnapshot};

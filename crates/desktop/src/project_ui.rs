@@ -486,8 +486,30 @@ async fn handle_project_action(
             });
         }
         "review" => {
-            ctx.app().await.review_engine(&input.project_id).await?;
+            let host = ctx.app().await;
+            if let Err(error) = host.review_engine(&input.project_id).await {
+                let message = error.to_string();
+                let state = host.review_state(&input.project_id);
+                if !state.is_some_and(|state| {
+                    state.message == message
+                        || (state.succeeded.is_none()
+                            && matches!(
+                                error,
+                                CoreError::Engine(gamel10n_engines::EngineError::Cancelled)
+                            ))
+                }) {
+                    let _ = host.log_error(&input.project_id, &error).await;
+                    let id = input.project_id.clone();
+                    ctx.update(move |ui| {
+                        let app = ui.global::<App>();
+                        if app.get_project_id().as_str() == id && !app.get_review_running() {
+                            app.set_review_message(message.into());
+                        }
+                    });
+                }
+            }
         }
+        "cancel-review" => ctx.app().await.cancel_review(&input.project_id),
         "cancel" => {
             ctx.app().await.cancel(&input.project_id).await;
         }
@@ -756,10 +778,9 @@ async fn handle_project_action(
             crate::game_check_ui::cancel(ctx);
             tokio::time::timeout(std::time::Duration::from_secs(60), async {
                 loop {
-                    for task in host.task_states().await.into_values().filter(|s| s.running) {
-                        host.cancel(&task.project_id).await;
-                    }
-                    if ctx.active_actions.load(Ordering::Acquire) <= 1 {
+                    if !host.cancel_all_tasks().await
+                        && ctx.active_actions.load(Ordering::Acquire) <= 1
+                    {
                         break;
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -1015,20 +1036,6 @@ pub async fn refresh_project(ctx: &Context, id: &str, opening: bool) -> Result<(
             .is_some_and(|state| state.operation == "adapt")
         {
             a.set_task_usage(adaptation_usage);
-        } else if state
-            .as_ref()
-            .is_some_and(|state| state.operation == "review")
-        {
-            let snapshot = if state.as_ref().is_some_and(|state| state.running) {
-                if matches_operation("review") {
-                    &progress
-                } else {
-                    &Value::Null
-                }
-            } else {
-                &review
-            };
-            a.set_task_usage(crate::token_ui::saved_analysis(snapshot));
         }
         a.set_review_summary(
             review
@@ -1037,6 +1044,13 @@ pub async fn refresh_project(ctx: &Context, id: &str, opening: bool) -> Result<(
                 .unwrap_or("")
                 .into(),
         );
+        if let Some(state) = host.review_state(&selected_id) {
+            crate::events::update_review(&a, &state);
+        } else {
+            a.set_review_running(false);
+            a.set_review_message("".into());
+            a.set_review_usage(crate::token_ui::saved_analysis(&review));
+        }
         if a.get_page() == 0 && a.get_tab() == 1 {
             a.invoke_action(
                 "texts".into(),

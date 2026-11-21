@@ -133,6 +133,17 @@ impl ActiveRun {
 #[derive(Default)]
 pub(crate) struct MetricsState {
     active: HashMap<String, ActiveRun>,
+    reviews: HashMap<String, ActiveRun>,
+}
+
+impl MetricsState {
+    fn runs(&mut self, operation: &str) -> &mut HashMap<String, ActiveRun> {
+        if operation == "review" {
+            &mut self.reviews
+        } else {
+            &mut self.active
+        }
+    }
 }
 
 #[derive(Default)]
@@ -210,7 +221,11 @@ impl Application {
         };
         let now = Utc::now();
         let record = ConsumptionRecord {
-            id: hash_text(&format!("{id}:{}:{}", now.to_rfc3339(), std::process::id()))[..32]
+            id: hash_text(&format!(
+                "{id}:{task}:{}:{}",
+                now.to_rfc3339(),
+                std::process::id()
+            ))[..32]
                 .into(),
             project_id: id.into(),
             project_name: project.name,
@@ -227,7 +242,7 @@ impl Application {
             elapsed_ms: 0,
             api: RequestMetrics::default(),
         };
-        self.metrics.lock().await.active.insert(
+        self.metrics.lock().await.runs(task).insert(
             id.into(),
             ActiveRun {
                 record,
@@ -238,8 +253,13 @@ impl Application {
         );
     }
 
-    pub(crate) async fn metrics_provider(&self, id: &str, provider: &OpenAiProvider) {
-        if let Some(run) = self.metrics.lock().await.active.get_mut(id) {
+    pub(crate) async fn metrics_provider(
+        &self,
+        id: &str,
+        operation: &str,
+        provider: &OpenAiProvider,
+    ) {
+        if let Some(run) = self.metrics.lock().await.runs(operation).get_mut(id) {
             run.record.model = Some(provider.model().into());
             run.record.profile_name = Some(provider.display_name().into());
             run.record.reasoning_effort = provider.analysis_reasoning_effort().map(str::to_owned);
@@ -250,11 +270,12 @@ impl Application {
     pub(crate) async fn metrics_details(
         &self,
         id: &str,
+        operation: &str,
         task: Option<&str>,
         mode: Option<&str>,
         status: Option<&str>,
     ) {
-        if let Some(run) = self.metrics.lock().await.active.get_mut(id) {
+        if let Some(run) = self.metrics.lock().await.runs(operation).get_mut(id) {
             if let Some(task) = task {
                 run.record.task = task.into();
             }
@@ -267,9 +288,9 @@ impl Application {
         }
     }
 
-    pub(crate) async fn checkpoint_metrics(&self, id: &str) {
+    pub(crate) async fn checkpoint_metrics(&self, id: &str, operation: &str) {
         let mut metrics = self.metrics.lock().await;
-        let Some(run) = metrics.active.get_mut(id) else {
+        let Some(run) = metrics.runs(operation).get_mut(id) else {
             return;
         };
         // Save enough progress for crash recovery without writing on every task update.
@@ -288,9 +309,9 @@ impl Application {
         }
     }
 
-    pub(crate) async fn finish_metrics(&self, id: &str, succeeded: Option<bool>) {
+    pub(crate) async fn finish_metrics(&self, id: &str, operation: &str, succeeded: Option<bool>) {
         let mut metrics = self.metrics.lock().await;
-        let Some(run) = metrics.active.remove(id) else {
+        let Some(run) = metrics.runs(operation).remove(id) else {
             return;
         };
         let mut record = run.snapshot();
@@ -319,6 +340,7 @@ impl Application {
         let active: BTreeMap<_, _> = metrics
             .active
             .values()
+            .chain(metrics.reviews.values())
             .map(|run| (run.record.id.as_str(), run))
             .collect();
         history
@@ -671,7 +693,7 @@ mod tests {
         })
         .unwrap()
         .with_display_name("Profile A".into());
-        app.metrics_provider(&project.id, &provider).await;
+        app.metrics_provider(&project.id, "adapt", &provider).await;
         drop(provider);
         let live = app.consumption_history().await.unwrap();
         assert_eq!(live.records[0].status, "running");
@@ -683,16 +705,13 @@ mod tests {
             .get_mut(&project.id)
             .unwrap()
             .last_saved = Instant::now() - std::time::Duration::from_secs(61);
-        app.checkpoint_metrics(&project.id).await;
+        app.checkpoint_metrics(&project.id, "adapt").await;
         app.finish(&project.id, "adapt", Ok("Adapter completed".into()))
             .await
             .unwrap();
-        let token = app
-            .begin(&project.id, "review", "Preparing review")
-            .await
-            .unwrap();
+        let token = app.begin_review(&project.id).await.unwrap();
         token.cancel();
-        app.finish(&project.id, "review", Err("Cancelled".into()))
+        app.finish_review(&project.id, Err("Cancelled".into()))
             .await
             .unwrap();
         let mut interrupted = record("interrupted", 100, Some(80));

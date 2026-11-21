@@ -1,30 +1,57 @@
 import { Button, LineEdit, TextEdit, ScrollView, ProgressIndicator } from "std-widgets.slint";
-import { App, Theme, Label, Caption, TokenCaption, Heading, SectionHeading, Divider, ReportText, Link } from "state.slint";
+import { App, Theme, Label, Caption, TokenCaption, TokenDisplay, Heading, SectionHeading, Divider, ReportText, Link } from "state.slint";
+
+component RunningTask inherits VerticalLayout {
+    in property <string> title;
+    in property <string> message;
+    in property <string> api;
+    in property <TokenDisplay> usage;
+    in property <float> progress;
+    in property <string> stop-label;
+    callback stop();
+    private property <bool> expanded;
+    spacing: 4px;
+    HorizontalLayout { spacing: 10px;
+        Label { text: App.project-name; color: Theme.secondary; max-width: 180px; min-width: 0px; overflow: elide; wrap: no-wrap; vertical-alignment: center; }
+        Label { text: root.title; color: Theme.ink; min-width: 0px; horizontal-stretch: 1; overflow: elide; wrap: no-wrap; vertical-alignment: center; }
+        Button { text: root.stop-label; clicked => { root.stop(); } }
+        Button { text: root.expanded ? "收起详情" : "任务详情"; accessible-label: root.title + "详情"; clicked => { root.expanded = !root.expanded; } }
+    }
+    ProgressIndicator { height: 3px; progress: root.progress; indeterminate: root.progress == 0; }
+    if root.expanded: VerticalLayout { spacing: 4px;
+        if root.api != "": Caption { text: "API：" + root.api; }
+        if root.usage.text != "": TokenCaption { value: root.usage; }
+        ScrollView { height: 64px; horizontal-scrollbar-policy: always-off; content-width: self.visible-width;
+            ReportText { text: root.message; }
+        }
+    }
+}
 
 export component TaskFeedback inherits Rectangle {
-    property <bool> details;
     private property <bool> show-task: App.busy && App.project-id != "";
+    private property <bool> show-review: App.review-running && App.project-id != "";
     private property <bool> show-recognition-failure: !App.busy && App.error == "" && App.recognition-failure-message != "";
     height: feedback-content.preferred-height + 20px;
     background: App.error != "" || root.show-recognition-failure ? Theme.error-bg : Theme.automatic-bg;
     border-radius: 5px;
     feedback-content := VerticalLayout { x: 12px; y: 10px; width: parent.width - 24px; height: self.preferred-height; spacing: 6px;
-        HorizontalLayout { spacing: 10px;
-            Label { text: (root.show-task || root.show-recognition-failure || App.page == 0) && App.project-name != "" ? App.project-name : "操作提示"; color: Theme.secondary; max-width: 180px; min-width: 0px; overflow: elide; wrap: no-wrap; vertical-alignment: center; }
-            Label { text: App.concise-text(App.error != "" ? App.error : root.show-recognition-failure ? App.recognition-failure-message : App.activity != "" ? App.activity : App.status); color: App.error != "" || root.show-recognition-failure ? Theme.error : Theme.ink; min-width: 0px; horizontal-stretch: 1; overflow: elide; wrap: no-wrap; vertical-alignment: center; }
-            if root.show-task: Button { text: App.task-operation == "translate" || App.task-operation == "retranslate" || App.task-operation == "candidate" ? "暂停翻译" : "停止任务"; clicked => { App.action("cancel", ""); } }
-            if root.show-task: Button { text: root.details ? "收起详情" : "任务详情"; clicked => { root.details = !root.details; } }
+        if root.show-task: RunningTask {
+            title: App.status; message: App.task-message; api: App.task-api; usage: App.task-usage; progress: App.progress;
+            stop-label: App.task-operation == "translate" || App.task-operation == "retranslate" || App.task-operation == "candidate" ? "暂停翻译" : "停止任务";
+            stop => { App.action("cancel", ""); }
+        }
+        if root.show-task && root.show-review: Divider {}
+        if root.show-review: RunningTask {
+            title: "正在总结经验"; message: App.review-message;
+            api: App.task-api-for("review", App.task-api-summary); usage: App.review-usage;
+            stop-label: "停止总结"; stop => { App.action("cancel-review", ""); }
+        }
+        if App.error != "" || root.show-recognition-failure || App.activity != "": HorizontalLayout { spacing: 10px;
+            Label { text: App.page == 0 && App.project-name != "" ? App.project-name : "操作提示"; color: Theme.secondary; max-width: 180px; min-width: 0px; overflow: elide; wrap: no-wrap; vertical-alignment: center; }
+            Label { text: App.concise-text(App.error != "" ? App.error : root.show-recognition-failure ? App.recognition-failure-message : App.activity); color: App.error != "" || root.show-recognition-failure ? Theme.error : Theme.ink; min-width: 0px; horizontal-stretch: 1; overflow: elide; wrap: no-wrap; vertical-alignment: center; }
             if App.error != "": Button { text: "查看原因"; clicked => { App.modal = "feedback"; } }
             if root.show-recognition-failure: Button { text: "查看原因"; clicked => { App.action("tab", "0"); } }
             if App.error != "": Button { text: "关闭"; clicked => { App.error = ""; } }
-        }
-        if root.show-task: ProgressIndicator { height: 3px; progress: App.progress; indeterminate: App.progress == 0; }
-        if root.show-task && root.details: VerticalLayout { spacing: 6px;
-            if App.task-api != "": Caption { text: "API：" + App.task-api; }
-            if App.task-usage.text != "": TokenCaption { value: App.task-usage; }
-            ScrollView { height: 64px; horizontal-scrollbar-policy: always-off; content-width: self.visible-width;
-                ReportText { text: App.task-message; }
-            }
         }
     }
 }
@@ -173,7 +200,7 @@ export component Recognition inherits VerticalLayout {
             Rectangle { width: 1px; height: 20px; y: (parent.height - self.height) / 2; background: Theme.line; }
         }
         HorizontalLayout { spacing: 12px; horizontal-stretch: 0;
-            Button { text: "总结经验"; enabled: !App.busy; clicked => { App.action("review", ""); } }
+            Button { text: "总结经验"; enabled: !App.review-running; clicked => { App.action("review", ""); } }
             VerticalLayout { alignment: center; horizontal-stretch: 0;
                 HorizontalLayout { spacing: 12px;
                     if App.review-summary != "": Link { text: "查看总结"; clicked => { App.modal = "engine-review"; } }
@@ -182,6 +209,11 @@ export component Recognition inherits VerticalLayout {
             }
         }
         Rectangle { horizontal-stretch: 1; }
+    }
+    if !App.review-running && (App.review-message != "" || App.review-usage.text != ""): HorizontalLayout { spacing: 8px;
+        if App.review-message != "": Caption { text: App.review-message; wrap: word-wrap; }
+        if App.review-usage.text != "": Caption { text: "总结用量"; horizontal-stretch: 0; }
+        if App.review-usage.text != "": TokenCaption { value: App.review-usage; }
     }
     HorizontalLayout { padding-left: 8px; padding-right: 8px; spacing: 10px;
         Rectangle { width: 8px;

@@ -554,6 +554,9 @@ pub fn clear(app: &App) {
     RecognitionView::new(&BTreeMap::new(), None, &Value::Null, &Value::Null).apply(app);
     app.set_adaptation_usage(Default::default());
     app.set_review_summary("".into());
+    app.set_review_running(false);
+    app.set_review_message("".into());
+    app.set_review_usage(Default::default());
 }
 
 #[cfg(test)]

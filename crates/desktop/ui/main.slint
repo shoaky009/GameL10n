@@ -27,7 +27,7 @@ export component MainWindow inherits Window {
                         Rectangle { horizontal-stretch: 1;
                             VerticalLayout { spacing: 4px; alignment: start;
                                 Label { text: App.concise-text(project.name); height: 22px; color: Theme.title; font-weight: 600; overflow: elide; wrap: no-wrap; }
-                                Caption { text: App.concise-text(project.status); height: 20px; line-height-factor: 1; color: project.running ? Theme.accent : Theme.secondary; overflow: elide; wrap: no-wrap; }
+                                Caption { text: project.review-running ? project.running ? project.status + " · 总结经验" : "正在总结经验" : App.concise-text(project.status); height: 20px; line-height-factor: 1; color: project.running || project.review-running ? Theme.accent : Theme.secondary; overflow: elide; wrap: no-wrap; }
                                 Caption { text: App.concise-text(project.path); height: 18px; font-size: 12px; line-height-factor: 1; overflow: elide; wrap: no-wrap; }
                             }
                             project-key := FocusScope { key-pressed(event) => { if event.text == Key.Return || event.text == " " { App.action("project", project.id); return accept; } return reject; } }
@@ -109,7 +109,7 @@ export component MainWindow inherits Window {
                 Rectangle { vertical-stretch: 1; }
             }
             if App.page == 4: About {}
-            if App.busy || App.activity != "" || App.error != "" || App.recognition-failure-message != "": TaskFeedback {}
+            if App.busy || App.review-running || App.activity != "" || App.error != "" || App.recognition-failure-message != "": TaskFeedback {}
             if App.page == 0: VerticalLayout { spacing: 8px; vertical-stretch: 0;
                 Divider {}
                 HorizontalLayout { spacing: 16px;

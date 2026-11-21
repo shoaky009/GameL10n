@@ -20,6 +20,7 @@ impl Application {
                 .task_state(&project.id)
                 .await
                 .is_some_and(|s| s.running)
+                || self.review_running(&project.id)
             {
                 return Err(CoreError::InvalidData(
                     "请先暂停运行中的任务再切换保存位置。".into(),

@@ -475,7 +475,7 @@ impl Application {
         {
             let _lifecycle = self.project_lifecycle.lock().await;
             for id in &ids {
-                if self.task_state(id).await.is_some_and(|s| s.running) {
+                if self.task_state(id).await.is_some_and(|s| s.running) || self.review_running(id) {
                     return Err(CoreError::ProjectBusy);
                 }
             }

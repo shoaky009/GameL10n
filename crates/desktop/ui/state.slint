@@ -1,5 +1,5 @@
 import { Palette } from "std-widgets.slint";
-export struct ProjectRow { id: string, name: string, path: string, status: string, running: bool, selected: bool }
+export struct ProjectRow { id: string, name: string, path: string, status: string, running: bool, review-running: bool, selected: bool }
 export struct TextRow { id: string, location: string, source: string, translation: string, metadata: string, selected: bool, origin: int, reviewed: bool, invalid: bool, failed: bool, candidate: bool }
 export struct NamedRow { id: string, name: string, detail: string, enabled: bool }
 export struct EngineRow { id: string, name: string, detail: string, enabled: bool, selected: bool }
@@ -178,6 +178,9 @@ export global App {
     in-out property <bool> force-intelligent;
     in-out property <TokenDisplay> adaptation-usage;
     in-out property <string> review-summary;
+    in-out property <bool> review-running;
+    in-out property <string> review-message;
+    in-out property <TokenDisplay> review-usage;
     in-out property <string> text-query;
     in-out property <int> resource-filter;
     in-out property <int> kind-filter;
