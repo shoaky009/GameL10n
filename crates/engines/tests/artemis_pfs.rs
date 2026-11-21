@@ -85,6 +85,7 @@ async fn automatic_recognition_verifies_pfs_replacement_before_model_calls() {
         objective: "develop".into(),
         improve_existing: false,
         require_model_analysis: false,
+        resume_session: false,
         reuse_failures: vec![],
         builtin_probes: vec![],
         discovery_inventory: None,

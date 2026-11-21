@@ -36,10 +36,10 @@ impl AdaptationFailure {
                 };
                 let action = match (error.status_code, code) {
                     (Some(401 | 403), _) | (_, "configuration" | "http-client" | "scheduler") => {
-                        "检查分析 API 的地址、密钥、模型及访问权限后，点击“继续适配”。"
+                        "检查分析 API 的地址、密钥、模型及访问权限后，点击“继续智能识别”。"
                     }
                     (Some(429), _) => {
-                        "稍后点击“继续适配”；若持续限流，请检查 API 配额或调整分析 API。"
+                        "稍后点击“继续智能识别”；若持续限流，请检查 API 配额或调整分析 API。"
                     }
                     (Some(408 | 500..=599), _)
                     | (
@@ -49,14 +49,14 @@ impl AdaptationFailure {
                         | "request-timeout"
                         | "stream-incomplete"
                         | "stream-error",
-                    ) => "连接或服务恢复后点击“继续适配”，也可以更换分析 API。",
+                    ) => "连接或服务恢复后点击“继续智能识别”，也可以更换分析 API。",
                     (_, "model-refusal") => {
-                        "更换能够处理当前分析任务的 API 或模型后，点击“继续适配”。"
+                        "更换能够处理当前分析任务的 API 或模型后，点击“继续智能识别”。"
                     }
                     (_, "output-token-limit") => {
-                        "点击“继续适配”，让模型缩小每次输出；持续截断时可更换分析模型。"
+                        "点击“继续智能识别”，让模型缩小每次输出；持续截断时可更换分析模型。"
                     }
-                    _ => "检查分析 API 的接口配置及模型工具调用支持后，点击“继续适配”。",
+                    _ => "检查分析 API 的接口配置及模型工具调用支持后，点击“继续智能识别”。",
                 };
                 (
                     Category::Api,
@@ -70,35 +70,35 @@ impl AdaptationFailure {
                 Category::Tool,
                 "isolation-failed",
                 error.to_string(),
-                "处理上述错误后点击“继续适配”；隔离选项位于程序设置。",
+                "处理上述错误后点击“继续智能识别”；隔离选项位于程序设置。",
                 None,
             ),
             EngineError::ToolMissing(_) => (
                 Category::Tool,
                 "tool-missing",
                 error.to_string(),
-                "检查工具文件或使用完整发行包后，点击“继续适配”。",
+                "检查工具文件或使用完整发行包后，点击“继续智能识别”。",
                 None,
             ),
             EngineError::Timeout => (
                 Category::Tool,
                 "tool-timeout",
                 error.to_string(),
-                "检查本地工具的执行记录和资源占用后，点击“继续适配”。",
+                "检查本地工具的执行记录和资源占用后，点击“继续智能识别”。",
                 None,
             ),
             EngineError::Io(_) => (
                 Category::Storage,
                 "io-error",
                 error.to_string(),
-                "检查相关文件的访问权限、占用和磁盘空间后，点击“继续适配”。",
+                "检查相关文件的访问权限、占用和磁盘空间后，点击“继续智能识别”。",
                 None,
             ),
             EngineError::Json(_) => (
                 Category::Data,
                 "invalid-json",
                 error.to_string(),
-                "根据错误检查相关数据或工具输出后，点击“继续适配”。",
+                "根据错误检查相关数据或工具输出后，点击“继续智能识别”。",
                 None,
             ),
             EngineError::Rejected(_)
@@ -107,21 +107,21 @@ impl AdaptationFailure {
                 Category::Adapter,
                 "adapter-error",
                 error.to_string(),
-                "根据诊断修正适配输入或实现后，点击“继续适配”。",
+                "根据诊断修正适配输入或实现后，点击“继续智能识别”。",
                 None,
             ),
             EngineError::Research(_) => (
                 Category::Research,
                 "research-request",
                 error.to_string(),
-                "检查资料地址和网络连接后，点击“继续适配”。",
+                "检查资料地址和网络连接后，点击“继续智能识别”。",
                 None,
             ),
             EngineError::Cancelled => (
                 Category::Tool,
                 "cancelled",
                 error.to_string(),
-                "点击“继续适配”恢复任务。",
+                "点击“继续智能识别”恢复任务。",
                 None,
             ),
         };
@@ -149,7 +149,7 @@ mod tests {
         assert!(failure.message.contains("无法设置目录权限"));
         assert_eq!(
             failure.next_action,
-            "处理上述错误后点击“继续适配”；隔离选项位于程序设置。"
+            "处理上述错误后点击“继续智能识别”；隔离选项位于程序设置。"
         );
     }
 

@@ -1999,6 +1999,7 @@ mod tests {
             objective: "Develop".into(),
             improve_existing: false,
             require_model_analysis: false,
+            resume_session: false,
             limits: AdaptationLimits::default(),
             baseline_units: &[],
             reuse_failures: vec![],

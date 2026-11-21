@@ -1429,6 +1429,7 @@ mod tests {
             objective: "Develop".into(),
             improve_existing: false,
             require_model_analysis: false,
+            resume_session: false,
             reuse_failures: vec![],
             builtin_probes: vec![],
             discovery_inventory: None,

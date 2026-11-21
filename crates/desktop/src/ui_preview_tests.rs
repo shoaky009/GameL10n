@@ -348,7 +348,9 @@ fn render_desktop_preview_fixtures() {
         capture(&format!("global-failure{suffix}"), 1120, 720);
         app.set_page(0);
         app.set_tab(0);
+        app.set_can_resume_adaptation(true);
         capture(&format!("recognition-failed{suffix}"), 1120, 720);
+        app.set_can_resume_adaptation(false);
         app.set_recognition_failure_message("".into());
         app.set_recognition_ready(false);
         app.set_adaptation_pending_coverage("图片中的文字和运行时生成的菜单尚未覆盖。".into());

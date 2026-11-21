@@ -560,7 +560,7 @@ fn install_actions(ui: &MainWindow, context: &Context) {
         if action == "texts" && input.argument == "refresh" && ui.global::<App>().get_loading() {
             return;
         }
-        if action == "adapt" {
+        if matches!(action.as_str(), "adapt" | "resume-adaptation") {
             recognition_ui::clear_failure(&ui.global::<App>());
         }
         if action == "project" {

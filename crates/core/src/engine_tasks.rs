@@ -85,6 +85,7 @@ struct AdaptationStart {
     objective: AdaptationObjective,
     inventory: Option<Inventory>,
     require_model_analysis: bool,
+    resume_session: bool,
 }
 
 struct ExistingRecognition {
@@ -184,43 +185,60 @@ fn saved_adaptation_objective(
     }))
 }
 
-fn has_unfinished_adaptation(
+#[derive(Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub(crate) struct SavedAdaptation {
+    last_status: Option<gamel10n_engines::AdaptationStatus>,
+    objective: Value,
+    user_instruction: String,
+    repair_issue: Option<RepairIssue>,
+}
+
+pub(crate) fn resumable_adaptation(
     directory: &Path,
     previous_task: Option<&crate::TaskState>,
-) -> Result<bool, CoreError> {
+) -> Result<Option<SavedAdaptation>, CoreError> {
     if previous_task
         .is_some_and(|task| task.operation == "recognize" && task.succeeded == Some(true))
         && directory.join("extraction/native.json").is_file()
     {
-        return Ok(false);
+        return Ok(None);
     }
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct SavedStatus {
-        #[serde(default)]
-        last_status: Option<gamel10n_engines::AdaptationStatus>,
-    }
-    let saved = match read_json::<SavedStatus>(&directory.join("adaptation/current/session.json")) {
-        Ok(saved) => saved,
-        Err(gamel10n_translation::files::FileError::Io { source, .. })
-            if source.kind() == std::io::ErrorKind::NotFound =>
-        {
-            return Ok(false);
-        }
-        // Let the adaptation recovery path diagnose the existing session and retain its files.
-        Err(gamel10n_translation::files::FileError::Json { source, .. }) if !source.is_io() => {
-            return Ok(true);
-        }
-        Err(error) => return Err(error.into()),
-    };
-    Ok(!matches!(
+    let saved =
+        match read_json::<SavedAdaptation>(&directory.join("adaptation/current/session.json")) {
+            Ok(saved) => saved,
+            Err(gamel10n_translation::files::FileError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound =>
+            {
+                return Ok(None);
+            }
+            Err(error) => return Err(error.into()),
+        };
+    let unfinished = !matches!(
         saved.last_status,
         Some(
             gamel10n_engines::AdaptationStatus::Activated
                 | gamel10n_engines::AdaptationStatus::Reused
         )
     ) || previous_task
-        .is_some_and(|task| task.operation == "adapt" && task.succeeded != Some(true)))
+        .is_some_and(|task| task.operation == "adapt" && task.succeeded != Some(true));
+    Ok(unfinished.then_some(saved))
+}
+
+fn has_unfinished_adaptation(
+    directory: &Path,
+    task: Option<&crate::TaskState>,
+) -> Result<bool, CoreError> {
+    match resumable_adaptation(directory, task) {
+        Ok(saved) => Ok(saved.is_some()),
+        // Regular recognition can recover a damaged legacy session from its workspace.
+        Err(CoreError::File(gamel10n_translation::files::FileError::Json { source, .. }))
+            if !source.is_io() =>
+        {
+            Ok(true)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn resolve_adaptation_objective(
@@ -438,6 +456,7 @@ impl Application {
                         objective: self.recognition_objective(id).await?,
                         inventory: None,
                         require_model_analysis: false,
+                        resume_session: false,
                     },
                     &cancellation,
                 ).await?;
@@ -453,6 +472,7 @@ impl Application {
                         objective: AdaptationObjective::Develop,
                         inventory: None,
                         require_model_analysis: true,
+                        resume_session: false,
                     },
                     &cancellation,
                 ).await?;
@@ -491,6 +511,7 @@ impl Application {
                         objective,
                         inventory: Some(recognized.inventory),
                         require_model_analysis: recognized.extracted.is_some(),
+                        resume_session: false,
                     },
                     &cancellation,
                 )
@@ -1061,21 +1082,61 @@ impl Application {
             Some(objective) => objective,
             None => self.adaptation_objective(id, &instruction).await?,
         };
-        let cancellation = self
-            .begin(id, "adapt", "正在智能适配：准备分析环境和已有进度。")
-            .await?;
+        self.start_adaptation(
+            id,
+            instruction,
+            AdaptationStart {
+                objective,
+                inventory: None,
+                require_model_analysis: false,
+                resume_session: false,
+                repair_issue,
+            },
+        )
+        .await
+    }
+
+    pub async fn resume_adaptation(&self, id: &str) -> Result<AdaptationResult, CoreError> {
+        let project = self.open_project(id).await?;
+        let directory = self.project_directory(id)?;
+        let task = self.task_state(id).await;
+        let saved =
+            tokio::task::spawn_blocking(move || resumable_adaptation(&directory, task.as_ref()))
+                .await??
+                .ok_or_else(|| CoreError::InvalidData("此项目没有可继续的智能识别会话。".into()))?;
+        let objective = match AdaptationObjective::from_saved(&saved.objective)? {
+            Some(objective) => objective,
+            None => saved_adaptation_objective(&project, &self.project_directory(id)?)?
+                .unwrap_or(AdaptationObjective::Develop),
+        };
+        self.start_adaptation(
+            id,
+            saved.user_instruction,
+            AdaptationStart {
+                objective,
+                inventory: None,
+                require_model_analysis: true,
+                resume_session: true,
+                repair_issue: saved.repair_issue,
+            },
+        )
+        .await
+    }
+
+    async fn start_adaptation(
+        &self,
+        id: &str,
+        instruction: String,
+        start: AdaptationStart,
+    ) -> Result<AdaptationResult, CoreError> {
+        let message = if start.resume_session {
+            "正在恢复智能识别会话。"
+        } else {
+            "正在智能适配：准备分析环境和已有进度。"
+        };
+        let cancellation = self.begin(id, "adapt", message).await?;
         let result = self
-            .run_adaptation(
-                id,
-                instruction,
-                AdaptationStart {
-                    objective,
-                    inventory: None,
-                    require_model_analysis: false,
-                    repair_issue,
-                },
-                &cancellation,
-            )
+            .run_adaptation(id, instruction, start, &cancellation)
             .await;
         let source = LogSource::from_model(
             result
@@ -1125,17 +1186,19 @@ impl Application {
         self.metrics_details(id, "adapt", task, continuing.then_some("continued"), None)
             .await;
         let improve_existing = improving_existing(&project);
-        let instruction =
-            if objective == AdaptationObjective::Repair && instruction.trim().is_empty() {
-                project
-                    .extra
-                    .get("adapterRepairNotes")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string()
-            } else {
-                instruction
-            };
+        let instruction = if !start.resume_session
+            && objective == AdaptationObjective::Repair
+            && instruction.trim().is_empty()
+        {
+            project
+                .extra
+                .get("adapterRepairNotes")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        } else {
+            instruction
+        };
         let baseline = if objective == AdaptationObjective::Repair
             || (require_model_analysis && objective == AdaptationObjective::ExpandCoverage)
         {
@@ -1164,9 +1227,13 @@ impl Application {
             })
             .await?;
         let previous = if objective == AdaptationObjective::Repair {
-            inputs.repair_issue = start
-                .repair_issue
-                .or_else(|| serde_json::from_value(project.extra.get("repairIssue")?.clone()).ok());
+            inputs.repair_issue = if start.resume_session {
+                start.repair_issue
+            } else {
+                start.repair_issue.or_else(|| {
+                    serde_json::from_value(project.extra.get("repairIssue")?.clone()).ok()
+                })
+            };
             inputs.repair_patch = self
                 .repair_patch_evidence(id, baseline.as_deref())
                 .await
@@ -1234,6 +1301,7 @@ impl Application {
             objective: objective.as_str().into(),
             improve_existing,
             require_model_analysis,
+            resume_session: start.resume_session,
             reuse_failures,
             builtin_probes,
             discovery_inventory: start.inventory,
@@ -3850,6 +3918,7 @@ mod tests {
                     objective: AdaptationObjective::ExpandCoverage,
                     inventory: None,
                     require_model_analysis: false,
+                    resume_session: false,
                 },
                 &token,
             )

@@ -12,6 +12,7 @@ pub struct ProjectSnapshot {
     pub task: Option<TaskState>,
     pub progress: Value,
     pub adaptation: Value,
+    pub can_resume_adaptation: bool,
     pub review: Value,
     pub warnings: Vec<String>,
 }
@@ -94,11 +95,23 @@ impl Application {
             let progress = optional("adaptation-progress.json", "适配进度");
             let adaptation = optional("adaptation-result.json", "适配详情");
             let review = optional("engine-review-result.json", "经验总结");
+            let can_resume_adaptation = if task.as_ref().is_some_and(|task| task.running) {
+                false
+            } else {
+                match crate::engine_tasks::resumable_adaptation(&directory, task.as_ref()) {
+                    Ok(saved) => saved.is_some(),
+                    Err(error) => {
+                        warnings.push(format!("无法读取智能识别会话：{error}"));
+                        false
+                    }
+                }
+            };
             Ok(ProjectSnapshot {
                 project,
                 task,
                 progress,
                 adaptation,
+                can_resume_adaptation,
                 review,
                 warnings,
             })

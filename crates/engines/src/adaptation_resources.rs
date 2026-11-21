@@ -612,6 +612,7 @@ mod tests {
             objective: "Repair".into(),
             improve_existing: true,
             require_model_analysis: false,
+            resume_session: false,
             reuse_failures: vec![],
             builtin_probes: vec![],
             discovery_inventory: None,

@@ -87,7 +87,12 @@ pub fn handle<'a>(
     action: &'a str,
     input: &'a UiInput,
 ) -> Pin<Box<dyn Future<Output = Result<bool, CoreError>> + Send + 'a>> {
-    if action == "adapt" {
+    if action == "resume-adaptation" {
+        Box::pin(async move {
+            ctx.app().await.resume_adaptation(&input.project_id).await?;
+            Ok(true)
+        })
+    } else if action == "adapt" {
         Box::pin(adapt(ctx, input))
     } else {
         Box::pin(handle_project_action(ctx, action, input))
@@ -279,6 +284,7 @@ async fn handle_project_action(
                 a.set_task_api_summary("".into());
                 a.set_task_usage(Default::default());
                 a.set_source_materials_cleared(false);
+                a.set_can_resume_adaptation(false);
                 crate::recognition_ui::clear(&a);
                 crate::workbench_ui::restore_view(&a, &workbench_view);
                 a.set_texts(ModelRc::default());
@@ -1035,6 +1041,7 @@ pub async fn refresh_project(ctx: &Context, id: &str, opening: bool) -> Result<(
             .into(),
         );
         recognition.apply(&a);
+        a.set_can_resume_adaptation(snapshot.can_resume_adaptation);
         a.set_selected_texts(selected_count as i32);
         let matches_operation = |operation: &str| {
             progress["operation"]

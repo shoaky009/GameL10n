@@ -140,6 +140,8 @@ pub struct AdaptationRequest<'a> {
     pub improve_existing: bool,
     /// Requires the model to assess the game; local parser success cannot finish the task early.
     pub require_model_analysis: bool,
+    /// Resume the saved model task without repeating completed automatic preparation.
+    pub resume_session: bool,
     pub reuse_failures: Vec<crate::GeneratedAdapterReuseFailure>,
     pub builtin_probes: Vec<crate::BuiltinAdapterProbeObservation>,
     /// Inventory from a completed regular discovery pass in this task. Avoids probing twice.
@@ -543,6 +545,9 @@ impl EngineService {
         }
         let path = workspace.join("session.json");
         let continuing = path.is_file();
+        if request.resume_session && !continuing {
+            return Err(EngineError::Rejected("找不到要继续的智能识别会话。".into()));
+        }
         let mut state: Session = if continuing {
             // Read errors must not be mistaken for corrupt JSON and overwrite a valid session.
             match load_session(&path) {
@@ -559,7 +564,7 @@ impl EngineService {
                                     .get("historyStorage")
                                     .is_some_and(|storage| !storage.is_null())
                             });
-                    if external_history {
+                    if request.resume_session || external_history {
                         return Err(EngineError::Protocol(format!(
                             "适配会话无法安全恢复，已有源码与历史记录已保留：{error}"
                         )));
@@ -595,15 +600,27 @@ impl EngineService {
         }
         normalize_messages(&mut state.messages);
         flow::recover(&mut state, request, provider.identity());
+        // Older sessions first saved model messages after automatic preparation completed.
+        let prepared_for_model = request.resume_session
+            && !state.messages.is_empty()
+            && state
+                .extra
+                .get("modelPreparationComplete")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+        state
+            .extra
+            .insert("modelPreparationComplete".into(), json!(false));
+        save_session(&path, &mut state).await?;
         state.extra.remove("repairPatch");
         if let Some(patch) = &request.inputs.repair_patch {
             state.extra.insert("repairPatch".into(), patch.clone());
         }
-        if !cancellation.is_cancelled()
+        let runtime_changed = !cancellation.is_cancelled()
             && self
                 .refresh_workspace_native_pin(&workspace, &path, &mut state)
-                .await?
-        {
+                .await?;
+        if runtime_changed {
             let message = "原生工具已更新，保留现有适配源码和会话，使用当前工具重新验收";
             Self::report(progress, "更新适配工具依赖", message);
             diagnostics.push(message.into());
@@ -628,13 +645,7 @@ impl EngineService {
                 )?,
             );
         }
-        let mut inventory = match &request.discovery_inventory {
-            Some(inventory) => Cow::Borrowed(inventory),
-            None => Cow::Owned(Inventory::scan(&request.game_directory)?),
-        };
-        if !request.inputs.files.is_empty() || !request.inputs.excluded.is_empty() {
-            inventory = Cow::Owned(request.inputs.inventory(inventory.into_owned())?);
-        }
+        let mut preparation_inventory = None;
         let run_id = hash_text(&format!(
             "{}:{}:{}",
             request.game_id,
@@ -738,7 +749,7 @@ impl EngineService {
                 state.extra.insert("resourceChanges".into(), json!(changes));
             }
             state.extra.insert("inputBinding".into(), json!({"boundFileCount":request.inputs.files.len(),"boundFiles":request.inputs.files.keys().take(40).collect::<Vec<_>>(),"excludedFileCount":request.inputs.excluded.len(),"excludedFiles":request.inputs.excluded.iter().take(20).collect::<Vec<_>>(),"baselineUnits":request.baseline_units.len()}));
-            crate::adaptation_context::ensure_builtin_discovery(
+            let discovery_changed = crate::adaptation_context::ensure_builtin_discovery(
                 &request.game_directory,
                 &mut state,
                 cancellation,
@@ -756,14 +767,28 @@ impl EngineService {
                     cancellation,
                 )
                 .await?;
-            if state.extra.get("launchInspection") != Some(&launch) {
+            let launch_changed = state.extra.get("launchInspection") != Some(&launch);
+            if launch_changed {
                 state.verified_package = None;
                 state.verified_fingerprint = None;
             }
             state.extra.insert("launchInspection".into(), launch);
+            if prepared_for_model && changes.is_empty()
+                && !runtime_changed && !discovery_changed && !launch_changed {
+                Self::report(progress, "继续智能识别", "正在沿用已保存的模型会话和工作文件。");
+                return Ok(None);
+            }
+            let mut inventory = match &request.discovery_inventory {
+                Some(inventory) => Cow::Borrowed(inventory),
+                None => Cow::Owned(Inventory::scan(&request.game_directory)?),
+            };
+            if !request.inputs.files.is_empty() || !request.inputs.excluded.is_empty() {
+                inventory = Cow::Owned(request.inputs.inventory(inventory.into_owned())?);
+            }
+            let inventory = preparation_inventory.insert(inventory);
             Self::report(progress, "检查已有工作样本", "正在复用解析器检查已暂存或解密的脚本样本。");
             automatic::inspect_workspace(self, &workspace, &mut state, cancellation).await?;
-            automatic::inspect_archives(self, request, &inventory, &workspace, &mut state, cancellation)
+            automatic::inspect_archives(self, request, inventory, &workspace, &mut state, cancellation)
                 .await?;
             let recipes = published_reuse::sampled_recipes(request, &state);
             state.extra.remove("publishedReuse");
@@ -849,10 +874,13 @@ impl EngineService {
         let continuation = flow::continuation(
             &state,
             &workspace,
-            &inventory,
+            preparation_inventory.as_deref(),
             request.baseline_units.len(),
             &self.disabled_families,
         )?;
+        state
+            .extra
+            .insert("modelPreparationComplete".into(), json!(true));
         save_session(&path, &mut state).await?;
         let run = flow::run(
             self,
@@ -3199,16 +3227,13 @@ fn result(
             (state.next_action.as_str(), true)
         }
         AdaptationStatus::Unavailable => ("使用带工具链的完整发行包，再继续适配。", false),
-        AdaptationStatus::Incomplete => (
-            "点击“继续适配”沿用现有源码和调查结果，可补充具体要求",
-            false,
-        ),
+        AdaptationStatus::Incomplete => ("点击“继续智能识别”沿用现有源码和调查结果。", false),
         AdaptationStatus::Failed => (
-            "根据错误信息处理问题，再点击“继续适配”；已有代码和已提交步骤会继续使用。",
+            "根据错误信息处理问题，再点击“继续智能识别”；已有代码和已提交步骤会继续使用。",
             false,
         ),
         _ => (
-            "点击“继续适配”，沿用当前源码和进度，并设置本次分析预算。",
+            "点击“继续智能识别”，按项目当前的分析预算继续处理已保存的进度。",
             false,
         ),
     };
@@ -5693,6 +5718,7 @@ mod tests {
             objective: "Develop".into(),
             improve_existing: false,
             require_model_analysis: false,
+            resume_session: false,
             reuse_failures: vec![],
             builtin_probes: vec![],
             discovery_inventory: None,
