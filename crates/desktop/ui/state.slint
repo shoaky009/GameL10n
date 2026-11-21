@@ -88,6 +88,7 @@ export global App {
     in-out property <[NamedRow]> knowledge;
     in-out property <[NamedRow]> knowledge-origins;
     in-out property <length> catalog-scroll-y;
+    out property <length> catalog-row-height: 62px;
     in-out property <[TermRow]> terms;
     in-out property <[string]> api-names;
     in-out property <[string]> resources;
@@ -259,6 +260,8 @@ export global App {
     in-out property <int> catalog-total;
     in-out property <string> engine-id;
     in-out property <string> engine-name;
+    in-out property <bool> engine-deletable;
+    in-out property <string> engine-delete-target;
     in-out property <string> engine-summary;
     in-out property <bool> engine-enabled;
     in-out property <int> engine-tab;

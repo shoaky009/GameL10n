@@ -99,7 +99,7 @@ pub async fn open_family(
     ctx.update(move |ui| {
         let app = ui.global::<App>();
         if app.get_page() == 2 && app.get_engine_id().as_str() == id {
-            app.set_catalog_scroll_y(-((position % 100) as f32) * 86.0);
+            app.set_catalog_scroll_y(-((position % 100) as f32) * app.get_catalog_row_height());
             if !action.is_empty() {
                 app.invoke_action(action.into(), selection.into());
             }
@@ -315,6 +315,63 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                     .into(),
                 );
             });
+        }
+        "engine-delete-dialog" => {
+            let library = catalog(ctx, true).await?;
+            let id = input.argument.clone();
+            let family = tokio::task::spawn_blocking(move || library.family(&id)).await??;
+            let message = format!(
+                "将删除「{}」的全部 {} 个版本、{} 条相关经验，以及兼容和激活记录。游戏项目中的原文、译文和补丁会保留。此操作无法撤销。",
+                family.family.name,
+                family.versions.len(),
+                family.knowledge.len()
+            );
+            ctx.update(move |ui| {
+                let app = ui.global::<App>();
+                let id = family.family.adapter_id();
+                if app.get_engine_id().as_str() == id && app.get_engine_deletable() {
+                    app.set_engine_delete_target(id.into());
+                    app.set_modal_title("删除引擎？".into());
+                    app.set_modal_message(message.into());
+                    app.set_modal("engine-delete".into());
+                }
+            });
+        }
+        "engine-delete" => {
+            let app = ctx.app().await;
+            if app.task_states().await.values().any(|task| task.running)
+                || app
+                    .list_projects("")
+                    .await
+                    .iter()
+                    .any(|project| app.review_running(&project.id))
+            {
+                return Err(CoreError::InvalidData(
+                    "有项目任务或经验总结正在使用引擎库，请在任务结束后删除。".into(),
+                ));
+            }
+            let id = input.argument.clone();
+            let target = id.clone();
+            let library = catalog(ctx, false).await?;
+            tokio::task::spawn_blocking(move || library.delete_family(&target)).await??;
+            {
+                let mut session = ctx
+                    .session
+                    .lock()
+                    .map_err(|_| CoreError::InvalidData("引擎选择状态不可用。".into()))?;
+                session.engine_selection.remove(&id);
+                if session.engine_selection_anchor.as_ref() == Some(&id) {
+                    session.engine_selection_anchor = None;
+                }
+            }
+            ctx.update(move |ui| {
+                let app = ui.global::<App>();
+                app.set_status(format!("已删除 {id} 的全部版本和相关经验。").into());
+                if app.get_engine_id().as_str() == id {
+                    clear_family(ui);
+                }
+            });
+            refresh(ctx, input, false).await?;
         }
         "version-delete-dialog" => {
             let catalog = catalog(ctx, false).await?;
@@ -557,7 +614,12 @@ async fn refresh(ctx: &Context, input: &UiInput, force: bool) -> Result<(), Core
         _ => LibrarySort::Name,
     };
     let page = tokio::task::spawn_blocking(move || {
-        catalog.snapshot_filtered(&query, filter, enabled, sort, offset, 100)
+        let page = catalog.snapshot_filtered(&query, filter, enabled, sort, offset, 100)?;
+        if page.families.is_empty() && page.total > 0 {
+            let last_offset = (page.total - 1) / 100 * 100;
+            return catalog.snapshot_filtered(&query, filter, enabled, sort, last_offset, 100);
+        }
+        Ok(page)
     })
     .await??;
     let selection = {
@@ -602,6 +664,9 @@ async fn refresh(ctx: &Context, input: &UiInput, force: bool) -> Result<(), Core
                 .collect::<Vec<_>>(),
         )));
         app.set_catalog_total(page.total.min(i32::MAX as usize) as i32);
+        if app.get_catalog_offset() != page.offset as i32 {
+            app.set_catalog_scroll_y(0.0);
+        }
         app.set_catalog_offset(page.offset.min(i32::MAX as usize) as i32);
         if !page.diagnostics.is_empty() {
             app.set_status(
@@ -642,6 +707,12 @@ fn apply_family(app: &App<'_>, family: &EngineLibraryFamily, query: &str) {
     app.set_engine_id(family.family.adapter_id().into());
     app.set_engine_name(family.family.name.clone().into());
     app.set_engine_enabled(family.enabled);
+    app.set_engine_deletable(
+        !family
+            .versions
+            .iter()
+            .any(|v| v.source == EngineLibrarySource::BuiltIn),
+    );
     app.set_engine_summary(family_text(family).into());
     app.set_versions(ModelRc::new(VecModel::from(
         family
@@ -725,6 +796,7 @@ fn clear_family(ui: MainWindow) {
     let app = ui.global::<App>();
     app.set_engine_id("".into());
     app.set_engine_name("".into());
+    app.set_engine_deletable(false);
     app.set_engine_summary("".into());
     app.set_version_id("".into());
     app.set_version_detail("".into());

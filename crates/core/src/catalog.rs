@@ -1073,20 +1073,7 @@ impl EngineCatalog {
             return Err(invalid("内置引擎不能删除。"));
         }
         let mut writes: Vec<(PathBuf, Option<Value>)> = Vec::new();
-        let mapping_path = safe_path(&self.root, "runtime-migrations.json")?;
-        if mapping_path.is_file() {
-            let mut mappings: Value = read_bounded_json(&mapping_path, 16 * 1024 * 1024)?;
-            let identity = format!("{adapter_id}/{version}");
-            let entries = mappings
-                .get_mut("entries")
-                .and_then(Value::as_object_mut)
-                .ok_or_else(|| invalid("适配器运行包映射索引无效。"))?;
-            entries.retain(|source, entry| {
-                source != &identity
-                    && entry.get("target").and_then(Value::as_str) != Some(&identity)
-            });
-            writes.push((mapping_path, Some(mappings)));
-        }
+        plan_reference_removal(&self.root, adapter_id, Some(version), &mut writes)?;
         let catalog_dir = safe_path(&self.root, &format!("catalog/{adapter_id}"))?;
         for file in json_files(&catalog_dir)? {
             let mut record: Value = read_bounded_json(&file, 16 * 1024 * 1024)?;
@@ -1103,19 +1090,6 @@ impl EngineCatalog {
                 == Some(version)
             {
                 writes.push((file, None));
-            }
-        }
-        for directory in directories(&safe_path(&self.root, "games")?)? {
-            for name in ["active.json", "previous.json"] {
-                let pin = safe_path(&directory, name)?;
-                if pin.is_file() {
-                    let activation: Value = read_bounded_json(&pin, 4096)?;
-                    if property(&activation, "id").and_then(Value::as_str) == Some(adapter_id)
-                        && property(&activation, "version").and_then(Value::as_str) == Some(version)
-                    {
-                        writes.push((pin, None));
-                    }
-                }
             }
         }
         let mut state = load_state(&self.root)?;
@@ -1159,13 +1133,7 @@ impl EngineCatalog {
         }
         // Metadata is prepared before deleting payloads; retry finishes an interrupted cleanup.
         let result = (|| -> Result<(), CoreError> {
-            for (file, value) in writes {
-                if let Some(value) = value {
-                    write_json(&file, &value)?;
-                } else if file.exists() {
-                    fs::remove_file(file)?;
-                }
-            }
+            apply_metadata_changes(writes)?;
             write_json(&safe_path(&self.root, "library-state.json")?, &state)?;
             if let Some(family) = index.families.get_mut(adapter_id) {
                 family.versions.remove(version);
@@ -1185,6 +1153,58 @@ impl EngineCatalog {
             references: Vec::new(),
             diagnostics,
         })
+    }
+
+    /// Removes the published packages and shared knowledge owned by one external family.
+    pub fn delete_family(&self, adapter_id: &str) -> Result<(), CoreError> {
+        validate_family_id(adapter_id)?;
+        let _write = write_gate()?;
+        let mut cached = self.lock()?;
+        let mut index = load_index(&self.root)?;
+        let family = index.families.get(adapter_id);
+        if family.is_some_and(|f| f.versions.values().any(|version| version.source == 0)) {
+            return Err(invalid("内置引擎随程序提供，不能删除。"));
+        }
+        let owns_knowledge =
+            |entry: &EngineKnowledgeSummary| entry.family.adapter_id() == adapter_id;
+        if family.is_none() && !index.knowledge.values().any(owns_knowledge) {
+            return Err(invalid("找不到要删除的引擎。"));
+        }
+
+        let packages = safe_path(&self.root, &format!("packages/{adapter_id}"))?;
+        let records = safe_path(&self.root, &format!("catalog/{adapter_id}"))?;
+        validate_tree(&packages)?;
+        validate_tree(&records)?;
+        let mut writes = Vec::new();
+        plan_reference_removal(&self.root, adapter_id, None, &mut writes)?;
+        let prefix = format!("{adapter_id}.");
+        for file in json_files(&safe_path(&self.root, "engine-knowledge")?)? {
+            // Family and knowledge keys can both contain dots. Check ownership in the file.
+            if file
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .is_some_and(|id| id.starts_with(&prefix))
+                && owns_knowledge(&read_knowledge_summary(&file)?)
+            {
+                writes.push((file, None));
+            }
+        }
+        let mut state = load_state(&self.root)?;
+        if let Some(families) = state["families"].as_object_mut() {
+            families.remove(adapter_id);
+        }
+        writes.push((safe_path(&self.root, "library-state.json")?, Some(state)));
+        for directory in [packages, records] {
+            if directory.try_exists()? {
+                fs::remove_dir_all(&directory).map_err(|error| {
+                    invalid(format!("无法删除 {}：{error}", directory.display()))
+                })?;
+            }
+        }
+        apply_metadata_changes(writes)?;
+        index.families.remove(adapter_id);
+        index.knowledge.retain(|_, entry| !owns_knowledge(entry));
+        self.commit_index(&mut cached, index)
     }
 
     fn commit_index(&self, cached: &mut CachedIndex, index: LibraryIndex) -> Result<(), CoreError> {
@@ -1208,6 +1228,62 @@ impl EngineCatalog {
             .lock()
             .map_err(|_| invalid("引擎索引锁已失效，请重新打开。"))
     }
+}
+
+fn plan_reference_removal(
+    root: &Path,
+    adapter_id: &str,
+    version: Option<&str>,
+    writes: &mut Vec<(PathBuf, Option<Value>)>,
+) -> Result<(), CoreError> {
+    let mapping_path = safe_path(root, "runtime-migrations.json")?;
+    if mapping_path.is_file() {
+        let mut mappings: Value = read_bounded_json(&mapping_path, 16 * 1024 * 1024)?;
+        let matches = |identity: &str| {
+            identity
+                .split_once('/')
+                .is_some_and(|(id, v)| id == adapter_id && version.is_none_or(|wanted| wanted == v))
+        };
+        let entries = mappings
+            .get_mut("entries")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| invalid("适配器运行包映射索引无效。"))?;
+        entries.retain(|source, entry| {
+            !matches(source)
+                && !entry
+                    .get("target")
+                    .and_then(Value::as_str)
+                    .is_some_and(matches)
+        });
+        writes.push((mapping_path, Some(mappings)));
+    }
+    for directory in directories(&safe_path(root, "games")?)? {
+        for name in ["active.json", "previous.json"] {
+            let pin = safe_path(&directory, name)?;
+            if pin.is_file() {
+                let activation: Value = read_bounded_json(&pin, 4096)?;
+                if property(&activation, "id").and_then(Value::as_str) == Some(adapter_id)
+                    && version.is_none_or(|wanted| {
+                        property(&activation, "version").and_then(Value::as_str) == Some(wanted)
+                    })
+                {
+                    writes.push((pin, None));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn apply_metadata_changes(writes: Vec<(PathBuf, Option<Value>)>) -> Result<(), CoreError> {
+    for (file, value) in writes {
+        if let Some(value) = value {
+            write_json(&file, &value)?;
+        } else if file.exists() {
+            fs::remove_file(file)?;
+        }
+    }
+    Ok(())
 }
 
 fn load_index(root: &Path) -> Result<LibraryIndex, CoreError> {

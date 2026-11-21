@@ -136,13 +136,21 @@ export component DialogLayer inherits Rectangle {
                     text: App.modal == "launch" && App.launch-conflict-revision != "" ? "确认覆盖"
                         : App.modal == "resume-translation" ? "继续原选区"
                         : App.modal == "cleanup" ? "清理所选文件"
+                        : App.modal == "engine-delete" ? "删除引擎"
                         : App.modal == "workflow-settings" ? "保存"
                         : root.workflow-active ? "开始自动汉化" : "确认";
                     enabled: (App.modal != "api" || !App.api-testing)
                         && (App.modal != "cleanup" || (!App.cleanup-loading && App.cleanup-selected))
                         && (!root.reuse-extracted-text || App.workflow-can-use-existing-text);
                     primary: true;
-                    clicked => { App.action("confirm", App.modal); }
+                    clicked => {
+                        if App.modal == "engine-delete" {
+                            App.modal = "";
+                            App.action("engine-delete", App.engine-delete-target);
+                        } else {
+                            App.action("confirm", App.modal);
+                        }
+                    }
                 }
             }
         }
