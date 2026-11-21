@@ -3,6 +3,7 @@
 use crate::{
     TokenUsage, TranslationUnit, files::hash_text, storage::TranslationPolicy, text::ProtectedText,
 };
+use reqwest::header::{HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -391,7 +392,11 @@ impl OpenAiProvider {
                 }
             ))
         );
+        let mut headers = HeaderMap::new();
+        headers.insert("originator", HeaderValue::from_static("gamel10n"));
         let client = reqwest::Client::builder()
+            .default_headers(headers)
+            .user_agent(concat!("GameL10n/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|_| ProviderError::new("http-client", "无法初始化 HTTP 客户端。"))?;
         let account_key = hash_text(&format!(
