@@ -78,7 +78,7 @@ export global App {
     in-out property <string> metrics-empty;
     in-out property <[ProjectRow]> projects;
     in-out property <length> project-scroll-y;
-    out property <length> project-row-height: 88px;
+    out property <length> project-row-height: 80px;
     in-out property <[TextRow]> texts;
     in-out property <[NamedRow]> apis;
     in-out property <[NamedRow]> chain;
@@ -291,6 +291,23 @@ export global App {
 
 export component Label inherits Text { color: Theme.ink; font-size: 14px; line-height-factor: 1.2; wrap: word-wrap; }
 export component Caption inherits Text { color: Theme.muted; font-size: 13px; line-height-factor: 1.2; wrap: word-wrap; }
+export component ListPanel inherits Rectangle {
+    background: Theme.surface;
+    border-width: 1px; border-color: Theme.line; border-radius: 5px;
+    VerticalLayout { padding: root.border-width; @children }
+}
+
+export component SelectableListRow inherits Rectangle {
+    in property <bool> selected;
+    in property <bool> hovered;
+    clip: true;
+    background: root.selected ? Theme.tint : root.hovered ? Theme.hover : transparent;
+    if root.selected: Rectangle {
+        x: 0px; y: 9px; width: 3px; height: parent.height - 18px; background: Theme.accent;
+    }
+    @children
+}
+
 export component Badge inherits Rectangle {
     in property <string> text;
     in property <int> tone;

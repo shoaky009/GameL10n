@@ -8,7 +8,7 @@ use gamel10n_core::{
 };
 use gamel10n_translation::provider::ConnectionTestKind;
 use serde_json::{Value, json};
-use slint::{ComponentHandle, ModelRc, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, VecModel};
 
 pub struct PendingApiTest(Context);
 
@@ -187,6 +187,12 @@ pub async fn refresh(ctx: &Context, project_id: Option<&str>) -> Result<(), Core
         }
         a.set_apis(ModelRc::new(VecModel::from(apis)));
         a.set_api_names(ModelRc::new(VecModel::from(names)));
+        let previous_index = a.get_chain_index().max(0) as usize;
+        let selected_api = a.get_chain().row_data(previous_index);
+        let chain_index = selected_api
+            .and_then(|api| chain.iter().position(|row| row.id == api.id))
+            .unwrap_or(previous_index);
+        a.set_chain_index((chain_index as i32).min(chain.len() as i32 - 1));
         a.set_chain(ModelRc::new(VecModel::from(chain)));
         a.set_analysis_index(index);
         a.set_loaded_analysis_index(index);
@@ -195,7 +201,6 @@ pub async fn refresh(ctx: &Context, project_id: Option<&str>) -> Result<(), Core
         {
             a.set_task_api_summary(api_summary.into());
         }
-        a.set_chain_index(if ids.is_empty() { -1 } else { 0 });
         a.set_candidate_api_index(if settings.api_configuration.profiles.is_empty() {
             -1
         } else {

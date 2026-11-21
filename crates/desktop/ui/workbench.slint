@@ -40,8 +40,8 @@ export component Workbench inherits FocusScope {
         Link { text: App.selected-texts > 0 ? "取消选择" : "选本页"; enabled: root.selection-enabled && (App.selected-texts > 0 || App.texts.length > 0); clicked => { App.action(App.selected-texts > 0 ? "select-clear" : "select-page", ""); } }
         if App.selected-texts == 0: Link { text: "全选匹配"; enabled: root.selection-enabled && App.text-total > 0; clicked => { App.action("select-matching", ""); } }
         if App.selected-texts > 0 || App.selection-busy: Caption { text: App.selection-busy ? "更新中…" : "已选 " + App.selected-texts; vertical-alignment: center; wrap: no-wrap; }
-        Button { text: "全量翻译"; primary: true; enabled: !App.busy && App.recognition != ""; clicked => { App.action("translate", "all"); } }
-        if App.selected-texts > 0: Button { text: "翻译所选"; enabled: root.selection-enabled && !App.busy; clicked => { App.action("translate", "selected"); } }
+        Button { text: "全量翻译"; primary: App.selected-texts == 0; enabled: !App.busy && App.recognition != ""; clicked => { App.action("translate", "all"); } }
+        if App.selected-texts > 0: Button { text: "翻译所选"; primary: true; enabled: root.selection-enabled && !App.busy; clicked => { App.action("translate", "selected"); } }
         if App.selected-texts > 0: Button { text: "重新翻译所选"; enabled: root.selection-enabled && !App.busy; clicked => { App.action("retranslate-dialog", ""); } }
         if App.selected-texts > 0: Button { text: "试译并生成补丁"; enabled: root.selection-enabled && !App.busy; clicked => { App.action("translate", "trial"); } }
         if App.selected-texts > 0: Button { text: "批量确认校对"; enabled: root.selection-enabled && App.editor-editable; clicked => { App.action("bulk-review", ""); } }
@@ -94,33 +94,39 @@ export component Workbench inherits FocusScope {
                     Rectangle { y: parent.height - 1px; height: 1px; background: Theme.line; }
                 }
             }
-            if App.texts.length == 0: Rectangle { vertical-stretch: 1;
-                Caption { x: 12px; y: 24px; width: parent.width - 24px;
+            if App.texts.length == 0: VerticalLayout { padding: 12px; spacing: 8px; alignment: start; vertical-stretch: 1;
+                Caption {
                     text: App.loading ? "正在加载文本…"
                         : App.recognition == "" ? (App.recognition-running
                             ? "正在识别与提取文本，完成后可在这里翻译与校对。"
                             : "尚未提取文本，请先进行识别与适配。")
                         : "没有符合条件的文本。";
                 }
-            }
-            HorizontalLayout { spacing: 16px;
-                HorizontalLayout { spacing: 8px;
-                    Button { text: "上一页"; width: 88px; enabled: App.offset > 0 && root.selection-enabled; clicked => { App.action("texts", "previous"); } }
-                    Button { text: "下一页"; width: 88px; enabled: App.offset + App.shown < App.text-total && root.selection-enabled; clicked => { App.action("texts", "next"); } }
+                if !App.loading && !App.recognition-running && App.recognition == "": Link { text: "前往识别与适配"; clicked => { App.action("tab", "0"); } }
+                if !App.loading && App.recognition != "" && (App.text-query != "" || App.resource-filter > 0 || App.kind-filter > 0 || App.status-filter > 0 || App.only-selected): Link {
+                    text: "清除筛选";
+                    clicked => {
+                        App.text-query = ""; App.resource-filter = 0; App.kind-filter = 0; App.status-filter = 0; App.only-selected = false;
+                        App.action("texts", "0");
+                    }
                 }
-                Caption { text: "共 " + App.text-total + " 条 · " + (App.text-total == 0 ? 0 : App.offset + 1) + "–" + (App.offset + App.shown); vertical-alignment: center; wrap: no-wrap; }
-                Rectangle { horizontal-stretch: 1; }
+            }
+            if App.text-total > 0: text-paging := HorizontalLayout { spacing: 8px;
+                private property <bool> multiple-pages: App.offset > 0 || App.shown < App.text-total;
+                Caption { text: text-paging.multiple-pages ? (App.offset + 1) + "–" + (App.offset + App.shown) + " / " + App.text-total : "共 " + App.text-total + " 条"; horizontal-stretch: 1; vertical-alignment: center; wrap: no-wrap; }
+                if text-paging.multiple-pages: Button { text: "上一页"; enabled: App.offset > 0 && root.selection-enabled; clicked => { App.action("texts", "previous"); } }
+                if text-paging.multiple-pages: Button { text: "下一页"; enabled: App.offset + App.shown < App.text-total && root.selection-enabled; clicked => { App.action("texts", "next"); } }
             }
         }
-        Rectangle { preferred-width: 320px; min-width: 270px; max-width: 380px; horizontal-stretch: 1; background: Theme.background; border-color: Theme.line; border-width: 1px; border-radius: 5px;
+        if App.editor-id != "": Rectangle { preferred-width: 320px; min-width: 270px; max-width: 380px; horizontal-stretch: 1; background: Theme.background; border-color: Theme.line; border-width: 1px; border-radius: 5px;
             VerticalLayout { padding: 12px; spacing: 8px;
                 HorizontalLayout { spacing: 6px;
                     Heading { text: "校对"; font-size: 16px; }
                     Badge { text: App.editor-text == "" ? "未翻译" : App.editor-dirty || App.editor-origin == 2 ? "人工" : App.editor-origin == 1 ? "自动" : "来源未知"; tone: App.editor-text == "" ? 0 : App.editor-dirty ? 2 : App.editor-origin; }
                     if App.editor-invalid || App.editor-text != "": Badge { text: App.editor-invalid ? "格式问题" : App.editor-reviewed && !App.editor-dirty ? "已校对" : "待校对"; tone: App.editor-invalid ? 5 : App.editor-reviewed && !App.editor-dirty ? 3 : 4; }
                     Rectangle { horizontal-stretch: 1; }
-                    Button { text: "↑"; width: 32px; horizontal-stretch: 0; enabled: root.editor-ready; clicked => { App.action("editor-step", "-1"); } }
-                    Button { text: "↓"; width: 32px; horizontal-stretch: 0; enabled: root.editor-ready; clicked => { App.action("editor-step", "1"); } }
+                    Button { text: "↑"; accessible-label: "上一条文本"; width: 32px; horizontal-stretch: 0; enabled: root.editor-ready; clicked => { App.action("editor-step", "-1"); } }
+                    Button { text: "↓"; accessible-label: "下一条文本"; width: 32px; horizontal-stretch: 0; enabled: root.editor-ready; clicked => { App.action("editor-step", "1"); } }
                 }
                 HorizontalLayout { spacing: 12px;
                     Label { text: "原文"; font-weight: 600; }

@@ -1,5 +1,5 @@
 import { Button, LineEdit, CheckBox, SpinBox, ScrollView, ListView } from "std-widgets.slint";
-import { App, Theme, Label, Caption, Heading, SectionHeading, ReportText, Divider, ProjectRow, TextRow, NamedRow, EngineRow, TermRow, TokenDisplay, CleanupRow, NavigationButton, Link, CopyButton, ClipboardBuffer } from "state.slint";
+import { App, Theme, Label, Caption, Heading, SectionHeading, ReportText, Divider, ProjectRow, TextRow, NamedRow, EngineRow, TermRow, TokenDisplay, CleanupRow, NavigationButton, Link, CopyButton, ClipboardBuffer, ListPanel, SelectableListRow } from "state.slint";
 import { ProjectSettings, GlobalApis } from "settings.slint";
 import { Workbench } from "workbench.slint";
 import { Recognition, PatchPage, TaskFeedback } from "project.slint";
@@ -13,30 +13,43 @@ export component MainWindow inherits Window {
     title: "GameL10n"; preferred-width: 1420px; preferred-height: 900px; min-width: 1120px; min-height: 720px;
     icon: @image-url("../assets/GameL10n.png");
     default-font-family: "Microsoft YaHei UI"; default-font-size: 14px; background: Theme.background;
+    private property <bool> logs-expanded: true;
     clipboard := ClipboardBuffer {}
     HorizontalLayout { padding: 16px; spacing: 20px;
         VerticalLayout { width: 220px; spacing: 8px;
             HorizontalLayout { Heading { text: "游戏项目"; font-size: 18px; } Rectangle { horizontal-stretch: 1; } }
-            Button { text: "添加游戏"; enabled: App.ready && !App.adding-game; clicked => { App.action("browse", ""); } }
-            HorizontalLayout { Button { text: App.multi-projects ? "取消" : "多选"; clicked => { App.action("project-selection", App.multi-projects ? "cancel" : "start"); } } Button { text: "移除"; enabled: App.project-id != "" || App.selected-projects > 0; clicked => { App.action("remove-dialog", ""); } } }
-            LineEdit { text <=> App.project-query; placeholder-text: "搜索名称或路径"; edited => { App.action("projects", ""); } }
-            ListView { vertical-stretch: 1; content-y <=> App.project-scroll-y;
-                for project in App.projects: Rectangle { height: App.project-row-height; clip: true; background: App.page == 0 && project.id == App.project-id ? Theme.tint : project-hit.has-hover ? Theme.hover : transparent; border-width: project-key.has-focus ? 1px : 0px; border-color: Theme.accent; border-radius: 4px;
-                    HorizontalLayout { padding: 8px; spacing: 6px;
-                        if App.multi-projects: CheckBox { checked: project.selected; toggled => { App.action("toggle-project", project.id); } }
-                        Rectangle { horizontal-stretch: 1;
-                            VerticalLayout { spacing: 4px; alignment: start;
-                                Label { text: App.concise-text(project.name); height: 22px; color: Theme.title; font-weight: 600; overflow: elide; wrap: no-wrap; }
-                                Caption { text: project.review-running ? project.running ? project.status + " · 总结经验" : "正在总结经验" : App.concise-text(project.status); height: 20px; line-height-factor: 1; color: project.running || project.review-running ? Theme.accent : Theme.secondary; overflow: elide; wrap: no-wrap; }
-                                Caption { text: App.concise-text(project.path); height: 18px; font-size: 12px; line-height-factor: 1; overflow: elide; wrap: no-wrap; }
+            ListPanel { vertical-stretch: 1;
+                VerticalLayout { padding: 8px; spacing: 6px;
+                    HorizontalLayout { spacing: 6px;
+                        Button { text: "添加游戏"; enabled: App.ready && !App.adding-game; clicked => { App.action("browse", ""); } }
+                        Button { text: App.multi-projects ? "取消" : "多选"; clicked => { App.action("project-selection", App.multi-projects ? "cancel" : "start"); } }
+                        Button { text: "移除"; enabled: App.multi-projects ? App.selected-projects > 0 : App.project-id != ""; clicked => { App.action("remove-dialog", ""); } }
+                    }
+                    LineEdit { text <=> App.project-query; placeholder-text: "搜索名称或路径"; edited => { App.action("projects", ""); } }
+                }
+                Divider {}
+                project-list := ListView { vertical-stretch: 1; content-y <=> App.project-scroll-y; horizontal-scrollbar-policy: always-off;
+                    for project in App.projects: SelectableListRow {
+                        width: project-list.visible-width; height: App.project-row-height;
+                        selected: App.multi-projects ? project.selected : App.page == 0 && project.id == App.project-id;
+                        hovered: project-hit.has-hover;
+                        border-width: project-key.has-focus && !self.selected ? 1px : 0px; border-color: Theme.accent;
+                        project-key := FocusScope { key-pressed(event) => { if event.text == Key.Return || event.text == " " { App.action("project", project.id); return accept; } return reject; } }
+                        project-hit := TouchArea { mouse-cursor: pointer; clicked => { project-key.focus(); App.action("project", project.id); } }
+                        HorizontalLayout { padding-left: 12px; padding-right: 12px; spacing: 6px;
+                            if App.multi-projects: CheckBox {
+                                checked: project.selected; horizontal-stretch: 0; accessible-label: project.name;
+                                toggled => { App.action("toggle-project", project.id); }
                             }
-                            project-key := FocusScope { key-pressed(event) => { if event.text == Key.Return || event.text == " " { App.action("project", project.id); return accept; } return reject; } }
-                            project-hit := TouchArea { mouse-cursor: pointer; clicked => { project-key.focus(); App.action("project", project.id); } }
+                            VerticalLayout { horizontal-stretch: 1; alignment: center; spacing: 3px;
+                                Label { text: App.concise-text(project.name); height: self.preferred-height; color: Theme.title; font-weight: 600; overflow: elide; wrap: no-wrap; }
+                                Caption { text: project.review-running ? project.running ? project.status + " · 总结经验" : "正在总结经验" : App.concise-text(project.status); height: self.preferred-height; line-height-factor: 1; color: project.running || project.review-running ? Theme.accent : Theme.secondary; overflow: elide; wrap: no-wrap; }
+                                Caption { text: App.concise-text(project.path); height: self.preferred-height; font-size: 12px; line-height-factor: 1; overflow: elide; wrap: no-wrap; }
+                            }
                         }
                     }
                 }
             }
-            Divider {}
             NavigationButton { text: "模型配置"; selected: App.page == 1; clicked => { App.action("navigate", "apis"); } }
             NavigationButton { text: "全局引擎库"; selected: App.page == 2; clicked => { App.action("navigate", "catalog"); } }
             NavigationButton { text: "消耗指标"; selected: App.page == 5; clicked => { App.action("navigate", "metrics"); } }
@@ -108,15 +121,15 @@ export component MainWindow inherits Window {
             }
             if App.page == 4: About {}
             if App.busy || App.review-running || App.activity != "" || App.error != "" || App.recognition-failure-message != "": TaskFeedback {}
-            if App.page == 0: VerticalLayout { spacing: 8px; vertical-stretch: 0;
+            if App.page == 0 && App.project-id != "": VerticalLayout { spacing: 8px; vertical-stretch: 0;
                 Divider {}
                 HorizontalLayout { spacing: 16px;
-                    Caption { text: "日志"; }
-                    Link { text: "回到最新"; font-size: 13px; enabled: !logs.follow-tail; clicked => { logs.follow-tail = true; logs.scroll-to-end(); } }
+                    Link { text: root.logs-expanded ? "收起日志" : "展开日志"; font-size: 13px; clicked => { root.logs-expanded = !root.logs-expanded; } }
+                    if root.logs-expanded: Link { text: "回到最新"; font-size: 13px; enabled: !logs.follow-tail; clicked => { logs.follow-tail = true; logs.scroll-to-end(); } }
                     Link { text: "打开日志目录"; font-size: 13px; enabled: App.project-id != ""; clicked => { App.action("open", "logs"); } }
                     Rectangle { horizontal-stretch: 1; }
                 }
-                Rectangle { height: 128px; background: Theme.surface; border-color: Theme.line; border-width: 1px;
+                Rectangle { visible: root.logs-expanded; height: root.logs-expanded ? 128px : 0px; background: Theme.surface; border-color: Theme.line; border-width: 1px;
                     logs := ScrollView {
                         property <bool> follow-tail: true;
                         property <string> project-key: App.project-id;

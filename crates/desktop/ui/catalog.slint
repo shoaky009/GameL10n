@@ -1,5 +1,5 @@
 import { Button, LineEdit, ComboBox, CheckBox, ScrollView, ListView } from "std-widgets.slint";
-import { App, Theme, Label, Caption, Heading, Link } from "state.slint";
+import { App, Theme, Label, Caption, Heading, Link, ListPanel, SelectableListRow } from "state.slint";
 export component EngineLibrary inherits VerticalLayout {
     spacing: 12px; Heading { text: "全局引擎库"; font-size: 26px; }
     HorizontalLayout {
@@ -10,41 +10,38 @@ export component EngineLibrary inherits VerticalLayout {
         Button { text: "刷新"; clicked => { App.action("catalog-refresh", ""); } }
     }
     HorizontalLayout { spacing: 16px;
-        Rectangle { width: 300px; background: Theme.surface; border-width: 1px; border-color: Theme.line; border-radius: 5px;
-            VerticalLayout { padding: 1px;
-                HorizontalLayout { padding: 8px; spacing: 6px;
-                    Button { text: "多选"; checkable: true; checked <=> App.catalog-multi; }
-                    Button { text: "启用所选"; enabled: App.engine-id != ""; clicked => { App.action("engine-enable", "true"); } }
-                    Button { text: "停用所选"; enabled: App.engine-id != ""; clicked => { App.action("engine-enable", "false"); } }
-                }
-                Rectangle { height: 1px; background: Theme.line; }
-                list := ListView { vertical-stretch: 1; content-y <=> App.catalog-scroll-y;
-                    horizontal-scrollbar-policy: always-off;
-                    for engine in App.engines: Rectangle {
-                        width: list.visible-width; height: App.catalog-row-height; clip: true;
-                        background: engine.selected ? Theme.tint : hit.has-hover ? Theme.hover : transparent;
-                        if engine.selected: Rectangle { x: 0px; y: 9px; width: 3px; height: parent.height - 18px; background: Theme.accent; }
-                        VerticalLayout { padding-left: 12px; padding-right: 12px; alignment: center; spacing: 3px;
-                            Label { text: engine.name; color: Theme.title; font-weight: 600; height: self.preferred-height; overflow: elide; wrap: no-wrap; }
-                            Caption { text: engine.detail; height: self.preferred-height; overflow: elide; wrap: no-wrap; }
+        ListPanel { width: 300px;
+            HorizontalLayout { padding: 8px; spacing: 6px;
+                Button { text: "多选"; checkable: true; checked <=> App.catalog-multi; }
+                Button { text: "启用所选"; enabled: App.engine-id != ""; clicked => { App.action("engine-enable", "true"); } }
+                Button { text: "停用所选"; enabled: App.engine-id != ""; clicked => { App.action("engine-enable", "false"); } }
+            }
+            Rectangle { height: 1px; background: Theme.line; }
+            list := ListView { vertical-stretch: 1; content-y <=> App.catalog-scroll-y;
+                horizontal-scrollbar-policy: always-off;
+                for engine in App.engines: SelectableListRow {
+                    width: list.visible-width; height: App.catalog-row-height;
+                    selected: engine.selected; hovered: hit.has-hover;
+                    VerticalLayout { padding-left: 12px; padding-right: 12px; alignment: center; spacing: 3px;
+                        Label { text: engine.name; color: Theme.title; font-weight: 600; height: self.preferred-height; overflow: elide; wrap: no-wrap; }
+                        Caption { text: engine.detail; height: self.preferred-height; overflow: elide; wrap: no-wrap; }
+                    }
+                    hit := TouchArea { pointer-event(event) => {
+                        if event.kind == PointerEventKind.down && event.button == PointerEventButton.left {
+                            App.action(event.modifiers.shift ? "engine-range" : event.modifiers.control || App.catalog-multi ? "engine-toggle" : "engine", engine.id);
                         }
-                        hit := TouchArea { pointer-event(event) => {
-                            if event.kind == PointerEventKind.down && event.button == PointerEventButton.left {
-                                App.action(event.modifiers.shift ? "engine-range" : event.modifiers.control || App.catalog-multi ? "engine-toggle" : "engine", engine.id);
-                            }
-                        } }
-                    }
+                    } }
                 }
-                Rectangle { height: 1px; background: Theme.line; }
-                HorizontalLayout { padding-left: 12px; padding-right: 8px; padding-top: 8px; padding-bottom: 8px; spacing: 6px;
-                    Caption {
-                        text: App.catalog-total <= 100 ? "共 " + App.catalog-total + " 个"
-                            : (App.catalog-offset + 1) + "–" + (App.catalog-offset + App.engines.length) + " / " + App.catalog-total;
-                        horizontal-stretch: 1; vertical-alignment: center; wrap: no-wrap;
-                    }
-                    if App.catalog-total > 100: Button { text: "上一页"; enabled: App.catalog-offset > 0; clicked => { App.action("catalog", "previous"); } }
-                    if App.catalog-total > 100: Button { text: "下一页"; enabled: App.catalog-offset + 100 < App.catalog-total; clicked => { App.action("catalog", "next"); } }
+            }
+            Rectangle { height: 1px; background: Theme.line; }
+            HorizontalLayout { padding-left: 12px; padding-right: 8px; padding-top: 8px; padding-bottom: 8px; spacing: 6px;
+                Caption {
+                    text: App.catalog-total <= 100 ? "共 " + App.catalog-total + " 个"
+                        : (App.catalog-offset + 1) + "–" + (App.catalog-offset + App.engines.length) + " / " + App.catalog-total;
+                    horizontal-stretch: 1; vertical-alignment: center; wrap: no-wrap;
                 }
+                if App.catalog-total > 100: Button { text: "上一页"; enabled: App.catalog-offset > 0; clicked => { App.action("catalog", "previous"); } }
+                if App.catalog-total > 100: Button { text: "下一页"; enabled: App.catalog-offset + 100 < App.catalog-total; clicked => { App.action("catalog", "next"); } }
             }
         }
         VerticalLayout { spacing: 12px;
