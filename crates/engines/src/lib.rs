@@ -15,6 +15,7 @@ pub mod review;
 pub mod service;
 mod source;
 mod tool_activity;
+mod tyrano;
 mod verification_diagnostic;
 pub mod vntextpatch;
 

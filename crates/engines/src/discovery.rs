@@ -736,6 +736,7 @@ pub(crate) fn native_candidates(
         }
     }
 
+    let tyrano = crate::tyrano::TyranoData::from_inventory(inventory, &files_by_extension["ks"]);
     FORMATS.iter().filter_map(move |&key| {
         let format = BUILTIN_FORMATS.iter().find(|format| format.key == key)?;
         let mut resources: Vec<_> = format
@@ -743,6 +744,9 @@ pub(crate) fn native_candidates(
             .iter()
             .flat_map(|&extension| files_by_extension[extension].iter().copied())
             .collect();
+        if key == "KirikiriKs" {
+            resources.retain(|path| !tyrano.contains(path));
+        }
         if resources.is_empty() {
             return None;
         }

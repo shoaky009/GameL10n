@@ -19,7 +19,7 @@
 | Cyberworks C,system | `CSystem` | `.a0` | SJIS；对应的脚本布局 |
 | Ethornell／BGI | `Ethornell` | `.bgi`、无扩展名 | SJIS；可识别的 BGI 脚本结构 |
 | KaGuYa | `Kaguya` | `.dat`，常见 `message.dat` | SJIS；仅消息表格式，不泛指所有 DAT |
-| Kirikiri KS | `KirikiriKs` | `.ks`、`.txt` | 回填 UTF-16；运行时需接受该编码并配置中文字体；角色名标签依游戏而异 |
+| Kirikiri KS | `KirikiriKs` | `.ks`、`.txt` | 回填 UTF-16；运行时需接受该编码并配置中文字体；角色名标签依游戏而异。自动识别会排除属于 TyranoScript 运行时的 data 目录。 |
 | Kirikiri SOC | `KirikiriSoc` | `.soc` | 同 KS 文本处理；运行时需接受 UTF-16 |
 | Kirikiri 编译 TJS | `KirikiriTjs` | `.tjs` | UTF-16 字符串、Unicode 字体；仅 `TJS2100` 编译格式，不含任意 TJS 源码 |
 | Majiro | `Majiro` | `.mjo` | SJIS；对应的 MJO 字节码版本 |

@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{collections::BTreeSet, path::Path};
 
 use crate::{
     CancellationToken, EngineError, ToolPaths, ToolProcess,
@@ -203,6 +203,19 @@ impl BuiltinFormat {
             _ => &[],
         }
     }
+}
+
+/// Resources in a saved native extraction that belong to another script runtime.
+pub fn incompatible_resources(game: &Path, format: &str, resources: &[String]) -> BTreeSet<String> {
+    if format != "KirikiriKs" {
+        return BTreeSet::new();
+    }
+    let tyrano = crate::tyrano::TyranoData::from_resources(game, resources);
+    resources
+        .iter()
+        .filter(|path| tyrano.contains(path))
+        .cloned()
+        .collect()
 }
 
 #[derive(Clone, Debug)]

@@ -459,13 +459,40 @@ impl Application {
             tokio::task::spawn_blocking(move || -> Result<Option<CachedAnalysis>, CoreError> {
                 let path = directory.join("extraction/native.json");
                 if path.is_file() {
-                    let native: StoredAnalysis = read_json(&path)?;
+                    let mut native: StoredAnalysis = read_json(&path)?;
                     if !matches!(native.schema_version, 1 | 2) {
                         return Err(CoreError::InvalidData(
                             "不支持的提取缓存版本，请重新提取。".into(),
                         ));
                     }
                     validate_units(&native.extraction.units)?;
+                    if let Some(gamel10n_engines::AdapterHandle::Native { format }) =
+                        &native.adapter
+                    {
+                        let excluded = gamel10n_engines::vntextpatch::incompatible_resources(
+                            &project.game_directory,
+                            format,
+                            &native.resource_files,
+                        );
+                        if !excluded.is_empty() {
+                            native
+                                .extraction
+                                .units
+                                .retain(|unit| !excluded.contains(&unit.resource_path));
+                            if native.extraction.units.is_empty() {
+                                return Ok(None);
+                            }
+                            native
+                                .resource_files
+                                .retain(|path| !excluded.contains(path));
+                            native
+                                .source_hashes
+                                .retain(|path, _| !excluded.contains(path));
+                            if let Some(probe) = &mut native.probe {
+                                probe.required_files.retain(|path| !excluded.contains(path));
+                            }
+                        }
+                    }
                     return Ok(Some(CachedAnalysis::Native(Box::new(native))));
                 }
                 Ok(crate::legacy::load(&directory, &project)?.map(CachedAnalysis::Legacy))

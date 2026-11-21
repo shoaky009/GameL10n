@@ -16,7 +16,7 @@ use crate::{
     vntextpatch::{BUILTIN_FORMATS, BuiltinFormat},
 };
 
-pub(crate) const DISCOVERY_REVISION: u64 = 18;
+pub(crate) const DISCOVERY_REVISION: u64 = 19;
 const CONTAINERS: &[&str] = &[
     "xp3", "rpa", "rpyc", "pack", "pak", "arc", "ypf", "int", "pfs",
 ];
@@ -590,6 +590,7 @@ fn inspect_builtin_files(
             break;
         }
     }
+    let tyrano = crate::tyrano::TyranoData::from_resources(root, &files);
     let mut ordered: Vec<_> = files.iter().collect();
     ordered.sort_by_key(|path| (priority(path), path.split('/').count(), path.to_lowercase()));
     let mut extension_counts = BTreeMap::new();
@@ -783,6 +784,9 @@ fn inspect_builtin_files(
                     .iter()
                     .filter(|format| format.extensions.contains(&ext.as_str()))
                 {
+                    if format.key == "KirikiriKs" && tyrano.contains(path) {
+                        continue;
+                    }
                     add(
                         &mut candidates,
                         format.key,
@@ -908,9 +912,11 @@ fn inspect_builtin_files(
             "evidence":"完整的哈希命名脚本可试用 Whale CP932 文本解析。",
             "inspectCall":{"tool":"inspect_adapter_component","arguments":{"id":"whale-script"}}}));
     }
-    Ok(
-        json!({"revision":DISCOVERY_REVISION,"filesScanned":scanned,"partial":partial,"candidates":result,"components":components,"flashMovies":flash_movies,"pfsArchives":pfs_archives,"scriptArchives":script_archives,"warnings":warnings}),
-    )
+    let mut report = json!({"revision":DISCOVERY_REVISION,"filesScanned":scanned,"partial":partial,"candidates":result,"components":components,"flashMovies":flash_movies,"pfsArchives":pfs_archives,"scriptArchives":script_archives,"warnings":warnings});
+    if !tyrano.directories.is_empty() {
+        report["tyranoScript"] = json!({"dataDirectories":tyrano.directories,"evidence":"相邻的 tyrano/tyrano.js 和 tyrano/plugins/kag/kag.js。按 TyranoScript 检查 data/scenario 剧本的实际编码和标签，区分对白、插件示例和脚本注释。"});
+    }
+    Ok(report)
 }
 
 /// Reuses the recorded candidate evidence on continuation until its discovery revision changes.
@@ -937,6 +943,13 @@ pub(crate) fn ensure_builtin_discovery(
 
 pub(crate) fn knowledge_candidates(state: &Session) -> Vec<String> {
     let mut keys = BTreeSet::new();
+    if state
+        .extra
+        .get("builtinDiscovery")
+        .is_some_and(|report| report["tyranoScript"].is_object())
+    {
+        keys.insert("TyranoScript".into());
+    }
     if let Some(candidates) = state
         .extra
         .get("builtinDiscovery")
