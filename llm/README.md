@@ -4,6 +4,7 @@
 
 - [智能适配工具使用指引](adapter-development.md)：按任务选择内置能力、调查资源、验收与发布。
 - [识别速度与模型用量](recognition-efficiency.md)：减少模型往返与本地探测工作量的方向、样例和衡量方法。
+- [基于真实游戏的识别优化自动化方案](adaptation-optimization-workflow.md) 约定从游戏目录运行基线、筛选高收益改动、验证家族复用和生成对照报告的流程。
 - [第三方适配工具接入计划](adaptation-tool-integration.md) 说明核心能力、技术取舍和一次交付的验收条件。
 - [智能适配日志调查 skill](../.agents/skills/review-adaptation-logs/SKILL.md)：用 `$review-adaptation-logs` 调用，先统计、再按失败阶段和调用 ID 定位，控制排查时的上下文用量。
 
