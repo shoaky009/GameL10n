@@ -2750,7 +2750,10 @@ impl EngineService {
         } else {
             "script_template"
         };
-        let mut components = vec!["engine_archive.py".to_owned()];
+        let mut components = Vec::new();
+        if id != crate::adaptation_assets::FLASH_POOL_TEMPLATE {
+            components.push("engine_archive.py".to_owned());
+        }
         if let Some(template) = archive_template {
             components.push(format!("{module}.py"));
             components.extend(

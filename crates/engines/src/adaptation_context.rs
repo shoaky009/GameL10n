@@ -16,7 +16,7 @@ use crate::{
     vntextpatch::{BUILTIN_FORMATS, BuiltinFormat},
 };
 
-pub(crate) const DISCOVERY_REVISION: u64 = 17;
+pub(crate) const DISCOVERY_REVISION: u64 = 18;
 const CONTAINERS: &[&str] = &[
     "xp3", "rpa", "rpyc", "pack", "pak", "arc", "ypf", "int", "pfs",
 ];
@@ -560,7 +560,7 @@ fn inspect_builtin_files(
                     continue;
                 }
                 let ext = extension(&name);
-                if matches!(ext.as_str(), "scn" | "psb" | "script")
+                if matches!(ext.as_str(), "scn" | "psb" | "script" | "swf")
                     || name == "scpack.idx"
                     || name.rsplit_once(".pfs.").is_some_and(|(_, suffix)| {
                         suffix.len() == 3 && suffix.bytes().all(|byte| byte.is_ascii_digit())
@@ -626,6 +626,7 @@ fn inspect_builtin_files(
     let mut whale_scripts = Vec::new();
     let mut bsscript = Vec::new();
     let mut scn = Vec::new();
+    let mut flash_movies = Vec::new();
     let mut pfs_archives = Vec::new();
     let mut script_archives = Vec::new();
     for (_, path) in samples {
@@ -653,6 +654,14 @@ fn inspect_builtin_files(
                 continue;
             }
         };
+        if extension(path) == "swf"
+            && head.len() >= 8
+            && head[3] >= 8
+            && matches!(&head[..3], b"FWS" | b"CWS")
+            && flash_movies.len() < 4
+        {
+            flash_movies.push(path.clone());
+        }
         if head.starts_with(b"pf8") && pfs_archives.len() < 2 {
             pfs_archives.push(path.clone());
         }
@@ -837,6 +846,12 @@ fn inspect_builtin_files(
             "scriptComponent":"nekosdk-script",
             "missingCapabilities":["NEKOPACK4A 脚本可用 nekopack4a-advscript2 模板按记录读写。选项、界面资源和中文显示须分别确认。"]}));
     }
+    if !flash_movies.is_empty() {
+        result.push(json!({"format":"FlashAvm1","adapterId":"template.flash-avm1-pool","name":"Flash SWF",
+            "evidenceKind":"movie-container","sampleFiles":flash_movies,"scriptComponent":"flash-avm1",
+            "evidence":["FWS/CWS 文件头，仅为容器线索。按顶层动作及常量池确认 AVM1 文本。"],
+            "template":"flash-avm1-pool","missingCapabilities":["嵌套影片、独立界面和中文运行显示需核对。"]}));
+    }
     if !bsscript.is_empty() {
         bsscript.truncate(4);
         result.insert(0,json!({"format":"BSScriptRev6","adapterId":"reference.bsscript-rev6","name":"BSScript Rev.6","evidenceKind":"script-signature",
@@ -894,7 +909,7 @@ fn inspect_builtin_files(
             "inspectCall":{"tool":"inspect_adapter_component","arguments":{"id":"whale-script"}}}));
     }
     Ok(
-        json!({"revision":DISCOVERY_REVISION,"filesScanned":scanned,"partial":partial,"candidates":result,"components":components,"pfsArchives":pfs_archives,"scriptArchives":script_archives,"warnings":warnings}),
+        json!({"revision":DISCOVERY_REVISION,"filesScanned":scanned,"partial":partial,"candidates":result,"components":components,"flashMovies":flash_movies,"pfsArchives":pfs_archives,"scriptArchives":script_archives,"warnings":warnings}),
     )
 }
 

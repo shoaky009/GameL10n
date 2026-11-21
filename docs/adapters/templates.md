@@ -34,6 +34,7 @@ BGI 重建接受按原成员名提交的已解码 V1 脚本。输入和输出封
 | `xp3-kirikiri-ks` | 无过滤器 XP3 中的 `.ks` |
 | `artemis-pfs8-ast` | PFS v8 中无跨卷路径冲突的 UTF-8 AST 2.0 |
 | `nekopack4a-advscript2` | NEKOPACK4A 中无跨卷同名脚本的 CP932 ADVSCRIPT2 |
+| `flash-avm1-pool` | [Flash AVM1 顶层动作的 UTF-8 常量池](engines/flash-avm1.md) |
 | `qlie-pack3-imos` | [带密钥的 QLIE PACK 3.0 和 Hash 1.3 中的 ImoScripter FormatType=1](engines/qlie-filepack3-systemfont.md#封包脚本模板) |
 | `qlie-pack31-imos` | [带内置密钥的 QLIE PACK 3.1 和 Hash 1.4 中的 ImoScripter FormatType=1](engines/qlie-filepack3-systemfont.md#封包脚本模板) |
 

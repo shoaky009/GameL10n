@@ -2934,6 +2934,36 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires GAMEL10N_AVM1_GAME and the development runtime"]
+    async fn installed_avm1_resources_pass_automatic_verification() {
+        let root = tempfile::tempdir().unwrap();
+        let (_, mut request, workspace, _) = fixture(root.path());
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let service = EngineService::new(&repo, crate::ToolPaths::development());
+        request.game_directory = std::env::var_os("GAMEL10N_AVM1_GAME").unwrap().into();
+        request.require_model_analysis = true;
+        request.limits.maximum_tokens = RESPONSE_TOKENS;
+        let (provider, server) = model(vec![budgeted_response(summary_response("stop"))]);
+        let result = service
+            .adapt(&request, &provider, &CancellationToken::new(), None)
+            .await
+            .unwrap();
+        let state = load_session(&workspace.join("session.json")).unwrap();
+        let template = &state.extra["automaticTemplate"];
+        assert_eq!(
+            template["resourceVerificationPassed"], true,
+            "{template} {result:?}"
+        );
+        assert_eq!(template["templateId"], "flash-avm1-pool");
+        println!("{}", template["movieProbe"]);
+        assert!(
+            server.join().unwrap()[0]
+                .to_string()
+                .contains("resourceVerificationPassed")
+        );
+    }
+
+    #[tokio::test]
     async fn qlie31_adapts_before_model_analysis_with_saved_runtime_dependencies() {
         verify_qlie31_resume(None).await;
     }

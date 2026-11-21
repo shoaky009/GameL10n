@@ -13,6 +13,7 @@
 | [Ren’Py RPYC2 与混合资源](engines/renpy-rpyc.md) | 组合模板 | 松散脚本、RPA/ARC 3.0 与无路径冲突的源码组合 |
 | [YU-RIS](engines/yuris.md) | 内置解析器 | YSTB、YSCF、命令表及可选 SJIS 隧道 |
 | [EAGLS / ALIS SCPACK](engines/eagls-scpack.md) | 脚本组件 | 完整成员的解析与回填，封包和中文运行另行确认 |
+| [Flash AVM1](engines/flash-avm1.md) | 脚本组件与组合模板 | FWS/CWS 顶层动作的 UTF-8 常量池，支持变长回填和分支重定位 |
 | [Unity SerializedFile](engines/unity-serialized-text.md) | 容器组件 | Unity 2022 小端 v22，TextAsset 文本布局另行确认 |
 | [QLIE 封包适配、字体与启动](engines/qlie-filepack3-systemfont.md) | 脚本组合模板、中文字体补丁和启动组件 | ImoScripter FormatType=1，带外部密钥的 PACK 3.0 与 Hash 1.3，带内置密钥的 PACK 3.1 与 Hash 1.4。3.0 支持已识别的系统字体布局 |
 | [System4 FNL 补字](engines/system4-ain14-msg1-fnl.md) | 字形组件 | 参考字形尺寸的位图生成，AIN、FNL 及运行补丁需单独适配 |

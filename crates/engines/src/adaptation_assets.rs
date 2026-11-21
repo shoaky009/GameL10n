@@ -25,6 +25,7 @@ const GRAPHICS_SHA256: &str = "E1292E3D47D1C65F4AE52A30B1159A476137422BD7A9272A5
 pub(crate) const ARTEMIS_PFS_TEMPLATE: &str = "artemis-pfs8-ast";
 pub(crate) const QLIE_PACK_TEMPLATE: &str = "qlie-pack3-imos";
 pub(crate) const QLIE_PACK31_TEMPLATE: &str = "qlie-pack31-imos";
+pub(crate) const FLASH_POOL_TEMPLATE: &str = "flash-avm1-pool";
 const QLIE_TEMPLATE_SOURCES: &[&str] = &[
     "qlie_archive.py",
     "qlie_pack31.py",
@@ -38,7 +39,7 @@ const QLIE_TEMPLATE_SOURCES: &[&str] = &[
 pub(crate) struct ArchiveTemplate {
     pub(crate) id: &'static str,
     pub(crate) format: &'static str,
-    pub(crate) component: &'static str,
+    archive_component: Option<&'static str>,
     pub(crate) extensions: &'static [&'static str],
     pub(crate) patterns: &'static [&'static str],
     pub(crate) name: &'static str,
@@ -54,9 +55,25 @@ pub(crate) struct ArchiveTemplate {
 
 pub(crate) const ARCHIVE_TEMPLATES: &[ArchiveTemplate] = &[
     ArchiveTemplate {
+        id: FLASH_POOL_TEMPLATE,
+        format: "FlashAvm1",
+        archive_component: None,
+        extensions: &[".swf"],
+        patterns: &["**/*.swf"],
+        name: "Flash AVM1 常量池文本",
+        module: "flash_avm1_adapter",
+        extra_sources: &["flash_avm1.py"],
+        optional_components: &[],
+        discovery_key: Some("flashMovies"),
+        sample_component: None,
+        prepare_for_model: true,
+        distinct_volume_names: false,
+        limitations: "识别 FWS/CWS 顶层 AVM1 动作中的 UTF-8 常量池。嵌套影片、独立界面与中文运行显示需要另行确认",
+    },
+    ArchiveTemplate {
         id: ARTEMIS_PFS_TEMPLATE,
         format: "ArtemisAst",
-        component: "archive.pfs8",
+        archive_component: Some("archive.pfs8"),
         extensions: &[".ast"],
         patterns: &["**/*.pfs", "**/*.pfs.*"],
         name: "Artemis PFS v8 + AST 2.0",
@@ -72,7 +89,7 @@ pub(crate) const ARCHIVE_TEMPLATES: &[ArchiveTemplate] = &[
     ArchiveTemplate {
         id: "nekopack4a-advscript2",
         format: "NekoSDK",
-        component: "archive.nekopack4a",
+        archive_component: Some("archive.nekopack4a"),
         extensions: &[".txt"],
         patterns: &["**/*.pak"],
         name: "NEKOPACK4A + NekoSDK ADVSCRIPT2",
@@ -88,7 +105,7 @@ pub(crate) const ARCHIVE_TEMPLATES: &[ArchiveTemplate] = &[
     ArchiveTemplate {
         id: QLIE_PACK_TEMPLATE,
         format: "Qlie",
-        component: "python.archives.qlie",
+        archive_component: Some("python.archives.qlie"),
         extensions: &[".s"],
         patterns: &[
             "GameData/*.pack",
@@ -111,7 +128,7 @@ pub(crate) const ARCHIVE_TEMPLATES: &[ArchiveTemplate] = &[
     ArchiveTemplate {
         id: QLIE_PACK31_TEMPLATE,
         format: "Qlie",
-        component: "qlie_pack31",
+        archive_component: Some("qlie_pack31"),
         extensions: &[".s"],
         patterns: &["GameData/*.pack"],
         name: "QLIE PACK 3.1 + ImoScripter FormatType=1",
@@ -221,13 +238,21 @@ pub(crate) fn template_catalog() -> Vec<Value> {
         (
             template.id,
             template.format,
-            Some(template.component),
+            template.archive_component,
             template.extensions.to_vec(),
             template.patterns.to_vec(),
             template.name,
         )
     });
-    bundled.into_iter().chain(archives).map(|(id,format,archive,extensions,patterns,name)|json!({"id":id,"version":1,"format":format,"archiveComponent":archive,"scriptExtensions":extensions,"resourcePatterns":patterns,"family":{"kind":"template","key":id,"name":name,"adapterId":format!("template.{id}")}})).collect()
+    bundled.into_iter().chain(archives).map(|(id, format, archive, extensions, patterns, name)| {
+        let mut template = json!({"id":id,"version":1,"format":format,"archiveComponent":archive,
+            "scriptExtensions":extensions,"resourcePatterns":patterns,
+            "family":{"kind":"template","key":id,"name":name,"adapterId":format!("template.{id}")}});
+        if id == FLASH_POOL_TEMPLATE {
+            template["scriptComponent"] = json!("flash-avm1");
+        }
+        template
+    }).collect()
 }
 
 pub(crate) fn engine_components() -> Vec<Value> {

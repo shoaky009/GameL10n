@@ -286,7 +286,7 @@ $runs = @($rows | Where-Object { $_.runId } | Group-Object runId | ForEach-Objec
             discoveryCandidates = $preparation.entry.discoveryCandidates
             skips = $preparation.entry.preparationSkips
             archiveTrials = $preparation.entry.automaticArchiveTrials
-            template = $preparation.entry.automaticTemplate | Select-Object templateId,status,stage,diagnostics,resourceVerificationPassed,verificationStage,duplicateScripts,uninstallArchive
+            template = $preparation.entry.automaticTemplate | Select-Object templateId,status,stage,diagnostics,resourceVerificationPassed,verificationStage,duplicateScripts,uninstallArchive,movieProbe
         }
     }
     if ($end) {

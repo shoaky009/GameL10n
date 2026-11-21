@@ -1,5 +1,30 @@
 [
   {
+    "id": "flash-avm1",
+    "name": "Flash AVM1 常量池文本",
+    "scope": "FWS/CWS 中以单个 ConstantPool 开始的顶层 DoAction、DoInitAction 和 PlaceObject2 剪辑动作。",
+    "origin": "GameL10n 实现。参考 GARbro 的容器边界、Ruffle 的指令语义和 JPEXS 的单引用常量内联。",
+    "api": "Movie(bytes).fields() 返回 locator、原文和类型。build({locator:译文}) 构建影片，validate(patched, translations) 核对文本、Push 操作数和跳转。",
+    "example": "from tools.flash_avm1 import Movie\nmovie = Movie(data)\nfields = list(movie.fields())",
+    "files": [
+      {
+        "name": "flash_avm1.py",
+        "path": "src/tools/flash_avm1.py",
+        "binary": false
+      },
+      {
+        "name": "flash_avm1_adapter.py",
+        "path": "src/tools/flash_avm1_adapter.py",
+        "binary": false
+      }
+    ],
+    "engineFamilies": [
+      "flash",
+      "flash-avm1-swf",
+      "flashavm1"
+    ]
+  },
+  {
     "id": "eagls-script",
     "name": "EAGLS / ALIS 脚本文本",
     "scope": "完整、已解包的源文本脚本成员；复用固定库解析对白、选项和字面姓名，保留变量引用、标签表与尾标。默认按标签区线索有界核对 EAGLS v1/v2 与文本起点，其他密钥或标签布局须显式提供 Profile。界面赋值、封包连接和中文运行支持另行确认。",

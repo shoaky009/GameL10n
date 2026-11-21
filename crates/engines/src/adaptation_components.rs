@@ -8,7 +8,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{collections::BTreeSet, ffi::OsString, fs, io::Write, path::Path};
 
-const VERSION: &str = "2.10.0";
+const VERSION: &str = "2.11.0";
 const USAGE: &str = "按 api 和 example 接入组件，有 probeCall 时可直接运行小样。work/ 下的探针用于分析，src/tools/ 下的组件供正式适配器复用。接入后仍需当前资源验收和游戏显示验证";
 const QLIE_LAUNCHER: &str = "qlie-japanese-font-launcher";
 const QLIE_LAUNCHER_BINARY: &str = "tools/QlieLauncher.exe";
@@ -237,6 +237,10 @@ fn describe(component: &Component, service: &EngineService) -> Value {
 
 fn source(name: &str) -> Result<&'static [u8], EngineError> {
     match name {
+        "flash_avm1.py" => Ok(include_bytes!("../../../adapters/components/flash_avm1.py")),
+        "flash_avm1_adapter.py" => Ok(include_bytes!(
+            "../../../adapters/components/flash_avm1_adapter.py"
+        )),
         "eagls_script.py" => Ok(include_bytes!(
             "../../../adapters/components/eagls_script.py"
         )),
