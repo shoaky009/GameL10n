@@ -80,6 +80,12 @@ enum ExtractionCoverage {
     CheckIfSmall,
 }
 
+enum PackageRegistration<'a> {
+    ProjectOnly,
+    Existing,
+    Trial(Option<&'a AdapterVersion>),
+}
+
 struct AdaptationStart {
     repair_issue: Option<RepairIssue>,
     objective: AdaptationObjective,
@@ -345,6 +351,109 @@ impl Application {
     }
     pub async fn recognize(&self, id: &str) -> Result<RecognitionResult, CoreError> {
         self.recognize_with_instruction(id, String::new()).await
+    }
+
+    pub async fn run_project_adapter(
+        &self,
+        id: &str,
+        selected: &AdapterVersion,
+    ) -> Result<usize, CoreError> {
+        let label = format!("{} {}", selected.adapter_id, selected.version);
+        let token = self
+            .begin_with_review_evidence(
+                id,
+                "extract",
+                &format!("正在使用 {label} 检查游戏资源。"),
+                true,
+            )
+            .await?;
+        let result = self.extract_selected(id, selected, &token).await;
+        self.finish(
+            id,
+            "extract",
+            result
+                .as_ref()
+                .map(|count| format!("{label} 已提取 {count} 条文本。"))
+                .map_err(ToString::to_string),
+        )
+        .await?;
+        result
+    }
+
+    async fn extract_selected(
+        &self,
+        id: &str,
+        selected: &AdapterVersion,
+        token: &CancellationToken,
+    ) -> Result<usize, CoreError> {
+        let project = self.store.get(id).await?;
+        let game = crate::game_directory::validate(&project.game_directory)?;
+        let root = self.data_directory().to_owned();
+        let directory = self.project_directory(id)?;
+        let selected = selected.clone();
+        let scan_token = token.clone();
+        let (game, detail, coverage, inventory, inputs) =
+            tokio::task::spawn_blocking(move || -> Result<_, CoreError> {
+                let detail = EngineCatalog::open(&root)?
+                    .version_detail(&selected.adapter_id, &selected.version)?;
+                let current = crate::catalog::project_adapter(&project).as_ref() == Some(&selected);
+                if !detail.exists || detail.source == crate::catalog::EngineLibrarySource::History {
+                    return Err(CoreError::InvalidData(format!(
+                        "{} {} 的适配器文件不可用。{}",
+                        selected.adapter_id,
+                        selected.version,
+                        detail.diagnostics.join("\n")
+                    )));
+                }
+                if !detail.enabled && !current {
+                    return Err(CoreError::InvalidData(
+                        "所选适配器已停用，请在全局引擎库启用后重试。".into(),
+                    ));
+                }
+                let confirmed = detail.games.iter().any(|g| {
+                    g.game_id == project.id
+                        && g.coverage_confirmed
+                        && g.structure_status == "passed"
+                        && g.runtime_status != "failed"
+                });
+                let coverage = if confirmed
+                    || (current
+                        && project
+                            .extra
+                            .get("analysis")
+                            .is_some_and(|a| a["unitCount"].as_u64().unwrap_or(0) > 0)
+                        && !crate::projects::extraction_coverage_pending(&project.extra))
+                {
+                    ExtractionCoverage::Confirmed
+                } else {
+                    ExtractionCoverage::CheckIfSmall
+                };
+                let inputs = source_inputs(&directory, &game, None, &scan_token, None)?;
+                let inventory = inputs.inventory(Inventory::scan(&game)?)?;
+                Ok((game, detail, coverage, inventory, inputs))
+            })
+            .await??;
+        let service = self.engine_service()?.with_discovery_inputs(inputs.clone());
+        let (adapter, probe) = service
+            .probe_selected(
+                &game,
+                &inventory,
+                (&detail.adapter_id, &detail.version),
+                detail.directory_path,
+                token,
+            )
+            .await?;
+        self.extract_adapter(
+            id,
+            adapter,
+            probe,
+            token,
+            coverage,
+            PackageRegistration::ProjectOnly,
+            None,
+            Some(&inputs),
+        )
+        .await
     }
 
     /// Resume unfinished adaptation; otherwise try existing adapters before intelligent adaptation.
@@ -731,8 +840,7 @@ impl Application {
                         probe,
                         cancellation,
                         coverage,
-                        false,
-                        None,
+                        PackageRegistration::Existing,
                         None,
                         None,
                     )
@@ -813,8 +921,7 @@ impl Application {
         probe: ProbeResult,
         cancellation: &CancellationToken,
         coverage: ExtractionCoverage,
-        trial: bool,
-        replaces: Option<&AdapterVersion>,
+        registration: PackageRegistration<'_>,
         verified_extraction: Option<Arc<VerifiedExtraction>>,
         inputs: Option<&AdaptationInputs>,
     ) -> Result<usize, CoreError> {
@@ -994,12 +1101,16 @@ impl Application {
             adapter: Some(adapter.clone()),
             probe: Some(probe.clone()),
         };
+        if cancellation.is_cancelled() {
+            return Err(gamel10n_engines::EngineError::Cancelled.into());
+        }
         self.commit_analysis(id, stored).await?;
         if let AdapterHandle::Python {
             package_directory: Some(package),
             ..
         } = &adapter
             && !coverage_pending
+            && !matches!(registration, PackageRegistration::ProjectOnly)
         {
             let catalog = EngineCatalog::open(self.data_directory())?;
             let compatibility = GameCompatibility {
@@ -1012,7 +1123,7 @@ impl Application {
                 runtime_status: "not-tested".into(),
                 updated_at: Some(chrono::Utc::now().to_rfc3339()),
             };
-            if trial {
+            if let PackageRegistration::Trial(replaces) = registration {
                 catalog.register_trial_package(package, compatibility, replaces)?;
             } else {
                 catalog.register_package(package, Some(compatibility))?;
@@ -1382,8 +1493,11 @@ impl Application {
                     probe,
                     cancellation,
                     coverage,
-                    trial,
-                    previous.as_ref(),
+                    if trial {
+                        PackageRegistration::Trial(previous.as_ref())
+                    } else {
+                        PackageRegistration::Existing
+                    },
                     result.verified_extraction.take(),
                     Some(&request.inputs),
                 )
@@ -2725,8 +2839,7 @@ mod tests {
             probe,
             &token,
             ExtractionCoverage::Confirmed,
-            false,
-            None,
+            PackageRegistration::Existing,
             None,
             Some(&inputs),
         )
@@ -2805,8 +2918,7 @@ mod tests {
             probe,
             &token,
             ExtractionCoverage::Confirmed,
-            false,
-            None,
+            PackageRegistration::Existing,
             None,
             None,
         )
@@ -2898,8 +3010,7 @@ mod tests {
                 probe,
                 &token,
                 ExtractionCoverage::Confirmed,
-                false,
-                None,
+                PackageRegistration::Existing,
                 None,
                 None,
             )
@@ -2996,8 +3107,7 @@ mod tests {
             probe,
             &token,
             ExtractionCoverage::Confirmed,
-            false,
-            None,
+            PackageRegistration::Existing,
             None,
             None,
         )
@@ -3366,8 +3476,7 @@ mod tests {
             probe,
             &token,
             ExtractionCoverage::Confirmed,
-            true,
-            None,
+            PackageRegistration::Trial(None),
             None,
             None,
         )
@@ -3623,6 +3732,67 @@ mod tests {
                 .records
                 .iter()
                 .all(|record| record.api.requests == 0)
+        );
+    }
+
+    #[tokio::test]
+    async fn manual_adapter_reextracts_only_the_selected_version_and_retains_reviewed_text() {
+        let tools = crate::ToolPaths::development();
+        if !tools.python().is_file() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let game = root.path().join("game");
+        fs::create_dir(&game).unwrap();
+        fs::write(game.join("text.json"), br#"["one","two"]"#).unwrap();
+        let app = Application::open(root.path().join("data"), &tools)
+            .await
+            .unwrap();
+        let id = app.add_project(&game).await.unwrap().id;
+        let script = include_str!("../../engines/tests/fixtures/json_adapter.py");
+        register_json_adapter(&app, "fixture", script);
+        let catalog = EngineCatalog::open(app.data_directory()).unwrap();
+        let selected = AdapterVersion {
+            adapter_id: "engine.fixture".into(),
+            version: "1".into(),
+        };
+        let project = app.open_project(&id).await.unwrap();
+        assert!(
+            catalog
+                .project_adapters(&project)
+                .unwrap()
+                .iter()
+                .any(|o| o.adapter == selected && !o.current)
+        );
+        assert_eq!(app.run_project_adapter(&id, &selected).await.unwrap(), 2);
+        app.save_translation_edit(&id, "0", "已校对".into(), true)
+            .await
+            .unwrap();
+        fs::write(game.join("text.json"), br#"["one","two","three"]"#).unwrap();
+        assert_eq!(app.run_project_adapter(&id, &selected).await.unwrap(), 3);
+        let saved = app.open_project(&id).await.unwrap();
+        let options = catalog.project_adapters(&saved).unwrap();
+        assert!(options[0].current && options[0].adapter == selected);
+        assert!(crate::projects::extraction_coverage_pending(&saved.extra));
+
+        // Another available adapter can read this game, so a fallback would wrongly succeed.
+        let incompatible = AdapterVersion {
+            adapter_id: "engine.siglus".into(),
+            version: "1.0.0".into(),
+        };
+        let error = app
+            .run_project_adapter(&id, &incompatible)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("未匹配"), "{error}");
+        assert_eq!(app.task_state(&id).await.unwrap().operation, "extract");
+        assert_eq!(app.text_page(&id, "", 0, 100).await.unwrap().total, 3);
+        let row = app.workbench_row(&id, "0").await.unwrap();
+        assert_eq!(row.text.as_deref(), Some("已校对"));
+        assert!(row.reviewed);
+        assert_eq!(
+            crate::catalog::project_adapter(&app.open_project(&id).await.unwrap()),
+            Some(selected)
         );
     }
 
@@ -4226,8 +4396,7 @@ mod tests {
             probe.clone(),
             &token,
             ExtractionCoverage::Confirmed,
-            false,
-            None,
+            PackageRegistration::Existing,
             Some(proof.clone()),
             None,
         )
@@ -4269,8 +4438,7 @@ mod tests {
             probe,
             &token,
             ExtractionCoverage::Confirmed,
-            false,
-            None,
+            PackageRegistration::Existing,
             Some(proof),
             None,
         )

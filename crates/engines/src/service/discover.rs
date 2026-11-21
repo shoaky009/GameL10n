@@ -29,6 +29,7 @@ struct Discovery<'a> {
     diagnostics: Vec<String>,
     reuse_failures: Vec<GeneratedAdapterReuseFailure>,
     builtin_probes: Vec<BuiltinAdapterProbeObservation>,
+    selected: Option<(&'a str, &'a str)>,
 }
 
 struct PackageCandidate {
@@ -50,6 +51,7 @@ impl EngineService {
         inventory: &Inventory,
         previous_failures: &[GeneratedAdapterReuseFailure],
         verification: DiscoveryVerification,
+        selected: Option<(&str, &str)>,
         cancellation: &CancellationToken,
         progress: ProgressCallback<'_>,
     ) -> Result<DiscoveryResult, EngineError> {
@@ -64,12 +66,18 @@ impl EngineService {
             diagnostics: Vec::new(),
             reuse_failures: Vec::new(),
             builtin_probes: Vec::new(),
+            selected,
         };
-        let mut matched = search.probe_smil().await?;
+        let package_only = selected.is_some() && !packages.is_empty();
+        let mut matched = if package_only {
+            None
+        } else {
+            search.probe_smil().await?
+        };
         if matched.is_none() {
             matched = search.probe_packages(packages, previous_failures).await?;
         }
-        if matched.is_none() && !self.ordered_packages_only {
+        if matched.is_none() && !self.ordered_packages_only && !package_only {
             matched = search.probe_builtins().await?;
         }
         let (adapter, probe) = matched.unzip();
@@ -83,12 +91,49 @@ impl EngineService {
             builtin_probes: search.builtin_probes,
         })
     }
+
+    /// Runs only the requested catalog version, including versions outside automatic matching.
+    pub async fn probe_selected(
+        &self,
+        source: &Path,
+        inventory: &Inventory,
+        version: (&str, &str),
+        package: Option<PathBuf>,
+        cancellation: &CancellationToken,
+    ) -> Result<(AdapterHandle, ProbeResult), EngineError> {
+        let result = self
+            .discover_with_inventory_and_failures(
+                source,
+                package.as_slice(),
+                inventory,
+                &[],
+                DiscoveryVerification::ProbeOnly,
+                Some(version),
+                cancellation,
+                None,
+            )
+            .await?;
+        result
+            .adapter
+            .zip(result.probe)
+            .filter(|(_, probe)| probe.adapter_version == version.1)
+            .ok_or_else(|| EngineError::Incompatible {
+                stage: "probe",
+                message: result.diagnostics.into_iter().next().unwrap_or_else(|| {
+                    format!(
+                        "{} {} 未匹配此游戏的资源。请核对适配器版本和游戏目录。",
+                        version.0, version.1
+                    )
+                }),
+            })
+    }
 }
 
 impl Discovery<'_> {
     async fn probe_smil(&mut self) -> Result<Option<(AdapterHandle, ProbeResult)>, EngineError> {
         const ID: &str = "engine.kirikiri-smil-smile";
         if self.service.ordered_packages_only
+            || self.selected.is_some_and(|version| version != (ID, "1"))
             || self
                 .service
                 .preferred_adapter
@@ -122,7 +167,13 @@ impl Discovery<'_> {
         let started = Instant::now();
         let probe = self
             .service
-            .probe_bounded(&adapter, self.source, &resources, self.cancellation)
+            .probe_bounded_with_inputs(
+                &adapter,
+                self.source,
+                &resources,
+                &self.service.discovery_inputs,
+                self.cancellation,
+            )
             .await?;
         self.probe_elapsed += started.elapsed();
         let Some(probe) = probe else { return Ok(None) };
@@ -174,12 +225,20 @@ impl Discovery<'_> {
             {
                 continue;
             }
+            if self
+                .selected
+                .is_some_and(|version| version != (manifest.id.as_str(), manifest.version.as_str()))
+            {
+                self.diagnostics
+                    .push("发布包的运行版本与所选版本不同，请选择对应的运行版本。".into());
+                continue;
+            }
             let (status, evidence) = self
                 .inventory
                 .recognize_with(manifest.recognition.as_ref(), &|path| {
                     self.service.discovery_inputs.file(self.source, path).ok()
                 });
-            if status == RecognitionStatus::NoMatch {
+            if status == RecognitionStatus::NoMatch && self.selected.is_none() {
                 continue;
             }
             let resources = manifest.resources(self.inventory);
@@ -473,7 +532,9 @@ impl Discovery<'_> {
                 }
                 _ => adapter.id().to_string(),
             };
-            if self.service.disabled_families.contains(&family) {
+            if self.service.disabled_families.contains(&family)
+                || self.selected.is_some_and(|(id, _)| id != family)
+            {
                 continue;
             }
             EngineService::report(
@@ -485,6 +546,10 @@ impl Discovery<'_> {
             if let Some(resources) = native_resources {
                 inventory.require_complete_native_inventory()?;
                 request.resource_files = Some(resources.into_iter().map(str::to_owned).collect());
+            }
+            let original = self.original_builtin_probe(&adapter, &mut request)?;
+            if let Some(original) = &original {
+                request.source_directory = original.directory().to_owned();
             }
             let probe = match self
                 .service
@@ -555,6 +620,53 @@ impl Discovery<'_> {
             }
         }
         Ok(None)
+    }
+
+    fn original_builtin_probe(
+        &self,
+        adapter: &AdapterHandle,
+        request: &mut AdapterRequest,
+    ) -> Result<Option<crate::ReadOnlySource>, EngineError> {
+        let inputs = &self.service.discovery_inputs;
+        if self.selected.is_none() || (inputs.files.is_empty() && inputs.excluded.is_empty()) {
+            return Ok(None);
+        }
+        // With a patch installed, probe and extract must see the same original resources.
+        // Stage only the selected parser's files when the backups have different names.
+        let paths = request.resource_files.get_or_insert_with(|| {
+            self.inventory
+                .files
+                .iter()
+                .filter(|file| {
+                    let path = file.path.to_ascii_lowercase();
+                    match adapter {
+                        AdapterHandle::BuiltinSfa16 => matches!(
+                            path.as_str(),
+                            "scr.aos" | "sfa16.exe" | "sfa16.exe.le.config"
+                        ),
+                        AdapterHandle::BuiltinSiglus => {
+                            matches!(path.as_str(), "scene.pck" | "gameexe.dat")
+                                || (!path.contains('/')
+                                    && (path.ends_with(".exe") || path.ends_with(".exe.le.config")))
+                                || (path.starts_with("g00/_moji_") && path.ends_with(".g00"))
+                        }
+                        _ => false,
+                    }
+                })
+                .map(|file| file.path.clone())
+                .collect()
+        });
+        let files = paths
+            .iter()
+            .map(|path| Ok((path.clone(), inputs.file(self.source, path)?)))
+            .collect::<Result<_, EngineError>>()?;
+        crate::ReadOnlySource::open_excluding(
+            self.source,
+            &files,
+            &inputs.excluded,
+            self.cancellation,
+        )
+        .map(Some)
     }
 
     fn record_builtin_failure(

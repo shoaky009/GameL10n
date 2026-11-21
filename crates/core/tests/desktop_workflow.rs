@@ -474,6 +474,20 @@ async fn selected_edit_patch_install_restore_and_restart_preserve_originals() {
         hash_file(&script).unwrap(),
         hash_file(&payload.join("script.rpy")).unwrap()
     );
+    let adapter = gamel10n_core::catalog::AdapterVersion {
+        adapter_id: "engine.vntextpatch-renpy".into(),
+        version: "1.0.1".into(),
+    };
+    assert_eq!(
+        app.run_project_adapter(&project.id, &adapter)
+            .await
+            .unwrap(),
+        1_000
+    );
+    let row = app.workbench_row(&project.id, &selected).await.unwrap();
+    assert_eq!(row.unit.source_text, "Hello there!");
+    assert_eq!(row.text.as_deref(), Some("你好！"));
+    assert!(row.reviewed);
     app.save_translation_edit(&project.id, &selected, "你好，再会！".into(), true)
         .await
         .unwrap();

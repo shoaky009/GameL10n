@@ -84,6 +84,10 @@ export global App {
     in-out property <[NamedRow]> chain;
     in-out property <[EngineRow]> engines;
     in-out property <[NamedRow]> versions;
+    in-out property <[StandardListViewItem]> adapter-items;
+    in-out property <[string]> adapter-keys;
+    in-out property <int> adapter-index: -1;
+    callback search-adapters(string);
     in-out property <[NamedRow]> games;
     in-out property <[NamedRow]> knowledge;
     in-out property <[NamedRow]> knowledge-origins;

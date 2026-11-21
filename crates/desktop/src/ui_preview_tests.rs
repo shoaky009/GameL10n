@@ -407,6 +407,25 @@ fn render_desktop_preview_fixtures() {
         app.set_workflow_finish(1);
         app.set_workflow_use_existing_text(true);
         capture(&format!("workflow-run{suffix}"), 1120, 720);
+        let root = tempfile::tempdir().unwrap();
+        let catalog = gamel10n_core::catalog::EngineCatalog::open(root.path()).unwrap();
+        let project = serde_json::from_value(serde_json::json!({
+            "schemaVersion": 2, "id": "fixture", "gameDirectory": root.path(), "name": "星海旅人",
+            "analysis": {"adapterId": "vntextpatch-kirikiriks", "adapterVersion": "1.0.1"}
+        }))
+        .unwrap();
+        crate::catalog_ui::show_adapter_picker(&ui, catalog.project_adapters(&project).unwrap());
+        assert_eq!(app.get_adapter_index(), 0);
+        assert_eq!(
+            app.get_adapter_keys().row_data(0).unwrap(),
+            "engine.vntextpatch-kirikiriks/1.0.1"
+        );
+        capture(&format!("project-adapter{suffix}"), 1120, 720);
+        app.invoke_search_adapters("Siglus".into());
+        assert_eq!(app.get_adapter_keys().row_count(), 1);
+        assert_eq!(app.get_adapter_index(), -1);
+        app.invoke_search_adapters("no-such-adapter".into());
+        assert_eq!(app.get_adapter_items().row_count(), 0);
         app.set_tab(2);
         app.set_modal("game-check".into());
         app.set_check_scene(1);

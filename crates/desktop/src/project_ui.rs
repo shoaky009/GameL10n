@@ -92,6 +92,24 @@ pub fn handle<'a>(
             ctx.app().await.resume_adaptation(&input.project_id).await?;
             Ok(true)
         })
+    } else if action == "run-project-adapter" {
+        Box::pin(async move {
+            let (adapter_id, version) = input
+                .argument
+                .split_once('/')
+                .ok_or_else(|| CoreError::InvalidData("请选择适配器版本。".into()))?;
+            let app = ctx.app().await;
+            let project = app.open_project(&input.project_id).await?;
+            if confirm_game_directory(project.game_directory).await? {
+                let selected = gamel10n_core::catalog::AdapterVersion {
+                    adapter_id: adapter_id.into(),
+                    version: version.into(),
+                };
+                app.run_project_adapter(&input.project_id, &selected)
+                    .await?;
+            }
+            Ok(true)
+        })
     } else if action == "adapt" {
         Box::pin(adapt(ctx, input))
     } else {

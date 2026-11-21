@@ -229,6 +229,10 @@ export component Recognition inherits VerticalLayout {
             value: App.recognition-running ? App.task-usage : App.adaptation-usage; color: Theme.secondary;
             max-width: root.width * 0.55; vertical-alignment: center;
         }
+        if !App.recognition-running: Link {
+            text: "手动执行适配器…"; enabled: !App.busy && !App.review-running;
+            clicked => { App.action("project-adapter-dialog", ""); }
+        }
     }
     if App.recognition-ready && !App.recognition-running: CompletedRecognition {}
     if App.recognition-running: RunningRecognition {}

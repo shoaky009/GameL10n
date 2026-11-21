@@ -157,6 +157,22 @@ pub struct EngineLibraryPage {
     pub diagnostics: Vec<String>,
 }
 
+pub struct ProjectAdapterOption {
+    pub adapter: AdapterVersion,
+    pub name: String,
+    pub current: bool,
+    pub source: EngineLibrarySource,
+}
+
+pub(crate) fn project_adapter(project: &crate::GameProject) -> Option<AdapterVersion> {
+    let mut version = crate::adapter_feedback::current_adapter(&project.extra)?;
+    // The native worker reports vntextpatch-* while the library groups it under engine.*.
+    if version.adapter_id.starts_with("vntextpatch-") {
+        version.adapter_id.insert_str(0, "engine.");
+    }
+    Some(version)
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub enum LibraryFilter {
     #[default]
@@ -493,6 +509,37 @@ impl EngineCatalog {
     /// Position in the unfiltered name-sorted index, without reading package files.
     pub fn family_position(&self, adapter_id: &str) -> Result<Option<usize>, CoreError> {
         Ok(self.lock()?.order.iter().position(|id| id == adapter_id))
+    }
+
+    pub fn project_adapters(
+        &self,
+        project: &crate::GameProject,
+    ) -> Result<Vec<ProjectAdapterOption>, CoreError> {
+        let cached = self.lock()?;
+        let current = project_adapter(project);
+        let mut options = Vec::new();
+        for id in &cached.order {
+            let family = &cached.index.families[id];
+            for version in family.versions.values() {
+                let is_current = current
+                    .as_ref()
+                    .is_some_and(|p| p.adapter_id == *id && p.version == version.version);
+                if !version.exists || (!family.enabled && !is_current) || version.source > 1 {
+                    continue;
+                }
+                options.push(ProjectAdapterOption {
+                    adapter: AdapterVersion {
+                        adapter_id: id.clone(),
+                        version: version.version.clone(),
+                    },
+                    name: family.family.name.clone(),
+                    current: is_current,
+                    source: EngineLibrarySource::from_number(version.source)?,
+                });
+            }
+        }
+        options.sort_by_key(|option| !option.current);
+        Ok(options)
     }
 
     pub fn family(&self, adapter_id: &str) -> Result<EngineLibraryFamily, CoreError> {

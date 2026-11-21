@@ -1083,6 +1083,7 @@ impl EngineService {
             inventory,
             &[],
             DiscoveryVerification::ProbeOnly,
+            None,
             cancellation,
             progress,
         )
@@ -1104,6 +1105,7 @@ impl EngineService {
             &inventory,
             previous_failures,
             DiscoveryVerification::Complete,
+            None,
             cancellation,
             progress,
         )

@@ -131,8 +131,90 @@ pub async fn open_knowledge(ctx: &Context, id: &str) -> Result<(), CoreError> {
     .await
 }
 
+pub(super) fn show_adapter_picker(
+    ui: &MainWindow,
+    options: Vec<gamel10n_core::catalog::ProjectAdapterOption>,
+) {
+    let app = ui.global::<App>();
+    let current = options.first().is_some_and(|option| option.current);
+    let rows: Vec<_> = options
+        .into_iter()
+        .map(|option| {
+            let key = format!("{}/{}", option.adapter.adapter_id, option.adapter.version);
+            let label = format!(
+                "{}  ·  {}  ·  {}{}",
+                option.name,
+                option.adapter.version,
+                source_name(option.source),
+                if option.current {
+                    "  ·  当前项目"
+                } else {
+                    ""
+                }
+            );
+            let search = format!("{label} {key}").to_lowercase();
+            (key, label, search)
+        })
+        .collect();
+    let window = ui.as_weak();
+    app.on_search_adapters(move |query| {
+        let Some(ui) = window.upgrade() else { return };
+        let app = ui.global::<App>();
+        let previous = usize::try_from(app.get_adapter_index())
+            .ok()
+            .and_then(|i| app.get_adapter_keys().row_data(i));
+        let query = query.trim().to_lowercase();
+        let mut keys = Vec::new();
+        let mut items = Vec::new();
+        let mut index = -1;
+        for (key, label, search) in &rows {
+            if !search.contains(&query) {
+                continue;
+            }
+            if previous.as_deref() == Some(key.as_str()) {
+                index = keys.len() as i32;
+            }
+            keys.push(key.as_str().into());
+            items.push(slint::language::StandardListViewItem::from(label.as_str()));
+        }
+        app.set_adapter_items(ModelRc::new(VecModel::from(items)));
+        app.set_adapter_keys(ModelRc::new(VecModel::from(keys)));
+        app.set_adapter_index(index);
+    });
+    app.set_adapter_index(-1);
+    app.invoke_search_adapters("".into());
+    if current {
+        app.set_adapter_index(0);
+    }
+    app.set_error("".into());
+    app.set_modal_title("手动执行适配器".into());
+    app.set_modal_message("".into());
+    app.set_modal("project-adapter".into());
+}
+
 pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool, CoreError> {
     match action {
+        "project-adapter-dialog" => {
+            let project = ctx.app().await.open_project(&input.project_id).await?;
+            let library = catalog(ctx, true).await?;
+            let options =
+                tokio::task::spawn_blocking(move || library.project_adapters(&project)).await??;
+            let id = input.project_id.clone();
+            let generation = ctx.generation.clone();
+            let revision = input.view_revision;
+            ctx.update(move |ui| {
+                let app = ui.global::<App>();
+                if generation.load(Ordering::SeqCst) != revision
+                    || app.get_project_id().as_str() != id
+                    || app.get_busy()
+                    || app.get_review_running()
+                    || !app.get_modal().is_empty()
+                {
+                    return;
+                }
+                show_adapter_picker(&ui, options);
+            });
+        }
         "catalog" | "catalog-refresh" => {
             refresh(ctx, input, action == "catalog-refresh").await?;
             if !input.engine_id.is_empty() {

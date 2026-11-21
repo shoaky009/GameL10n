@@ -1,4 +1,4 @@
-import { Button, LineEdit, TextEdit, ComboBox, CheckBox, ScrollView, ProgressIndicator } from "std-widgets.slint";
+import { Button, LineEdit, TextEdit, ComboBox, CheckBox, ScrollView, ProgressIndicator, StandardListView } from "std-widgets.slint";
 import { App, Theme, Label, Caption, TokenCaption, Heading, ReportText, Link } from "state.slint";
 import { ApiTestControls, WorkflowControls } from "settings.slint";
 import { GameCheckControls } from "game-check.slint";
@@ -22,6 +22,21 @@ export component DialogLayer inherits Rectangle {
             }
             if App.modal == "game-check": GameCheckControls { settings-height: min(320px, root.height - 390px); }
             if App.modal == "workflow-settings": WorkflowControls {}
+            if App.modal == "project-adapter": VerticalLayout { spacing: 8px;
+                Label { text: App.project-name; font-weight: 600; }
+                search := LineEdit { placeholder-text: "搜索适配器名称、标识或版本"; edited(value) => { App.search-adapters(value); } init => { self.focus(); } }
+                Rectangle { height: min(260px, root.height * 0.35);
+                    if App.adapter-items.length > 0: StandardListView {
+                        model: App.adapter-items; current-item <=> App.adapter-index;
+                    }
+                    if App.adapter-items.length == 0: Caption {
+                        text: search.text == "" ? "没有可用版本，请检查全局引擎库的启用状态。" : "没有匹配的适配器，请更换搜索词。";
+                        vertical-alignment: center; horizontal-alignment: center;
+                    }
+                }
+                Caption { text: App.adapter-index >= 0 ? App.adapter-keys[App.adapter-index] : "请选择一个版本"; wrap: word-wrap; }
+                Caption { text: "仅使用所选版本提取文本，全程在本地执行。成功后更新项目原文，匹配的译文和校对记录可继续使用。"; wrap: word-wrap; }
+            }
             if App.modal == "launch": VerticalLayout { spacing: 10px;
                 Caption { text: App.launch-summary; }
                 if App.launch-reason != "": ReportText { text: App.launch-reason; }
@@ -151,6 +166,7 @@ export component DialogLayer inherits Rectangle {
                     text: App.modal == "launch" && App.launch-conflict-revision != "" ? "确认覆盖"
                         : App.modal == "resume-translation" ? "继续原选区"
                         : App.modal == "install" ? "安装补丁"
+                        : App.modal == "project-adapter" ? "执行并提取文本"
                         : App.modal == "cleanup" ? "清理所选文件"
                         : App.modal == "engine-delete" ? "删除引擎"
                         : App.modal == "api" ? "保存配置"
@@ -158,11 +174,15 @@ export component DialogLayer inherits Rectangle {
                         : root.workflow-active ? "开始自动汉化" : "确认";
                     enabled: (App.modal != "api" || !App.api-testing)
                         && (App.modal != "install" || App.can-install-patch)
+                        && (App.modal != "project-adapter" || (App.adapter-index >= 0 && App.adapter-index < App.adapter-keys.length && !App.busy && !App.review-running))
                         && (App.modal != "cleanup" || (!App.cleanup-loading && App.cleanup-selected))
                         && (!root.reuse-extracted-text || App.workflow-can-use-existing-text);
                     primary: true;
                     clicked => {
-                        if App.modal == "engine-delete" {
+                        if App.modal == "project-adapter" {
+                            App.action("run-project-adapter", App.adapter-keys[App.adapter-index]);
+                            App.modal = "";
+                        } else if App.modal == "engine-delete" {
                             App.modal = "";
                             App.action("engine-delete", App.engine-delete-target);
                         } else {
