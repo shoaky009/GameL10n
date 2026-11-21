@@ -77,7 +77,7 @@ export component DialogLayer inherits Rectangle {
                 if App.adaptation-objective == 1: HorizontalLayout {
                     spacing: 10px;
                     Caption { text: "问题类型"; vertical-alignment: center; }
-                    ComboBox { model: ["游戏崩溃", "字体显示有问题", "补丁没效果", "其他"]; current-index <=> App.repair-issue; horizontal-stretch: 1; }
+                    ComboBox { model: ["游戏崩溃", "字体显示异常", "补丁没效果", "其他"]; current-index <=> App.repair-issue; horizontal-stretch: 1; }
                 }
                 if root.workflow-active: WorkflowControls {}
                 if root.workflow-active: Caption { text: "运行期间可能安装补丁并启动游戏。开始前请关闭游戏。"; }
