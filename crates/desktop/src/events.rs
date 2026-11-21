@@ -210,13 +210,17 @@ pub(super) fn update_review(app: &App, state: &gamel10n_core::ReviewState) {
         app.set_review_message(state.message.as_str().into());
     }
     if let Some(progress) = &state.progress {
-        app.set_review_usage(token_ui::analysis_usage(
+        let usage = token_ui::analysis_usage(
             progress.usage.input_tokens,
             progress.usage.output_tokens,
             progress.usage.cached_tokens.unwrap_or(0),
             progress.api_requests,
             progress.api_requests_estimated,
-        ));
+        );
+        if state.succeeded == Some(true) {
+            app.set_review_summary_usage(usage.clone());
+        }
+        app.set_review_usage(usage);
     } else {
         app.set_review_usage(Default::default());
     }

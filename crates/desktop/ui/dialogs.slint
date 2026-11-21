@@ -27,7 +27,15 @@ export component DialogLayer inherits Rectangle {
                 Caption { text: "工作目录（留空使用游戏目录）"; } LineEdit { text <=> App.launch-directory; }
                 HorizontalLayout { Button { text: "检测入口"; clicked => { App.action("launch-detect", ""); } } Button { text: "使用自动配置"; clicked => { App.action("launch-reset", ""); } } Rectangle { horizontal-stretch: 1; } }
             }
-            if App.modal == "engine-review": Link { text: "同类引擎经验"; font-size: 20px; strong: true; clicked => { App.modal = ""; App.action("open", "knowledge"); } }
+            if App.modal == "engine-review": VerticalLayout { spacing: 6px;
+                HorizontalLayout { spacing: 12px;
+                    Heading { text: "经验总结"; horizontal-stretch: 1; }
+                    Link { text: "同类引擎经验"; clicked => { App.modal = ""; App.action("open", "knowledge"); } }
+                }
+                if App.review-summary-usage.text != "": TokenCaption {
+                    value: App.review-summary-usage; text: "生成用量 · " + self.value.text; wrap: word-wrap;
+                }
+            }
             if App.modal == "api": ScrollView { height: min(420px, root.height - 300px - (App.api-test-result != "" ? 80px : 0px) - (App.api-testing ? 32px : 0px)); horizontal-scrollbar-policy: always-off; content-width: self.visible-width;
               VerticalLayout { spacing: 10px;
                 Caption { text: "配置名称"; } LineEdit { text <=> App.api-name; edited => { App.api-test-result = ""; } }

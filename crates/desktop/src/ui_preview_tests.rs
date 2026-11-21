@@ -89,6 +89,9 @@ fn render_desktop_preview_fixtures() {
         "已覆盖脚本中的角色名、对白和选项；图片文字与系统菜单仍需确认。\n中文显示使用随补丁安装的字体，需在游戏内检查换行、存档和读档效果。".into(),
     );
     app.set_review_summary("已整理脚本文本提取、占位符保护及原文字节回填的验证经验。".into());
+    app.set_review_summary_usage(crate::token_ui::analysis_usage(
+        1_518_192, 33_415, 1_408_640, Some(60), false,
+    ));
     app.set_status("文本可试译".into());
     app.set_resources(ModelRc::new(VecModel::from(vec![
         "全部资源".into(),
@@ -302,6 +305,9 @@ fn render_desktop_preview_fixtures() {
         app.set_adaptation_progress("正在检查脚本结构与原文字节回填。".into());
         app.set_task_api_summary("分析 API：本地测试配置".into());
         capture(&format!("recognition-running{suffix}"), 1120, 720);
+        app.set_modal("engine-review".into());
+        capture(&format!("engine-review{suffix}"), 1120, 720);
+        app.set_modal("".into());
         app.set_recognition_running(false);
         app.set_adaptation_running(false);
         app.set_tab(1);

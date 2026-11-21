@@ -210,10 +210,8 @@ export component Recognition inherits VerticalLayout {
         }
         Rectangle { horizontal-stretch: 1; }
     }
-    if !App.review-running && (App.review-message != "" || App.review-usage.text != ""): HorizontalLayout { spacing: 8px;
-        if App.review-message != "": Caption { text: App.review-message; wrap: word-wrap; }
-        if App.review-usage.text != "": Caption { text: "总结用量"; horizontal-stretch: 0; }
-        if App.review-usage.text != "": TokenCaption { value: App.review-usage; }
+    if !App.review-running && App.review-message != "": Caption {
+        text: App.review-message; wrap: word-wrap;
     }
     HorizontalLayout { padding-left: 8px; padding-right: 8px; spacing: 10px;
         Rectangle { width: 8px;

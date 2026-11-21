@@ -1044,12 +1044,13 @@ pub async fn refresh_project(ctx: &Context, id: &str, opening: bool) -> Result<(
                 .unwrap_or("")
                 .into(),
         );
+        a.set_review_summary_usage(crate::token_ui::saved_analysis(&review));
         if let Some(state) = host.review_state(&selected_id) {
             crate::events::update_review(&a, &state);
         } else {
             a.set_review_running(false);
             a.set_review_message("".into());
-            a.set_review_usage(crate::token_ui::saved_analysis(&review));
+            a.set_review_usage(Default::default());
         }
         if a.get_page() == 0 && a.get_tab() == 1 {
             a.invoke_action(
