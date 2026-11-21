@@ -268,7 +268,7 @@ fn render_desktop_preview_fixtures() {
         for (width, height) in [(1120, 720), (1420, 900)] {
             capture(&format!("workbench-unselected{suffix}"), width, height);
             if width == 1120 {
-                click(1060.0, 235.0);
+                click(620.0, 235.0);
                 assert_eq!(app.get_modal(), "install");
                 capture(&format!("workbench-install{suffix}"), width, height);
                 app.set_modal("".into());
