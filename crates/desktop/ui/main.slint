@@ -1,5 +1,5 @@
 import { Button, LineEdit, CheckBox, SpinBox, ScrollView, ListView } from "std-widgets.slint";
-import { App, Theme, Label, Caption, Heading, SectionHeading, ReportText, Divider, ProjectRow, TextRow, NamedRow, EngineRow, TermRow, TokenDisplay, CleanupRow, NavigationButton, Link, CopyLink, ClipboardBuffer } from "state.slint";
+import { App, Theme, Label, Caption, Heading, SectionHeading, ReportText, Divider, ProjectRow, TextRow, NamedRow, EngineRow, TermRow, TokenDisplay, CleanupRow, NavigationButton, Link, CopyButton, ClipboardBuffer } from "state.slint";
 import { ProjectSettings, GlobalApis } from "settings.slint";
 import { Workbench } from "workbench.slint";
 import { Recognition, PatchPage, TaskFeedback } from "project.slint";
@@ -62,11 +62,9 @@ export component MainWindow inherits Window {
                             HorizontalLayout { spacing: 16px;
                                 HorizontalLayout { spacing: 8px;
                                     Link { text: "项目文件"; font-size: 13px; clicked => { App.action("open", "project"); } }
-                                    CopyLink {
-                                        label: "复制路径";
+                                    CopyButton {
+                                        label: "复制项目文件路径";
                                         value: App.ready ? App.project-files-path : "";
-                                        font-size: 13px;
-                                        accessible-label: "项目文件，" + self.text;
                                         copy(value) => { clipboard.copy-text(value); }
                                     }
                                 }

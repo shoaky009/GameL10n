@@ -310,33 +310,21 @@ export component NavigationButton inherits Rectangle {
     keyboard := FocusScope { key-pressed(event) => { if event.text == Key.Return || event.text == " " { root.clicked(); return accept; } return reject; } }
     hit := TouchArea { mouse-cursor: pointer; clicked => { keyboard.focus(); root.clicked(); } }
 }
-export component Link inherits Rectangle {
-    in property <string> text;
+component LinkControl inherits Rectangle {
     in property <bool> enabled: true;
-    in property <length> font-size: 14px;
-    in property <bool> strong;
+    out property <bool> highlighted: root.enabled && (hit-target.has-hover || keyboard.has-focus);
     callback clicked;
     min-width: 0px;
     horizontal-stretch: 0;
     vertical-stretch: 0;
     forward-focus: keyboard;
     accessible-role: button;
-    accessible-label: root.text;
     accessible-enabled: root.enabled;
     accessible-action-default => { if root.enabled { root.clicked(); } }
     border-radius: 2px;
     border-width: keyboard.has-focus && root.enabled ? 1px : 0px;
     border-color: Theme.accent;
-    VerticalLayout {
-        StyledText {
-            text: root.enabled && (hit-target.has-hover || keyboard.has-focus)
-                ? (root.strong ? @markdown("**<u>\{root.text}</u>**") : @markdown("<u>\{root.text}</u>"))
-                : (root.strong ? @markdown("**\{root.text}**") : @markdown("\{root.text}"));
-            default-color: root.enabled ? Theme.accent : Theme.muted;
-            default-font-size: root.font-size;
-            accessible-role: none;
-        }
-    }
+    @children
     hit-target := TouchArea {
         enabled: root.enabled;
         mouse-cursor: pointer;
@@ -354,15 +342,45 @@ export component Link inherits Rectangle {
         }
     }
 }
-export component CopyLink inherits Link {
+export component Link inherits LinkControl {
+    in property <string> text;
+    in property <length> font-size: 14px;
+    in property <bool> strong;
+    accessible-label: root.text;
+    VerticalLayout {
+        StyledText {
+            text: root.highlighted
+                ? (root.strong ? @markdown("**<u>\{root.text}</u>**") : @markdown("<u>\{root.text}</u>"))
+                : (root.strong ? @markdown("**\{root.text}**") : @markdown("\{root.text}"));
+            default-color: root.enabled ? Theme.accent : Theme.muted;
+            default-font-size: root.font-size;
+            accessible-role: none;
+        }
+    }
+}
+export component CopyButton inherits LinkControl {
     in property <string> label;
     in property <string> value;
     callback copy(string);
     private property <bool> copied;
-    text: root.copied ? "已复制" : root.label;
+    accessible-label: root.label;
     enabled: root.value != "";
-    font-size: 12px;
-    width: 56px;
+    width: 24px; height: 24px;
+    background: root.highlighted ? Theme.hover : transparent;
+    Tooltip { text: root.copied ? @markdown("已复制") : @markdown("\{root.label}"); }
+    if !root.copied: Path {
+        x: 5px; y: 5px; width: 14px; height: 14px;
+        viewbox-width: 16; viewbox-height: 16;
+        stroke: root.enabled ? Theme.accent : Theme.muted; opacity: root.enabled ? 1 : 0.45;
+        stroke-width: 1.4px;
+        commands: "M 4 11 H 2 Q 1 11 1 10 V 2 Q 1 1 2 1 H 10 Q 11 1 11 2 V 4 M 6 5 H 14 Q 15 5 15 6 V 14 Q 15 15 14 15 H 6 Q 5 15 5 14 V 6 Q 5 5 6 5 Z";
+    }
+    if root.copied: Path {
+        x: 5px; y: 5px; width: 14px; height: 14px;
+        viewbox-width: 16; viewbox-height: 16;
+        stroke: Theme.accent; stroke-width: 1.8px;
+        commands: "M 2 8 L 6 12 L 14 3";
+    }
     changed value => { root.copied = false; }
     clicked => {
         root.copy(root.value);
