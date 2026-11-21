@@ -33,6 +33,13 @@ FONT_NAME = re.compile(r"^Font\[(\d+)\]\.Name=([^\r\n]*)", re.I | re.M)
 FONT_COMMAND = re.compile(r'^[ \t]*(?:\\scp,[^\s,]+[ \t]+)?\\fn2,[^,\r\n]+,"([^"\r\n]*)"', re.I | re.M)
 SETUP_MEMBER = "misc/misc.s"
 SETUP_ROUTINE = re.compile(r"^@@!Misc_FontSetup[ \t]*\r?\n(.*?)(?=^[ \t]*\\ret\b|^@@|\Z)", re.I | re.M | re.S)
+TABLE_LOAD = re.compile(
+    r'\s*\\var,table,t,p\s+\\scp,t[ \t]+\\l,"Avg\\ImoScripter_FontList\.txt"\s+'
+    r'\\scp,p[ \t]+\\l,"Avg\\Setting\.txt"\s+\\scp,t[ \t]+\\comb,p[ \t]*\r?\n(?:[ \t]*\r?\n)*', re.I)
+STARTUP_CALL = re.compile(r'^[ \t]*\\sub,@@!Misc_FontSetup,"Misc\\Misc\.s"(?:,\d+)?[ \t]*\r?$', re.I | re.M)
+RESET_GATE = re.compile(r'[ \t]*\\if,ParamInt\[0\]==1\\then[ \t]*\r?\n', re.I)
+TABLE_FACE = re.compile(r'([ \t]*)\\scp,t[ \t]+\\\?v,"font\[0\]\.name","([^"\r\n]+)"[ \t]*\r?\n'
+                        r'[ \t]*\\scp,cfg[ \t]+\\fn2,0,ResultStr\[0\][ \t]*\r?\n', re.I)
 CONFIG_SCOPE = re.compile(r"^[ \t]*\\scp,cfg[ \t]*(\r?\n)", re.I | re.M)
 INHERIT_BASE = re.compile(r"^([ \t]*)\\\?fn[ \t]+\\fn2,\w+,ResultStr\[0\][ \t]*\r?$", re.I | re.M)
 SET_BASE = re.compile(r'\\fn2,0,"([^"\r\n]+)"', re.I)
@@ -51,6 +58,23 @@ SYSTEM_FACES = {
 }
 CONFIG_BYTES = 64 << 10
 FONT_BYTES = 64 << 20
+UNICODE_FACE = "Microsoft YaHei"
+
+
+def unicode_runtime(executable):
+    """Recognize the IMOSURUME runtime with native UTF-16 scenario loading."""
+    if executable.stat().st_size > 64 << 20:
+        return False
+    image = archive.read_file(executable, 64 << 20)
+    marker = "VS_VERSION_INFO\0".encode("utf-16-le")
+    at = image.rfind(marker)
+    if at < 6:
+        return False
+    start = at - 6
+    record = image[start:start + int.from_bytes(image[start:start + 2], "little")]
+    fixed = bytes.fromhex("bd04effe 00000100 02000200 00000000")
+    return (record[40:56] == fixed
+            and "ProductName\0\0IMOSURUME\0".encode("utf-16-le") in record)
 
 
 class NeedFontAssets(ValueError):
@@ -193,6 +217,33 @@ class Resources:
         return {name for doc in self.overrides for _, name in FONT_NAME.findall(doc.text)} - INHERITED
 
 
+def table_selection(script):
+    routine = SETUP_ROUTINE.search(script)
+    if not routine or not (load := TABLE_LOAD.match(script, routine.start(1), routine.end(1))):
+        return None
+    start = load.end()
+    gate = RESET_GATE.match(script, start)
+    face = TABLE_FACE.match(script, gate.end() if gate else start)
+    if not face:
+        raise ValueError("QLIE 启动字体表已加载，但无法确认 0 号字体的赋值位置")
+    return gate, face
+
+
+def startup_table(scripts, *, patched):
+    starts, setups = [], []
+    for member, script in scripts:
+        if member == "startup.s":
+            starts.append(bool(STARTUP_CALL.search(script)))
+        elif member == SETUP_MEMBER:
+            selection = table_selection(script)
+            if patched and selection and selection[0]:
+                raise ValueError("QLIE 普通启动时会跳过基础字体赋值，导致对白继续使用玩家配置中的字体")
+            setups.append(selection)
+    if starts and all(starts) and setups and all(setups):
+        return {face[2] for _, face in setups}
+    return set()
+
+
 @dataclass(frozen=True)
 class Layout:
     resources: Resources
@@ -205,7 +256,7 @@ class Layout:
         by_face = ({family(style, mapping) + " Regular": style for style in FONT_INPUTS}
                    if mapping else SYSTEM_FACES)
         if len(slots) == 16 and not mapping:
-            by_face = {**by_face, "tahoma": "Sans"}
+            by_face = {**by_face, "tahoma": "Sans", UNICODE_FACE.casefold(): "Sans"}
         faces = {}
         for original in {face for _, face in slots.values()} | resources.selected_faces():
             lookup = original if mapping else unicodedata.normalize("NFKC", original).casefold()
@@ -214,8 +265,9 @@ class Layout:
             faces[original] = by_face[lookup]
         return cls(resources, slots, faces)
 
-    def resource_edits(self, faces):
-        for doc in [self.resources.config, *self.resources.overrides]:
+    def resource_edits(self, faces, table_startup=False):
+        docs = self.resources.overrides if table_startup else [self.resources.config, *self.resources.overrides]
+        for doc in docs:
             matches = (m for m in FONT_NAME.finditer(doc.text) if doc.member or int(m[1]) in self.slots)
             text = replace_value(doc.text, matches, 2, lambda m: faces.get(m[2]))
             if text != doc.text:
@@ -237,7 +289,17 @@ class Layout:
 
         return replace_value(script, FONT_COMMAND.finditer(script), 1, face)
 
-    def restore_base(self, script, faces):
+    def restore_base(self, script, faces, *, native_unicode=False):
+        if native_unicode and (table := table_selection(script)):
+            gate, face = table
+            if gate:
+                # A normal boot has no reset argument. Apply only the font name on both paths.
+                indent = gate[0][:len(gate[0]) - len(gate[0].lstrip())]
+                default = faces[self.slots[0][1]]
+                lines = face[0].replace(f'"{face[2]}"', f'"{default}"').splitlines(keepends=True)
+                assign = "".join(indent + line.lstrip(" \t") for line in lines)
+                return script[:gate.start()] + assign + gate[0] + script[face.end():]
+            return script
         selection = base_selection(script)
         if selection is None:
             return script

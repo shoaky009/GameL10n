@@ -977,6 +977,29 @@ impl Application {
         })
         .await?
     }
+    pub(crate) async fn check_patch_copies(
+        &self,
+        id: &str,
+        copies: &BTreeMap<String, String>,
+    ) -> Result<(), CoreError> {
+        let (analysis, workbench) = self.workbench(id).await?;
+        let workbench = workbench.lock().await;
+        for (id, text) in copies {
+            let row = workbench
+                .rows
+                .get(id)
+                .ok_or_else(|| CoreError::InvalidData("脚本副本与提取记录不一致。".into()))?;
+            if row.text().is_some_and(|saved| saved != text) {
+                let unit = &analysis.extraction().units[row.index];
+                return Err(CoreError::InvalidData(format!(
+                    "{} · {} 的脚本副本已有不同译文，请明确选择各副本的译文。",
+                    unit.resource_path, unit.locator
+                )));
+            }
+        }
+        Ok(())
+    }
+
     pub async fn saved_translations(
         &self,
         id: &str,

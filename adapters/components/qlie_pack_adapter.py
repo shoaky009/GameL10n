@@ -115,6 +115,17 @@ def script_members(index):
     return [entry for entry in index.entries if entry.name.lower().endswith(".s")]
 
 
+def startup_scripts(archives, read, layout):
+    remaining = MAX_TOTAL
+    for path, (_, index) in archives.items():
+        for entry in script_members(index):
+            name = entry.name.replace("\\", "/").casefold()
+            if name in ("startup.s", font.SETUP_MEMBER):
+                raw = read(path, entry, min(MAX_SCRIPT, remaining))
+                remaining -= len(raw)
+                yield name, script_format.decode(raw, unicode_scripts=layout.unicode_scripts)[0]
+
+
 def pending_ranges(request, missing):
     ranges = request.get("probeRanges", []) + missing
     if len(ranges) > 64 or sum(part["length"] for part in ranges) > 8 << 20:
@@ -314,6 +325,52 @@ def locate(root, request, files, stack):
     return install
 
 
+def field_identity(relative, member, row_number, field):
+    locator = json.dumps([member, row_number, field], ensure_ascii=False, separators=(",", ":"))
+    return archive.digest(f"{relative}\0{locator}".encode("utf-8")), locator
+
+
+def patch_copies(install, samples):
+    selected = {}
+    for sample in samples:
+        member, row, field = json.loads(sample["locator"])
+        name = member.replace("\\", "/").casefold()
+        key = (sample["resourcePath"], member)
+        selected.setdefault(name, {}).setdefault(key, {})[row, field] = sample["expected"]
+    candidates = {}
+    for path, (_, index) in install.archives.items():
+        for entry in script_members(index):
+            name = entry.name.replace("\\", "/").casefold()
+            if name in selected:
+                candidates.setdefault(name, []).append((path, entry))
+    remaining = MAX_TOTAL
+    additions = {}
+    for name, entries in candidates.items():
+        if len(entries) < 2:
+            continue
+        groups = {}
+        for path, entry in entries:
+            raw = install.read(path, entry, min(MAX_SCRIPT, remaining))
+            remaining -= len(raw)
+            groups.setdefault(archive.digest(raw), []).append((path, entry.name))
+        for copies in groups.values():
+            if len(copies) < 2:
+                continue
+            fields = {}
+            for key in copies:
+                for position, text in selected[name].get(key, {}).items():
+                    fields.setdefault(position, set()).add(text)
+            for key in copies:
+                for (row, field), values in fields.items():
+                    if (row, field) in selected[name].get(key, {}):
+                        continue
+                    if len(values) != 1:
+                        raise ValueError(f"QLIE 相同脚本副本有多种译文，请为每个副本选择译文：{name}，行 {row}，{field}")
+                    unit_id, _ = field_identity(*key, row, field)
+                    additions[unit_id] = next(iter(values))
+    return additions
+
+
 def text_units(relative, member, row_number, record, row, *, unicode_scripts):
     raw_name = record.speaker.raw if record.speaker else ""
     speaker = raw_name.split("＠", 1)[0] or None
@@ -321,12 +378,12 @@ def text_units(relative, member, row_number, record, row, *, unicode_scripts):
     for field, text in row.items():
         if not text.strip() or field == "name" and raw_name.startswith("$"):
             continue
-        locator = json.dumps([member, row_number, field], ensure_ascii=False, separators=(",", ":"))
+        unit_id, locator = field_identity(relative, member, row_number, field)
         kind = "name" if field == "name" else kinds.get(record.parts[0].kind, "dialogue")
         tokens = ["\n"] if field == "message" and len(record.parts) > 1 else []
         if unicode_scripts:
             tokens.extend(dict.fromkeys(tag[0] for tag in script_format.RUBY.finditer(text)))
-        yield field, dict(id=archive.digest(f"{relative}\0{locator}".encode("utf-8")),
+        yield field, dict(id=unit_id,
                           resourcePath=relative, locator=locator, context=member, sourceText=text,
                           speaker=None if kind == "name" else speaker, kind=kind,
                           protectedTokens=tokens or None)
@@ -345,9 +402,10 @@ def read_scripts(install):
             yield path, entry.name, script, encoding, bom
 
 
-def scripts(install, sources, translations=None, mapping=None, faces=None):
+def scripts(install, sources, translations=None, mapping=None, faces=None, *, native_unicode=False):
     units, changes, used = [], {}, set()
     changed = 0
+    text_changed = False
     mapping = install.glyphs if mapping is None else mapping
     reverse = {code: slot for slot, code in mapping.items()}
     options = dict(unicode_scripts=install.layout.unicode_scripts)
@@ -370,13 +428,16 @@ def scripts(install, sources, translations=None, mapping=None, faces=None):
                                 raise ValueError("译文与 QLIE 字形码位冲突")
                             row[field] = encoded
                             modified = True
+                            text_changed = True
                 rows.append(row)
             patched = script_format.patch(script, rows, **options) if modified else script
             if faces:
                 patched = install.font_layout.script_faces(patched, faces)
                 if member.replace("\\", "/").casefold() == font.SETUP_MEMBER:
-                    patched = install.font_layout.restore_base(patched, faces)
+                    patched = install.font_layout.restore_base(patched, faces, native_unicode=native_unicode)
             if patched != script:
+                if native_unicode and modified and cp932:
+                    encoding, bom = "utf-16-le", script_format.UTF16_LE
                 encoded = patched.encode(encoding)
                 if encoded.decode(encoding) != patched:
                     raise ValueError("译文按脚本原编码回读时发生变化")
@@ -391,6 +452,8 @@ def scripts(install, sources, translations=None, mapping=None, faces=None):
             raise ValueError(f"{path}/{member}：{error}") from error
     if translations is not None and translations.keys() - used:
         raise ValueError("译文 ID 不属于本次选择的 QLIE 脚本")
+    if native_unicode and not text_changed:
+        changes.clear()
     return units, changes
 
 
@@ -453,14 +516,22 @@ def execute(request):
         return rebuild(root, request, install, translations, warnings)
 
 
+def unicode_dialogue(root, install, *, patched):
+    if (not install.layout.unicode_scripts or not install.executable or not install.font_resources
+            or len(install.font_resources.slots()) != 16 or not font.unicode_runtime(root / install.executable)):
+        return set()
+    return font.startup_table(startup_scripts(install.archives, install.read, install.layout), patched=patched)
+
+
 def rebuild(root, request, install, translations, warnings):
     output = Path(request["outputDirectory"])
     archive.separate(archive.checked_path(root), archive.checked_path(output))
     sources = read_scripts(install)
     mapping = install.glyphs
     layout = install.font_layout
+    native_unicode = bool(translations and not mapping and layout and unicode_dialogue(root, install, patched=False))
     characters = {char for text in translations.values() for char in text}
-    needed = font.glyphs_needed(characters, mapping)
+    needed = set() if native_unicode else font.glyphs_needed(characters, mapping)
     if needed:
         sources = list(sources)
         if install.layout.unicode_scripts:
@@ -470,7 +541,9 @@ def rebuild(root, request, install, translations, warnings):
                 characters = {char for unit in units for char in translations.get(unit["id"], "")}
                 needed = font.glyphs_needed(characters, mapping)
     runtime, faces = {}, {}
-    if needed:
+    if native_unicode:
+        faces = dict.fromkeys(layout.faces, font.UNICODE_FACE)
+    elif needed:
         if not layout:
             raise ValueError(f"QLIE 译文需要已确认的中文编码与字体方案（{install.font_diagnostic}）")
         if font.LAUNCHER.casefold() == install.executable.casefold():
@@ -480,9 +553,9 @@ def rebuild(root, request, install, translations, warnings):
         mapping = font.plan(layout, mapping, needed, occupied, characters)
         faces = {face: font.family(style, mapping) + " Regular" for face, style in layout.faces.items()}
         runtime = font.make_runtime(layout, install.executable, mapping, assets)
-    _, changes = scripts(install, sources, translations, mapping, faces)
-    if faces:
-        for doc, raw in layout.resource_edits(faces):
+    _, changes = scripts(install, sources, translations, mapping, faces, native_unicode=native_unicode)
+    if faces and changes:
+        for doc, raw in layout.resource_edits(faces, native_unicode):
             if doc.member is None:
                 runtime[doc.path] = raw
             else:
@@ -528,6 +601,8 @@ def rebuild(root, request, install, translations, warnings):
                                 raise ValueError(f"QLIE 未翻译资源发生变化：{path}")
     if operation == "build":
         build = dict(files=files, mode="replace", warnings=warnings)
+        if native_unicode and changes:
+            build["warnings"] = [*warnings, "译文使用原生 UTF-16 剧本和微软雅黑对白字体，请使用原游戏的日语转区配置启动。"]
         if mapping:
             build.update(launchExecutable=font.LAUNCHER, warnings=[*warnings, LAUNCH_WARNING])
         return dict(build=build)

@@ -601,6 +601,15 @@ impl PatchInstaller {
         game_directory: &Path,
         relative: &str,
     ) -> Result<PathBuf, CoreError> {
+        self.resolve_source_file(game_directory, relative, None)
+    }
+
+    pub(crate) fn resolve_source_file(
+        &self,
+        game_directory: &Path,
+        relative: &str,
+        expected_original: Option<&str>,
+    ) -> Result<PathBuf, CoreError> {
         let game = directory_root(game_directory)?;
         let relative = normalize_relative(relative)?;
         let target = safe_path(&game, &relative)?;
@@ -624,6 +633,14 @@ impl PatchInstaller {
             && !same_hash(current.as_deref(), entry.installed_sha256.as_deref())
             && !same_hash(current.as_deref(), entry.pending_sha256.as_deref())
         {
+            // A game may save settings in a previously patched file. A bound extraction
+            // can still read its exact original from the journal without touching that file.
+            if expected_original.is_some()
+                && same_hash(expected_original, entry.original_sha256.as_deref())
+                && let Some(backup) = self.find_original_backup(&game, entry)?
+            {
+                return Ok(backup);
+            }
             return Ok(target);
         }
         if !entry.original_existed {

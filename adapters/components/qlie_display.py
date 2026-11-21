@@ -28,13 +28,13 @@ def trial_fields(install, samples, overlay):
         if entry is None:
             raise ValueError(f"QLIE 试译脚本成员缺失：{volume}/{member}")
         raw = install.read(volume, entry, pack.MAX_SCRIPT)
-        script, _, _ = qlie_script.decode(raw, unicode_scripts=install.layout.unicode_scripts)
+        script, encoding, _ = qlie_script.decode(raw, unicode_scripts=install.layout.unicode_scripts)
         records = qlie_script.scan(script, unicode_scripts=install.layout.unicode_scripts)
         faces = set(font.FONT_COMMAND.findall(script))
         for row, field, expected in fields:
             if type(row) is not int or not 0 <= row < len(records) or field not in records[row].row():
                 raise ValueError(f"QLIE 试译字段缺失：{volume}/{member}，行 {row}，字段 {field}")
-            yield records[row].row()[field], expected, faces
+            yield records[row].row()[field], expected, faces, encoding
 
 
 def locate_samples(source, samples):
@@ -102,8 +102,14 @@ def verify(request):
                 return dict(fonts=[], aliases={})
         effective_files = [*request["resources"], *files] if overlay else files
         install = pack.locate(root, {}, [p for p in effective_files if p != font.MAPPING], stack)
+        base = pack.unicode_dialogue(root, install, patched=True) if samples and request["template"] else set()
+        if base and base | install.font_resources.selected_faces() != {font.UNICODE_FACE}:
+            raise ValueError("QLIE 启动字体表与对白基础字体没有统一使用微软雅黑")
         aliases, script_faces = {}, set()
-        for raw, expected, faces in trial_fields(install, samples, overlay):
+        for raw, expected, faces, encoding in trial_fields(install, samples, overlay):
+            if base and (not encoding.startswith("utf-16") or raw != expected
+                         or faces - font.INHERITED - {font.UNICODE_FACE}):
+                raise ValueError("QLIE 译文字段需要直接写入 UTF-16 剧本并使用统一的对白字体")
             if raw == expected:
                 continue
             if len(raw) != len(expected):

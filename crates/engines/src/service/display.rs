@@ -33,10 +33,11 @@ struct Sample<'a> {
 fn write_samples(
     units: &[TranslationUnit],
     translations: &BTreeMap<String, String>,
+    include_unchanged: bool,
 ) -> Result<tempfile::NamedTempFile, EngineError> {
     let samples = units.iter().filter_map(|unit| {
         let expected = translations.get(&unit.id)?;
-        (expected != &unit.source_text).then_some(Sample {
+        (include_unchanged || expected != &unit.source_text).then_some(Sample {
             resource_path: &unit.resource_path,
             locator: &unit.locator,
             expected,
@@ -138,6 +139,41 @@ fn verify_font(
 }
 
 impl EngineService {
+    /// Resolve additional physical copies for the user's patch selection against original archives.
+    pub async fn patch_translation_copies(
+        &self,
+        adapter: &AdapterHandle,
+        source: &Path,
+        files: &[String],
+        units: &[TranslationUnit],
+        translations: &BTreeMap<String, String>,
+        cancellation: &CancellationToken,
+    ) -> Result<BTreeMap<String, String>, EngineError> {
+        if !matches!(
+            adapter.id(),
+            "template.qlie-pack3-imos" | "template.qlie-pack31-imos"
+        ) || translations.len() == units.len()
+            || files
+                .iter()
+                .filter(|p| p.to_ascii_lowercase().ends_with(".pack"))
+                .take(2)
+                .count()
+                < 2
+        {
+            return Ok(BTreeMap::new());
+        }
+        let samples = write_samples(units, translations, true)?;
+        let output = tempfile::NamedTempFile::new()?;
+        self.helper(&json!({
+            "operation":"qlie_patch_copies", "components":self.asset_root.join("adapters/components"),
+            "library":self.reference_library(&self.current_reference()?)?, "source":source,
+            "resources":files, "samplesFile":samples.path(), "output":output.path(),
+        }), cancellation).await?;
+        Ok(serde_json::from_reader(std::io::BufReader::new(
+            output.as_file(),
+        ))?)
+    }
+
     pub(super) fn display_cache(&self, key: &str) -> PathBuf {
         self.shared_directory
             .join("verified-display")
@@ -162,7 +198,7 @@ impl QlieDisplay {
             .output_directory
             .as_deref()
             .ok_or_else(|| EngineError::Protocol("缺少回填目录".into()))?;
-        let samples = write_samples(units, translations)?;
+        let samples = write_samples(units, translations, false)?;
         let launch = build.launch_target()?;
         let launcher = launch
             .as_ref()

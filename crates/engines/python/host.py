@@ -1224,6 +1224,17 @@ def execute(request):
     if operation == 'list_files': return list_files(request)
     if operation == 'archive_component': return archive_component(request)
     if operation == 'archive_template_probe': return archive_template_probe(request)
+    if operation == 'qlie_patch_copies':
+        from contextlib import ExitStack
+        sys.path[:0] = [str(Path(request['components']).parent), request['library']]
+        from components import qlie_pack_adapter as pack
+        with ExitStack() as stack:
+            install = pack.locate(Path(request['source']), {}, request['resources'], stack)
+            with open(request['samplesFile'], encoding='utf-8') as stream:
+                additions = pack.patch_copies(install, json.load(stream))
+        with open(request['output'], 'w', encoding='utf-8') as stream:
+            json.dump(additions, stream, ensure_ascii=False)
+        return {}
     if operation == 'qlie_display':
         sys.path[:0] = [str(Path(request['components']).parent), request['library']]
         from components import qlie_display

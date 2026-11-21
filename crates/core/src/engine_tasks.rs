@@ -1542,7 +1542,7 @@ impl Application {
         if cancellation.is_cancelled() {
             return Err(gamel10n_engines::EngineError::Cancelled.into());
         }
-        let translations = Arc::new(self.saved_translations(id, unit_ids, reviewed_only).await?);
+        let mut translations = self.saved_translations(id, unit_ids, reviewed_only).await?;
         if translations.is_empty() {
             return Err(CoreError::InvalidData(
                 "所选范围没有可用于补丁的有效译文。".into(),
@@ -1551,6 +1551,21 @@ impl Application {
         let (adapter, source_input, files, hashes, probe) =
             self.build_source(id, cancellation).await?;
         let source = source_input.directory();
+        let analysis = self
+            .cached_analysis(id)
+            .await?
+            .ok_or_else(|| CoreError::InvalidData("请先提取游戏文本。".into()))?;
+        let units = &analysis.extraction().units;
+        let service = self.engine_service()?;
+        let copies = service
+            .patch_translation_copies(&adapter, source, &files, units, &translations, cancellation)
+            .await?;
+        let copy_count = copies.len();
+        if copy_count > 0 {
+            self.check_patch_copies(id, &copies).await?;
+            translations.extend(copies);
+        }
+        let translations = Arc::new(translations);
         let adapter_version = match &adapter {
             AdapterHandle::Python { id, version, .. } => Some(AdapterVersion {
                 adapter_id: id.clone(),
@@ -1566,6 +1581,9 @@ impl Application {
         let fingerprint = {
             let mut inputs =
                 json!({"adapter":adapter,"sources":hashes,"texts":translations,"version":3});
+            if copy_count != 0 {
+                inputs["additionalTextCopies"] = json!(copy_count);
+            }
             if let Some(probe) = &probe
                 && !probe.build_hints.is_empty()
             {
@@ -1623,12 +1641,16 @@ impl Application {
         }
         self.progress(id, "build", "正在回填译文并验证补丁结构。")
             .await;
-        let service = self.engine_service()?;
-        let built = service
+        let mut built = service
             .execute_with_hashes(&adapter, &request, Some(&hashes), None, cancellation)
             .await?
             .build
             .ok_or_else(|| CoreError::InvalidData("适配器未返回补丁文件清单。".into()))?;
+        if copy_count > 0 {
+            built.warnings.push(format!(
+                "已将译文同步到其他卷中内容完全相同的脚本，共 {copy_count} 个额外文本位置。"
+            ));
+        }
         if built.mode == BuildMode::Overlay && built.files.is_empty() {
             return Err(CoreError::InvalidData(
                 "所选译文没有产生需要写入的修改。".into(),
@@ -1682,11 +1704,6 @@ impl Application {
             crate::launch::validate_configuration(&game.game_directory, &launch.configuration)?;
         }
         write_json(&patch.path().join("patch-manifest.json"), &manifest)?;
-        let count = self
-            .cached_analysis(id)
-            .await?
-            .map(|a| a.extraction().units.len())
-            .unwrap_or(0);
         if destination.exists() {
             return Err(CoreError::InvalidData(
                 "同一补丁目录已存在但缺少提交记录，已有文件已保留。".into(),
@@ -1706,7 +1723,7 @@ impl Application {
                     launch.location == gamel10n_engines::protocol::LaunchLocation::Patch
                 })
             }),
-            total_units: count,
+            total_units: units.len(),
             translated_units: translations.len(),
             is_trial: unit_ids.is_some(),
             validation: serde_json::to_value(validation)
@@ -2012,7 +2029,7 @@ pub(crate) fn source_inputs(
                 return Err(gamel10n_engines::EngineError::Cancelled.into());
             }
             let path = if reference {
-                installer.resolve_original_file(game, &relative)?
+                installer.resolve_source_file(game, &relative, Some(&hashes[&key]))?
             } else {
                 crate::patching::safe_path(&source, &relative)?
             };
