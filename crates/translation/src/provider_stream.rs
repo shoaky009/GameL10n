@@ -328,7 +328,7 @@ impl Assembly {
             return Err(invalid("Data arrived after the terminal event."));
         }
         let value: Value = serde_json::from_slice(&event.data)
-            .map_err(|_| invalid("SSE data is not a complete UTF-8 JSON object."))?;
+            .map_err(|error| invalid(&format!("Invalid SSE JSON: {error}")))?;
         if !value.is_object() {
             return Err(invalid("SSE data must be an object."));
         }
@@ -490,14 +490,17 @@ impl OpenAiProvider {
                     request.send().await
                 }) => match result {
                     Ok(Ok(response)) => response,
-                    Ok(Err(error)) if !error.is_timeout() => {
-                        return Err(ProviderError::new("network-error", "API 请求失败，结果未知。"));
+                    Ok(Err(error)) => {
+                        if error.is_timeout() {
+                            timing.timeout_stage = Some("first-response");
+                        }
+                        return Err(ProviderError::transport(error, "network-error", "发送分析请求或等待 HTTP 响应头失败", &self.settings.api_key));
                     }
-                    _ => {
+                    Err(_) => {
                         timing.timeout_stage = Some("first-response");
-                        return Err(ProviderError::new(
-                            "request-timeout", "等待分析响应首字节超时，结果未知。",
-                        ));
+                        let mut error = ProviderError::new("request-timeout", "等待分析响应头超时。");
+                        error.diagnostic.detail = Some(format!("等待 HTTP 响应头达到 {} ms", self.analysis_first_response_timeout.as_millis()));
+                        return Err(error);
                     }
                 }
             };
@@ -537,26 +540,33 @@ impl OpenAiProvider {
                     }
                     result = tokio::time::timeout_at(deadline,response.chunk()) => match result {
                         Ok(Ok(chunk)) => chunk,
-                        Ok(Err(error)) if !error.is_timeout() => {
-                            return Err(ProviderError::new("network-interrupted", "API 流式响应中断，结果未知。"));
+                        Ok(Err(cause)) => {
+                            if cause.is_timeout() {
+                                timing.timeout_stage = Some(if first.is_none() { "first-response" } else { "stream-idle" });
+                            }
+                            return Err(ProviderError::transport(cause, "network-interrupted",
+                                &format!("读取 SSE 响应体失败（已收 {wire_bytes} 字节）"), &self.settings.api_key));
                         }
-                        _ => {
+                        Err(_) => {
                             timing.timeout_stage = Some(if first.is_none() {
                                 "first-response"
                             } else {
                                 "stream-idle"
                             });
-                            return Err(ProviderError::new(
-                                "request-timeout", "分析响应等待超时，结果未知。",
-                            ));
+                            let mut error = ProviderError::new("request-timeout", "分析响应等待超时。");
+                            error.diagnostic.detail = Some(if first.is_none() {
+                                format!("HTTP 已返回，等待 SSE 首字节达到请求时限 {} ms", self.analysis_first_response_timeout.as_millis())
+                            } else {
+                                format!("已收 {wire_bytes} 字节，连续 {} ms 未收到 SSE 数据", self.analysis_stream_idle_timeout.as_millis())
+                            });
+                            return Err(error);
                         }
                     }
                 };
                 let Some(chunk) = chunk else {
-                    return Err(ProviderError::new(
-                        "stream-incomplete",
-                        "API 流式响应缺少终止事件，未接受本次结果。",
-                    ));
+                    let mut error = ProviderError::new("stream-incomplete", "API 流式响应缺少终止事件。");
+                    error.diagnostic.detail = Some(format!("SSE 响应体已到 EOF，共 {wire_bytes} 字节，缺少终止事件"));
+                    return Err(error);
                 };
                 if chunk.is_empty() {
                     continue;

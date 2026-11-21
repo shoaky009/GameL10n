@@ -1,8 +1,39 @@
 //! Persisted model/tool orchestration, independent of desktop UI and adapter runtime.
 use super::history;
 use super::*;
+use gamel10n_translation::provider::ProviderError;
+use std::time::Duration;
 
-const MAX_RESPONSE_FORMAT_RETRIES: u8 = 2;
+const MAX_TURN_RETRIES: u8 = 2;
+
+fn turn_retry(error: &ProviderError, attempt: u8) -> Option<(&'static str, Duration)> {
+    let code = error.diagnostic.code.as_str();
+    match (error.status_code, code) {
+        (Some(408), _)
+        | (
+            None,
+            "network-error" | "network-interrupted" | "request-timeout" | "stream-incomplete",
+        ) => {
+            let delay = error
+                .retry_after
+                .unwrap_or(Duration::from_secs(u64::from(attempt)));
+            Some(("network-retry", delay.min(Duration::from_secs(30))))
+        }
+        (None, "tool-call" | "agent-tool-format") => Some(("tool-call-retry", Duration::ZERO)),
+        (
+            None,
+            "stream-format"
+            | "api-json-syntax"
+            | "chat-choices"
+            | "chat-incomplete"
+            | "responses-status"
+            | "responses-output"
+            | "responses-incomplete"
+            | "empty-content",
+        ) => Some(("stream-format-retry", Duration::ZERO)),
+        _ => None,
+    }
+}
 
 #[cfg(test)]
 const CHECKPOINT_REQUEST: &str = "当前会话较长。下一步先调用 checkpoint，保存已确认的引擎和版本、现有源码及资源路径、已通过与失败的验证、排除的方案和下一项具体操作。摘要优先控制在 3000 字内，保留当前实现必需的字段顺序、数组步长、调用约定和证据位置；明确已覆盖、已知遗漏和未调查的文字类别。详细反汇编和源码引用路径及范围，避免复制全文。这是保存已有进度，不需要重新扫描游戏、查找同一资料或重跑已完成测试。";
@@ -557,8 +588,8 @@ pub(super) async fn run(
     let mut continuation = Some(continuation);
     let output_limit = request.limits.maximum_output_tokens;
     let mut recovering_output = false;
-    let mut response_format_retries = 0;
-    let mut next_format_retry = None;
+    let mut turn_retries = 0;
+    let mut next_retry: Option<(&str, String, Duration)> = None;
     for key in ["lastImplementationTurn", "lastVerificationProgressTurn"] {
         if !state.extra.contains_key(key) {
             set_number(
@@ -894,17 +925,19 @@ pub(super) async fn run(
         );
         save_session(path, state).await?;
         let requested = output_limit.min((remaining - estimated).min(u64::from(u32::MAX)) as u32);
-        let retry = next_format_retry.take();
-        if let Some((operation, _)) = retry {
-            trace_run(json!({"operation":operation,"retry":response_format_retries}))?;
+        let retry = next_retry.take();
+        if let Some((operation, reason, delay)) = &retry {
+            trace_run(
+                json!({"operation":operation,"turn":state.total_turns+1,"retry":turn_retries,"reason":reason,"delayMs":delay.as_millis()}),
+            )?;
         }
         if let Some(progress) = progress {
             progress(EngineProgress {
                 stage: "智能适配".into(),
-                message: match retry {
-                    Some((_, reason)) => format!(
-                        "{reason}，正在重试（{response_format_retries}/{MAX_RESPONSE_FORMAT_RETRIES}）。"
-                    ),
+                message: match &retry {
+                    Some((_, reason, _)) => {
+                        format!("{reason}，正在重试（{turn_retries}/{MAX_TURN_RETRIES}）。")
+                    }
                     None => "正在分析资源或规划下一步操作。".into(),
                 },
                 message_from_model: false,
@@ -913,7 +946,7 @@ pub(super) async fn run(
                 api_requests: Some(state.api_requests()),
                 api_requests_estimated: state.api_requests_estimated(),
                 tool_name: None,
-                status_only: true,
+                status_only: retry.is_none(),
                 progress_note: state.progress_note.clone(),
                 last_breakthrough: state
                     .extra
@@ -921,6 +954,15 @@ pub(super) async fn run(
                     .cloned()
                     .unwrap_or_default(),
             });
+        }
+        if let Some((_, _, delay)) = retry
+            && !delay.is_zero()
+        {
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => return Ok((AdaptationStatus::Cancelled, "任务已取消，现有进度已保留。".into(), None)),
+                _ = tokio::time::sleep(delay) => {}
+            }
         }
         let started = Instant::now();
         repair::analyzing(state);
@@ -953,7 +995,7 @@ pub(super) async fn run(
             Err(error) => {
                 add_usage(&mut state.usage, &error.usage);
                 trace_model(
-                    json!({"operation":"model","status":"failed","turn":state.total_turns+1,"elapsedMs":started.elapsed().as_millis(),"error":error.message,"diagnostic":error.diagnostic,"failureCode":error.diagnostic.code,"httpStatus":error.status_code,"outcomeUnknown":error.outcome_unknown,"usage":error.usage,"maximumOutputTokens":requested,"visibleHistoryBytes":visible,"retainedHistoryBytes":retained,"contextComponents":decision_context.components,"instructionBytes":instructions.len(),"instructionFingerprint":instruction_fingerprint,"toolDefinitionBytes":tools_bytes,"toolDefinitionFingerprint":tool_fingerprint,"verificationConfigured":state.workflow.verification_args.is_some()}),
+                    json!({"operation":"model","status":"failed","turn":state.total_turns+1,"elapsedMs":started.elapsed().as_millis(),"error":error.to_string(),"diagnostic":error.diagnostic,"failureCode":error.diagnostic.code,"httpStatus":error.status_code,"outcomeUnknown":error.outcome_unknown,"usage":error.usage,"maximumOutputTokens":requested,"visibleHistoryBytes":visible,"retainedHistoryBytes":retained,"contextComponents":decision_context.components,"instructionBytes":instructions.len(),"instructionFingerprint":instruction_fingerprint,"toolDefinitionBytes":tools_bytes,"toolDefinitionFingerprint":tool_fingerprint,"verificationConfigured":state.workflow.verification_args.is_some()}),
                 )?;
                 save_session(path, state).await?;
                 if error.is_cancelled() {
@@ -963,16 +1005,11 @@ pub(super) async fn run(
                         None,
                     ));
                 }
-                let retry = match error.diagnostic.code.as_str() {
-                    "stream-format" => Some(("stream-format-retry", "流式响应格式无效")),
-                    "tool-call" | "agent-tool-format" => {
-                        Some(("tool-call-retry", "工具调用格式无效"))
-                    }
-                    _ => None,
-                };
-                if retry.is_some() && response_format_retries < MAX_RESPONSE_FORMAT_RETRIES {
-                    response_format_retries += 1;
-                    next_format_retry = retry;
+                if turn_retries < MAX_TURN_RETRIES
+                    && let Some((operation, delay)) = turn_retry(&error, turn_retries + 1)
+                {
+                    turn_retries += 1;
+                    next_retry = Some((operation, error.failure_summary(), delay));
                     continue;
                 }
                 if error.diagnostic.code == "output-token-limit"
@@ -992,7 +1029,7 @@ pub(super) async fn run(
             }
         };
         recovering_output = false;
-        response_format_retries = 0;
+        turn_retries = 0;
         state.total_turns += 1;
         let usage = completion_usage(&response, estimated)?;
         add_usage(&mut state.usage, &usage);

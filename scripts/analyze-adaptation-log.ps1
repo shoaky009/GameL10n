@@ -384,6 +384,9 @@ $result = [ordered]@{
         else {
             $item = Event-Reference $_
             $item.operation = 'model'; $item.status = $_.entry.status; $item.failureCode = $_.entry.failureCode
+            $item.error = $_.entry.error
+            $item.detail = $_.entry.diagnostic.detail
+            $item.requestId = $_.entry.diagnostic.requestId
             $item.seconds = Seconds $_.entry.elapsedMs
             $item.streamAttempt = $_.entry.streamAttempt
             $item

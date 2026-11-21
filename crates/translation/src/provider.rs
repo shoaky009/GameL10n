@@ -109,7 +109,7 @@ pub struct ProviderDiagnostic {
     pub request_id: Option<String>,
 }
 #[derive(Debug, thiserror::Error)]
-#[error("{message}")]
+#[error("{}", self.describe(&self.message))]
 pub struct ProviderError {
     pub message: String,
     pub outcome_unknown: bool,
@@ -143,6 +143,39 @@ impl ProviderError {
     pub fn is_cancelled(&self) -> bool {
         self.diagnostic.code == "cancelled"
     }
+    fn transport(cause: reqwest::Error, code: &str, stage: &str, key: &str) -> Self {
+        let code = if cause.is_timeout() {
+            "request-timeout"
+        } else {
+            code
+        };
+        let cause = cause.without_url();
+        let mut chain = Vec::new();
+        let mut current: Option<&(dyn std::error::Error + 'static)> = Some(&cause);
+        while let Some(error) = current {
+            let mut reason = error.to_string();
+            if let Some(io) = error.downcast_ref::<std::io::Error>() {
+                reason = format!("{:?} ({reason})", io.kind());
+            }
+            if chain.last() != Some(&reason) {
+                chain.push(reason);
+            }
+            current = error.source();
+        }
+        let mut detail = chain.join(" → ");
+        if !key.is_empty() {
+            detail = detail.replace(key, "[redacted]");
+        }
+        let detail: String = detail
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(1024)
+            .collect();
+        let mut error = Self::new(code, stage);
+        error.diagnostic.detail = Some(detail);
+        error.outcome_unknown = true;
+        error
+    }
     pub(crate) fn is_response_format_error(&self) -> bool {
         self.status_code.is_none()
             && matches!(
@@ -157,7 +190,7 @@ impl ProviderError {
             )
     }
     pub fn failure_summary(&self) -> String {
-        match self.status_code {
+        let summary: String = match self.status_code {
             Some(429) => "限流或额度限制（HTTP 429）".into(),
             Some(401) => "身份验证失败，请检查 API Key（HTTP 401）".into(),
             Some(403) => "没有访问此接口或模型的权限（HTTP 403）".into(),
@@ -165,10 +198,10 @@ impl ProviderError {
             Some(status @ 500..) => format!("服务商异常（HTTP {status}）"),
             Some(status) => format!("请求被拒绝（HTTP {status}）"),
             None => match self.diagnostic.code.as_str() {
-                "network-error" => "网络连接异常",
-                "network-interrupted" => "接收响应时网络中断",
+                "network-error" | "network-interrupted" => &self.message,
+                "request-timeout" if self.diagnostic.detail.is_some() => &self.message,
                 "request-timeout" => "请求超时",
-                "stream-incomplete" => "流式响应提前结束",
+                "stream-incomplete" => "流式响应提前结束，缺少终止事件",
                 "stream-format" => "流式响应格式无效",
                 "stream-error" => "服务商返回流式错误",
                 "output-token-limit" => "模型输出达到长度上限，结果被截断，可减少每批文本数",
@@ -176,6 +209,7 @@ impl ProviderError {
                 "translation-unknown-id" => "返回格式不正确：文本 ID 与请求不符",
                 "translation-value-type" => "返回格式不正确：译文不是文本",
                 "empty-content" => "模型返回了空内容",
+                "chat-choices" | "responses-status" | "responses-output" => &self.message,
                 "tool-call" | "agent-tool-format" => {
                     "工具调用格式不正确，请检查模型及接口是否支持工具调用"
                 }
@@ -188,6 +222,13 @@ impl ProviderError {
                 _ => "返回格式不正确",
             }
             .into(),
+        };
+        self.describe(&summary)
+    }
+    fn describe(&self, summary: &str) -> String {
+        match &self.diagnostic.detail {
+            Some(detail) => format!("{}，{detail}", summary.trim_end_matches('。')),
+            None => summary.to_owned(),
         }
     }
     fn with_usage(mut self, usage: &TokenUsage) -> Self {
@@ -739,7 +780,7 @@ impl OpenAiProvider {
                 self.request_count.fetch_add(1, Ordering::Relaxed);
                 *attempted = true;
                 request.send().await
-            }=>result.map_err(|error| {let mut failure=ProviderError::new(if error.is_timeout(){"request-timeout"}else{"network-error"},"API 请求失败，结果未知。请检查已保存的请求记录。");failure.outcome_unknown=true;failure})?,
+            }=>result.map_err(|error| ProviderError::transport(error,"network-error","发送 API 请求或等待响应头失败",&self.settings.api_key))?,
         };
         let status = response.status();
         if !status.is_success() {
@@ -771,7 +812,7 @@ impl OpenAiProvider {
             let chunk = tokio::select! {
                 biased;
                 _=cancellation.cancelled()=>return Err(ProviderError::new("cancelled","任务已取消。")),
-                result=response.chunk()=>result.map_err(|failure| {let mut error=ProviderError::new(if failure.is_timeout(){"request-timeout"}else{"network-interrupted"},"API 响应中断，结果未知。");error.outcome_unknown=true;error})?,
+                result=response.chunk()=>result.map_err(|error| ProviderError::transport(error,"network-interrupted","读取 HTTP 响应体失败",&self.settings.api_key))?,
             };
             let Some(chunk) = chunk else {
                 break;
