@@ -122,10 +122,7 @@ pub async fn refresh(ctx: &Context, project_id: Option<&str>) -> Result<(), Core
     } else {
         None
     };
-    let ps = project
-        .as_ref()
-        .map(|p| p.settings.clone())
-        .unwrap_or(json!({}));
+    let ps = project.map(|p| p.settings).unwrap_or_default();
     let config = &settings.api_configuration;
     let analysis = ps
         .get("analysisProfileId")
@@ -137,16 +134,7 @@ pub async fn refresh(ctx: &Context, project_id: Option<&str>) -> Result<(), Core
         .position(|p| Some(p.id.as_str()) == analysis)
         .map(|i| i as i32)
         .unwrap_or(-1);
-    let ids = ps
-        .get("translationProfileIds")
-        .and_then(Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter_map(Value::as_str)
-                .map(str::to_owned)
-                .collect()
-        })
-        .unwrap_or_else(|| config.chain());
+    let ids = config.project_translation_chain(&ps);
     let chain = chain_rows(&settings, &ids);
     let apis = config
         .profiles

@@ -481,6 +481,15 @@ async fn selected_edit_patch_install_restore_and_restart_preserve_originals() {
         .generate_patch(&project.id, Some(vec![selected.clone()]), false)
         .await
         .unwrap();
+    let error = app
+        .install_latest_patch(&project.id, Some(&patch))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("待安装的补丁已变化"));
+    assert_eq!(
+        hash_file(&script).unwrap(),
+        hash_file(&payload.join("script.rpy")).unwrap()
+    );
     assert!(
         fs::read_to_string(
             rebuilt

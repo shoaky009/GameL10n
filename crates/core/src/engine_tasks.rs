@@ -198,6 +198,7 @@ pub(crate) fn resumable_adaptation(
     directory: &Path,
     previous_task: Option<&crate::TaskState>,
 ) -> Result<Option<SavedAdaptation>, CoreError> {
+    // A successful regular extraction supersedes the model session left by an earlier attempt.
     if previous_task
         .is_some_and(|task| task.operation == "recognize" && task.succeeded == Some(true))
         && directory.join("extraction/native.json").is_file()
@@ -1696,30 +1697,26 @@ impl Application {
             let mut previous: PatchResult = read_json(&result_record)?;
             let manifest = crate::patching::read_manifest(&destination)?;
             let payload = resolve_relative(&destination, PAYLOAD_DIRECTORY)?;
-            let valid =
-                manifest
-                    .files
-                    .iter()
-                    .try_fold(true, |valid, file| -> Result<bool, CoreError> {
-                        Ok(valid
-                            && hash_file(&resolve_relative(&payload, &file.relative_path)?)?
-                                == file.sha256)
-                    })?;
-            if valid {
+            for file in &manifest.files {
                 if cancellation.is_cancelled() {
                     return Err(gamel10n_engines::EngineError::Cancelled.into());
                 }
-                previous.is_trial = unit_ids.is_some();
-                previous
-                    .extra
-                    .insert("adapterVersionRef".into(), json!(adapter_version));
-                write_json(&result_record, &previous)?;
-                write_json(&root.join("latest-result.json"), &previous)?;
-                return Ok(destination);
+                if hash_file(&resolve_relative(&payload, &file.relative_path)?)? != file.sha256 {
+                    return Err(CoreError::InvalidData(
+                        "已有补丁内容发生变化，请移出这份补丁后重新生成。".into(),
+                    ));
+                }
             }
-            return Err(CoreError::InvalidData(
-                "已有补丁内容发生变化，请移出这份补丁后重新生成。".into(),
-            ));
+            if cancellation.is_cancelled() {
+                return Err(gamel10n_engines::EngineError::Cancelled.into());
+            }
+            previous.is_trial = unit_ids.is_some();
+            previous
+                .extra
+                .insert("adapterVersionRef".into(), json!(adapter_version));
+            write_json(&result_record, &previous)?;
+            write_json(&root.join("latest-result.json"), &previous)?;
+            return Ok(destination);
         }
         let patch = tempfile::Builder::new()
             .prefix("patch-")
@@ -1895,6 +1892,7 @@ impl Application {
     pub(crate) async fn install_patch_in_task(
         &self,
         id: &str,
+        expected_directory: Option<&Path>,
         cancellation: &CancellationToken,
     ) -> Result<crate::patching::PatchInstallResult, CoreError> {
         if cancellation.is_cancelled() {
@@ -1905,6 +1903,12 @@ impl Application {
             .latest_patch(id)
             .await?
             .ok_or_else(|| CoreError::InvalidData("尚未生成补丁。".into()))?;
+        // Both confirmation and workflow verification identify an immutable build by its directory.
+        if expected_directory.is_some_and(|expected| expected != patch.patch_directory) {
+            return Err(CoreError::InvalidData(
+                "待安装的补丁已变化，请核对当前补丁后重试。".into(),
+            ));
+        }
         let root = self.project_directory(id)?;
         let cancellation = cancellation.clone();
         self.run_file_task(id, "install", move |progress| {
@@ -1928,10 +1932,20 @@ impl Application {
     }
 
     pub async fn install_patch(&self, id: &str) -> Result<(), CoreError> {
+        self.install_latest_patch(id, None).await
+    }
+
+    pub async fn install_latest_patch(
+        &self,
+        id: &str,
+        expected_directory: Option<&Path>,
+    ) -> Result<(), CoreError> {
         let cancellation = self
             .begin(id, "install", "正在核对文件并安装汉化补丁。")
             .await?;
-        let result = self.install_patch_in_task(id, &cancellation).await;
+        let result = self
+            .install_patch_in_task(id, expected_directory, &cancellation)
+            .await;
         self.finish(
             id,
             "install",

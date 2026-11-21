@@ -66,6 +66,21 @@ impl ApiConfiguration {
             .clone()
             .unwrap_or_else(|| self.translation_profile_id.clone().into_iter().collect())
     }
+
+    /// An explicit empty project chain disables translation. Only an absent override inherits the global chain.
+    pub fn project_translation_chain(&self, settings: &Value) -> Vec<String> {
+        if let Some(ids) = settings["translationProfileIds"].as_array() {
+            return ids
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect();
+        }
+        match settings["translationProfileId"].as_str() {
+            Some(id) => vec![id.to_owned()],
+            None => self.chain(),
+        }
+    }
 }
 
 #[derive(Clone, Deserialize, Serialize)]

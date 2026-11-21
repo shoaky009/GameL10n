@@ -578,7 +578,10 @@ async fn handle_project_action(
                 .into(),
         ),
         "install" => {
-            ctx.app().await.install_patch(&input.project_id).await?;
+            ctx.app()
+                .await
+                .install_latest_patch(&input.project_id, Some(input.patch_path.as_ref()))
+                .await?;
             crate::launch_ui::refresh(ctx, &input.project_id, false).await?;
         }
         "restore" => {

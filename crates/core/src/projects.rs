@@ -70,14 +70,19 @@ impl ProjectSummary {
     }
 }
 
+const INDEXED_API_SETTINGS: [&str; 3] = [
+    "analysisProfileId",
+    "translationProfileIds",
+    "translationProfileId",
+];
+
 impl From<&GameProject> for ProjectSummary {
     fn from(project: &GameProject) -> Self {
         let mut extra = project.extra.clone();
-        if let Some(id) = project.settings.get("analysisProfileId") {
-            extra.insert("analysisProfileId".into(), id.clone());
-        }
-        if let Some(ids) = project.settings.get("translationProfileIds") {
-            extra.insert("translationProfileIds".into(), ids.clone());
+        for key in INDEXED_API_SETTINGS {
+            if let Some(value) = project.settings.get(key) {
+                extra.insert(key.into(), value.clone());
+            }
         }
         Self {
             id: project.id.clone(),
@@ -289,7 +294,7 @@ impl ProjectStore {
                     .find(|project| project.id == id)
                     .ok_or_else(|| CoreError::ProjectMissing(id.into()))?;
                 let mut extra = summary.extra.clone();
-                let settings = ["analysisProfileId", "translationProfileIds"]
+                let settings = INDEXED_API_SETTINGS
                     .into_iter()
                     .filter_map(|key| extra.remove(key).map(|value| (key.into(), value)))
                     .collect();

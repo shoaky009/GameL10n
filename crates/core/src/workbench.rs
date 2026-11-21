@@ -729,16 +729,15 @@ impl Application {
         let Some(analysis) = self.cached_analysis(id).await? else {
             return Ok(Vec::new());
         };
-        let valid: HashSet<_> = analysis
+        let mut remaining: HashSet<_> = analysis
             .extraction()
             .units
             .iter()
             .map(|unit| unit.id.as_str())
             .collect();
-        let mut seen = HashSet::new();
         Ok(selection
             .into_iter()
-            .filter(|id| valid.contains(id.as_str()) && seen.insert(id.clone()))
+            .filter(|id| remaining.remove(id.as_str()))
             .collect())
     }
     pub async fn save_text_selection(
@@ -752,17 +751,13 @@ impl Application {
             .cached_analysis(id)
             .await?
             .ok_or_else(|| CoreError::InvalidData("请先提取游戏文本。".into()))?;
-        let valid: HashSet<_> = analysis
+        let mut remaining: HashSet<_> = analysis
             .extraction()
             .units
             .iter()
             .map(|unit| unit.id.as_str())
             .collect();
-        let mut seen = HashSet::new();
-        if selection
-            .iter()
-            .any(|id| !valid.contains(id.as_str()) || !seen.insert(id))
-        {
+        if selection.iter().any(|id| !remaining.remove(id.as_str())) {
             return Err(CoreError::InvalidData(
                 "文本选区已失效，请重新选择。".into(),
             ));
@@ -1310,6 +1305,11 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
         assert!(
             app.save_text_selection(&id, &["missing".into()])
+                .await
+                .is_err()
+        );
+        assert!(
+            app.save_text_selection(&id, &["2".into(), "2".into()])
                 .await
                 .is_err()
         );

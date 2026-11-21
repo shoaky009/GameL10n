@@ -31,8 +31,11 @@ async fn indexed_projects_remain_usable_without_their_metadata() {
             .await
             .unwrap();
         let project = app.add_project(&game).await.unwrap();
-        let settings =
-            json!({"analysisProfileId":"analysis", "translationProfileIds":["translation"]});
+        let settings = json!({
+            "analysisProfileId": "analysis",
+            "translationProfileId": "legacy",
+            "translationProfileIds": ["translation"]
+        });
         app.save_project_settings(&project.id, settings.clone())
             .await
             .unwrap();

@@ -5,7 +5,7 @@ use crate::{
     view::{App, TermRow, TextRow},
 };
 use gamel10n_core::{
-    CoreError,
+    Application, CoreError,
     workbench::{WorkbenchFilter, WorkbenchRow, parse_terminology},
 };
 use gamel10n_translation::{execution::TranslationOptions, files::hash_text};
@@ -603,6 +603,27 @@ async fn texts(ctx: &Context, input: &UiInput) -> Result<(), CoreError> {
     Ok(())
 }
 
+async fn retranslation_id(
+    app: &Application,
+    project: &str,
+    selected: &[String],
+) -> Result<String, CoreError> {
+    // Completed rows carry this ID so a resumed retranslation can skip already paid requests.
+    if let Some(scope) = app.translation_scope(project).await?
+        && !scope.completed
+        && let (Some(id), Some(previous)) = (scope.retranslation_id, scope.unit_ids)
+        && (previous == selected
+            || previous.iter().collect::<HashSet<_>>() == selected.iter().collect::<HashSet<_>>())
+    {
+        return Ok(id);
+    }
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    Ok(hash_text(&format!("{project}{timestamp}"))[..32].to_owned())
+}
+
 pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool, CoreError> {
     match action {
         "insert-term" => {
@@ -823,13 +844,10 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
         "translate" => {
             flush_editor(ctx, input).await?;
             let app = ctx.app().await;
-            let previous = app
-                .translation_scope(&input.project_id)
-                .await?
-                .filter(|scope| !scope.completed);
             if input.argument == "all"
-                && let Some(scope) = &previous
-                && scope.unit_ids.is_some()
+                && let Some(scope) = app.translation_scope(&input.project_id).await?
+                && !scope.completed
+                && let Some(ids) = scope.unit_ids
             {
                 show_dialog(
                     ctx,
@@ -837,7 +855,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                     "继续上次翻译",
                     format!(
                         "上次任务选择了 {} 条文本。继续原选区时只处理尚未成功的文本，已完成结果不会重复请求。",
-                        scope.unit_ids.as_ref().map_or(0, Vec::len)
+                        ids.len()
                     ),
                 );
                 return Ok(true);
@@ -848,51 +866,22 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                 result?;
                 return Ok(true);
             }
-            let ids = if matches!(input.argument.as_str(), "all" | "force-all") {
-                None
-            } else {
-                let selection = ensure_selection(ctx, &input.project_id).await?;
-                if selection.is_empty() {
-                    return Err(CoreError::InvalidData("请先选择要翻译的文本。".into()));
-                }
-                Some(selection)
-            };
             let mut options = TranslationOptions {
                 batch_size: input.batch_size.max(1) as usize,
-                unit_ids: ids,
                 build_patch_after: input.argument == "trial",
                 collect_translations: false,
                 ..Default::default()
             };
-            if input.argument == "retranslate" {
-                let previous = previous.as_ref().map(|scope| scope.options());
-                let same_selection = |previous: &TranslationOptions| {
-                    previous.retranslation_id.is_some()
-                        && previous
-                            .unit_ids
-                            .as_ref()
-                            .map(|ids| ids.iter().collect::<BTreeSet<_>>())
-                            == options
-                                .unit_ids
-                                .as_ref()
-                                .map(|ids| ids.iter().collect::<BTreeSet<_>>())
-                };
-                options.retranslation_id = previous
-                    .filter(same_selection)
-                    .and_then(|options| options.retranslation_id)
-                    .or_else(|| {
-                        Some(
-                            hash_text(&format!(
-                                "{}{}",
-                                input.project_id,
-                                SystemTime::now()
-                                    .duration_since(UNIX_EPOCH)
-                                    .unwrap_or_default()
-                                    .as_nanos(),
-                            ))[..32]
-                                .into(),
-                        )
-                    });
+            if !matches!(input.argument.as_str(), "all" | "force-all") {
+                let selection = ensure_selection(ctx, &input.project_id).await?;
+                if selection.is_empty() {
+                    return Err(CoreError::InvalidData("请先选择要翻译的文本。".into()));
+                }
+                if input.argument == "retranslate" {
+                    options.retranslation_id =
+                        Some(retranslation_id(&app, &input.project_id, &selection).await?);
+                }
+                options.unit_ids = Some(selection);
             }
             let result = app.translate_project(&input.project_id, options).await;
             ctx.refresh_texts(&input.project_id);

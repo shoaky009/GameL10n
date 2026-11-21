@@ -561,18 +561,9 @@ impl Application {
                 }
             }
             WorkflowAction::InstallPatch => {
-                let patch = self
-                    .latest_patch(id)
-                    .await?
-                    .ok_or_else(|| CoreError::InvalidData("尚未生成补丁。".into()))?;
                 let Some((built, scope)) = &context.built else {
                     return Err(CoreError::InvalidData("请先在本次流程中生成补丁。".into()));
                 };
-                if built != &patch.patch_directory {
-                    return Err(CoreError::InvalidData(
-                        "待安装的补丁已变化，请重新生成。".into(),
-                    ));
-                }
                 if *scope == WorkflowScope::All {
                     self.require_workflow_verification(id, context).await?;
                 } else {
@@ -580,8 +571,9 @@ impl Application {
                 }
                 context.installed = None;
                 context.installed_all = false;
-                self.install_patch_in_task(id, cancellation).await?;
-                context.installed = Some(patch.patch_directory);
+                self.install_patch_in_task(id, Some(built), cancellation)
+                    .await?;
+                context.installed = Some(built.clone());
                 context.installed_all = *scope == WorkflowScope::All;
             }
             WorkflowAction::CheckGame => {

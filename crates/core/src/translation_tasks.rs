@@ -361,24 +361,9 @@ impl Application {
     pub async fn translation_providers(&self, id: &str) -> Result<Vec<OpenAiProvider>, CoreError> {
         let project = self.store.get(id).await?;
         let settings = self.settings().await?;
-        let configured = project
-            .settings
-            .get("translationProfileIds")
-            .and_then(Value::as_array)
-            .map(|ids| {
-                ids.iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_owned)
-                    .collect::<Vec<_>>()
-            })
-            .or_else(|| {
-                project
-                    .settings
-                    .get("translationProfileId")
-                    .and_then(Value::as_str)
-                    .map(|id| vec![id.into()])
-            })
-            .unwrap_or_else(|| settings.api_configuration.chain());
+        let configured = settings
+            .api_configuration
+            .project_translation_chain(&project.settings);
         if configured.is_empty() {
             return Err(CoreError::InvalidData("请先配置翻译 API 链。".into()));
         }
@@ -436,7 +421,12 @@ impl Application {
                     return Ok(Permit(Arc::clone(&self.translation_scheduler)));
                 }
             }
-            tokio::select! {biased;_=cancellation.cancelled()=>return Err(gamel10n_engines::EngineError::Cancelled.into()),_=notified=>{},_=tokio::time::sleep(Duration::from_millis(250))=>{}}
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => return Err(gamel10n_engines::EngineError::Cancelled.into()),
+                _ = notified => {}
+                _ = tokio::time::sleep(Duration::from_millis(250)) => {}
+            }
         }
     }
 
@@ -536,26 +526,28 @@ impl Application {
             let result = self
                 .translate_in_task(id, options.clone(), operation, &cancellation)
                 .await?;
-            if !options.candidate_only && result.failed == 0 {
-                if options.build_patch_after {
-                    final_operation = "build";
-                    self.progress(id, "build", "翻译已保存，正在检查原始资源并生成补丁。")
-                        .await;
-                    patch = Some(
-                        self.generate_patch_in_task(
-                            id,
-                            options.unit_ids.as_deref(),
-                            false,
-                            &cancellation,
-                        )
-                        .await?,
-                    );
-                }
-                if cancellation.is_cancelled() {
-                    return Err(gamel10n_engines::EngineError::Cancelled.into());
-                }
-                self.save_translation_scope(id, &options, true).await?;
+            if options.candidate_only || result.failed != 0 {
+                return Ok(result);
             }
+            // A failed trial build must remain resumable even when every translation is already saved.
+            if options.build_patch_after {
+                final_operation = "build";
+                self.progress(id, "build", "翻译已保存，正在检查原始资源并生成补丁。")
+                    .await;
+                patch = Some(
+                    self.generate_patch_in_task(
+                        id,
+                        options.unit_ids.as_deref(),
+                        false,
+                        &cancellation,
+                    )
+                    .await?,
+                );
+            }
+            if cancellation.is_cancelled() {
+                return Err(gamel10n_engines::EngineError::Cancelled.into());
+            }
+            self.save_translation_scope(id, &options, true).await?;
             Ok::<_, CoreError>(result)
         }
         .await;
@@ -656,18 +648,7 @@ impl Application {
                 .unwrap_or_else(|| "配置不可用".into())
         };
         let analysis = analysis.map(label).unwrap_or_else(|| "未选择".into());
-        let chain = project
-            .settings
-            .get("translationProfileIds")
-            .and_then(Value::as_array)
-            .map(|values| {
-                values
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_owned)
-                    .collect()
-            })
-            .unwrap_or_else(|| configuration.chain());
+        let chain = configuration.project_translation_chain(&project.settings);
         let translation = if chain.is_empty() {
             "未选择".into()
         } else {

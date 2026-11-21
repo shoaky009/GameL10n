@@ -612,6 +612,22 @@ fn project_actions_keep_settings_selection_and_saved_edits_in_sync_across_tabs()
             .await
             .unwrap();
         }
+        host.save_project_settings(
+            &other_project.id,
+            serde_json::json!({"translationProfileId": "second"}),
+        )
+        .await
+        .unwrap();
+        invoke_action(&ui, &ctx, "tab", "3").await;
+        assert_eq!(app.get_chain().row_count(), 1);
+        assert_eq!(app.get_chain().row_data(0).unwrap().id, "second");
+        assert!(
+            app.get_task_api_summary()
+                .contains("翻译 API 链：second（second-model · Responses）")
+        );
+        let providers = host.translation_providers(&other_project.id).await.unwrap();
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].display_name(), "second");
         app.set_task_operation("adapt".into());
         app.set_task_api_summary(
             host.task_api_summary(&other_project.id)
@@ -739,6 +755,13 @@ fn project_actions_keep_settings_selection_and_saved_edits_in_sync_across_tabs()
         assert_eq!(app.get_tab(), 1);
         assert_eq!(std::fs::read_to_string(game_directory.join("dialogue.txt")).unwrap(), "补丁中的试译");
         assert_eq!(host.workbench_row(&project.id, &editor_id).await.unwrap().text.as_deref(), Some("试译生成后的新修改"));
+
+        std::fs::write(project_dir.join("translation-scope.json"), b"incomplete JSON").unwrap();
+        invoke_action(&ui, &ctx, "toggle-text", editor_id.as_str()).await;
+        invoke_action(&ui, &ctx, "translate", "selected").await;
+        let scope = host.translation_scope(&project.id).await.unwrap().unwrap();
+        assert!(scope.completed);
+        assert_eq!(scope.unit_ids, Some(vec![editor_id.to_string()]));
 
         std::fs::write(game_directory.join("game.exe"), "launch fixture").unwrap();
         std::fs::write(game_directory.join("Config.exe"), "configuration fixture").unwrap();
