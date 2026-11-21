@@ -410,13 +410,12 @@ fn project_actions_keep_settings_selection_and_saved_edits_in_sync_across_tabs()
         invoke_action(&ui, &ctx, "select-clear", "").await;
         assert_eq!(app.get_selected_texts(), 0);
         assert!(ctx.app().await.load_text_selection(&project.id).await.unwrap().is_empty());
-        assert_eq!(app.get_text_total(), 0);
-        assert_eq!(app.get_texts().row_count(), 0);
+        assert!(!app.get_only_selected());
+        assert_eq!(app.get_resource_filter(), resource as i32);
+        assert_eq!(app.get_text_total(), 101);
+        assert!(app.get_texts().iter().all(|row| !row.selected));
         assert_eq!(app.get_offset(), 0);
-        assert!(app.get_editor_id().is_empty());
-        assert!(app.get_editor_source().is_empty());
 
-        app.set_only_selected(false);
         app.set_resource_filter(0);
         invoke_action(&ui, &ctx, "texts", "0").await;
         invoke_action(&ui, &ctx, "select-page", "").await;
@@ -432,9 +431,9 @@ fn project_actions_keep_settings_selection_and_saved_edits_in_sync_across_tabs()
                 .all(|row| row.selected && row.id.as_str() != "line-000")
         );
         invoke_action(&ui, &ctx, "select-clear", "").await;
-        assert_eq!(app.get_texts().row_count(), 0);
+        assert!(!app.get_only_selected());
+        assert_eq!(app.get_text_total(), 221);
 
-        app.set_only_selected(false);
         invoke_action(&ui, &ctx, "texts", "0").await;
         invoke_action(&ui, &ctx, "edit-text", "line-099").await;
         assert_eq!(app.get_editor_id().as_str(), "line-099");
@@ -717,6 +716,30 @@ fn project_actions_keep_settings_selection_and_saved_edits_in_sync_across_tabs()
             host.project_directory(&project.id).unwrap().to_string_lossy()
         );
         let game_directory = host.open_project(&project.id).await.unwrap().game_directory;
+        let project_dir = host.project_directory(&project.id).unwrap();
+        let patch = project_dir.join("patches/trial");
+        std::fs::create_dir_all(patch.join("files")).unwrap();
+        std::fs::write(patch.join("files/dialogue.txt"), "补丁中的试译").unwrap();
+        gamel10n_core::patching::build_manifest(&patch, &BTreeMap::new()).unwrap();
+        write_json(
+            &project_dir.join("latest-result.json"),
+            &serde_json::json!({"patchDirectory":"patches/trial","isTrial":true,"translatedUnits":1,"totalUnits":221,"validation":{"passed":true}}),
+        ).unwrap();
+        invoke_action(&ui, &ctx, "refresh-project", "").await;
+        invoke_action(&ui, &ctx, "tab", "1").await;
+        assert!(app.get_patch_is_trial());
+        assert_eq!(app.get_selected_texts(), 0);
+        let editor_id = app.get_editor_id();
+        app.set_editor_text("试译生成后的新修改".into());
+        app.set_editor_dirty(true);
+        app.invoke_action("edit-changed".into(), "".into());
+        app.set_modal("install".into());
+        invoke_action(&ui, &ctx, "confirm", "install").await;
+        assert_eq!(app.get_modal(), "");
+        assert_eq!(app.get_tab(), 1);
+        assert_eq!(std::fs::read_to_string(game_directory.join("dialogue.txt")).unwrap(), "补丁中的试译");
+        assert_eq!(host.workbench_row(&project.id, &editor_id).await.unwrap().text.as_deref(), Some("试译生成后的新修改"));
+
         std::fs::write(game_directory.join("game.exe"), "launch fixture").unwrap();
         std::fs::write(game_directory.join("Config.exe"), "configuration fixture").unwrap();
         invoke_action(&ui, &ctx, "launch-settings", "").await;

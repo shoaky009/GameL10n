@@ -9,7 +9,17 @@ export component DialogLayer inherits Rectangle {
     TouchArea {}
     Rectangle { width: min(parent.width - 100px, 660px); height: min(parent.height - 80px, modal-content.preferred-height); x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; background: Theme.surface; border-radius: 8px;
         modal-content := VerticalLayout { padding: 20px; spacing: 12px;
-            if App.modal != "engine-review": Heading { text: App.modal == "game-check" ? "游戏运行检查" : App.modal == "launch" ? "游戏启动设置" : App.modal == "api" ? (App.api-id == "" ? "新增模型配置" : "编辑模型配置") : App.modal == "patch-texts" ? "本次补丁文本" : App.modal == "feedback" ? "任务需要处理" : App.modal-title; }
+            if App.modal != "engine-review": Heading { text: App.modal == "game-check" ? "游戏运行检查" : App.modal == "launch" ? "游戏启动设置" : App.modal == "api" ? (App.api-id == "" ? "新增模型配置" : "编辑模型配置") : App.modal == "patch-texts" ? "本次补丁文本" : App.modal == "install" ? "安装到游戏目录" : App.modal == "feedback" ? "任务需要处理" : App.modal-title; }
+            if App.modal == "install": VerticalLayout { spacing: 8px;
+                Label { text: App.patch-summary; }
+                ReportText { text: App.project-path; accessible-label: "安装位置"; }
+                Caption { text: "请先关闭游戏及汉化启动器。安装时会按需将原文件备份为 .bak。"; }
+                if App.warnings != "": ScrollView {
+                    height: min(140px, install-warnings.preferred-height);
+                    horizontal-scrollbar-policy: always-off; content-width: self.visible-width;
+                    install-warnings := ReportText { text: App.warnings; color: Theme.pending; }
+                }
+            }
             if App.modal == "game-check": GameCheckControls { settings-height: min(320px, root.height - 390px); }
             if App.modal == "workflow-settings": WorkflowControls {}
             if App.modal == "launch": VerticalLayout { spacing: 10px;
@@ -68,7 +78,7 @@ export component DialogLayer inherits Rectangle {
             if App.modal == "feedback": ScrollView { height: min(400px, root.height - 240px); horizontal-scrollbar-policy: always-off; content-width: self.visible-width;
                 VerticalLayout { padding-right: 16px; alignment: start; ReportText { text: App.error; } }
             }
-            if App.modal-message != "" && App.modal != "game-check" && App.modal != "api" && App.modal != "patch-texts" && App.modal != "engine-review" && App.modal != "feedback": Label { text: App.modal-message; }
+            if App.modal-message != "" && App.modal != "install" && App.modal != "game-check" && App.modal != "api" && App.modal != "patch-texts" && App.modal != "engine-review" && App.modal != "feedback": Label { text: App.modal-message; }
             if App.error != "" && App.modal != "engine-review" && App.modal != "feedback": ReportText { text: App.error; color: Theme.error; }
             if App.modal == "adapt": ScrollView { height: min(adapt-fields.preferred-height, min(460px, root.height - 280px)); horizontal-scrollbar-policy: always-off; content-width: self.visible-width;
               adapt-fields := VerticalLayout { spacing: 8px; padding-right: 12px; alignment: start;
@@ -140,12 +150,14 @@ export component DialogLayer inherits Rectangle {
                 if App.modal != "game-check" && App.modal != "patch-texts" && App.modal != "engine-review" && App.modal != "feedback": Button {
                     text: App.modal == "launch" && App.launch-conflict-revision != "" ? "确认覆盖"
                         : App.modal == "resume-translation" ? "继续原选区"
+                        : App.modal == "install" ? "安装补丁"
                         : App.modal == "cleanup" ? "清理所选文件"
                         : App.modal == "engine-delete" ? "删除引擎"
                         : App.modal == "api" ? "保存配置"
                         : App.modal == "workflow-settings" ? "保存"
                         : root.workflow-active ? "开始自动汉化" : "确认";
                     enabled: (App.modal != "api" || !App.api-testing)
+                        && (App.modal != "install" || App.can-install-patch)
                         && (App.modal != "cleanup" || (!App.cleanup-loading && App.cleanup-selected))
                         && (!root.reuse-extracted-text || App.workflow-can-use-existing-text);
                     primary: true;

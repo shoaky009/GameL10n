@@ -146,6 +146,7 @@ impl Context {
         };
         input.editor_revision = if navigation
             || list_navigation
+            || (action == "confirm" && input.argument != "install")
             || matches!(
                 action,
                 "edit-changed"
@@ -159,7 +160,6 @@ impl Context {
                     | "undo-edit"
                     | "translate"
                     | "candidate"
-                    | "confirm"
                     | "generate-patch"
                     | "game-check-dialog"
                     | "close"

@@ -234,8 +234,16 @@ fn refresh_selection(ctx: &Context, id: &str) {
         }
         drop(saved);
         app.set_selection_busy(false);
-        if app.get_only_selected() && app.get_page() == 0 && app.get_tab() == 1 {
-            app.invoke_action("texts".into(), "current".into());
+        if app.get_only_selected() {
+            let page = if app.get_selected_texts() == 0 {
+                app.set_only_selected(false);
+                "0"
+            } else {
+                "current"
+            };
+            if app.get_page() == 0 && app.get_tab() == 1 {
+                app.invoke_action("texts".into(), page.into());
+            }
         }
     });
 }

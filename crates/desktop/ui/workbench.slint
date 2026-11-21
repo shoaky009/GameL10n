@@ -51,7 +51,11 @@ export component Workbench inherits FocusScope {
     spacing: 8px;
     HorizontalLayout { spacing: 12px;
         Button { text: "全量翻译"; primary: App.selected-texts == 0; enabled: !App.busy && App.recognition != ""; clicked => { App.action("translate", "all"); } }
-        Caption { text: App.counts; horizontal-stretch: 1; vertical-alignment: center; overflow: elide; wrap: no-wrap; }
+        Caption { text: App.counts; horizontal-stretch: 0; min-width: 0px; vertical-alignment: center; overflow: elide; wrap: no-wrap; }
+        if App.patch-is-trial: VerticalLayout { alignment: center; horizontal-stretch: 0;
+            Link { text: "安装最近的试译补丁…"; enabled: App.can-install-patch; clicked => { App.modal = "install"; } }
+        }
+        Rectangle { horizontal-stretch: 1; }
     }
     HorizontalLayout { spacing: 8px;
         search-input := LineEdit { placeholder-text: "搜索原文、译文或位置"; text <=> App.text-query; edited => { App.action("texts", "0"); } horizontal-stretch: 1; min-width: 120px; }
@@ -66,7 +70,7 @@ export component Workbench inherits FocusScope {
                 if App.selected-texts == 0: Link { text: "全选匹配"; enabled: root.selection-enabled && App.text-total > 0; clicked => { App.action("select-matching", ""); } }
             }
         }
-        CheckBox { text: "仅显示已选"; checked <=> App.only-selected; toggled => { App.action("texts", "0"); } }
+        CheckBox { text: "仅显示已选"; checked <=> App.only-selected; enabled: App.selected-texts > 0 || App.only-selected; toggled => { App.action("texts", "0"); } }
         if App.selected-texts > 0 || App.selection-busy: Caption { text: App.selection-busy ? "更新中…" : "已选 " + App.selected-texts; vertical-alignment: center; wrap: no-wrap; }
         if App.selected-texts > 0: Button { text: "翻译所选"; primary: true; enabled: root.selection-enabled && !App.busy; clicked => { App.action("translate", "selected"); } }
         if App.selected-texts > 0: Button { text: "重新翻译所选"; enabled: root.selection-enabled && !App.busy; clicked => { App.action("retranslate-dialog", ""); } }

@@ -273,7 +273,13 @@ async fn handle_project_action(
                     return;
                 }
                 let a = ui.global::<App>();
+                a.set_project_path("".into());
                 a.set_project_files_path("".into());
+                a.set_patch_path("".into());
+                a.set_patch_is_trial(false);
+                if a.get_modal() == "install" {
+                    a.set_modal("".into());
+                }
                 a.set_project_id(requested.into());
                 a.set_page(0);
                 a.set_error("".into());
@@ -564,20 +570,6 @@ async fn handle_project_action(
             refresh_patch(ctx, &input.project_id).await?;
             ctx.update(|ui| ui.global::<App>().set_tab(2));
         }
-        "install-dialog" => show_dialog(
-            ctx,
-            "install",
-            "安装汉化补丁",
-            format!(
-                "请关闭游戏及汉化启动器。补丁将安装到此项目对应的游戏目录，原文件在必要时保留 .bak。\n{}",
-                ctx.app()
-                    .await
-                    .open_project(&input.project_id)
-                    .await?
-                    .game_directory
-                    .display()
-            ),
-        ),
         "restore-dialog" => show_dialog(
             ctx,
             "restore",
@@ -1118,6 +1110,7 @@ pub async fn refresh_patch(ctx: &Context, id: &str) -> Result<(), CoreError> {
         if a.get_project_id().as_str() != id {
             return;
         }
+        a.set_patch_is_trial(result.as_ref().is_some_and(|patch| patch.is_trial));
         if let Some(p) = result {
             a.set_patch_path(p.patch_directory.display().to_string().into());
             a.set_patch_summary(

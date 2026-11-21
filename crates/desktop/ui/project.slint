@@ -279,7 +279,7 @@ export component PatchPage inherits ScrollView {
         Heading { text: "2 · 安装到游戏"; font-size: 18px; }
         Caption { text: "安装或恢复前请关闭游戏。安装位置：" + App.project-path; }
         HorizontalLayout { spacing: 8px;
-            Button { text: "安装汉化补丁"; primary: App.patch-path != ""; enabled: !App.busy && App.patch-path != ""; clicked => { App.action("install-dialog", ""); } }
+            Button { text: "安装汉化补丁…"; primary: App.patch-path != ""; enabled: App.can-install-patch; clicked => { App.modal = "install"; } }
             Button { text: "恢复原版…"; enabled: !App.busy; clicked => { App.action("restore-dialog", ""); } }
             Rectangle { horizontal-stretch: 1; }
         }
