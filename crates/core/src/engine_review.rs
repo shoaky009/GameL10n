@@ -184,13 +184,14 @@ impl Application {
             tokio::pin!(future);
             let result = loop {
                 tokio::select! {
-                    result = &mut future => break result?,
+                    result = &mut future => break result,
                     Some(progress) = rx.recv() => self.review_progress(id, progress).await,
                 }
             };
             while let Ok(progress) = rx.try_recv() {
                 self.review_progress(id, progress).await;
             }
+            let result = result?;
             if result.reused {
                 self.metrics_details(id, "review", None, Some("reused"), None)
                     .await;

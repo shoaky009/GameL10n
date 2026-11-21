@@ -47,6 +47,11 @@ pub struct EngineReviewResult {
 
 type SourceHashes = Vec<(String, String)>;
 
+const REVIEW_SUMMARY_LIMIT: usize = 4000;
+const KNOWLEDGE_SUMMARY_LIMIT: usize = 400;
+const CONDITIONS_LIMIT: usize = 1600;
+const GUIDANCE_LIMIT: usize = 8000;
+
 fn review_evidence(directory: &Path) -> Result<(Vec<InventoryFile>, SourceHashes), EngineError> {
     let source = directory.join("adaptation/current/src");
     let mut evidence = Vec::new();
@@ -282,7 +287,7 @@ impl EngineService {
         let mut inspected = BTreeMap::new();
         let mut turn = 0;
         let mut latest_exchange = 0;
-        loop {
+        let submission = 'review: loop {
             if cancellation.is_cancelled() {
                 return Err(EngineError::Cancelled);
             }
@@ -293,7 +298,7 @@ impl EngineService {
                 + 1;
             let remaining = limits.maximum_tokens.saturating_sub(tokens(&usage));
             if remaining < estimated + 128 {
-                break;
+                break None;
             }
             turn += 1;
             if let Some(progress) = progress {
@@ -342,7 +347,7 @@ impl EngineService {
             };
             add_usage(&mut usage, &completion_usage(&completion, estimated)?);
             if tokens(&usage) > limits.maximum_tokens {
-                break;
+                break None;
             }
             latest_exchange = messages.len();
             if completion.output_items.is_empty() {
@@ -414,81 +419,51 @@ impl EngineService {
                         }
                         read_knowledge(knowledge_directory, &args, None)
                     }
-                    "finish_review" => {
-                        if !finish_alone {
-                            return Err(EngineError::Rejected(
-                                "finish_review 必须单独调用。".into(),
-                            ));
-                        }
-                        let summary = text(&args, "summary")?;
-                        if summary.trim().is_empty() || summary.chars().count() > 4000 {
-                            return Err(EngineError::Protocol("总结为空或超过 4000 字符。".into()));
-                        }
-                        let suggestions: Vec<String> = serde_json::from_value(
-                            args.get("mainProgramSuggestions")
-                                .cloned()
-                                .unwrap_or(json!([])),
-                        )?;
-                        let (entry_id, revision) = if let Some(improvement) =
-                            args.get("improvement").filter(|value| !value.is_null())
-                        {
-                            save_improvement(
-                                knowledge_directory,
-                                project_directory,
-                                &state,
-                                &evidence_fingerprint,
-                                improvement,
-                                &inspected,
-                                &evidence
-                                    .iter()
-                                    .map(|file| file.path.as_str())
-                                    .collect::<Vec<_>>(),
-                            )?
-                        } else {
-                            (None, None)
-                        };
-                        let mut knowledge_dependencies: Vec<_> = inspected
-                            .keys()
-                            .filter_map(|key| key.strip_prefix("knowledge:").map(str::to_owned))
-                            .collect();
-                        if let Some(id) = &entry_id {
-                            knowledge_dependencies.push(id.clone());
-                        }
-                        knowledge_dependencies.sort();
-                        knowledge_dependencies.dedup();
-                        let result = EngineReviewResult {
-                            cache_version: 2,
-                            library_fingerprint: review_library_fingerprint(
-                                &knowledge_entries(knowledge_directory)?,
-                                &state,
-                                &knowledge_dependencies,
-                            )?,
-                            knowledge_dependencies,
-                            evidence_fingerprint,
-                            summary: summary.into(),
-                            entry_id,
-                            revision,
-                            usage,
-                            api_requests: Some(
-                                provider.request_count().saturating_sub(requests_before),
-                            ),
-                            main_program_suggestions: suggestions,
-                            reused: false,
-                        };
-                        write_json(&report, &result).map_err(file_error)?;
-                        write_json(
-                            &project_directory.join("logs/engine-review-session.json"),
-                            &json!({"messages":messages,"usage":result.usage,"finished":true}),
-                        )
-                        .map_err(file_error)?;
-                        return Ok(result);
+                    "finish_review" if !finish_alone => {
+                        Err(EngineError::Rejected("finish_review 必须单独调用。".into()))
                     }
+                    "finish_review" => match submit_review(
+                        &args,
+                        knowledge_directory,
+                        project_directory,
+                        &state,
+                        &evidence_fingerprint,
+                        &inspected,
+                        &evidence,
+                    ) {
+                        Err(
+                            error @ (EngineError::Protocol(_)
+                            | EngineError::Rejected(_)
+                            | EngineError::Json(_)),
+                        ) => Err(error),
+                        Err(error) => return Err(error),
+                        Ok(submission) => break 'review Some(submission),
+                    },
                     _ => Err(EngineError::Rejected(
                         "总结仅允许读取证据、读取经验和 finish_review。".into(),
                     )),
                 };
                 let value = match result {
                     Ok(value) => value,
+                    Err(error) if call.name == "finish_review" => {
+                        let reason = match error {
+                            EngineError::Protocol(reason) | EngineError::Rejected(reason) => reason,
+                            other => other.to_string(),
+                        };
+                        if let Some(progress) = progress {
+                            progress(EngineProgress {
+                                stage: "修正经验总结".into(),
+                                message: format!("总结提交未通过，正在请求模型修正。{reason}"),
+                                usage: usage.clone(),
+                                turn,
+                                api_requests: Some(
+                                    provider.request_count().saturating_sub(requests_before),
+                                ),
+                                ..EngineProgress::default()
+                            });
+                        }
+                        json!({"success":false,"error":reason,"instruction":"沿用已读证据，修正后重新提交。"})
+                    }
                     Err(error) => json!({"success":false,"error":error.to_string()}),
                 };
                 messages.push(
@@ -500,8 +475,43 @@ impl EngineService {
                 )
                 .map_err(file_error)?;
             }
+        };
+        let submission = submission
+            .ok_or_else(|| EngineError::Rejected("本次总结的 Token 预算不足。".into()))?;
+        let entry_id = submission.entry_id;
+        let mut knowledge_dependencies: Vec<_> = inspected
+            .keys()
+            .filter_map(|key| key.strip_prefix("knowledge:").map(str::to_owned))
+            .collect();
+        if let Some(id) = &entry_id {
+            knowledge_dependencies.push(id.clone());
         }
-        Err(EngineError::Rejected("本次总结的 Token 预算不足。".into()))
+        knowledge_dependencies.sort();
+        knowledge_dependencies.dedup();
+        let result = EngineReviewResult {
+            cache_version: 2,
+            library_fingerprint: review_library_fingerprint(
+                &knowledge_entries(knowledge_directory)?,
+                &state,
+                &knowledge_dependencies,
+            )?,
+            knowledge_dependencies,
+            evidence_fingerprint,
+            summary: submission.summary,
+            entry_id,
+            revision: submission.revision,
+            usage,
+            api_requests: Some(provider.request_count().saturating_sub(requests_before)),
+            main_program_suggestions: submission.suggestions,
+            reused: false,
+        };
+        write_json(&report, &result).map_err(file_error)?;
+        write_json(
+            &project_directory.join("logs/engine-review-session.json"),
+            &json!({"messages":messages,"usage":result.usage,"finished":true}),
+        )
+        .map_err(file_error)?;
+        Ok(result)
     }
 }
 
@@ -591,14 +601,40 @@ fn require_knowledge_text<'a>(
     maximum: usize,
 ) -> Result<&'a str, EngineError> {
     let value = text(entry, key)?;
-    if value.trim().is_empty() || value.encode_utf16().count() > maximum {
-        return Err(EngineError::Protocol(format!("经验 {key} 为空或过长。")));
-    }
+    check_text_length(
+        format_args!("经验 {key}"),
+        value,
+        value.encode_utf16().count(),
+        maximum,
+    )?;
     Ok(value)
 }
 
+fn check_text_length(
+    field: impl std::fmt::Display,
+    value: &str,
+    length: usize,
+    maximum: usize,
+) -> Result<(), EngineError> {
+    if value.trim().is_empty() {
+        return Err(EngineError::Protocol(format!(
+            "{field} 需要填写非空白文本。"
+        )));
+    }
+    if length > maximum {
+        return Err(EngineError::Protocol(format!(
+            "{field} 长度为 {length}，上限为 {maximum}。"
+        )));
+    }
+    Ok(())
+}
+
 fn validate_knowledge(entry: &Value) -> Result<(), EngineError> {
-    let invalid = || EngineError::Protocol("经验的引擎分类、工具或证据来源无效。".into());
+    validate_knowledge_fields(entry)?;
+    validate_knowledge_attachments(entry)
+}
+
+fn validate_knowledge_fields(entry: &Value) -> Result<(), EngineError> {
     let family = &entry["family"];
     let key = text(family, "key")?;
     let name = require_knowledge_text(family, "name", 160)?;
@@ -607,12 +643,23 @@ fn validate_knowledge(entry: &Value) -> Result<(), EngineError> {
         || name.chars().any(char::is_control)
         || !stable_key(text(entry, "key")?, 64)
     {
-        return Err(invalid());
+        return Err(EngineError::Protocol(
+            "经验的引擎分类或变体标识无效。".into(),
+        ));
     }
-    for (key, maximum) in [("conditions", 1600), ("summary", 400), ("guidance", 8000)] {
+    for (key, maximum) in [
+        ("conditions", CONDITIONS_LIMIT),
+        ("summary", KNOWLEDGE_SUMMARY_LIMIT),
+        ("guidance", GUIDANCE_LIMIT),
+    ] {
         require_knowledge_text(entry, key, maximum)?;
     }
-    let aliases = entry["aliases"].as_array().ok_or_else(invalid)?;
+    let invalid_aliases = || {
+        EngineError::Protocol(
+            "经验的 aliases 必须为最多 12 项的数组，每项须为非空白文本，长度上限为 160。".into(),
+        )
+    };
+    let aliases = entry["aliases"].as_array().ok_or_else(invalid_aliases)?;
     if aliases.len() > 12
         || aliases.iter().any(|alias| {
             alias
@@ -620,8 +667,13 @@ fn validate_knowledge(entry: &Value) -> Result<(), EngineError> {
                 .is_none_or(|alias| alias.trim().is_empty() || alias.encode_utf16().count() > 160)
         })
     {
-        return Err(invalid());
+        return Err(invalid_aliases());
     }
+    Ok(())
+}
+
+fn validate_knowledge_attachments(entry: &Value) -> Result<(), EngineError> {
+    let invalid = || EngineError::Protocol("经验的工具或证据来源无效。".into());
     let origins = entry["origins"].as_array().ok_or_else(invalid)?;
     if origins.is_empty()
         || origins.iter().any(|origin| {
@@ -755,6 +807,54 @@ fn knowledge_id(value: &Value) -> Option<String> {
     ))
 }
 
+struct SubmittedReview {
+    summary: String,
+    suggestions: Vec<String>,
+    entry_id: Option<String>,
+    revision: Option<String>,
+}
+
+fn submit_review(
+    args: &Value,
+    directory: &Path,
+    project: &Path,
+    state: &Session,
+    fingerprint: &str,
+    inspected: &BTreeMap<String, String>,
+    evidence: &[InventoryFile],
+) -> Result<SubmittedReview, EngineError> {
+    let summary = text(args, "summary")?;
+    check_text_length(
+        "项目总结 summary",
+        summary,
+        summary.chars().count(),
+        REVIEW_SUMMARY_LIMIT,
+    )?;
+    let suggestions = args
+        .get("mainProgramSuggestions")
+        .map(Vec::<String>::deserialize)
+        .transpose()?
+        .unwrap_or_default();
+    let (entry_id, revision) = match args.get("improvement").filter(|value| !value.is_null()) {
+        Some(draft) => save_improvement(
+            directory,
+            project,
+            state,
+            fingerprint,
+            draft,
+            inspected,
+            evidence,
+        )?,
+        None => (None, None),
+    };
+    Ok(SubmittedReview {
+        summary: summary.to_owned(),
+        suggestions,
+        entry_id,
+        revision,
+    })
+}
+
 fn save_improvement(
     directory: &Path,
     project: &Path,
@@ -762,30 +862,12 @@ fn save_improvement(
     fingerprint: &str,
     draft: &Value,
     inspected: &BTreeMap<String, String>,
-    evidence_files: &[&str],
+    evidence_files: &[InventoryFile],
 ) -> Result<(Option<String>, Option<String>), EngineError> {
-    for (key, maximum) in [
-        ("key", 64),
-        ("conditions", 1600),
-        ("summary", 400),
-        ("guidance", 8000),
-    ] {
-        let value = text(draft, key)?;
-        if value.trim().is_empty() || value.chars().count() > maximum {
-            return Err(EngineError::Protocol(format!("经验 {key} 为空或过长。")));
-        }
-    }
+    validate_knowledge_fields(draft)?;
     let id = knowledge_id(draft)
         .ok_or_else(|| EngineError::Protocol("经验缺少稳定的引擎分类。".into()))?;
-    resolve_relative(directory, &format!("{id}.json"))?;
-    if !id
-        .bytes()
-        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || b".-".contains(&byte))
-    {
-        return Err(EngineError::Protocol(
-            "经验分类和变体键必须是稳定的小写格式标识。".into(),
-        ));
-    }
+    let path = resolve_relative(directory, &format!("{id}.json"))?;
     let citations: Vec<String> = serde_json::from_value(draft["evidence"].clone())?;
     if citations.is_empty()
         || citations.len() > 8
@@ -793,16 +875,24 @@ fn save_improvement(
             path != "overview"
                 && (!inspected.contains_key(path)
                     || path != "adaptation/current/session.json"
-                        && !evidence_files.contains(&path.as_str()))
+                        && !evidence_files.iter().any(|file| file.path == *path))
         })
     {
         return Err(EngineError::Rejected(
             "经验必须引用 overview 或实际读取过的项目证据，最多 8 项。".into(),
         ));
     }
-    let path = directory.join(format!("{id}.json"));
     let previous = if path.try_exists()? {
-        Some(read_knowledge_entry(&path, &id)?)
+        Some(read_knowledge_entry(&path, &id).map_err(|error| {
+            match error {
+                EngineError::Io(_) => error,
+                _ => std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("读取已有引擎经验 {id} 失败：{error}"),
+                )
+                .into(),
+            }
+        })?)
     } else {
         None
     };
@@ -869,16 +959,22 @@ fn save_improvement(
     entry
         .as_object_mut()
         .map(|object| object.remove("evidence"));
-    validate_knowledge(&entry)?;
+    validate_knowledge_attachments(&entry)?;
     let revision = knowledge_revision(&entry);
     entry["revision"] = json!(revision);
-    write_json(&path, &entry).map_err(file_error)?;
+    write_json(&path, &entry).map_err(std::io::Error::other)?;
     Ok((Some(id), Some(revision)))
 }
 
 fn review_tools() -> Vec<Value> {
     let string = json!({"type":"string"});
     let integer = json!({"type":"integer","minimum":0});
+    let knowledge_text = |maximum: usize, description: &str| {
+        json!({
+            "type":"string", "minLength":1, "maxLength":maximum,
+            "description":format!("{description} Nonblank, at most {maximum} UTF-16 code units.")
+        })
+    };
     vec![
         definition(
             "read_evidence",
@@ -901,7 +997,22 @@ fn review_tools() -> Vec<Value> {
         definition(
             "finish_review",
             "Save concise conclusion and at most one cited conditional engine/variant improvement. improvement=null is correct when no supported useful finding remains. Preserve valid existing guidance and tools. Call alone.",
-            json!({"summary":string,"mainProgramSuggestions":{"type":"array","items":string},"improvement":{"anyOf":[{"type":"null"},{"type":"object","properties":{"key":string,"family":{"type":"object","properties":{"kind":string,"key":string,"name":string},"required":["kind","key","name"]},"aliases":{"type":"array","items":string},"conditions":string,"summary":string,"guidance":string,"evidence":{"type":"array","items":string},"tools":{"type":"array","items":{"type":"object","properties":{"name":string,"description":string,"usage":string,"sourceFiles":{"type":"array","items":string}},"required":["name","description","usage","sourceFiles"]}}},"required":["key","family","aliases","conditions","summary","guidance","evidence","tools"]}]}}),
+            json!({
+                "summary":{"type":"string","minLength":1,"maxLength":REVIEW_SUMMARY_LIMIT,"description":"Nonblank project conclusion."},
+                "mainProgramSuggestions":{"type":"array","items":string},
+                "improvement":{"anyOf":[{"type":"null"}, {
+                    "type":"object","properties":{
+                        "key":string,
+                        "family":{"type":"object","properties":{"kind":string,"key":string,"name":string},"required":["kind","key","name"]},
+                        "aliases":{"type":"array","items":string},
+                        "conditions":knowledge_text(CONDITIONS_LIMIT, "When the entry applies."),
+                        "summary":knowledge_text(KNOWLEDGE_SUMMARY_LIMIT, "Short library preview. Put implementation details in guidance."),
+                        "guidance":knowledge_text(GUIDANCE_LIMIT, "Reusable details for the next adaptation."),
+                        "evidence":{"type":"array","items":string},
+                        "tools":{"type":"array","items":{"type":"object","properties":{"name":string,"description":string,"usage":string,"sourceFiles":{"type":"array","items":string}},"required":["name","description","usage","sourceFiles"]}}
+                    },"required":["key","family","aliases","conditions","summary","guidance","evidence","tools"]
+                }]}
+            }),
             &["summary", "mainProgramSuggestions", "improvement"],
         ),
     ]
