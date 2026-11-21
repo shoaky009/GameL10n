@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod catalog_ui;
+mod events;
 mod game_check_ui;
 mod launch_ui;
 mod log_ui;
@@ -19,7 +20,7 @@ mod workbench_ui;
 
 use clap::Parser;
 use gamel10n_core::{
-    AppEvent, Application, CoreError, ToolPaths, catalog::EngineCatalog, default_data_directory,
+    Application, CoreError, ToolPaths, catalog::EngineCatalog, default_data_directory,
 };
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use std::{
@@ -462,7 +463,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     {
         let ctx = context.clone();
         runtime.spawn(async move {
-            subscribe_events(ctx.clone()).await;
+            events::subscribe_events(ctx.clone()).await;
             if let Err(error) = refresh_projects(&ctx, "").await {
                 ctx.show_error("", error.to_string());
             }
@@ -807,224 +808,6 @@ pub async fn refresh_projects(ctx: &Context, query: &str) -> Result<(), CoreErro
         }
     });
     Ok(())
-}
-
-pub async fn subscribe_events(ctx: Context) {
-    let app = ctx.app().await;
-    let mut events = app.subscribe();
-    let epoch = ctx.root_generation.load(Ordering::Relaxed);
-    ctx.runtime.clone().spawn(async move {
-        loop {
-            let event = match events.recv().await {
-                Ok(event) => event,
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                    ctx.update(|ui| {
-                        ui.global::<App>()
-                            .invoke_action("refresh-project".into(), "".into())
-                    });
-                    continue;
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-            };
-            if ctx.root_generation.load(Ordering::Relaxed) != epoch {
-                break;
-            }
-            match event {
-                AppEvent::EngineLibraryChanged => {
-                    *ctx.catalog
-                        .lock()
-                        .unwrap_or_else(|error| error.into_inner()) = None;
-                    ctx.update(|ui| {
-                        if ui.global::<App>().get_page() == 2 {
-                            ui.global::<App>()
-                                .invoke_action("catalog-refresh".into(), "".into());
-                        }
-                    });
-                }
-                AppEvent::ProjectsChanged => {
-                    let ctx = ctx.clone();
-                    ctx.update(|ui| {
-                        ui.global::<App>()
-                            .invoke_action("projects".into(), "".into())
-                    });
-                }
-                AppEvent::TaskChanged(state) => {
-                    let catalog_changed = !state.running
-                        && matches!(state.operation.as_str(), "adapt" | "review" | "recognize");
-                    if catalog_changed {
-                        *ctx.catalog.lock().unwrap_or_else(|e| e.into_inner()) = None;
-                    }
-                    ctx.update(move |ui| {
-                        let a = ui.global::<App>();
-                        let projects = a.get_projects();
-                        let mut running_changed = false;
-                        if let Some((index, mut row)) = projects
-                            .iter()
-                            .enumerate()
-                            .find(|(_, row)| row.id.as_str() == state.project_id)
-                        {
-                            running_changed = row.running != state.running;
-                            row.running = state.running;
-                            row.status = recognition_ui::task_status(
-                                &state.operation,
-                                state.running,
-                                state.succeeded,
-                                None,
-                                false,
-                            )
-                            .into();
-                            projects.set_row_data(index, row);
-                        }
-                        if catalog_changed && a.get_page() == 2 {
-                            a.invoke_action("catalog-refresh".into(), "".into());
-                        }
-                        if a.get_project_id().as_str() == state.project_id {
-                            if state.running && !a.get_busy() {
-                                a.set_error("".into());
-                                a.set_activity("".into());
-                                a.set_progress(0.0);
-                                a.set_task_usage(Default::default());
-                                if recognition_ui::recognition_task(&state.operation) {
-                                    recognition_ui::clear_failure(&a);
-                                    a.set_adaptation_progress("".into());
-                                    a.set_adaptation_notes("".into());
-                                }
-                            }
-                            a.set_busy(state.running);
-                            a.set_task_operation(state.operation.clone().into());
-                            a.set_editor_editable(
-                                !state.running
-                                    || !matches!(
-                                        state.operation.as_str(),
-                                        "retranslate" | "extract" | "recognize" | "workflow"
-                                    ),
-                            );
-                            a.set_status(
-                                recognition_ui::task_status(
-                                    &state.operation,
-                                    state.running,
-                                    state.succeeded,
-                                    None,
-                                    false,
-                                )
-                                .into(),
-                            );
-                            a.set_task_message(state.message.clone().into());
-                            a.set_adaptation_running(state.running && state.operation == "adapt");
-                            a.set_recognition_running(
-                                state.running && recognition_ui::recognition_task(&state.operation),
-                            );
-                            if a.get_recognition_running() {
-                                a.set_adaptation_progress(state.message.clone().into());
-                            }
-                            if state.running
-                                && state.operation == "adapt"
-                                && !a.get_adaptation_summary().is_empty()
-                            {
-                                a.set_adaptation_result_title("上次适配结果".into());
-                            }
-                            if !state.running {
-                                a.set_activity("".into());
-                                a.set_adaptation_progress("".into());
-                                if state.succeeded == Some(false) {
-                                    if recognition_ui::recognition_task(&state.operation) {
-                                        recognition_ui::show_task_failure(&a, &state);
-                                    } else {
-                                        a.set_error(state.message.into());
-                                    }
-                                }
-                                a.invoke_action("refresh-project".into(), "".into());
-                            }
-                        }
-                        if running_changed {
-                            a.invoke_action("projects".into(), "".into());
-                        }
-                    });
-                }
-                AppEvent::TranslationChanged {
-                    project_id,
-                    progress,
-                } => ctx.update(move |ui| {
-                    let a = ui.global::<App>();
-                    if a.get_project_id().as_str() == project_id {
-                        if a.get_tab() == 1
-                            && (!progress.updates.is_empty()
-                                || !progress.failure_updates.is_empty())
-                        {
-                            a.invoke_action("texts".into(), "refresh".into());
-                        }
-                        a.set_progress(if progress.total == 0 {
-                            0.0
-                        } else {
-                            progress.completed as f32 / progress.total as f32
-                        });
-                        a.set_counts(
-                            format!(
-                                "完成 {} / {} · 复用 {} · 失败 {}",
-                                progress.completed,
-                                progress.total,
-                                progress.cache_hits,
-                                progress.failed
-                            )
-                            .into(),
-                        );
-                        a.set_task_message(progress.message.into());
-                        a.set_task_usage(token_ui::usage(
-                            progress.usage.input_tokens,
-                            progress.usage.output_tokens,
-                            progress.usage.cached_tokens.unwrap_or(0),
-                        ));
-                    }
-                }),
-                AppEvent::EngineProgress {
-                    project_id,
-                    progress,
-                } => ctx.update(move |ui| {
-                    let a = ui.global::<App>();
-                    if a.get_project_id().as_str() == project_id && a.get_busy() {
-                        let detail = recognition_ui::progress_detail(&progress);
-                        let usage = token_ui::analysis_usage(
-                            progress.usage.input_tokens,
-                            progress.usage.output_tokens,
-                            progress.usage.cached_tokens.unwrap_or(0),
-                            progress.api_requests,
-                            progress.api_requests_estimated,
-                        );
-                        if a.get_recognition_running()
-                            && (!progress.progress_note.is_null()
-                                || !progress.last_breakthrough.is_null())
-                        {
-                            a.set_adaptation_notes(
-                                recognition_ui::progress_notes(
-                                    &progress.progress_note,
-                                    &progress.last_breakthrough,
-                                )
-                                .into(),
-                            );
-                        }
-                        if a.get_adaptation_running() {
-                            a.set_adaptation_usage(usage.clone());
-                        }
-                        if a.get_recognition_running() {
-                            a.set_adaptation_progress(detail.clone().into());
-                        }
-                        a.set_task_usage(usage);
-                        a.set_task_message(detail.into());
-                    }
-                }),
-                AppEvent::Log { project_id, line } => ctx.update(move |ui| {
-                    let a = ui.global::<App>();
-                    if a.get_project_id().as_str() == project_id {
-                        if !line.starts_with('[') {
-                            a.set_error(line.into());
-                        } else {
-                            a.invoke_action("logs".into(), "".into());
-                        }
-                    }
-                }),
-            }
-        }
-    });
 }
 
 pub fn show_dialog(ctx: &Context, kind: &str, title: &str, message: String) {
