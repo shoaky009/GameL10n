@@ -2721,7 +2721,7 @@ impl EngineService {
             )?;
         }
         let mut components = Vec::new();
-        if id != crate::adaptation_assets::FLASH_POOL_TEMPLATE {
+        if archive_template.is_none_or(|template| template.archive_component.is_some()) {
             components.push("engine_archive.py".to_owned());
         }
         if let Some(template) = archive_template {

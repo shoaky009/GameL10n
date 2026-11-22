@@ -16,7 +16,7 @@ use crate::{
     vntextpatch::{BUILTIN_FORMATS, BuiltinFormat},
 };
 
-pub(crate) const DISCOVERY_REVISION: u64 = 20;
+pub(crate) const DISCOVERY_REVISION: u64 = 21;
 const CONTAINERS: &[&str] = &[
     "xp3", "rpa", "rpyc", "pack", "pak", "arc", "ypf", "int", "pfs",
 ];
@@ -574,7 +574,7 @@ fn inspect_builtin_files(
                     continue;
                 }
                 let ext = extension(&name);
-                if matches!(ext.as_str(), "scn" | "psb" | "script" | "swf")
+                if matches!(ext.as_str(), "scn" | "psb" | "script" | "swf" | "ain")
                     || name == "scpack.idx"
                     || name.rsplit_once(".pfs.").is_some_and(|(_, suffix)| {
                         suffix.len() == 3 && suffix.bytes().all(|byte| byte.is_ascii_digit())
@@ -642,6 +642,7 @@ fn inspect_builtin_files(
     let mut bsscript = Vec::new();
     let mut scn = Vec::new();
     let mut flash_movies = Vec::new();
+    let mut ain_scripts = Vec::new();
     let mut pfs_archives = Vec::new();
     let mut script_archives = Vec::new();
     for (_, path) in samples {
@@ -676,6 +677,9 @@ fn inspect_builtin_files(
             && flash_movies.len() < 4
         {
             flash_movies.push(path.clone());
+        }
+        if extension(path) == "ain" && head.starts_with(b"AI2\0") && ain_scripts.len() < 4 {
+            ain_scripts.push(path.clone());
         }
         if head.starts_with(b"pf8") && pfs_archives.len() < 2 {
             pfs_archives.push(path.clone());
@@ -876,6 +880,14 @@ fn inspect_builtin_files(
             "evidence":["FWS/CWS 文件头，仅为容器线索。按顶层动作及常量池确认 AVM1 文本。"],
             "template":"flash-avm1-pool","missingCapabilities":["嵌套影片、独立界面和中文运行显示需核对。"]}));
     }
+    if !ain_scripts.is_empty() {
+        let template = crate::adaptation_assets::SYSTEM4_AIN_TEMPLATE;
+        result.push(json!({"format":"System4Ain","adapterId":format!("template.{template}"),
+            "name":"AliceSoft System4 AIN","evidenceKind":"script-signature","sampleFiles":ain_scripts,
+            "evidence":[".ain 文件头匹配 AI2，按解压后的 VERS、CODE 和 MSG1 表确认布局。"],
+            "scriptComponent":"system4-ain","template":template,
+            "missingCapabilities":["核对独立界面文字、EX 和字库及游戏内显示。"]}));
+    }
     if !bsscript.is_empty() {
         bsscript.truncate(4);
         result.insert(0,json!({"format":"BSScriptRev6","adapterId":"reference.bsscript-rev6","name":"BSScript Rev.6","evidenceKind":"script-signature",
@@ -932,7 +944,7 @@ fn inspect_builtin_files(
             "evidence":"完整的哈希命名脚本可试用 Whale CP932 文本解析。",
             "inspectCall":{"tool":"inspect_adapter_component","arguments":{"id":"whale-script"}}}));
     }
-    let mut report = json!({"revision":DISCOVERY_REVISION,"filesScanned":scanned,"partial":partial,"candidates":result,"components":components,"flashMovies":flash_movies,"pfsArchives":pfs_archives,"scriptArchives":script_archives,"warnings":warnings});
+    let mut report = json!({"revision":DISCOVERY_REVISION,"filesScanned":scanned,"partial":partial,"candidates":result,"components":components,"flashMovies":flash_movies,"ainScripts":ain_scripts,"pfsArchives":pfs_archives,"scriptArchives":script_archives,"warnings":warnings});
     if !tyrano.directories.is_empty() {
         report["tyranoScript"] = json!({"dataDirectories":tyrano.directories,"evidence":"相邻的 tyrano/tyrano.js 和 tyrano/plugins/kag/kag.js。按 TyranoScript 检查 data/scenario 剧本的实际编码和标签，区分对白、插件示例和脚本注释。"});
     }

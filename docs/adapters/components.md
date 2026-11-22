@@ -5,6 +5,7 @@
 | 需要 | 组件或入口 |
 | --- | --- |
 | EAGLS 脚本、KaGuYa 表格、Unity 容器 | `eagls-script`、`kaguya-tblstr`、`unity-serialized-file` |
+| AliceSoft System4 消息表 | `system4-ain` 检查 AI2 封装的 MSG1，按槽位变长回填 |
 | XP3 过滤器与重建 | `xp3-adler` 检测过滤器，`xp3-smil` 处理确认的 SMIL 映射 |
 | KiriKiri 场景和预渲染字库 | `kirikiri-scn-text`、`kirikiri-tft` |
 | CP932 与隧道编码 | `cp932-glyph-map`、`sjis-tunnel`、`vntextproxy-runtime` |

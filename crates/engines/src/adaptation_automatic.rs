@@ -1703,11 +1703,14 @@ fn preparable_template(state: &Session) -> Option<&'static ArchiveTemplate> {
 
 pub(super) fn can_prepare_for_model(state: &Session) -> bool {
     preparable_template(state).is_some()
-        || state
-            .extra
-            .get("builtinDiscovery")
-            .and_then(|evidence| evidence["flashMovies"].as_array())
-            .is_some_and(|movies| !movies.is_empty())
+        || ARCHIVE_TEMPLATES.iter().any(|template| {
+            template.prepare_for_model
+                && template.discovery_key.is_some_and(|key| {
+                    state.extra["builtinDiscovery"][key]
+                        .as_array()
+                        .is_some_and(|resources| !resources.is_empty())
+                })
+        })
 }
 
 pub(super) async fn run_template(
@@ -1787,6 +1790,8 @@ pub(super) async fn run_template(
             && patterns.iter().any(|pattern| glob_match(pattern, path));
         let mut candidate_files: Vec<_> = paths.keys().filter(|path| template_input(path)).cloned().collect();
         let flash = id == crate::adaptation_assets::FLASH_POOL_TEMPLATE;
+        let ain = id == crate::adaptation_assets::SYSTEM4_AIN_TEMPLATE;
+        let loose_template = archive_template.is_some_and(|template| template.archive_component.is_none());
         let candidate_limit = if flash { 1024 } else { 64 };
         if candidate_files.len() > candidate_limit {
             return Err(reject(format!("自动组合的待检查资源超过 {candidate_limit} 项")));
@@ -1808,12 +1813,17 @@ pub(super) async fn run_template(
         if !identical_copies.is_empty() {
             report["identicalArchiveCopies"] = json!(identical_copies);
         }
-        supported(remaining,&template,template["archiveComponent"] == "archive.rpa3",false)?;
+        if let Err(error) = supported(remaining, &template, template["archiveComponent"] == "archive.rpa3", false) {
+            if !ain {
+                return Err(error);
+            }
+            report["coverageDiagnostic"] = json!(limit(&error.to_string(), 1000));
+        }
         if let Some(archive) = uninstall_archive {
             candidate_files.push(archive.clone());
         }
         let lengths: BTreeMap<_, _> = if let Some(profile) = archive_template {
-            report["stage"] = json!(if flash { "swf-inspection" } else { "archive-inspection" });
+            report["stage"] = json!(if flash { "swf-inspection" } else if ain { "ain-inspection" } else { "archive-inspection" });
             let evidence = probe_archive_template(service, request, workspace, state, profile, &candidate_files, token).await?;
             if let Some(ancillary) = evidence.get("uninstallArchive") {
                 report["uninstallArchive"] = ancillary.clone();
@@ -1827,6 +1837,9 @@ pub(super) async fn run_template(
             if flash {
                 report["movieProbe"] = json!({"inspected":evidence["inspectedMovies"],"selected":evidence["selectedMovies"],
                     "textUnits":evidence["textUnits"],"skipped":evidence["skippedMovieCount"],"examples":evidence["skippedMovies"]});
+                report["selectedBytes"] = evidence["selectedBytes"].clone();
+            } else if ain {
+                report["ainProbe"] = evidence["scripts"].clone();
                 report["selectedBytes"] = evidence["selectedBytes"].clone();
             } else {
                 if !evidence["indexFingerprints"].as_object().is_some_and(|indices| !indices.is_empty()) {
@@ -1893,7 +1906,7 @@ pub(super) async fn run_template(
         }
         report["stage"]=json!("compose");record(state,path,"automaticTemplate",report.clone()).await?;EngineService::report(progress,"自动组合适配器",format!("资源符合 {} 的条件，正在连接现有组件。",template["id"]));
         let mut composition = json!({"id":template["id"]});
-        if flash {
+        if loose_template {
             composition["resourcePatterns"] = json!(lengths.keys().collect::<Vec<_>>());
         }
         let composed=service.compose_template(workspace,state,&composition,token).await?;
@@ -1904,6 +1917,9 @@ pub(super) async fn run_template(
         checks.push(RUNTIME_CHECK.into());
         if flash {
             checks.push("确认 AVM1 外层脚本以外的界面、嵌套影片和启动程序内文字覆盖。".into());
+        }
+        if ain {
+            checks.push("核对 MSG1 之外的 STR0、EX 字段，以及游戏实际使用的编码和字体。".into());
         }
         if let Some(duplicates) = report["duplicateScripts"].as_u64().filter(|count| *count > 0) {
             checks.push(format!("各卷有 {duplicates} 份同路径脚本，需要确认游戏加载顺序。"));
@@ -1921,7 +1937,11 @@ pub(super) async fn run_template(
         if prepare_for_model {
             workflow::observe(state, workspace, "test_adapter", arguments, &tested);
             if tested["passed"] == true {
-                report["nextAction"] = json!("沿用宿主已验收的资源和源码，核对独立文字覆盖、卷加载顺序及游戏显示");
+                report["nextAction"] = json!(if ain {
+                    "沿用已验收的 MSG1 读写，只调查其他文字覆盖、字库和显示路径"
+                } else {
+                    "沿用宿主已验收的资源和源码，核对独立文字覆盖、卷加载顺序及游戏显示"
+                });
             } else if state.verification.as_ref().is_some_and(|result| result.original_roundtrip_passed) {
                 report["originalRoundtripPassed"] = json!(true);
                 report["nextAction"] = json!("沿用已通过原文往返的模板和资源范围，处理当前译文验收问题及游戏内显示。修改后宿主按已保存的配方重新验收");

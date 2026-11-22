@@ -25,6 +25,17 @@
     ]
   },
   {
+    "id": "system4-ain",
+    "name": "AliceSoft System4 AIN 消息表",
+    "scope": "完整 AI2 容器内带 VERS、CODE、FUNC 和 MAIN 边界的 MSG1。按槽位读取和变长回填，保留其余字节。STR0、EX 字段、字库和实际显示单独确认。",
+    "origin": "复用固定库的 AI2 容器与 MSG1 字节变换，按 System4 节边界检查消息槽。",
+    "api": "tools.system4_ain.Ain(data).message(index) 返回解码前的消息字节。rebuild({index: bytes}) 更新指定槽位，index 从 0 开始。原文严格解码结果由 decoded_messages() 返回。接入已有项目时用原有 ID 与槽位对应关系。",
+    "example": "try_builtin_adapter(format=\"system4-ain\", directory=\"resources\", files=[\"scenario.ain\"])\n# Use compose_adapter_template(id=\"system4-ain-msg1\") for a supported loose script. Reuse the raw slot writer with an independently verified display encoding or FNL mapping.",
+    "sampleCheck": "system4_ain.py",
+    "files": [{"name": "system4_ain.py", "path": "src/tools/system4_ain.py", "binary": false}],
+    "engineFamilies": ["system4", "system4ain", "alicesoft", "ain"]
+  },
+  {
     "id": "eagls-script",
     "name": "EAGLS / ALIS 脚本文本",
     "scope": "完整、已解包的源文本脚本成员；复用固定库解析对白、选项和字面姓名，保留变量引用、标签表与尾标。默认按标签区线索有界核对 EAGLS v1/v2 与文本起点，其他密钥或标签布局须显式提供 Profile。界面赋值、封包连接和中文运行支持另行确认。",

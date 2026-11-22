@@ -26,6 +26,7 @@ pub(crate) const ARTEMIS_PFS_TEMPLATE: &str = "artemis-pfs8-ast";
 pub(crate) const QLIE_PACK_TEMPLATE: &str = "qlie-pack3-imos";
 pub(crate) const QLIE_PACK31_TEMPLATE: &str = "qlie-pack31-imos";
 pub(crate) const FLASH_POOL_TEMPLATE: &str = "flash-avm1-pool";
+pub(crate) const SYSTEM4_AIN_TEMPLATE: &str = "system4-ain-msg1";
 const QLIE_TEMPLATE_SOURCES: &[&str] = &[
     "qlie_archive.py",
     "qlie_bitmap.py",
@@ -40,7 +41,7 @@ const QLIE_TEMPLATE_SOURCES: &[&str] = &[
 pub(crate) struct ArchiveTemplate {
     pub(crate) id: &'static str,
     pub(crate) format: &'static str,
-    archive_component: Option<&'static str>,
+    pub(crate) archive_component: Option<&'static str>,
     pub(crate) extensions: &'static [&'static str],
     pub(crate) patterns: &'static [&'static str],
     pub(crate) name: &'static str,
@@ -55,6 +56,22 @@ pub(crate) struct ArchiveTemplate {
 }
 
 pub(crate) const ARCHIVE_TEMPLATES: &[ArchiveTemplate] = &[
+    ArchiveTemplate {
+        id: SYSTEM4_AIN_TEMPLATE,
+        format: "System4Ain",
+        archive_component: None,
+        extensions: &[".ain"],
+        patterns: &["**/*.ain"],
+        name: "AliceSoft System4 AIN 对话",
+        module: "system4_ain_adapter",
+        extra_sources: &["system4_ain.py"],
+        optional_components: &[],
+        discovery_key: Some("ainScripts"),
+        sample_component: None,
+        prepare_for_model: true,
+        distinct_volume_names: false,
+        limitations: "AI2 容器内带 VERS、CODE、FUNC 和 MAIN 边界的 MSG1 消息表，支持变长回填。按完整表验证原文编码。界面、EX、字库及实际显示单独确认",
+    },
     ArchiveTemplate {
         id: FLASH_POOL_TEMPLATE,
         format: "FlashAvm1",
@@ -257,6 +274,8 @@ pub(crate) fn template_catalog() -> Vec<Value> {
             "family":{"kind":"template","key":id,"name":name,"adapterId":format!("template.{id}")}});
         if id == FLASH_POOL_TEMPLATE {
             template["scriptComponent"] = json!("flash-avm1");
+        } else if id == SYSTEM4_AIN_TEMPLATE {
+            template["scriptComponent"] = json!("system4-ain");
         }
         template
     }).collect()

@@ -252,6 +252,9 @@ fn describe(component: &Component, service: &EngineService) -> Value {
 
 fn source(name: &str) -> Result<&'static [u8], EngineError> {
     match name {
+        "system4_ain.py" => Ok(include_bytes!(
+            "../../../adapters/components/system4_ain.py"
+        )),
         "flash_avm1.py" => Ok(include_bytes!("../../../adapters/components/flash_avm1.py")),
         "flash_avm1_adapter.py" => Ok(include_bytes!(
             "../../../adapters/components/flash_avm1_adapter.py"

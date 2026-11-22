@@ -17,7 +17,7 @@
 | [Flash AVM1](engines/flash-avm1.md) | 脚本组件与组合模板 | FWS/CWS 顶层动作的 UTF-8 常量池，支持变长回填和分支重定位 |
 | [Unity SerializedFile](engines/unity-serialized-text.md) | 容器组件 | Unity 2022 小端 v22，TextAsset 文本布局另行确认 |
 | [QLIE 封包适配、字体与启动](engines/qlie-filepack3-systemfont.md) | 脚本组合模板、中文字体补丁和启动组件 | ImoScripter FormatType=1，带外部密钥的 PACK 3.0 与 Hash 1.3，带内置密钥的 PACK 3.1 与 Hash 1.4。支持系统字体布局及配套的 Locale Emulator 启动入口 |
-| [System4 FNL 补字](engines/system4-ain14-msg1-fnl.md) | 字形组件 | 参考字形尺寸的位图生成，AIN、FNL 及运行补丁需单独适配 |
+| [AliceSoft System4 AIN 与 FNL](engines/system4-ain14-msg1-fnl.md) | 脚本组件、组合模板和字形组件 | AI2 封装的 MSG1 对话支持变长回填。FNL 按原字形尺寸补字，运行字库路径按游戏确认 |
 | [Artemis PFS](engines/artemis-pfs.md) | AST 组合模板与覆盖卷参考 | PFS v8、UTF-8 AST 2.0，覆盖加载按游戏确认 |
 | [NekoSDK / ADVSCRIPT2](engines/nekosdk.md) | 封包与脚本组件、组合模板 | NEKOPACK4A 和已确认的 CP932 对白记录 |
 | [AI5V / SILV MES](engines/ai5v-mes.md) | 脚本组件 | 已解包的 0x80 字表式 MES，按已知指令读写 CP932 内联文本 |
