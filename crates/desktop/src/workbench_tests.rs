@@ -253,6 +253,8 @@ fn confirmed_adaptation_rechecks_source_on_a_small_worker_stack() {
                 && event["call"]["name"] == "test_adapter"
                 && event["result"]["passed"] == true
         }));
+        invoke_action(&ui, &ctx, "adapt-dialog", "").await;
+        assert_eq!(ui.global::<App>().get_adaptation_objective(), 0);
         slint::quit_event_loop().unwrap();
     })
     .unwrap();
@@ -560,8 +562,18 @@ fn project_actions_keep_settings_selection_and_saved_edits_in_sync_across_tabs()
         app.set_workflow_use_existing_text(true);
         invoke_action(&ui, &ctx, "confirm", "workflow-settings").await;
         assert_eq!(app.get_modal(), "");
+        let directory = ctx.app().await.project_directory(&project.id).unwrap();
+        write_json(
+            &directory.join("rust-task.json"),
+            &serde_json::json!({
+                "projectId": project.id, "operation": "recognize",
+                "running": false, "succeeded": true, "message": "识别完成"
+            }),
+        )
+        .unwrap();
         invoke_action(&ui, &ctx, "adapt-dialog", "").await;
         assert_eq!(app.get_modal().as_str(), "adapt");
+        assert_eq!(app.get_adaptation_objective(), 1);
         assert_eq!(app.get_workflow_finish(), 1);
         assert!(app.get_workflow_use_existing_text());
         app.invoke_select_adaptation_objective(1);

@@ -35,12 +35,35 @@ pub struct GameProject {
 }
 
 impl GameProject {
+    pub fn next_recognition_goal(&self) -> Option<&str> {
+        if self
+            .extra
+            .get("taskSummary")
+            .is_some_and(recognition_completed)
+        {
+            return Some("repair");
+        }
+        self.settings["recognitionGoal"].as_str()
+    }
+
     pub(crate) fn mark_updated(&mut self) {
         self.extra.insert(
             "updatedAt".into(),
             Value::String(chrono::Utc::now().to_rfc3339()),
         );
     }
+}
+
+pub(crate) fn recognition_completed(summary: &Value) -> bool {
+    summary["succeeded"].as_bool() == Some(true)
+        && match summary["operation"].as_str() {
+            Some("recognize") => true,
+            Some("adapt") => matches!(
+                summary["adaptationStatus"].as_str(),
+                Some("Activated" | "Reused")
+            ),
+            _ => false,
+        }
 }
 
 /// Lightweight project list data. Opening the list never opens extraction payloads.

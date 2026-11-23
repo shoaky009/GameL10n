@@ -617,7 +617,7 @@ async fn show_adaptation_dialog(ctx: &Context, input: &UiInput) -> Result<(), Co
     settings_ui::refresh(ctx, Some(&input.project_id)).await?;
     let host = ctx.app().await;
     let project = host.open_project(&input.project_id).await?;
-    let goal = match project.settings["recognitionGoal"].as_str() {
+    let goal = match project.next_recognition_goal() {
         Some("recognize") => 0,
         Some("repair") => 1,
         Some("expandCoverage") => 2,

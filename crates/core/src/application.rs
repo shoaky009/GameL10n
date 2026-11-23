@@ -1352,7 +1352,14 @@ impl Application {
         project: &mut GameProject,
         summary: serde_json::Value,
     ) -> Result<(), CoreError> {
-        if project.extra.get("taskSummary") == Some(&summary) {
+        if crate::projects::recognition_completed(&summary)
+            && project.settings["recognitionGoal"] != "repair"
+        {
+            if !project.settings.is_object() {
+                project.settings = serde_json::json!({});
+            }
+            project.settings["recognitionGoal"] = "repair".into();
+        } else if project.extra.get("taskSummary") == Some(&summary) {
             return Ok(());
         }
         project.extra.insert("taskSummary".into(), summary);
@@ -1447,6 +1454,56 @@ pub(crate) fn resolve_relative(root: &Path, relative: &str) -> Result<PathBuf, C
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn only_completed_recognition_changes_the_next_goal_to_repair() {
+        let root = tempfile::tempdir().unwrap();
+        let game = root.path().join("game");
+        fs::create_dir(&game).unwrap();
+        let app = Application::open(root.path().join("data"), &ToolPaths::new("missing"))
+            .await
+            .unwrap();
+        let id = app.add_project(&game).await.unwrap().id;
+        let details = app
+            .project_directory(&id)
+            .unwrap()
+            .join("adaptation-result.json");
+        for (operation, status, succeeded, expected) in [
+            ("recognize", "", true, "repair"),
+            ("recognize", "", true, "repair"),
+            ("recognize", "", false, "recognize"),
+            ("adapt", "Activated", true, "repair"),
+            ("adapt", "Reused", true, "repair"),
+            ("adapt", "BudgetExhausted", true, "recognize"),
+            ("adapt", "WaitingForUser", true, "recognize"),
+            ("adapt", "Incomplete", true, "recognize"),
+            ("adapt", "Unsupported", true, "recognize"),
+            ("adapt", "Failed", false, "recognize"),
+            ("adapt", "Activated", false, "recognize"),
+        ] {
+            app.save_project_settings(&id, serde_json::json!({"recognitionGoal": "recognize"}))
+                .await
+                .unwrap();
+            app.begin(&id, operation, "识别中").await.unwrap();
+            write_json(&details, &serde_json::json!({"status": status})).unwrap();
+            let result = if succeeded {
+                Ok("结束".into())
+            } else {
+                Err("失败".into())
+            };
+            app.finish(&id, operation, result).await.unwrap();
+            let project = app.open_project(&id).await.unwrap();
+            assert_eq!(
+                project.next_recognition_goal(),
+                Some(expected),
+                "{operation} {status}"
+            );
+            assert_eq!(
+                project.settings["recognitionGoal"], expected,
+                "{operation} {status}"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn repeated_successful_adaptation_recovers_its_new_summary_without_rereading_details() {
