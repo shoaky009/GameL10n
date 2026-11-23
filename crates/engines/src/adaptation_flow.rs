@@ -592,10 +592,6 @@ pub(super) async fn run(
         .extra
         .insert("matchedKnowledge".into(), json!(knowledge.entries));
     let mut continuation = Some(continuation);
-    let output_limit = request.limits.maximum_output_tokens;
-    let mut recovering_output = false;
-    let mut turn_retries = 0;
-    let mut next_retry: Option<(&str, String, Duration)> = None;
     for key in ["lastImplementationTurn", "lastVerificationProgressTurn"] {
         if !state.extra.contains_key(key) {
             set_number(
@@ -635,197 +631,267 @@ pub(super) async fn run(
             .map_or("", RepairIssue::guidance)
     );
     let instruction_fingerprint = hash_text(&instructions);
-    let tool_definitions = serde_json::to_string(&all)?;
-    let tools_bytes = tool_definitions.len();
-    let tool_fingerprint = hash_text(&tool_definitions);
+    let (tools_bytes, tool_fingerprint) = {
+        let definitions = serde_json::to_string(&all)?;
+        (definitions.len(), hash_text(&definitions))
+    };
     trace_run(
         json!({"operation":"engine-knowledge","entries":knowledge.entries,"instructionFingerprint":instruction_fingerprint}),
     )?;
+    let mut run = AdaptationRun {
+        service,
+        request,
+        provider,
+        workspace,
+        path,
+        cancellation,
+        progress,
+        trace: trace_run,
+        tools: all,
+        known_tools,
+        instructions,
+        instruction_fingerprint,
+        tool_fingerprint,
+        tools_bytes,
+        initial_usage,
+        recovering_output: false,
+        turn_retries: 0,
+        next_retry: None,
+    };
     loop {
         if cancellation.is_cancelled() {
-            return Ok((
-                AdaptationStatus::Cancelled,
-                "任务已取消，现有进度已保留。".into(),
-                None,
-            ));
+            return Ok(cancelled_run());
         }
+        if let Some(done) = run.pending_tools(state).await? {
+            return Ok(done);
+        }
+        run.workflow_steps(state).await?;
+        run.prepare_turn(state, continuation.take())?;
+        if let Some(done) = run.model_turn(state).await? {
+            return Ok(done);
+        }
+    }
+}
+
+type RunOutcome = (AdaptationStatus, String, Option<AdapterHandle>);
+
+fn cancelled_run() -> RunOutcome {
+    (
+        AdaptationStatus::Cancelled,
+        "任务已取消，现有进度已保留。".into(),
+        None,
+    )
+}
+
+struct AdaptationRun<'a, 'r, T> {
+    service: &'a EngineService,
+    request: &'a AdaptationRequest<'r>,
+    provider: &'a OpenAiProvider,
+    workspace: &'a Path,
+    path: &'a Path,
+    cancellation: &'a CancellationToken,
+    progress: ProgressCallback<'a>,
+    trace: &'a T,
+    tools: Vec<Value>,
+    known_tools: Vec<String>,
+    instructions: String,
+    instruction_fingerprint: String,
+    tool_fingerprint: String,
+    tools_bytes: usize,
+    initial_usage: u64,
+    recovering_output: bool,
+    turn_retries: u8,
+    next_retry: Option<(&'static str, String, Duration)>,
+}
+
+impl<T: Fn(Value) -> Result<(), EngineError>> AdaptationRun<'_, '_, T> {
+    async fn pending_tools(&self, state: &mut Session) -> Result<Option<RunOutcome>, EngineError> {
         let sequential = sequential(&state.pending_calls);
         state
             .extra
             .insert("pendingCallsAreSequential".into(), json!(sequential));
         if let Err(error) = validate_batch(&state.pending_calls) {
             state.workflow.needs_verification = false;
-            trace_run(
+            (self.trace)(
                 json!({"operation":"tool-batch-rejected","turn":state.total_turns,"error":error,"tools":state.pending_calls.iter().map(|call| &call.name).collect::<Vec<_>>()}),
             )?;
             for call in std::mem::take(&mut state.pending_calls) {
                 append_failure(state, &call, &error);
             }
-            save_session(path, state).await?;
+            save_session(self.path, state).await?;
         }
         while let Some(call) = state.pending_calls.first().cloned() {
-            if cancellation.is_cancelled() {
-                return Ok((
-                    AdaptationStatus::Cancelled,
-                    "任务已取消，现有进度已保留。".into(),
-                    None,
-                ));
+            if self.cancellation.is_cancelled() {
+                return Ok(Some(cancelled_run()));
             }
-            state.running_tool_id = Some(call.id.clone());
-            save_session(path, state).await?;
-            let args = serde_json::from_str::<Value>(&call.arguments);
-            if let Some(progress) = progress {
-                progress(EngineProgress {
-                    translation_preview: None,
-                    stage: "执行适配工具".into(),
-                    message: crate::tool_activity::message(
-                        &call.name,
-                        args.as_ref().unwrap_or(&Value::Null),
-                    ),
-                    message_from_model: false,
-                    tool_name: Some(call.name.clone()),
-                    usage: state.usage.clone(),
-                    turn: state.total_turns,
-                    api_requests: Some(state.api_requests()),
-                    api_requests_estimated: state.api_requests_estimated(),
-                    status_only: false,
-                    progress_note: state.progress_note.clone(),
-                    last_breakthrough: state
-                        .extra
-                        .get("lastBreakthrough")
-                        .cloned()
-                        .unwrap_or_default(),
-                });
-            }
-            let started = Instant::now();
-            let sample_checks_before = state.sample_checks.clone();
-            let metadata = json!({"id":call.id,"name":call.name,"selectors":args.as_ref().map(selectors).unwrap_or(Value::Null),"argumentFingerprint":hash_text(&call.arguments)});
-            trace_run(json!({"operation":"tool-start","turn":state.total_turns,"call":metadata}))?;
-            let outcome = match &args {
-                Ok(args) => {
-                    service
-                        .adaptation_tool(
-                            request,
-                            workspace,
-                            state,
-                            &call.name,
-                            args,
-                            cancellation,
-                            progress,
-                        )
-                        .await
-                }
-                Err(error) => Err(EngineError::Protocol(error.to_string())),
-            };
-            let mut value = match outcome {
-                Ok(value) => value,
-                Err(EngineError::Cancelled) => {
-                    trace_run(
-                        json!({"operation":"tool-end","turn":state.total_turns,"call":metadata,"status":"cancelled","elapsedMs":started.elapsed().as_millis(),"sampleChecks":state.sample_checks.since(&sample_checks_before)}),
-                    )?;
-                    return Ok((
-                        AdaptationStatus::Cancelled,
-                        "任务已取消，现有进度已保留。".into(),
-                        None,
-                    ));
-                }
-                Err(error @ EngineError::Isolation(_)) => return Err(error),
-                Err(error) => json!({"success":false,"error":error.to_string()}),
-            };
-            if let Some(object) = value.as_object_mut() {
-                object.entry("success").or_insert(json!(true));
-            }
-            let success = history::successful(&value);
-            if !success && let Some(progress) = progress {
-                let diagnostic = failure_diagnostic(&value)
-                    .and_then(|text| text.lines().next())
-                    .unwrap_or("未返回错误详情。")
-                    .chars()
-                    .take(160)
-                    .collect::<String>();
-                progress(state.progress(EngineProgress {
-                    stage: "工具执行失败".into(),
-                    message: format!("{}：{diagnostic}", call.name),
-                    tool_name: Some(call.name.clone()),
-                    ..EngineProgress::default()
-                }));
-            }
-            if success
-                && value["changed"] == true
-                && matches!(call.name.as_str(), "write_file" | "replace_text")
-                && args
-                    .as_ref()
-                    .ok()
-                    .and_then(|args| args["path"].as_str())
-                    .is_some_and(|path| path.replace('\\', "/").starts_with("src/"))
-            {
-                repair::patched(state);
-            }
-            record_tool(state, &call, args.as_ref().unwrap_or(&Value::Null), &value);
-            workflow::observe(
-                state,
-                workspace,
-                &call.name,
-                args.as_ref().unwrap_or(&Value::Null),
-                &value,
-            );
-            decision::record(state, &call, args.as_ref().unwrap_or(&Value::Null));
-            let content = value.to_string();
-            let trace_result = result_trace(&value);
-            trace_run(
-                json!({"operation":"tool-end","turn":state.total_turns,"call":metadata,"elapsedMs":started.elapsed().as_millis(),"success":success,"outputBytes":content.len(),"resultFingerprint":hash_text(&content),"result":trace_result,"sampleChecks":state.sample_checks.since(&sample_checks_before)}),
-            )?;
-            state
-                .messages
-                .push(json!({"role":"tool","tool_call_id":call.id,"content":content}));
-            state.pending_calls.remove(0);
-            state.running_tool_id = None;
-            if sequential && !success && call.name != "report_progress" {
-                state.workflow.needs_verification = false;
-                for pending in std::mem::take(&mut state.pending_calls) {
-                    append_failure(
-                        state,
-                        &pending,
-                        "前置操作失败，本步骤未执行。请先修复该错误。",
-                    );
-                }
-            }
-            save_session(path, state).await?;
-            if call.name == "finish" && success {
-                let directory = PathBuf::from(text(&value, "packageDirectory")?);
-                return Ok((
-                    AdaptationStatus::Activated,
-                    state.summary.clone(),
-                    Some(PackageManifest::load(&directory)?.handle(&directory)?),
-                ));
-            }
-            if call.name == "report_blocker" && value["stopped"] == true {
-                let status = if value["kind"] == "needs_input" {
-                    AdaptationStatus::WaitingForUser
-                } else {
-                    AdaptationStatus::Unsupported
-                };
-                return Ok((status, state.summary.clone(), None));
+            if let Some(done) = self.execute_tool(state, &call, sequential).await? {
+                return Ok(Some(done));
             }
         }
+        Ok(None)
+    }
+
+    async fn execute_tool(
+        &self,
+        state: &mut Session,
+        call: &ToolCall,
+        sequential: bool,
+    ) -> Result<Option<RunOutcome>, EngineError> {
+        state.running_tool_id = Some(call.id.clone());
+        save_session(self.path, state).await?;
+        let args = serde_json::from_str::<Value>(&call.arguments);
+        if let Some(progress) = self.progress {
+            progress(EngineProgress {
+                translation_preview: None,
+                stage: "执行适配工具".into(),
+                message: crate::tool_activity::message(
+                    &call.name,
+                    args.as_ref().unwrap_or(&Value::Null),
+                ),
+                message_from_model: false,
+                tool_name: Some(call.name.clone()),
+                usage: state.usage.clone(),
+                turn: state.total_turns,
+                api_requests: Some(state.api_requests()),
+                api_requests_estimated: state.api_requests_estimated(),
+                status_only: false,
+                progress_note: state.progress_note.clone(),
+                last_breakthrough: state
+                    .extra
+                    .get("lastBreakthrough")
+                    .cloned()
+                    .unwrap_or_default(),
+            });
+        }
+        let started = Instant::now();
+        let sample_checks_before = state.sample_checks.clone();
+        let metadata = json!({"id":call.id,"name":call.name,"selectors":args.as_ref().map(selectors).unwrap_or(Value::Null),"argumentFingerprint":hash_text(&call.arguments)});
+        (self.trace)(json!({"operation":"tool-start","turn":state.total_turns,"call":metadata}))?;
+        let outcome = match &args {
+            Ok(args) => {
+                self.service
+                    .adaptation_tool(
+                        self.request,
+                        self.workspace,
+                        state,
+                        &call.name,
+                        args,
+                        self.cancellation,
+                        self.progress,
+                    )
+                    .await
+            }
+            Err(error) => Err(EngineError::Protocol(error.to_string())),
+        };
+        let mut value = match outcome {
+            Ok(value) => value,
+            Err(EngineError::Cancelled) => {
+                (self.trace)(
+                    json!({"operation":"tool-end","turn":state.total_turns,"call":metadata,"status":"cancelled","elapsedMs":started.elapsed().as_millis(),"sampleChecks":state.sample_checks.since(&sample_checks_before)}),
+                )?;
+                return Ok(Some(cancelled_run()));
+            }
+            Err(error @ EngineError::Isolation(_)) => return Err(error),
+            Err(error) => json!({"success":false,"error":error.to_string()}),
+        };
+        if let Some(object) = value.as_object_mut() {
+            object.entry("success").or_insert(json!(true));
+        }
+        let success = history::successful(&value);
+        if !success && let Some(progress) = self.progress {
+            let diagnostic = failure_diagnostic(&value)
+                .and_then(|text| text.lines().next())
+                .unwrap_or("未返回错误详情。")
+                .chars()
+                .take(160)
+                .collect::<String>();
+            progress(state.progress(EngineProgress {
+                stage: "工具执行失败".into(),
+                message: format!("{}：{diagnostic}", call.name),
+                tool_name: Some(call.name.clone()),
+                ..EngineProgress::default()
+            }));
+        }
+        if success
+            && value["changed"] == true
+            && matches!(call.name.as_str(), "write_file" | "replace_text")
+            && args
+                .as_ref()
+                .ok()
+                .and_then(|args| args["path"].as_str())
+                .is_some_and(|path| path.replace('\\', "/").starts_with("src/"))
+        {
+            repair::patched(state);
+        }
+        record_tool(state, call, args.as_ref().unwrap_or(&Value::Null), &value);
+        workflow::observe(
+            state,
+            self.workspace,
+            &call.name,
+            args.as_ref().unwrap_or(&Value::Null),
+            &value,
+        );
+        decision::record(state, call, args.as_ref().unwrap_or(&Value::Null));
+        let content = value.to_string();
+        let trace_result = result_trace(&value);
+        (self.trace)(
+            json!({"operation":"tool-end","turn":state.total_turns,"call":metadata,"elapsedMs":started.elapsed().as_millis(),"success":success,"outputBytes":content.len(),"resultFingerprint":hash_text(&content),"result":trace_result,"sampleChecks":state.sample_checks.since(&sample_checks_before)}),
+        )?;
+        state
+            .messages
+            .push(json!({"role":"tool","tool_call_id":call.id,"content":content}));
+        state.pending_calls.remove(0);
+        state.running_tool_id = None;
+        if sequential && !success && call.name != "report_progress" {
+            state.workflow.needs_verification = false;
+            for pending in std::mem::take(&mut state.pending_calls) {
+                append_failure(
+                    state,
+                    &pending,
+                    "前置操作失败，本步骤未执行。请先修复该错误。",
+                );
+            }
+        }
+        save_session(self.path, state).await?;
+        if call.name == "finish" && success {
+            let directory = PathBuf::from(text(&value, "packageDirectory")?);
+            return Ok(Some((
+                AdaptationStatus::Activated,
+                state.summary.clone(),
+                Some(PackageManifest::load(&directory)?.handle(&directory)?),
+            )));
+        }
+        if call.name == "report_blocker" && value["stopped"] == true {
+            let status = if value["kind"] == "needs_input" {
+                AdaptationStatus::WaitingForUser
+            } else {
+                AdaptationStatus::Unsupported
+            };
+            return Ok(Some((status, state.summary.clone(), None)));
+        }
+        Ok(None)
+    }
+
+    async fn workflow_steps(&self, state: &mut Session) -> Result<(), EngineError> {
         for _ in 0..2 {
-            let Some(step) = workflow::next(state, workspace)? else {
+            let Some(step) = workflow::next(state, self.workspace)? else {
                 break;
             };
             state.workflow.running = Some(step.fingerprint.clone());
-            save_session(path, state).await?;
+            save_session(self.path, state).await?;
             let started = Instant::now();
-            trace_run(
+            (self.trace)(
                 json!({"operation":"host-step-start","step":"test_adapter","fingerprint":step.fingerprint,"turn":state.total_turns,"selectors":selectors(&step.arguments)}),
             )?;
-            let mut value = match service
+            let mut value = match self
+                .service
                 .test_adapter(
-                    request,
-                    workspace,
+                    self.request,
+                    self.workspace,
                     state,
                     &step.arguments,
-                    cancellation,
-                    progress,
+                    self.cancellation,
+                    self.progress,
                 )
                 .await
             {
@@ -839,17 +905,31 @@ pub(super) async fn run(
             };
             state.workflow.running = None;
             state.workflow.last_attempt = Some(step.fingerprint.clone());
-            workflow::observe(state, workspace, "test_adapter", &step.arguments, &value);
-            trace_run(
+            workflow::observe(
+                state,
+                self.workspace,
+                "test_adapter",
+                &step.arguments,
+                &value,
+            );
+            (self.trace)(
                 json!({"operation":"host-step-end","step":"test_adapter","fingerprint":step.fingerprint,"turn":state.total_turns,"elapsedMs":started.elapsed().as_millis(),"passed":value["passed"],"stage":value["stage"],"issues":value["issues"],"selectors":selectors(&step.arguments),"result":result_trace(&value)}),
             )?;
             if let Some(object) = value.as_object_mut() {
                 object.remove("repairTickets");
             }
             state.messages.push(json!({"role":"user","content":format!("宿主已按现有参数自动执行 test_adapter，原始验收标准未变。结果：{}",value)}));
-            save_session(path, state).await?;
+            save_session(self.path, state).await?;
         }
-        if let Some(continuation) = continuation.take() {
+        Ok(())
+    }
+
+    fn prepare_turn(
+        &self,
+        state: &mut Session,
+        continuation: Option<String>,
+    ) -> Result<(), EngineError> {
+        if let Some(continuation) = continuation {
             state
                 .messages
                 .push(json!({"role":"user","content":continuation}));
@@ -878,11 +958,19 @@ pub(super) async fn run(
             }
             review.push_str(objective_context(&state.objective));
             state.messages.push(json!({"role":"user","content":review}));
-            trace_run(
+            (self.trace)(
                 json!({"operation":"implementation-review","turn":state.total_turns,"lastImplementationTurn":number(state,"lastImplementationTurn"),"lastVerificationProgressTurn":number(state,"lastVerificationProgressTurn"),"highestVerificationMilestone":number(state,"highestVerificationMilestone")}),
             )?;
         }
-        let mut decision_context = decision::build(state, workspace, &service.disabled_families)?;
+        Ok(())
+    }
+
+    fn decision_context(
+        &self,
+        state: &mut Session,
+    ) -> Result<(decision::Context, usize, usize), EngineError> {
+        let mut decision_context =
+            decision::build(state, self.workspace, &self.service.disabled_families)?;
         let mut retained = state.messages[state.history_start..]
             .iter()
             .map(visible_json_bytes)
@@ -897,11 +985,12 @@ pub(super) async fn run(
         // Full process output remains in the archive. Its omitted bytes need no extra compaction.
         let checkpoint_bytes = retained.saturating_sub(process_bytes_saved);
         if visible > 192 * 1024 || checkpoint_bytes > 768 * 1024 {
-            compact_history(state, &service.disabled_families)?;
-            trace_run(
+            compact_history(state, &self.service.disabled_families)?;
+            (self.trace)(
                 json!({"operation":"history-compacted","turn":state.total_turns,"reason":"history-size","visibleHistoryBytes":visible,"retainedHistoryBytes":retained,"checkpointHistoryBytes":checkpoint_bytes,"historyStart":state.history_start}),
             )?;
-            decision_context = decision::build(state, workspace, &service.disabled_families)?;
+            decision_context =
+                decision::build(state, self.workspace, &self.service.disabled_families)?;
             visible = decision_context
                 .replay
                 .messages
@@ -913,36 +1002,143 @@ pub(super) async fn run(
                 .map(visible_json_bytes)
                 .sum();
         }
-        let estimated = (visible + instructions.len() + tools_bytes) as u64 / 3 + 1;
-        let remaining = request
+        Ok((decision_context, visible, retained))
+    }
+
+    async fn model_turn(&mut self, state: &mut Session) -> Result<Option<RunOutcome>, EngineError> {
+        let (mut decision_context, visible, retained) = self.decision_context(state)?;
+        let output_limit = self.request.limits.maximum_output_tokens;
+        let estimated = (visible + self.instructions.len() + self.tools_bytes) as u64 / 3 + 1;
+        let remaining = self
+            .request
             .limits
             .maximum_tokens
-            .saturating_sub(tokens(&state.usage).saturating_sub(initial_usage));
+            .saturating_sub(tokens(&state.usage).saturating_sub(self.initial_usage));
         if remaining < estimated + 256 {
-            save_session(path, state).await?;
-            return Ok((
+            save_session(self.path, state).await?;
+            return Ok(Some((
                 AdaptationStatus::BudgetExhausted,
                 "本次适配的 Token 预算不足，源码和进度已保存，可继续适配。".into(),
                 None,
-            ));
+            )));
         }
         let mut messages = history::flatten(&decision_context.replay.messages);
-        messages.insert(0, json!({"role":"system","content":instructions}));
+        messages.insert(0, json!({"role":"system","content":self.instructions}));
         decision_context.components["requestPrefix"] = request_prefix(
             state,
             &messages,
-            &instruction_fingerprint,
-            &tool_fingerprint,
+            &self.instruction_fingerprint,
+            &self.tool_fingerprint,
         );
-        save_session(path, state).await?;
+        save_session(self.path, state).await?;
         let requested = output_limit.min((remaining - estimated).min(u64::from(u32::MAX)) as u32);
-        let retry = next_retry.take();
+        if !self.wait_for_retry(state).await? {
+            return Ok(Some(cancelled_run()));
+        }
+        let started = Instant::now();
+        repair::analyzing(state);
+        let requests_before = self.provider.request_count();
+        let metrics_before = self.provider.request_metrics();
+        let response = self
+            .provider
+            .complete_agent(
+                &messages,
+                &self.tools,
+                &self.known_tools,
+                requested,
+                self.cancellation,
+            )
+            .await;
+        state.record_api_requests(
+            self.provider
+                .request_count()
+                .saturating_sub(requests_before),
+        );
+        let metrics_after = self.provider.request_metrics();
+        let trace_model = |mut entry: Value| {
+            entry["apiMs"] = json!(metrics_after.api_ms.saturating_sub(metrics_before.api_ms));
+            entry["waitingMs"] = json!(
+                metrics_after
+                    .waiting_ms
+                    .saturating_sub(metrics_before.waiting_ms)
+            );
+            (self.trace)(entry)
+        };
+        let stream_timing = match &response {
+            Ok(response) => response.stream_timing.clone(),
+            Err(error) => error.stream_timing.as_deref().cloned(),
+        };
+        let trace_model = |mut entry: Value| {
+            entry["streamAttempt"] = json!(stream_timing);
+            trace_model(entry)
+        };
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => {
+                add_usage(&mut state.usage, &error.usage);
+                trace_model(
+                    json!({"operation":"model","status":"failed","turn":state.total_turns+1,"elapsedMs":started.elapsed().as_millis(),"error":error.to_string(),"diagnostic":error.diagnostic,"failureCode":error.diagnostic.code,"httpStatus":error.status_code,"outcomeUnknown":error.outcome_unknown,"usage":error.usage,"maximumOutputTokens":requested,"visibleHistoryBytes":visible,"retainedHistoryBytes":retained,"contextComponents":decision_context.components,"instructionBytes":self.instructions.len(),"instructionFingerprint":self.instruction_fingerprint,"toolDefinitionBytes":self.tools_bytes,"toolDefinitionFingerprint":self.tool_fingerprint,"verificationConfigured":state.workflow.verification_args.is_some()}),
+                )?;
+                save_session(self.path, state).await?;
+                if error.is_cancelled() {
+                    return Ok(Some(cancelled_run()));
+                }
+                if self.turn_retries < MAX_TURN_RETRIES
+                    && let Some((operation, delay)) = turn_retry(&error, self.turn_retries + 1)
+                {
+                    self.turn_retries += 1;
+                    self.next_retry = Some((operation, error.failure_summary(), delay));
+                    return Ok(None);
+                }
+                if error.diagnostic.code == "output-token-limit"
+                    && !self.recovering_output
+                    && requested == output_limit
+                    && remaining.saturating_sub(tokens(&error.usage))
+                        > estimated + u64::from(output_limit)
+                {
+                    self.recovering_output = true;
+                    state.messages.push(json!({"role":"user","content":"上一次分析响应达到单次输出上限，整次响应未接受，其中的任何工具调用均未执行。已保存的源码和已完成工具结果仍有效，不要重新调查或读取整个工程。请缩小本轮操作：一次实现一个小文件，已有代码用 replace_text 局部修改，不要一次生成完整适配器。沿用已确认结论继续下一项具体操作。"}));
+                    (self.trace)(
+                        json!({"operation":"output-limit-recovery","previousLimit":requested,"maximumOutputTokens":output_limit}),
+                    )?;
+                    return Ok(None);
+                }
+                return Err(EngineError::Api(Box::new(error)));
+            }
+        };
+        self.recovering_output = false;
+        self.turn_retries = 0;
+        state.total_turns += 1;
+        let usage = completion_usage(&response, estimated)?;
+        add_usage(&mut state.usage, &usage);
+        trace_model(
+            json!({"operation":"model","status":"completed","turn":state.total_turns,"elapsedMs":started.elapsed().as_millis(),"usage":usage,"requestId":response.request_id,"tools":response.tool_calls.iter().map(|c|&c.name).collect::<Vec<_>>(),"visibleHistoryBytes":visible,"retainedHistoryBytes":retained,"omittedToolResults":decision_context.replay.omitted,"decisionHistoryStart":decision_context.selected_start,"decisionEvidenceCount":decision_context.evidence_count,"problemId":state.decision.current_problem.as_ref().map(|p|&p.id),"toolDefinitionBytes":self.tools_bytes,"toolDefinitionFingerprint":self.tool_fingerprint,"instructionBytes":self.instructions.len(),"instructionFingerprint":self.instruction_fingerprint,"availableToolCount":self.tools.len(),"maximumOutputTokens":requested,"contextComponents":decision_context.components,"verificationConfigured":state.workflow.verification_args.is_some()}),
+        )?;
+        self.store_response(state, response).await?;
+        if tokens(&state.usage).saturating_sub(self.initial_usage)
+            > self.request.limits.maximum_tokens
+        {
+            return Ok(Some((
+                AdaptationStatus::BudgetExhausted,
+                "本次适配的 Token 预算已用完，模型结果已保存，继续后执行剩余步骤。".into(),
+                None,
+            )));
+        }
+        if state.pending_calls.is_empty() {
+            state.messages.push(json!({"role":"user","content":format!("{}\n全部工具定义均已提供，请直接选择下一项操作。{}如果确实需要用户提供资料或操作，或调查后已确认无法支持，请单独调用 report_blocker，说明已尝试的方案、具体卡点和可执行的下一步。",objective_context(&state.objective),if state.verified_package.is_some(){"完整资源验收已通过。若当前目标已完成，请直接 finish；在 summary 披露已知覆盖遗漏和仍需用户验证的运行效果。不要因未进游戏验证而重新开始研究或扩展其他类别。"}else{"适配尚未发布。请执行下一项工具操作，继续解决真实验证失败，包括中文编码和字体支持；不要仅返回阶段总结。"})}));
+        }
+        Ok(None)
+    }
+
+    async fn wait_for_retry(&mut self, state: &Session) -> Result<bool, EngineError> {
+        let turn_retries = self.turn_retries;
+        let retry = self.next_retry.take();
         if let Some((operation, reason, delay)) = &retry {
-            trace_run(
+            (self.trace)(
                 json!({"operation":operation,"turn":state.total_turns+1,"retry":turn_retries,"reason":reason,"delayMs":delay.as_millis()}),
             )?;
         }
-        if let Some(progress) = progress {
+        if let Some(progress) = self.progress {
             progress(EngineProgress {
                 translation_preview: None,
                 stage: "智能适配".into(),
@@ -972,82 +1168,18 @@ pub(super) async fn run(
         {
             tokio::select! {
                 biased;
-                _ = cancellation.cancelled() => return Ok((AdaptationStatus::Cancelled, "任务已取消，现有进度已保留。".into(), None)),
+                _ = self.cancellation.cancelled() => return Ok(false),
                 _ = tokio::time::sleep(delay) => {}
             }
         }
-        let started = Instant::now();
-        repair::analyzing(state);
-        let requests_before = provider.request_count();
-        let metrics_before = provider.request_metrics();
-        let response = provider
-            .complete_agent(&messages, &all, &known_tools, requested, cancellation)
-            .await;
-        state.record_api_requests(provider.request_count().saturating_sub(requests_before));
-        let metrics_after = provider.request_metrics();
-        let trace_model = |mut entry: Value| {
-            entry["apiMs"] = json!(metrics_after.api_ms.saturating_sub(metrics_before.api_ms));
-            entry["waitingMs"] = json!(
-                metrics_after
-                    .waiting_ms
-                    .saturating_sub(metrics_before.waiting_ms)
-            );
-            trace_run(entry)
-        };
-        let stream_timing = match &response {
-            Ok(response) => response.stream_timing.clone(),
-            Err(error) => error.stream_timing.as_deref().cloned(),
-        };
-        let trace_model = |mut entry: Value| {
-            entry["streamAttempt"] = json!(stream_timing);
-            trace_model(entry)
-        };
-        let response = match response {
-            Ok(response) => response,
-            Err(error) => {
-                add_usage(&mut state.usage, &error.usage);
-                trace_model(
-                    json!({"operation":"model","status":"failed","turn":state.total_turns+1,"elapsedMs":started.elapsed().as_millis(),"error":error.to_string(),"diagnostic":error.diagnostic,"failureCode":error.diagnostic.code,"httpStatus":error.status_code,"outcomeUnknown":error.outcome_unknown,"usage":error.usage,"maximumOutputTokens":requested,"visibleHistoryBytes":visible,"retainedHistoryBytes":retained,"contextComponents":decision_context.components,"instructionBytes":instructions.len(),"instructionFingerprint":instruction_fingerprint,"toolDefinitionBytes":tools_bytes,"toolDefinitionFingerprint":tool_fingerprint,"verificationConfigured":state.workflow.verification_args.is_some()}),
-                )?;
-                save_session(path, state).await?;
-                if error.is_cancelled() {
-                    return Ok((
-                        AdaptationStatus::Cancelled,
-                        "任务已取消，现有进度已保留。".into(),
-                        None,
-                    ));
-                }
-                if turn_retries < MAX_TURN_RETRIES
-                    && let Some((operation, delay)) = turn_retry(&error, turn_retries + 1)
-                {
-                    turn_retries += 1;
-                    next_retry = Some((operation, error.failure_summary(), delay));
-                    continue;
-                }
-                if error.diagnostic.code == "output-token-limit"
-                    && !recovering_output
-                    && requested == output_limit
-                    && remaining.saturating_sub(tokens(&error.usage))
-                        > estimated + u64::from(output_limit)
-                {
-                    recovering_output = true;
-                    state.messages.push(json!({"role":"user","content":"上一次分析响应达到单次输出上限，整次响应未接受，其中的任何工具调用均未执行。已保存的源码和已完成工具结果仍有效，不要重新调查或读取整个工程。请缩小本轮操作：一次实现一个小文件，已有代码用 replace_text 局部修改，不要一次生成完整适配器。沿用已确认结论继续下一项具体操作。"}));
-                    trace_run(
-                        json!({"operation":"output-limit-recovery","previousLimit":requested,"maximumOutputTokens":output_limit}),
-                    )?;
-                    continue;
-                }
-                return Err(EngineError::Api(Box::new(error)));
-            }
-        };
-        recovering_output = false;
-        turn_retries = 0;
-        state.total_turns += 1;
-        let usage = completion_usage(&response, estimated)?;
-        add_usage(&mut state.usage, &usage);
-        trace_model(
-            json!({"operation":"model","status":"completed","turn":state.total_turns,"elapsedMs":started.elapsed().as_millis(),"usage":usage,"requestId":response.request_id,"tools":response.tool_calls.iter().map(|c|&c.name).collect::<Vec<_>>(),"visibleHistoryBytes":visible,"retainedHistoryBytes":retained,"omittedToolResults":decision_context.replay.omitted,"decisionHistoryStart":decision_context.selected_start,"decisionEvidenceCount":decision_context.evidence_count,"problemId":state.decision.current_problem.as_ref().map(|p|&p.id),"toolDefinitionBytes":tools_bytes,"toolDefinitionFingerprint":tool_fingerprint,"instructionBytes":instructions.len(),"instructionFingerprint":instruction_fingerprint,"availableToolCount":all.len(),"maximumOutputTokens":requested,"contextComponents":decision_context.components,"verificationConfigured":state.workflow.verification_args.is_some()}),
-        )?;
+        Ok(true)
+    }
+
+    async fn store_response(
+        &self,
+        state: &mut Session,
+        response: Completion,
+    ) -> Result<(), EngineError> {
         if let Some(data) = response.provider_data {
             state
                 .messages
@@ -1062,19 +1194,10 @@ pub(super) async fn run(
         if !response.text.trim().is_empty() {
             state.summary = response.text.chars().take(8000).collect();
         }
-        assistant_progress(state, &response.text, &response.tool_calls, progress);
+        assistant_progress(state, &response.text, &response.tool_calls, self.progress);
         state.pending_calls = response.tool_calls;
-        save_session(path, state).await?;
-        if tokens(&state.usage).saturating_sub(initial_usage) > request.limits.maximum_tokens {
-            return Ok((
-                AdaptationStatus::BudgetExhausted,
-                "本次适配的 Token 预算已用完，模型结果已保存，继续后执行剩余步骤。".into(),
-                None,
-            ));
-        }
-        if state.pending_calls.is_empty() {
-            state.messages.push(json!({"role":"user","content":format!("{}\n全部工具定义均已提供，请直接选择下一项操作。{}如果确实需要用户提供资料或操作，或调查后已确认无法支持，请单独调用 report_blocker，说明已尝试的方案、具体卡点和可执行的下一步。",objective_context(&state.objective),if state.verified_package.is_some(){"完整资源验收已通过。若当前目标已完成，请直接 finish；在 summary 披露已知覆盖遗漏和仍需用户验证的运行效果。不要因未进游戏验证而重新开始研究或扩展其他类别。"}else{"适配尚未发布。请执行下一项工具操作，继续解决真实验证失败，包括中文编码和字体支持；不要仅返回阶段总结。"})}));
-        }
+        save_session(self.path, state).await?;
+        Ok(())
     }
 }
 
