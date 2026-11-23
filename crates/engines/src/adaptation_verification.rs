@@ -856,74 +856,18 @@ pub(super) async fn test_adapter(
         );
         state.extra.insert("resourceChanges".into(), json!(changes));
     }
-    let parameters = TestArguments::parse(
-        &json!({"kind":text(args,"kind")?,"key":text(args,"key")?,"name":text(args,"name")?,"resourcePatterns":strings(args,"resourcePatterns")?}),
-    )?;
-    state.family = json!({"kind":parameters.kind,"key":parameters.key,"name":parameters.name});
-    state.resource_patterns = parameters.resource_patterns;
-    if let Some(recognition) = args.get("recognition") {
-        state.recognition = if recognition.is_null() {
-            None
-        } else {
-            Some(serde_json::from_value(recognition.clone())?)
-        };
-    }
-    if let Some(recognition) = &state.recognition {
-        recognition.validate()?;
-    }
-    if let Some(selection) = args.get("releaseFiles") {
-        let mut selection: Vec<ReleaseFile> = serde_json::from_value(selection.clone())?;
-        components::retain_release_sources(&state.release_files, &mut selection)?;
-        state.release_files = validate_release_selection(&selection)?;
-    }
-    apply_coverage(state, args)?;
-    let discovery_only = args
-        .get("discoveryOnly")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let trial = args
-        .get("trialFiles")
-        .map(|value| serde_json::from_value::<Vec<String>>(value.clone()))
-        .transpose()?
-        .map(|files| {
-            files
-                .into_iter()
-                .map(|file| file.replace('\\', "/"))
-                .collect::<Vec<_>>()
-        });
-    if let Some(files) = &trial {
-        if discovery_only {
-            return Err(EngineError::Rejected(
-                "trialFiles 与 discoveryOnly 不能同时使用。".into(),
-            ));
-        }
-        let unique: BTreeSet<_> = files.iter().map(|file| file.to_lowercase()).collect();
-        if files.is_empty() || files.len() > 12 || unique.len() != files.len() {
-            return Err(EngineError::Rejected(
-                "trialFiles 需要 1–12 个不重复的完整资源路径。".into(),
-            ));
-        }
-        let approved = state.extra.get("resourceHashes");
-        for file in files {
-            resolve_relative(&workspace.join("resources"), file)?;
-            if approved.and_then(|value| value.get(file)).is_none() {
-                return Err(EngineError::Rejected(format!(
-                    "试验资源尚未 stage_resources：{file}"
-                )));
-            }
-        }
-    }
-    let mut previous_member_failure =
-        if !discovery_only && trial.is_none() && state.workflow.running.is_some() {
-            state
-                .verification
-                .as_ref()
-                .filter(|previous| !previous.passed && previous.archive_member_retry.is_some())
-                .cloned()
-        } else {
-            None
-        };
-    let previous_full_verification = if !discovery_only && trial.is_none() {
+    let scope = TestScope::configure(workspace, state, args)?;
+    let full = !scope.discovery_only && scope.trial.is_none();
+    let previous_member_failure = if full && state.workflow.running.is_some() {
+        state
+            .verification
+            .as_ref()
+            .filter(|previous| !previous.passed && previous.archive_member_retry.is_some())
+            .cloned()
+    } else {
+        None
+    };
+    let previous_full_verification = if full {
         state
             .verification
             .take()
@@ -933,26 +877,156 @@ pub(super) async fn test_adapter(
                     && verification.verified_extraction.is_some()
             })
             .and_then(|verification| {
-                Some((
-                    state.verified_package.take()?,
-                    state.verified_fingerprint.take()?,
-                    state
+                Some(PreviousVerification {
+                    package: state.verified_package.take()?,
+                    implementation: state.verified_fingerprint.take()?,
+                    input: state
                         .extra
                         .get("verificationCache")?
                         .get("fingerprint")?
                         .clone(),
-                    verification,
-                ))
+                    result: verification,
+                })
             })
     } else {
         None
     };
     state.verified_package = None;
     state.verified_fingerprint = None;
-    if trial.is_none() {
+    if scope.trial.is_none() {
         state.verification = None;
         require_launch_resources(state, &request.inputs)?;
     }
+    let package = prepare_test_package(service, workspace, state, &scope, cancellation).await?;
+    state.extra.remove(scope.cache_key());
+    let mut test = AdapterTest {
+        service,
+        request,
+        workspace,
+        scope: &scope,
+        package: &package,
+        cancellation,
+        callback,
+        stats: FingerprintStats::default(),
+        cacheable: true,
+        reused: false,
+        input: None,
+        probe: None,
+        verification: None,
+        verification_ms: 0,
+        verification_directory: None,
+        stage: if scope.trial.is_some() {
+            "trial"
+        } else {
+            "discovery"
+        },
+    };
+    let checked = test
+        .verify(state, previous_member_failure, previous_full_verification)
+        .await;
+    test.finish(state, checked).await
+}
+
+struct TestScope {
+    id: String,
+    trial: Option<Vec<String>>,
+    discovery_only: bool,
+}
+
+impl TestScope {
+    fn configure(workspace: &Path, state: &mut Session, args: &Value) -> Result<Self, EngineError> {
+        let parameters = TestArguments::parse(
+            &json!({"kind":text(args,"kind")?,"key":text(args,"key")?,"name":text(args,"name")?,"resourcePatterns":strings(args,"resourcePatterns")?}),
+        )?;
+        state.family = json!({"kind":parameters.kind,"key":parameters.key,"name":parameters.name});
+        state.resource_patterns = parameters.resource_patterns;
+        if let Some(recognition) = args.get("recognition") {
+            state.recognition = if recognition.is_null() {
+                None
+            } else {
+                Some(serde_json::from_value(recognition.clone())?)
+            };
+        }
+        if let Some(recognition) = &state.recognition {
+            recognition.validate()?;
+        }
+        if let Some(selection) = args.get("releaseFiles") {
+            let mut selection: Vec<ReleaseFile> = serde_json::from_value(selection.clone())?;
+            components::retain_release_sources(&state.release_files, &mut selection)?;
+            state.release_files = validate_release_selection(&selection)?;
+        }
+        apply_coverage(state, args)?;
+        let discovery_only = args
+            .get("discoveryOnly")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let trial = args
+            .get("trialFiles")
+            .map(|value| serde_json::from_value::<Vec<String>>(value.clone()))
+            .transpose()?
+            .map(|files| {
+                files
+                    .into_iter()
+                    .map(|file| file.replace('\\', "/"))
+                    .collect::<Vec<_>>()
+            });
+        if let Some(files) = &trial {
+            if discovery_only {
+                return Err(EngineError::Rejected(
+                    "trialFiles 与 discoveryOnly 不能同时使用。".into(),
+                ));
+            }
+            let unique: BTreeSet<_> = files.iter().map(|file| file.to_lowercase()).collect();
+            if files.is_empty() || files.len() > 12 || unique.len() != files.len() {
+                return Err(EngineError::Rejected(
+                    "trialFiles 需要 1–12 个不重复的完整资源路径。".into(),
+                ));
+            }
+            let approved = state.extra.get("resourceHashes");
+            for file in files {
+                resolve_relative(&workspace.join("resources"), file)?;
+                if approved.and_then(|value| value.get(file)).is_none() {
+                    return Err(EngineError::Rejected(format!(
+                        "试验资源尚未 stage_resources：{file}"
+                    )));
+                }
+            }
+        }
+        Ok(Self {
+            id: format!("{}.{}", parameters.kind, parameters.key),
+            discovery_only,
+            trial,
+        })
+    }
+    fn cache_key(&self) -> &'static str {
+        if self.discovery_only {
+            "discoveryVerificationCache"
+        } else if self.trial.is_some() {
+            "trialVerificationCache"
+        } else {
+            "verificationCache"
+        }
+    }
+}
+
+struct TestPackage {
+    implementation: String,
+    directory: PathBuf,
+    path: PathBuf,
+    parsed: PackageManifest,
+    handle: AdapterHandle,
+    cached: Option<Value>,
+    reused_package: bool,
+    compile_ms: u128,
+}
+
+async fn prepare_test_package(
+    service: &EngineService,
+    workspace: &Path,
+    state: &mut Session,
+    scope: &TestScope,
+    cancellation: &CancellationToken,
+) -> Result<TestPackage, EngineError> {
     let preparation_started = Instant::now();
     service.bind_reference(workspace, state, None, false, cancellation)?;
     state.release_files = validate_release_selection(&state.release_files)?;
@@ -967,43 +1041,15 @@ pub(super) async fn test_adapter(
         ));
     }
     let implementation = workspace_fingerprint(workspace, state)?;
-    let mut stats = FingerprintStats::default();
-    let cache_key = if discovery_only {
-        "discoveryVerificationCache"
-    } else if trial.is_some() {
-        "trialVerificationCache"
-    } else {
-        "verificationCache"
-    };
+    let cache_key = scope.cache_key();
     let cached = state.extra.get(cache_key).cloned().filter(|cache| {
         cache["revision"] == VERIFIER_REVISION && cache["implementation"] == implementation
     });
-    let prepared = if let Some(cached) = &cached {
-        if let Some(error) = cached["compilationError"].as_str() {
-            return Err(EngineError::Rejected(error.into()));
-        }
-        let package = &cached["package"];
-        if let Some(path) = package["directoryPath"].as_str() {
-            let path = Path::new(path);
-            match PackageManifest::load(path) {
-                Ok(manifest) => match manifest.handle(path) {
-                    Ok(handle) if service.tool_paths(Some(path), cancellation).await.is_ok() => {
-                        Some((path.to_path_buf(), manifest, handle))
-                    }
-                    _ => None,
-                },
-                Err(_) => None,
-            }
-        } else {
-            None
-        }
-    } else {
-        None
-    };
+    let prepared = cached_test_package(service, cached.as_ref(), cancellation).await?;
     let package_was_valid = prepared.is_some();
     let directory = workspace.join("builds").join(&implementation[..20]);
-    let id = format!("{}.{}", parameters.kind, parameters.key);
-    let version = implementation[..16].to_string();
+    let id = &scope.id;
+    let version = &implementation[..16];
     let (package, parsed, handle) = if let Some(prepared) = prepared {
         prepared
     } else {
@@ -1067,95 +1113,156 @@ pub(super) async fn test_adapter(
         let handle = parsed.handle(&package)?;
         (package, parsed, handle)
     };
-    let manifest = serde_json::to_value(&parsed)?;
     progress(state, 1);
     let compile_ms = preparation_started.elapsed().as_millis();
-    let mut stage = if trial.is_some() {
-        "trial"
-    } else {
-        "discovery"
+    Ok(TestPackage {
+        implementation,
+        directory,
+        path: package,
+        parsed,
+        handle,
+        cached,
+        reused_package: package_was_valid,
+        compile_ms,
+    })
+}
+
+async fn cached_test_package(
+    service: &EngineService,
+    cached: Option<&Value>,
+    cancellation: &CancellationToken,
+) -> Result<Option<(PathBuf, PackageManifest, AdapterHandle)>, EngineError> {
+    let Some(cache) = cached else {
+        return Ok(None);
     };
-    let mut verification = None;
-    let mut verification_directory = None;
-    let mut probe = None;
-    let mut verification_ms = 0;
-    let mut cacheable = true;
-    let mut input = None;
-    let mut inspected = false;
-    let mut reused = false;
-    state.extra.remove(cache_key);
-    let checked = async {
-        let (discovery, fingerprint) = inspect_inputs(
-            service,
-            request,
-            workspace,
+    if let Some(error) = cache["compilationError"].as_str() {
+        return Err(EngineError::Rejected(error.into()));
+    }
+    let Some(path) = cache["package"]["directoryPath"].as_str().map(Path::new) else {
+        return Ok(None);
+    };
+    let Ok(manifest) = PackageManifest::load(path) else {
+        return Ok(None);
+    };
+    let Ok(handle) = manifest.handle(path) else {
+        return Ok(None);
+    };
+    if service.tool_paths(Some(path), cancellation).await.is_err() {
+        return Ok(None);
+    }
+    Ok(Some((path.to_owned(), manifest, handle)))
+}
+
+struct PreviousVerification {
+    package: Value,
+    implementation: String,
+    input: Value,
+    result: VerificationResult,
+}
+
+struct AdapterTest<'a, 'r> {
+    service: &'a EngineService,
+    request: &'a AdaptationRequest<'r>,
+    workspace: &'a Path,
+    cancellation: &'a CancellationToken,
+    callback: ProgressCallback<'a>,
+    scope: &'a TestScope,
+    package: &'a TestPackage,
+    stats: FingerprintStats,
+    stage: &'a str,
+    cacheable: bool,
+    reused: bool,
+    input: Option<String>,
+    probe: Option<ProbeResult>,
+    verification: Option<VerificationResult>,
+    verification_ms: u128,
+    verification_directory: Option<PathBuf>,
+}
+
+impl AdapterTest<'_, '_> {
+    async fn inspect(
+        &mut self,
+        state: &Session,
+    ) -> Result<(DiscoveryInputs, InputFingerprint), EngineError> {
+        inspect_inputs(
+            self.service,
+            self.request,
+            self.workspace,
             state,
-            &parsed,
-            &handle,
-            discovery_only,
-            trial.as_deref(),
-            cancellation,
-            &mut stats,
+            &self.package.parsed,
+            &self.package.handle,
+            self.scope.discovery_only,
+            self.scope.trial.as_deref(),
+            self.cancellation,
+            &mut self.stats,
         )
-        .await?;
-        if implementation != workspace_fingerprint(workspace, state)? {
+        .await
+    }
+
+    async fn verify(
+        &mut self,
+        state: &mut Session,
+        previous_member_failure: Option<VerificationResult>,
+        previous_full_verification: Option<PreviousVerification>,
+    ) -> Result<bool, EngineError> {
+        let (discovery, fingerprint) = self.inspect(state).await?;
+        if self.package.implementation != workspace_fingerprint(self.workspace, state)? {
             return Err(EngineError::Rejected(
                 "验收准备期间源码或依赖发生变化，请重新验收。".into(),
             ));
         }
-        input = Some(fingerprint.digest);
-        inspected = true;
-        cacheable &= discovery.complete;
+        self.input = Some(fingerprint.digest);
+        self.cacheable &= discovery.complete;
         let resources = discovery.resources;
-        probe = Some(discovery.probe);
-        if let Some(cached) = cached.as_ref().filter(|cached| {
-            package_was_valid
-                && input
+        self.probe = Some(discovery.probe);
+        if let Some(cached) = self.package.cached.as_ref().filter(|cached| {
+            self.package.reused_package
+                && self
+                    .input
                     .as_ref()
                     .is_some_and(|input| cached["fingerprint"] == *input)
                 && cached["result"].is_object()
                 && !legacy_exit_only_failure(cached)
         }) {
-            reused = true;
-            if !discovery_only {
-                stage = cached["result"]["stage"].as_str().unwrap_or("discovery");
-                verification = cached
+            self.reused = true;
+            if !self.scope.discovery_only {
+                self.stage = cached["result"]["stage"].as_str().unwrap_or("discovery");
+                self.verification = cached
                     .get("verification")
                     .filter(|value| !value.is_null())
                     .map(|value| serde_json::from_value::<VerificationResult>(value.clone()))
                     .transpose()?;
-                if trial.is_none()
-                    && stage == "finish-ready"
+                if self.scope.trial.is_none()
+                    && self.stage == "finish-ready"
                     && cached["result"]["passed"] == true
-                    && let Some(result) = verification.as_mut().filter(|verification| {
+                    && let Some(result) = self.verification.as_mut().filter(|verification| {
                         verification.passed && verification.original_roundtrip_passed
                     })
-                    && let Some((package, implementation, input, previous)) =
-                        &previous_full_verification
-                    && cached["package"] == *package
-                    && cached["implementation"] == *implementation
-                    && cached["fingerprint"] == *input
-                    && result.resource_hashes == previous.resource_hashes
+                    && let Some(previous) = &previous_full_verification
+                    && cached["package"] == previous.package
+                    && cached["implementation"] == previous.implementation
+                    && cached["fingerprint"] == previous.input
+                    && result.resource_hashes == previous.result.resource_hashes
                 {
                     result
                         .verified_extraction
-                        .clone_from(&previous.verified_extraction);
+                        .clone_from(&previous.result.verified_extraction);
                 }
             }
             return Ok(cached["result"]["passed"] == true);
         }
-        if trial.is_none() {
+        if self.scope.trial.is_none() {
             progress(state, 2);
         }
-        if discovery_only {
+        if self.scope.discovery_only {
             return Ok(true);
         }
-        stage = if trial.is_some() {
+        self.stage = if self.scope.trial.is_some() {
             "trial"
         } else {
             "verification"
         };
-        if let Some(mut previous) = previous_member_failure.take()
+        if let Some(previous) = previous_member_failure
             && previous.resource_hashes.len() == resources.len()
             && resources.iter().all(|resource| {
                 previous
@@ -1163,54 +1270,84 @@ pub(super) async fn test_adapter(
                     .get(resource)
                     .is_some_and(|hash| fingerprint.staged_hashes.get(resource) == Some(hash))
             })
+            && self.replay_failure(state, previous).await?
         {
-            let started = Instant::now();
-            let budget = automatic::Budget::new(cancellation, std::time::Duration::from_secs(15));
-            match replay_archive_member(
-                service,
-                workspace,
-                state,
-                &handle,
-                &previous,
-                &budget.token,
-            )
-            .await
-            {
-                Ok(true) => {
-                    stage = "member-retest";
-                    cacheable = false;
-                    verification_ms = started.elapsed().as_millis();
-                    previous.original_roundtrip_passed = false;
-                    previous.units = 0;
-                    previous.extracted_sources.clear();
-                    previous.stage_timings_ms =
-                        BTreeMap::from([(stage.into(), verification_ms as u64)]);
-                    previous.diagnostics.truncate(1);
-                    previous
-                        .diagnostics
-                        .push("封包成员复测重现了相同的说话人差异。修正后继续完整验收。".into());
-                    verification = Some(previous);
-                    return Ok(false);
-                }
-                Err(EngineError::Cancelled) if cancellation.is_cancelled() => {
-                    return Err(EngineError::Cancelled);
-                }
-                Err(error @ EngineError::Isolation(_)) => return Err(error),
-                Ok(false) | Err(_) => {}
-            }
+            return Ok(false);
         }
-        let (coverage, baseline) = evidence(request, state, trial.as_deref());
+        self.verify_resources(
+            state,
+            &resources,
+            &fingerprint.staged_hashes,
+            discovery.complete,
+        )
+        .await
+    }
+
+    async fn replay_failure(
+        &mut self,
+        state: &mut Session,
+        mut previous: VerificationResult,
+    ) -> Result<bool, EngineError> {
+        let started = Instant::now();
+        let budget = automatic::Budget::new(self.cancellation, std::time::Duration::from_secs(15));
+        match replay_archive_member(
+            self.service,
+            self.workspace,
+            state,
+            &self.package.handle,
+            &previous,
+            &budget.token,
+        )
+        .await
+        {
+            Ok(true) => {
+                self.stage = "member-retest";
+                self.cacheable = false;
+                self.verification_ms = started.elapsed().as_millis();
+                previous.original_roundtrip_passed = false;
+                previous.units = 0;
+                previous.extracted_sources.clear();
+                previous.stage_timings_ms =
+                    BTreeMap::from([(self.stage.into(), self.verification_ms as u64)]);
+                previous.diagnostics.truncate(1);
+                previous
+                    .diagnostics
+                    .push("封包成员复测重现了相同的说话人差异。修正后继续完整验收。".into());
+                self.verification = Some(previous);
+                Ok(true)
+            }
+            Err(EngineError::Cancelled) if self.cancellation.is_cancelled() => {
+                Err(EngineError::Cancelled)
+            }
+            Err(error @ EngineError::Isolation(_)) => Err(error),
+            Ok(false) | Err(_) => Ok(false),
+        }
+    }
+    async fn verify_resources(
+        &mut self,
+        state: &mut Session,
+        resources: &[String],
+        staged_hashes: &BTreeMap<String, String>,
+        complete: bool,
+    ) -> Result<bool, EngineError> {
+        let (coverage, baseline) = evidence(self.request, state, self.scope.trial.as_deref());
         let output = tempfile::Builder::new()
             .prefix("verification-")
-            .tempdir_in(&directory)?;
+            .tempdir_in(&self.package.directory)?;
         // Reports persist independently of disposable resource and rebuild trees.
-        verification_directory = Some(directory.join(
+        self.verification_directory = Some(self.package.directory.join(
             format!("{}.json", output.path().file_name().unwrap_or_default().to_string_lossy()),
         ));
-        let source = resources::source(workspace, state, "resources", &resources, cancellation)?;
+        let source = resources::source(
+            self.workspace,
+            state,
+            "resources",
+            resources,
+            self.cancellation,
+        )?;
         let started = Instant::now();
         let forward = |event| {
-            if let Some(callback) = callback {
+            if let Some(callback) = self.callback {
                 callback(state.progress(event));
             }
         };
@@ -1225,41 +1362,46 @@ pub(super) async fn test_adapter(
                 ..Default::default()
             });
         };
-        let result = service
+        let result = self
+            .service
             .verify_with_coverage(
-                &handle,
+                &self.package.handle,
                 source.directory(),
-                &resources,
+                resources,
                 output.path(),
                 baseline,
                 &coverage,
-                Some(&fingerprint.staged_hashes),
-                probe.as_ref(),
-                (trial.is_none() && discovery.complete && callback.is_some())
+                Some(staged_hashes),
+                self.probe.as_ref(),
+                (self.scope.trial.is_none() && complete && self.callback.is_some())
                     .then_some(&publish_preview),
-                cancellation,
+                self.cancellation,
                 Some(&forward),
             )
             .await?;
-        verification_ms = started.elapsed().as_millis();
-        cacheable &= result.cacheable;
-        if trial.is_none() {
+        self.verification_ms = started.elapsed().as_millis();
+        self.cacheable &= result.cacheable;
+        if self.scope.trial.is_none() {
             if result.original_roundtrip_passed {
                 progress(state, 3);
             }
             if result.passed {
-                stage = "finish-ready";
+                self.stage = "finish-ready";
             }
         }
         let passed = result.passed;
-        verification = Some(result);
+        self.verification = Some(result);
         Ok(passed)
     }
-    .await;
-    let (mut passed, mut diagnostics) = match checked {
+    async fn finish(
+        mut self,
+        state: &mut Session,
+        checked: Result<bool, EngineError>,
+    ) -> Result<Value, EngineError> {
+        let (mut passed, mut diagnostics) = match checked {
         Ok(passed) => (
             passed,
-            verification
+            self.verification
                 .as_ref()
                 .map(|result| result.diagnostics.clone())
                 .unwrap_or_else(|| {
@@ -1268,148 +1410,169 @@ pub(super) async fn test_adapter(
         ),
         Err(error @ (EngineError::Cancelled | EngineError::Isolation(_))) => return Err(error),
         Err(error) => {
-            cacheable &= !matches!(&error, EngineError::Io(_) | EngineError::Timeout);
+            self.cacheable &= !matches!(&error, EngineError::Io(_) | EngineError::Timeout);
             (false, vec![error.to_string()])
         }
     };
-    if inspected && !reused {
-        let final_input = inspect_inputs(
-            service,
+        if self.input.is_some() && !self.reused {
+            let final_input = self.inspect(state).await;
+            let changed = match final_input {
+                Ok((discovery, final_input)) => {
+                    self.cacheable &= discovery.complete;
+                    self.input.as_ref() != Some(&final_input.digest)
+                        || self.package.implementation
+                            != workspace_fingerprint(self.workspace, state)?
+                }
+                Err(error @ (EngineError::Cancelled | EngineError::Isolation(_))) => {
+                    return Err(error);
+                }
+                Err(error) => {
+                    diagnostics.push(format!("验收输入复核失败：{error}"));
+                    true
+                }
+            };
+            if changed {
+                passed = false;
+                self.cacheable = false;
+                if self.stage == "finish-ready" {
+                    self.stage = "verification";
+                }
+                diagnostics.push(
+                    "验收期间源码、资源或发现依据发生变化，请重新暂存变化资源并重新验收。".into(),
+                );
+            }
+        }
+        self.save_report(state, passed, diagnostics)
+    }
+    fn save_report(
+        self,
+        state: &mut Session,
+        passed: bool,
+        diagnostics: Vec<String>,
+    ) -> Result<Value, EngineError> {
+        let Self {
             request,
             workspace,
-            state,
-            &parsed,
-            &handle,
-            discovery_only,
-            trial.as_deref(),
-            cancellation,
-            &mut stats,
-        )
-        .await;
-        let changed = match final_input {
-            Ok((discovery, final_input)) => {
-                cacheable &= discovery.complete;
-                input.as_ref() != Some(&final_input.digest)
-                    || implementation != workspace_fingerprint(workspace, state)?
+            callback,
+            cacheable,
+            reused,
+            input,
+            stage,
+            stats,
+            probe,
+            mut verification,
+            verification_directory,
+            verification_ms,
+            scope,
+            package,
+            ..
+        } = self;
+        let compile_ms = package.compile_ms;
+        let implementation = &package.implementation;
+        let id = &scope.id;
+        let version = &implementation[..16];
+        let trial = &scope.trial;
+        let cache_key = scope.cache_key();
+        if let Some(verification) = &mut verification {
+            verification.passed = passed;
+            verification.cacheable = cacheable;
+            verification.diagnostics.clone_from(&diagnostics);
+            if let Some(directory) = &verification_directory {
+                write_json(directory, verification).map_err(file_error)?;
+                // Full issue lists belong to the report rather than recurring session snapshots.
+                verification.adapter_issues.clear();
             }
-            Err(error @ (EngineError::Cancelled | EngineError::Isolation(_))) => return Err(error),
-            Err(error) => {
-                diagnostics.push(format!("验收输入复核失败：{error}"));
-                true
+            if trial.is_none() {
+                state.verification = Some(verification.clone());
             }
-        };
-        if changed {
-            passed = false;
-            cacheable = false;
-            if stage == "finish-ready" {
-                stage = "verification";
-            }
-            diagnostics.push(
-                "验收期间源码、资源或发现依据发生变化，请重新暂存变化资源并重新验收。".into(),
+        }
+        if passed && stage == "finish-ready" && !reused {
+            progress(state, 4);
+        }
+        let selected = trial
+            .as_ref()
+            .or_else(|| probe.as_ref().map(|probe| &probe.required_files))
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let package_info = json!({"directoryPath":package.path,"id":id,"version":version,"manifest":package.parsed,"resourceFiles":selected,"resourceHashes":verification.as_ref().map(|result|&result.resource_hashes)});
+        if passed && stage == "finish-ready" {
+            accept(
+                state,
+                package_info.clone(),
+                implementation,
+                verification
+                    .clone()
+                    .ok_or_else(|| EngineError::Protocol("完整验收缺少结果。".into()))?,
+                request,
+            )?;
+        }
+        let mut result = json!({"passed":passed,"stage":stage,"diagnostics":diagnostics,"id":id,"version":version,"compileMs":compile_ms,"verificationMs":verification_ms,"verificationStagesMs":if reused {None}else{verification.as_ref().map(|result|&result.stage_timings_ms)},"trialFiles":trial,"probe":probe,"nextAction":if !passed{"修复 diagnostics 后重新验收。"}else if stage=="trial"{"小范围试验通过；省略 trialFiles 执行完整验收后才能 finish。"}else if stage=="discovery"{"资源发现通过；执行完整 test_adapter 后才能发布。"}else{"完整资源验收通过，当前目标完成后 finish；已知遗漏需要 allowPartial 并明确披露。"}});
+        result["issues"] = json!(
+            verification
+                .as_ref()
+                .map(|verification| verification.issues.as_slice())
+                .unwrap_or_default()
+        );
+        result["evidenceFile"] = json!(verification_directory.as_ref().and_then(|directory| {
+            directory
+                .strip_prefix(workspace)
+                .ok()
+                .map(|path| path.to_string_lossy().replace('\\', "/"))
+        }));
+        if !passed && result["issues"].as_array().is_none_or(Vec::is_empty) {
+            result["issues"] = json!([crate::VerificationIssue::new(
+                crate::VerificationIssueCode::AdapterOperation,
+                stage
+            )
+            .difference("verification passes", &diagnostics.join("; "))]);
+        }
+        if let Some(files) = trial {
+            result["trialBytes"] = json!(
+                files
+                    .iter()
+                    .map(
+                        |file| resources::file(workspace, state, &format!("resources/{file}"))
+                            .and_then(|path| Ok(path.metadata()?.len()))
+                    )
+                    .sum::<Result<u64, EngineError>>()?
             );
         }
-    }
-    if let Some(verification) = &mut verification {
-        verification.passed = passed;
-        verification.cacheable = cacheable;
-        verification.diagnostics.clone_from(&diagnostics);
-        if let Some(directory) = &verification_directory {
-            write_json(directory, verification).map_err(file_error)?;
-            // Full issue lists belong to the report rather than recurring session snapshots.
-            verification.adapter_issues.clear();
+        result = refresh_result(result, state, reused);
+        if let Some(verification) = &verification {
+            result["units"] = json!(verification.units);
+            result["extractedSourceCount"] = json!(verification.extracted_sources.len());
+            result["extractedSources"] = json!(
+                verification
+                    .extracted_sources
+                    .iter()
+                    .take(8)
+                    .collect::<BTreeMap<_, _>>()
+            );
         }
-        if trial.is_none() {
-            state.verification = Some(verification.clone());
+        let coverage_pending =
+            passed && stage == "finish-ready" && small_extraction_needs_review(request, state);
+        result["coveragePending"] = json!(coverage_pending);
+        if coverage_pending {
+            result["nextAction"] = json!(format!(
+                "当前资源仅提取 {} 条文本（少于 {SMALL_EXTRACTION_THRESHOLD} 条），主要文字覆盖待确认。核对 extractedSources 与主要脚本和封包。若发现未纳入的主文本资源，在下次 test_adapter 更新 resourcePatterns 并提交独立 coverageSamples。若确为小体量游戏，提供独立样本并通过完整验收，再在 finish 的 smallGameEvidence 中说明主要文本资源、规模和排除遗漏的依据。仍有已知遗漏时不能发布。",
+                verification.as_ref().map_or(0, |result| result.units)
+            ));
         }
-    }
-    if passed && stage == "finish-ready" && !reused {
-        progress(state, 4);
-    }
-    let selected = trial
-        .as_ref()
-        .or_else(|| probe.as_ref().map(|probe| &probe.required_files))
-        .cloned()
-        .unwrap_or_default();
-    let package_info = json!({"directoryPath":package,"id":id,"version":version,"manifest":manifest,"resourceFiles":selected,"resourceHashes":verification.as_ref().map(|result|&result.resource_hashes)});
-    if passed && stage == "finish-ready" {
-        accept(
+        report_verification_progress(
             state,
-            package_info.clone(),
-            &implementation,
+            &result,
             verification
-                .clone()
-                .ok_or_else(|| EngineError::Protocol("完整验收缺少结果。".into()))?,
-            request,
-        )?;
-    }
-    let mut result = json!({"passed":passed,"stage":stage,"diagnostics":diagnostics,"id":id,"version":version,"compileMs":compile_ms,"verificationMs":verification_ms,"verificationStagesMs":if reused {None}else{verification.as_ref().map(|result|&result.stage_timings_ms)},"trialFiles":trial,"probe":probe,"nextAction":if !passed{"修复 diagnostics 后重新验收。"}else if stage=="trial"{"小范围试验通过；省略 trialFiles 执行完整验收后才能 finish。"}else if stage=="discovery"{"资源发现通过；执行完整 test_adapter 后才能发布。"}else{"完整资源验收通过，当前目标完成后 finish；已知遗漏需要 allowPartial 并明确披露。"}});
-    result["issues"] = json!(
-        verification
-            .as_ref()
-            .map(|verification| verification.issues.clone())
-            .unwrap_or_default()
-    );
-    result["evidenceFile"] = json!(verification_directory.as_ref().and_then(|directory| {
-        directory
-            .strip_prefix(workspace)
-            .ok()
-            .map(|path| path.to_string_lossy().replace('\\', "/"))
-    }));
-    if !passed && result["issues"].as_array().is_none_or(Vec::is_empty) {
-        result["issues"] = json!([crate::VerificationIssue::new(
-            crate::VerificationIssueCode::AdapterOperation,
-            stage
-        )
-        .difference("verification passes", &diagnostics.join("; "))]);
-    }
-    if let Some(files) = &trial {
-        result["trialBytes"] = json!(
-            files
-                .iter()
-                .map(
-                    |file| resources::file(workspace, state, &format!("resources/{file}"))
-                        .and_then(|path| Ok(path.metadata()?.len()))
-                )
-                .collect::<Result<Vec<_>, _>>()?
-                .into_iter()
-                .sum::<u64>()
+                .as_ref()
+                .is_some_and(|result| result.original_roundtrip_passed),
+            callback,
         );
+        result["compileMs"] = json!(compile_ms);
+        stats.apply(&mut result);
+        if cacheable && input.is_some() {
+            state.extra.insert(cache_key.into(),json!({"fingerprint":input,"implementation":implementation,"revision":VERIFIER_REVISION,"readsAdapterFailureResponse":true,"package":package_info,"verification":verification,"result":result}));
+        }
+        Ok(result)
     }
-    result = refresh_result(result, state, reused);
-    if let Some(verification) = &verification {
-        result["units"] = json!(verification.units);
-        result["extractedSourceCount"] = json!(verification.extracted_sources.len());
-        result["extractedSources"] = json!(
-            verification
-                .extracted_sources
-                .iter()
-                .take(8)
-                .collect::<BTreeMap<_, _>>()
-        );
-    }
-    let coverage_pending =
-        passed && stage == "finish-ready" && small_extraction_needs_review(request, state);
-    result["coveragePending"] = json!(coverage_pending);
-    if coverage_pending {
-        result["nextAction"] = json!(format!(
-            "当前资源仅提取 {} 条文本（少于 {SMALL_EXTRACTION_THRESHOLD} 条），主要文字覆盖待确认。核对 extractedSources 与主要脚本和封包。若发现未纳入的主文本资源，在下次 test_adapter 更新 resourcePatterns 并提交独立 coverageSamples。若确为小体量游戏，提供独立样本并通过完整验收，再在 finish 的 smallGameEvidence 中说明主要文本资源、规模和排除遗漏的依据。仍有已知遗漏时不能发布。",
-            verification.as_ref().map_or(0, |result| result.units)
-        ));
-    }
-    report_verification_progress(
-        state,
-        &result,
-        verification
-            .as_ref()
-            .is_some_and(|result| result.original_roundtrip_passed),
-        callback,
-    );
-    result["compileMs"] = json!(compile_ms);
-    stats.apply(&mut result);
-    if cacheable && input.is_some() {
-        state.extra.insert(cache_key.into(),json!({"fingerprint":input,"implementation":implementation,"revision":VERIFIER_REVISION,"readsAdapterFailureResponse":true,"package":package_info,"verification":verification,"result":result}));
-    }
-    Ok(result)
 }
 
 #[cfg(test)]
