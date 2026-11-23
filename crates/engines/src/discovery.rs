@@ -18,6 +18,11 @@ use crate::{
     vntextpatch::{BUILTIN_FORMATS, FORMATS},
 };
 
+mod filter;
+pub use filter::DiscoveryFilter;
+
+const RULE_FILE_LIMIT: usize = 128;
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "runtime", rename_all = "camelCase")]
 pub enum AdapterHandle {
@@ -265,7 +270,7 @@ impl Recognition {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "camelCase")]
 pub struct FileRule {
     #[serde(default, deserialize_with = "null_default")]
@@ -282,7 +287,7 @@ fn null_default<'de, T: Deserialize<'de> + Default, D: serde::Deserializer<'de>>
     Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, Hash)]
 pub struct Signature {
     pub offset: u64,
     pub hex: String,
@@ -462,18 +467,28 @@ impl Inventory {
         {
             return RecognitionStatus::Unknown;
         }
-        let mut unknown = !self.complete;
-        for (index, file) in self
-            .files
-            .iter()
-            .filter(|file| {
+        self.matching_rule_files(
+            rule,
+            reads,
+            resolve,
+            self.files.iter().filter(|file| {
                 rule.patterns
                     .iter()
                     .any(|pattern| glob_match(pattern, &file.path))
-            })
-            .enumerate()
-        {
-            if index >= 128 {
+            }),
+        )
+    }
+
+    fn matching_rule_files<'a>(
+        &self,
+        rule: &FileRule,
+        reads: &mut usize,
+        resolve: &impl Fn(&str) -> Option<PathBuf>,
+        files: impl Iterator<Item = &'a InventoryFile>,
+    ) -> RecognitionStatus {
+        let mut unknown = !self.complete;
+        for (index, file) in files.enumerate() {
+            if index >= RULE_FILE_LIMIT {
                 unknown = true;
                 break;
             }

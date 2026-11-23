@@ -673,6 +673,7 @@ impl Application {
         let project_directory = self.project_directory(id)?;
         let token = cancellation.clone();
         let pin = catalog_adapter(&project).map(|adapter| (adapter.adapter_id, adapter.version));
+        let catalog_cache = self.discovery_catalog.clone();
         let (
             known_packages,
             packages,
@@ -682,14 +683,26 @@ impl Application {
             known_versions,
             inputs,
         ) = tokio::task::spawn_blocking(move || -> Result<_, CoreError> {
-            let catalog = EngineCatalog::open(&root)?;
+            let catalog = catalog_cache
+                .lock()
+                .map_err(|_| CoreError::InvalidData("引擎索引锁已失效。".into()))?
+                .open(&root)?;
             let inputs = source_inputs(&project_directory, &game, None, &token, None)?;
             let inventory =
                 inputs.inventory(gamel10n_engines::discovery::Inventory::scan(&game)?)?;
-            let mut candidates = catalog.discovery_candidates_for_game(
+            let mut matching =
+                catalog.matching_packages(&inventory, |path| inputs.file(&game, path).ok())?;
+            if let Some((id, version)) = &pin {
+                matching
+                    .entry(id.clone())
+                    .or_default()
+                    .insert(version.clone());
+            }
+            let mut candidates = catalog.matching_candidates_for_game(
                 &game_id,
                 pin.as_ref()
                     .map(|(id, version)| (id.as_str(), version.as_str())),
+                Some(&matching),
             )?;
             if known_only {
                 candidates.retain(|candidate| candidate.is_known_game);
@@ -708,7 +721,12 @@ impl Application {
             let mut known_packages = Vec::new();
             let mut packages = Vec::new();
             for candidate in candidates {
-                if !candidate.matches_inventory(&inventory) {
+                if candidate
+                    .descriptor
+                    .as_ref()
+                    .is_none_or(|d| d.discovery_index_version != 1)
+                    && !candidate.matches_inventory(&inventory)
+                {
                     continue;
                 }
                 if candidate.is_known_game {
@@ -1390,7 +1408,26 @@ impl Application {
             .map_err(|error| CoreError::InvalidData(format!("内置解析器探测记录无效：{error}")))?
             .unwrap_or_default();
         let current = catalog_adapter(&project);
-        let catalog = EngineCatalog::open(self.data_directory())?;
+        let catalog = self
+            .discovery_catalog
+            .lock()
+            .map_err(|_| CoreError::InvalidData("引擎索引锁已失效。".into()))?
+            .open(self.data_directory())?;
+        let matching_inventory = match &start.inventory {
+            Some(inventory) => inventory.clone(),
+            None => Inventory::scan(&project.game_directory)?,
+        };
+        let matching_inventory = inputs.inventory(matching_inventory)?;
+        let mut matching = catalog.matching_packages(&matching_inventory, |path| {
+            inputs.file(&project.game_directory, path).ok()
+        })?;
+        if let Some(pin) = &current {
+            matching
+                .entry(pin.adapter_id.clone())
+                .or_default()
+                .insert(pin.version.clone());
+        }
+        let indexed_packages = catalog.adaptation_package_index(&matching)?;
         let packages = catalog
             .discovery_candidates(
                 current
@@ -1409,6 +1446,7 @@ impl Application {
             package_directory: self.data_directory().join("extensions"),
             package_directories: packages,
             reference_package_directories: references,
+            indexed_packages,
             user_instruction: instruction,
             objective: objective.as_str().into(),
             improve_existing,

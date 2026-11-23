@@ -126,6 +126,14 @@ impl AdaptationLimits {
 }
 
 #[derive(Clone, Debug)]
+pub struct IndexedPackage {
+    pub family: String,
+    pub version: String,
+    pub search_text: String,
+    pub matches_game: bool,
+}
+
+#[derive(Clone, Debug)]
 pub struct AdaptationRequest<'a> {
     pub game_id: String,
     pub game_directory: PathBuf,
@@ -137,6 +145,8 @@ pub struct AdaptationRequest<'a> {
     pub package_directories: Vec<PathBuf>,
     /// Additional published sources that can be copied and verified on the current inputs.
     pub reference_package_directories: Vec<PathBuf>,
+    /// Catalog metadata for filtering automatic probes and searching published sources.
+    pub indexed_packages: BTreeMap<PathBuf, IndexedPackage>,
     pub user_instruction: String,
     pub objective: String,
     pub improve_existing: bool,
@@ -157,6 +167,20 @@ impl AdaptationRequest<'_> {
         self.package_directories
             .iter()
             .chain(&self.reference_package_directories)
+    }
+
+    fn package_matches(&self, directory: &Path) -> bool {
+        self.indexed_packages
+            .get(directory)
+            .is_none_or(|package| package.matches_game)
+    }
+
+    fn version_sources<'b>(&'b self, id: &str, version: &str) -> impl Iterator<Item = &'b PathBuf> {
+        self.source_packages().filter(move |path| {
+            self.indexed_packages
+                .get(*path)
+                .is_none_or(|item| item.family == id && item.version == version)
+        })
     }
 }
 
@@ -680,10 +704,16 @@ impl EngineService {
             && request.inputs.files.is_empty()
             && request.inputs.excluded.is_empty()
         {
+            let packages: Vec<_> = request
+                .package_directories
+                .iter()
+                .filter(|directory| request.package_matches(directory))
+                .cloned()
+                .collect();
             let discovery = self
                 .discover_with_failures(
                     &request.game_directory,
-                    &request.package_directories,
+                    &packages,
                     &request.reuse_failures,
                     cancellation,
                     progress,
@@ -1275,6 +1305,17 @@ impl EngineService {
         let mut published = Vec::new();
         let mut seen = BTreeSet::new();
         for directory in request.source_packages() {
+            if let Some(item) = request.indexed_packages.get(directory)
+                && item.family != family_id
+                && (root.is_none()
+                    || crate::adaptation_context::engine_root(
+                        item.family
+                            .split_once('.')
+                            .map_or(&item.family, |(_, key)| key),
+                    ) != root)
+            {
+                continue;
+            }
             let Ok(manifest) = PackageManifest::load(directory) else {
                 continue;
             };
@@ -1397,6 +1438,15 @@ impl EngineService {
         let mut seen = BTreeSet::new();
         let mut packages = Vec::new();
         for directory in request.source_packages() {
+            if let Some(item) = request.indexed_packages.get(directory)
+                && (if query.is_empty() {
+                    !item.matches_game
+                } else {
+                    !item.search_text.contains(&query)
+                })
+            {
+                continue;
+            }
             if let Ok(manifest) = PackageManifest::load(directory)
                 && (query.is_empty()
                     || format!("{} {}", manifest.id, manifest.family)
@@ -1716,7 +1766,7 @@ impl EngineService {
                 json!({"success":true,"format":format,"nextAction":"补齐资源发现或容器胶水后执行 test_adapter。"}),
             );
         }
-        for directory in request.source_packages() {
+        for directory in request.version_sources(id, version) {
             let Ok(manifest) = PackageManifest::load(directory) else {
                 continue;
             };
@@ -2104,6 +2154,9 @@ impl EngineService {
         write_unmodified(&workspace.join("src/adapter.py"), &entry)?;
         register_python(state, "src/adapter.py")?;
         state.resource_patterns = serde_json::from_value(patterns)?;
+        if !refresh || state.recognition.is_none() {
+            state.recognition = serde_json::from_value(template["recognition"].clone())?;
+        }
         let limitations = archive_template.map_or(
             "只连接已声明的脚本与封包组件。RPYC2 保留非文本对象及源码摘要；其他脚本编码沿用解析器。不生成未经当前游戏验证的字体、转区或运行时补丁。",
             |template| template.limitations,
@@ -2908,7 +2961,7 @@ fn workspace_fingerprint(workspace: &Path, state: &Session) -> Result<String, En
         })
         .collect::<Result<_, EngineError>>()?;
     Ok(hash_text(&serde_json::to_string(
-        &json!({"hostRevision":1,"files":files,"selection":state.release_files,"patterns":state.resource_patterns,"recognition":state.recognition,"family":state.family}),
+        &json!({"hostRevision":2,"files":files,"selection":state.release_files,"patterns":state.resource_patterns,"recognition":state.recognition,"family":state.family}),
     )?))
 }
 fn verification_context(request: &AdaptationRequest<'_>) -> Result<String, EngineError> {
@@ -5022,6 +5075,7 @@ mod tests {
             package_directory: root.join("extensions"),
             package_directories: vec![],
             reference_package_directories: vec![],
+            indexed_packages: Default::default(),
             user_instruction: String::new(),
             objective: "Develop".into(),
             improve_existing: false,

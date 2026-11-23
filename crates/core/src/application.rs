@@ -284,6 +284,7 @@ impl TaskEntry {
 #[derive(Clone)]
 pub struct Application {
     pub(crate) store: Arc<ProjectStore>,
+    pub(crate) discovery_catalog: Arc<std::sync::Mutex<crate::catalog::DiscoveryCatalogCache>>,
     parser: VnTextPatch,
     analysis: Arc<Mutex<AnalysisCache>>,
     tasks: Arc<Mutex<HashMap<String, TaskEntry>>>,
@@ -309,6 +310,7 @@ impl Application {
         let (events, _) = broadcast::channel(256);
         Ok(Self {
             store: Arc::new(ProjectStore::open(data_directory).await?),
+            discovery_catalog: Default::default(),
             parser: VnTextPatch::new(tools),
             analysis: Arc::new(Mutex::new(AnalysisCache::default())),
             tasks: Arc::new(Mutex::new(HashMap::new())),

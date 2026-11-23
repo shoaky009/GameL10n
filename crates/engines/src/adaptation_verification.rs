@@ -1107,7 +1107,7 @@ async fn prepare_test_package(
         let assembly_sha256 = package_files
             .get("src/adapter.py")
             .ok_or_else(|| EngineError::Protocol("缺少适配器入口。".into()))?;
-        let manifest = json!({"id":id,"version":version,"manifestVersion":4,"protocolVersion":1,"family":state.family,"resourceFiles":[],"resourcePatterns":state.resource_patterns,"recognition":state.recognition,"sourceSha256":source_sha256,"assemblySha256":assembly_sha256,"packageFiles":package_files,"releaseFiles":state.release_files});
+        let manifest = json!({"id":id,"version":version,"manifestVersion":4,"protocolVersion":1,"discoveryIndexVersion":1,"family":state.family,"resourceFiles":[],"resourcePatterns":state.resource_patterns,"recognition":state.recognition,"sourceSha256":source_sha256,"assemblySha256":assembly_sha256,"packageFiles":package_files,"releaseFiles":state.release_files});
         write_json(&package.join("package.json"), &manifest).map_err(file_error)?;
         let parsed = PackageManifest::load(&package)?;
         let handle = parsed.handle(&package)?;
@@ -1613,6 +1613,7 @@ mod tests {
             package_directory: root.join("extensions"),
             package_directories: vec![],
             reference_package_directories: vec![],
+            indexed_packages: Default::default(),
             user_instruction: String::new(),
             objective: "Develop".into(),
             improve_existing: false,

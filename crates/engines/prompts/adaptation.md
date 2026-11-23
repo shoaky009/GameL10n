@@ -16,6 +16,7 @@ Supply independently located original text as coverageSamples in checkpoint/test
 sourceText. Use field declarations, raw offsets or user screenshots as evidence, not the adapter's own extraction.
 These samples are merged and retained across checkpoints; the host checks them against extraction before publication.
 When you identify the main text resource, include it in resourcePatterns and supply an independent anchor at the next test_adapter.
+Include proven prerequisites from the adapter's probe in recognition.required so the host can rule out unrelated games without launching Python.
 Never infer a script anchor from the game title, manuals or filenames. A mismatch can be a reader bug OR a mislabelled sample.
 When independent raw-resource evidence proves the sample wrong, use coverageSampleCorrections in checkpoint/test_adapter
 to replace that exact anchor with a real independently located sample, recording the reason and evidence. Do not ask the user

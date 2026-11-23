@@ -14,11 +14,15 @@ use serde_json::{Value, json};
 use crate::{CoreError, patching::safe_path};
 
 mod lifecycle;
+mod routing;
+pub(crate) use routing::DiscoveryCatalogCache;
+type MatchingVersions = BTreeMap<String, std::collections::BTreeSet<String>>;
 pub use lifecycle::{AdapterVersion, VersionFeedback, VersionLifecycle};
 use lifecycle::{lifecycle, save_lifecycle};
 
 // Catalog instances are opened independently by concurrent project tasks.
 static WRITE_GATE: Mutex<()> = Mutex::new(());
+static CATALOG_REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 fn write_gate() -> Result<MutexGuard<'static, ()>, CoreError> {
     WRITE_GATE
         .lock()
@@ -203,6 +207,8 @@ pub struct EngineLibraryDeleteResult {
 #[serde(rename_all = "camelCase")]
 pub struct EngineDiscoveryDescriptor {
     #[serde(default)]
+    pub discovery_index_version: u32,
+    #[serde(default)]
     pub resource_files: Vec<String>,
     #[serde(default)]
     pub resource_patterns: Vec<String>,
@@ -255,6 +261,15 @@ impl EngineDiscoveryCandidate {
             })
         }
     }
+}
+
+fn package_discovery(package: &Value) -> Value {
+    json!({
+        "discoveryIndexVersion": property(package,"discoveryIndexVersion").and_then(Value::as_u64).unwrap_or(0),
+        "resourceFiles": property(package, "resourceFiles").cloned().unwrap_or_else(|| json!([])),
+        "resourcePatterns": property(package, "resourcePatterns").cloned().unwrap_or_else(|| json!([])),
+        "recognition": property(package, "recognition")
+    })
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -311,8 +326,21 @@ impl Default for LibraryIndex {
     }
 }
 
+impl LibraryIndex {
+    fn matching_families<'a>(
+        &'a self,
+        matching: Option<&'a MatchingVersions>,
+    ) -> Box<dyn Iterator<Item = (&'a String, &'a IndexFamily)> + 'a> {
+        match matching {
+            Some(ids) => Box::new(ids.keys().filter_map(|id| self.families.get_key_value(id))),
+            None => Box::new(self.families.iter()),
+        }
+    }
+}
+
 struct CachedIndex {
     index: LibraryIndex,
+    routing: std::sync::OnceLock<routing::PackageRoutes>,
     /// Search strings are built once per refresh, without opening package files.
     search: BTreeMap<String, String>,
     order: Vec<String>,
@@ -361,6 +389,7 @@ impl CachedIndex {
         order.sort_by_cached_key(|id| (index.families[id].family.name.to_lowercase(), id.clone()));
         Self {
             index,
+            routing: Default::default(),
             search,
             order,
         }
@@ -375,6 +404,18 @@ pub struct EngineCatalog {
 }
 
 impl EngineCatalog {
+    pub(crate) fn matching_packages(
+        &self,
+        inventory: &gamel10n_engines::discovery::Inventory,
+        resolve: impl Fn(&str) -> Option<PathBuf>,
+    ) -> Result<MatchingVersions, CoreError> {
+        let cached = self.lock()?;
+        let routes = cached
+            .routing
+            .get_or_init(|| routing::PackageRoutes::new(&cached.index));
+        Ok(routes.select(inventory, resolve))
+    }
+
     pub fn open(data_directory: &Path) -> Result<Self, CoreError> {
         Self::from_extensions_root(&data_directory.join("extensions"))
     }
@@ -390,6 +431,39 @@ impl EngineCatalog {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    pub(crate) fn adaptation_package_index(
+        &self,
+        matching: &MatchingVersions,
+    ) -> Result<BTreeMap<PathBuf, gamel10n_engines::adaptation::IndexedPackage>, CoreError> {
+        let cached = self.lock()?;
+        let mut packages = BTreeMap::new();
+        let base = self.root.join("packages");
+        for (id, family) in &cached.index.families {
+            let search_text = format!("{} {}", id, json!(family.family)).to_lowercase();
+            for (version, entry) in &family.versions {
+                if entry.source == 1
+                    && entry
+                        .extra
+                        .get("discovery")
+                        .is_some_and(|d| d["discoveryIndexVersion"].as_u64() == Some(1))
+                {
+                    packages.insert(
+                        base.join(id).join(version),
+                        gamel10n_engines::adaptation::IndexedPackage {
+                            family: id.clone(),
+                            version: version.clone(),
+                            search_text: search_text.clone(),
+                            matches_game: matching
+                                .get(id)
+                                .is_some_and(|versions| versions.contains(version)),
+                        },
+                    );
+                }
+            }
+        }
+        Ok(packages)
     }
 
     pub fn refresh(&self) -> Result<(), CoreError> {
@@ -739,6 +813,14 @@ impl EngineCatalog {
         &self,
         pinned: Option<(&str, &str)>,
     ) -> Result<Vec<EngineDiscoveryCandidate>, CoreError> {
+        self.candidates_matching(pinned, None)
+    }
+
+    fn candidates_matching(
+        &self,
+        pinned: Option<(&str, &str)>,
+        matching: Option<&MatchingVersions>,
+    ) -> Result<Vec<EngineDiscoveryCandidate>, CoreError> {
         if let Some((id, version)) = pinned {
             validate_family_id(id)?;
             validate_part(version)?;
@@ -746,8 +828,17 @@ impl EngineCatalog {
         let cached = self.lock()?;
         let mut candidates = Vec::new();
         let mut pin_known = false;
-        for (id, family) in &cached.index.families {
-            for (version, entry) in &family.versions {
+        let families = cached.index.matching_families(matching);
+        for (id, family) in families {
+            let versions: Box<dyn Iterator<Item = _>> = match matching {
+                Some(matching) => Box::new(
+                    matching[id]
+                        .iter()
+                        .filter_map(|v| family.versions.get_key_value(v)),
+                ),
+                None => Box::new(family.versions.iter()),
+            };
+            for (version, entry) in versions {
                 let is_pinned = pinned
                     .is_some_and(|(pin_id, pin_version)| pin_id == id && pin_version == version);
                 pin_known |= is_pinned;
@@ -947,7 +1038,7 @@ impl EngineCatalog {
         save_lifecycle(setting, version, &lifecycle)?;
         extra.insert("lifecycle".into(), json!(lifecycle));
         extra.insert("discoveryLoaded".into(), Value::Bool(true));
-        extra.insert("discovery".into(), json!({"resourceFiles":property(&package,"resourceFiles").unwrap_or(&Value::Null),"resourcePatterns":property(&package,"resourcePatterns").unwrap_or(&Value::Null),"recognition":property(&package,"recognition").unwrap_or(&Value::Null)}));
+        extra.insert("discovery".into(), package_discovery(&package));
         stored.versions.insert(
             version.into(),
             IndexVersion {
@@ -1331,6 +1422,7 @@ impl EngineCatalog {
             }
             return Err(error.into());
         }
+        CATALOG_REVISION.fetch_add(1, std::sync::atomic::Ordering::Release);
         *cached = CachedIndex::new(index);
         Ok(())
     }
@@ -1429,6 +1521,18 @@ fn load_index(root: &Path) -> Result<LibraryIndex, CoreError> {
                     .get("enabled")
                     .and_then(Value::as_bool)
                     .unwrap_or(true);
+                let released: HashSet<_> = setting["releases"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|v| v["version"].as_str())
+                    .collect();
+                let excluded: HashSet<_> = setting["excludedVersions"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .collect();
                 for (version, entry) in &mut family.versions {
                     let lifecycle = lifecycle(setting, version)?;
                     if setting
@@ -1436,18 +1540,9 @@ fn load_index(root: &Path) -> Result<LibraryIndex, CoreError> {
                         .and_then(|values| values.get(version))
                         .is_some()
                     {
-                        let released = setting["releases"].as_array().is_some_and(|values| {
-                            values
-                                .iter()
-                                .any(|value| value["version"].as_str() == Some(version))
-                        });
-                        let excluded =
-                            setting["excludedVersions"]
-                                .as_array()
-                                .is_some_and(|values| {
-                                    values.iter().any(|value| value.as_str() == Some(version))
-                                });
-                        entry.is_candidate = released && !excluded && lifecycle.can_reuse();
+                        entry.is_candidate = released.contains(version.as_str())
+                            && !excluded.contains(version.as_str())
+                            && lifecycle.can_reuse();
                         entry.extra.insert("lifecycle".into(), json!(lifecycle));
                     }
                 }
@@ -1636,7 +1731,10 @@ fn rebuild_index(root: &Path) -> Result<LibraryIndex, CoreError> {
                     exists: true,
                     published_at,
                     is_candidate: candidate,
-                    extra: BTreeMap::new(),
+                    extra: BTreeMap::from([
+                        ("discovery".into(), package_discovery(&package)),
+                        ("discoveryLoaded".into(), Value::Bool(true)),
+                    ]),
                 },
             );
         }
@@ -2536,8 +2634,7 @@ mod tests {
             json!({"resourceFiles":[],"resourcePatterns":["*.dat"],"recognition":null});
         stored["families"]["engine.fixture-0001"]["versions"]["v1"]["isCandidate"] = json!(false);
         stored["families"]["engine.fixture-0002"]["enabled"] = json!(false);
-        stored["families"]["engine.fixture-0003"]["versions"]["v1"]["discovery"] =
-            json!({"resourceFiles":[],"resourcePatterns":["*.png"],"recognition":null});
+        stored["families"]["engine.fixture-0003"]["versions"]["v1"]["discovery"] = json!({"discoveryIndexVersion":1,"resourceFiles":[],"resourcePatterns":["*.png"],"recognition":null});
         write_json(&path, &stored).unwrap();
         let game = root.path().join("game");
         fs::create_dir_all(&game).unwrap();
@@ -2545,6 +2642,14 @@ mod tests {
         let inventory = gamel10n_engines::discovery::Inventory::scan(&game).unwrap();
         let catalog = EngineCatalog::from_extensions_root(root.path()).unwrap();
         let candidates = catalog.discovery_candidates(None).unwrap();
+        let matching = catalog
+            .matching_packages(&inventory, |path| Some(game.join(path)))
+            .unwrap();
+        assert!(matching.contains_key("engine.fixture-0000"));
+        assert!(!matching.contains_key("engine.fixture-0003"));
+        let sources = catalog.adaptation_package_index(&matching).unwrap();
+        assert!(!sources.contains_key(&root.path().join("packages/engine.fixture-0000/v1")));
+        assert!(!sources[&root.path().join("packages/engine.fixture-0003/v1")].matches_game);
         assert_eq!(candidates.len(), 2);
         assert_eq!(
             candidates
@@ -2570,5 +2675,62 @@ mod tests {
                     && candidate.adapter_id == "engine.fixture-0002")
         );
         assert!(!root.path().join("packages").exists());
+    }
+
+    #[test]
+    fn large_catalog_excludes_unrelated_packages_before_opening_manifests() {
+        use gamel10n_engines::discovery::Inventory;
+        use std::{cell::Cell, time::Instant};
+
+        for count in [1_000, 10_000] {
+            let root = tempfile::tempdir().unwrap();
+            let game = root.path().join("game");
+            fs::create_dir(&game).unwrap();
+            fs::write(game.join("GAME.EXE"), b"MZ").unwrap();
+            fs::write(game.join("story.arc"), b"GOOD").unwrap();
+            let inventory = Inventory::scan(&game).unwrap();
+            let mut versions = serde_json::Map::new();
+            for number in 0..count {
+                let version = format!("v{number}");
+                let rule = match number {
+                    0 => {
+                        json!({"patterns":["**/*.arc"],"signatures":[{"offset":0,"hex":"474f4f44"}]})
+                    }
+                    n if n % 2 == 0 => {
+                        json!({"patterns":["**/*.arc"],"signatures":[{"offset":0,"hex":"4e4f5045"}]})
+                    }
+                    _ => json!({"patterns":[format!("**/format{number}.bin")]}),
+                };
+                versions.insert(version.clone(), json!({"source":1, "version":version, "exists":true, "isCandidate":true,
+                    "discovery":{"discoveryIndexVersion":1,"resourcePatterns":["*.exe","*.arc"],"recognition":{"schemaVersion":1,"required":[rule]}}}));
+            }
+            write_json(&root.path().join("library-index.json"), &json!({"schemaVersion":1,"families":{
+                "engine.archive":{"family":{"kind":"engine","key":"archive","name":"Archive"},"versions":versions}
+            }})).unwrap();
+            let cold = Instant::now();
+            let catalog = EngineCatalog::from_extensions_root(root.path()).unwrap();
+            for run in 0..2 {
+                let start = Instant::now();
+                let reads = Cell::new(0);
+                let matching = catalog
+                    .matching_packages(&inventory, |path| {
+                        reads.set(reads.get() + 1);
+                        Some(game.join(path))
+                    })
+                    .unwrap();
+                let candidates = catalog
+                    .matching_candidates_for_game("new-game", None, Some(&matching))
+                    .unwrap();
+                assert_eq!(candidates.len(), 1);
+                assert_eq!(candidates[0].version, "v0");
+                assert_eq!(reads.get(), 2);
+                eprintln!(
+                    "versions={count} run={run} select={:?} since_open={:?}",
+                    start.elapsed(),
+                    cold.elapsed()
+                );
+            }
+            assert!(!root.path().join("packages").exists());
+        }
     }
 }

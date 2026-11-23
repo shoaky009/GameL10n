@@ -42,6 +42,9 @@ pub(super) fn sampled_recipes(request: &AdaptationRequest<'_>, state: &Session) 
     }
     let mut seen = BTreeSet::new();
     request.source_packages().filter_map(|directory| {
+        if request.indexed_packages.get(directory).is_some_and(|item| !samples.contains_key(&item.family)) {
+            return None;
+        }
         let manifest = PackageManifest::load(directory).ok()?;
         let archives: Vec<_> = samples.get(&manifest.id)?.iter().copied()
             .filter(|path| manifest.resource_patterns.iter().any(|pattern| glob_match(pattern, path)))
@@ -104,7 +107,7 @@ fn find<'a>(
 ) -> Result<(PackageManifest, &'a Path), EngineError> {
     let id = text(args, "id")?;
     let version = text(args, "version")?;
-    for directory in request.source_packages() {
+    for directory in request.version_sources(id, version) {
         if let Ok(manifest) = PackageManifest::load(directory)
             && manifest.id == id
             && manifest.version == version

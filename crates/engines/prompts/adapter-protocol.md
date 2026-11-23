@@ -29,7 +29,7 @@ Optional test_adapter recognition is a separate schemaVersion:1 declaration of r
 Each rule selects ANY of patterns; size constraints and ALL signatures hold on one file. All required rules must match;
 hints only rank candidates. Signatures use hex bytes and offset>=0: origin start (default) counts to signature start;
 origin end counts backwards from EOF to signature end. Unknown evidence retains a candidate for CLI probe.
-Omit recognition to keep saved conditions; do not add game-title filenames or research extra facts merely to fill it.
+Publish the necessary format checks already used by probe in recognition.required, especially when resourcePatterns includes executables, sidecars or wildcards. Use format markers shared across games. Keep optional companions in hints. Omit recognition to keep saved conditions.
 The host owns indexing, ranking and I/O budgets; declaration changes version the package without changing CLI v1.
 During probe, sourceDirectory contains only up to 65536 header bytes per candidate. probeFiles reports original lengths
 and actual headerBytes. To inspect a footer, index or PE resource outside that header, return

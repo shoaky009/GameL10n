@@ -154,15 +154,25 @@ impl EngineCatalog {
         game_id: &str,
         pinned: Option<(&str, &str)>,
     ) -> Result<Vec<EngineDiscoveryCandidate>, CoreError> {
-        let mut candidates = self.discovery_candidates(pinned)?;
+        self.matching_candidates_for_game(game_id, pinned, None)
+    }
+
+    pub(crate) fn matching_candidates_for_game(
+        &self,
+        game_id: &str,
+        pinned: Option<(&str, &str)>,
+        matching: Option<&MatchingVersions>,
+    ) -> Result<Vec<EngineDiscoveryCandidate>, CoreError> {
+        let mut candidates = self.candidates_matching(pinned, matching)?;
         let cached = self.lock()?;
         let state = load_state(&self.root)?;
         let mut known_updates = BTreeMap::new();
-        for (id, family) in &cached.index.families {
+        for (id, family) in cached.index.matching_families(matching) {
             for game in family.games.iter().filter(|game| {
                 game.game_id == game_id
                     && game.structure_status == "passed"
                     && game.runtime_status != "failed"
+                    && matching.is_none_or(|m| m[id].contains(&game.adapter_version))
             }) {
                 let Some(entry) = family.versions.get(&game.adapter_version) else {
                     continue;

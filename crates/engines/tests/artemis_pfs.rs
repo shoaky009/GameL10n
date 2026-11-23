@@ -81,6 +81,7 @@ async fn automatic_recognition_verifies_pfs_replacement_before_model_calls() {
         package_directory: extensions.clone(),
         package_directories: vec![],
         reference_package_directories: vec![],
+        indexed_packages: Default::default(),
         user_instruction: String::new(),
         objective: "develop".into(),
         improve_existing: false,

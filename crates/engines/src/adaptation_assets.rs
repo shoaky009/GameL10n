@@ -272,6 +272,15 @@ pub(crate) fn template_catalog() -> Vec<Value> {
         let mut template = json!({"id":id,"version":1,"format":format,"archiveComponent":archive,
             "scriptExtensions":extensions,"resourcePatterns":patterns,
             "family":{"kind":"template","key":id,"name":name,"adapterId":format!("template.{id}")}});
+        let required = match id {
+            QLIE_PACK_TEMPLATE | QLIE_PACK31_TEMPLATE => json!({"patterns":["GameData/*.pack"]}),
+            SYSTEM4_AIN_TEMPLATE => json!({"patterns":patterns,"signatures":[{"offset":0,"hex":"41493200"}]}),
+            ARTEMIS_PFS_TEMPLATE => json!({"patterns":patterns,"signatures":[{"offset":0,"hex":"706638"}]}),
+            _ => Value::Null,
+        };
+        if !required.is_null() {
+            template["recognition"] = json!({"schemaVersion":1,"required":[required]});
+        }
         if id == FLASH_POOL_TEMPLATE {
             template["scriptComponent"] = json!("flash-avm1");
         } else if id == SYSTEM4_AIN_TEMPLATE {
