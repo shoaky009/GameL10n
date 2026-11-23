@@ -1,5 +1,8 @@
 //! Batch planning, durable request receipts, cache reuse and translation API fallback.
 
+mod batches;
+mod planning;
+
 use crate::{
     TokenUsage, TranslationUnit,
     compatibility::legacy_json,
@@ -173,14 +176,24 @@ pub struct TranslationEngine {
     directory: PathBuf,
     legacy_memory: Option<PathBuf>,
 }
-type ProgressChanges<'a> = (
-    &'a [&'a TranslationUnit],
-    &'a BTreeMap<String, String>,
-    &'a [RecordedIssue],
-);
+type Batch<'a> = Vec<Vec<&'a TranslationUnit>>;
+struct TranslationRun<'a, F> {
+    engine: &'a TranslationEngine,
+    providers: &'a [OpenAiProvider],
+    policy: &'a TranslationPolicy,
+    options: &'a TranslationOptions,
+    cancellation: &'a CancellationToken,
+    journal: ExecutionJournal,
+    journal_path: PathBuf,
+    completed: CompletedTranslations,
+    failed: BTreeSet<String>,
+    cache_hits: usize,
+    usage: TokenUsage,
+    total: usize,
+    report: F,
+}
 struct CommitState {
     memory: TranslationMemory,
-    completed: BTreeMap<String, String>,
     issues: Vec<RecordedIssue>,
 }
 struct CommitOptions {
@@ -260,6 +273,7 @@ impl TranslationEngine {
             legacy_memory,
         }
     }
+
     pub async fn run<F>(
         &self,
         all_units: &[TranslationUnit],
@@ -267,758 +281,62 @@ impl TranslationEngine {
         policy: &TranslationPolicy,
         options: &TranslationOptions,
         cancellation: &CancellationToken,
-        mut report: F,
+        report: F,
     ) -> Result<TranslationRunResult, ExecutionError>
     where
         F: FnMut(TranslationProgress),
     {
-        if providers.is_empty()
-            || !(1..=80).contains(&options.batch_size)
-            || policy.target_language.trim().is_empty()
-        {
-            return Err(ExecutionError::Invalid(
-                "请配置翻译 API 链、目标语言和每批文本数（1–80）。".into(),
-            ));
-        }
-        if options.candidate_only && options.retranslation_id.is_some()
-            || options.retranslation_id.as_deref().is_some_and(|id| {
-                id.len() != 32 || !id.bytes().all(|byte| byte.is_ascii_hexdigit())
-            })
-            || options.retranslation_id.is_some() && options.unit_ids.is_none()
-        {
-            return Err(ExecutionError::Invalid(
-                "重新翻译必须指定选区和有效任务标识。".into(),
-            ));
-        }
-        let selected: Option<HashSet<&str>> = options
-            .unit_ids
-            .as_ref()
-            .map(|ids| ids.iter().map(String::as_str).collect());
-        let units: Vec<_> = all_units
-            .iter()
-            .filter(|unit| {
-                selected
-                    .as_ref()
-                    .is_none_or(|ids| ids.contains(unit.id.as_str()))
-            })
-            .collect();
-        if selected
-            .as_ref()
-            .is_some_and(|ids| ids.is_empty() || ids.len() != units.len())
-        {
-            return Err(ExecutionError::Invalid(
-                "文本选区为空或已失效，请重新选择。".into(),
-            ));
-        }
-        let continue_on_error = !options.candidate_only;
-        let mut memory =
+        let (selected, units) = planning::select_units(all_units, providers, policy, options)?;
+        let memory =
             TranslationMemory::load(self.directory.join("memory"), self.legacy_memory.as_deref())?;
         let journal_path = self.directory.join("translation-execution.json");
-        let mut journal: ExecutionJournal = if journal_path.is_file() {
+        let journal = if journal_path.is_file() {
             read_json(&journal_path)?
         } else {
             ExecutionJournal::default()
         };
-        let mut issues = load_issues(&self.directory);
-        let mut completed =
-            CompletedTranslations::new(&self.directory, options.collect_translations)?;
-        let mut failed = BTreeSet::new();
-        let mut cache_hits = 0;
-        let mut usage = TokenUsage::default();
-        let mut emit = |stage: &str,
-                        message: String,
-                        done: usize,
-                        hits: usize,
-                        failed: usize,
-                        usage: &TokenUsage,
-                        changes: Option<ProgressChanges<'_>>| {
-            let updates = changes
-                .map(|(units, completed, _)| {
-                    units
-                        .iter()
-                        .filter_map(|unit| {
-                            completed
-                                .get(&unit.id)
-                                .map(|text| (unit.id.clone(), text.clone()))
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            let failure_updates = changes
-                .map(|(units, completed, issues)| {
-                    units
-                        .iter()
-                        .map(|unit| {
-                            (
-                                unit.id.clone(),
-                                if completed.contains_key(&unit.id) {
-                                    None
-                                } else {
-                                    issues
-                                        .iter()
-                                        .find(|issue| issue.unit_id.as_deref() == Some(&unit.id))
-                                        .map(|issue| issue.message.clone())
-                                },
-                            )
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            report(TranslationProgress {
-                stage: stage.into(),
-                completed: done,
-                total: units.len(),
-                cache_hits: hits,
-                failed,
-                usage: usage.clone(),
-                message,
-                updates,
-                failure_updates,
-            });
+        let mut state = CommitState {
+            memory,
+            issues: load_issues(&self.directory),
         };
-        emit(
-            "查询缓存",
-            "正在加载历史译文。".into(),
-            0,
-            0,
-            0,
-            &usage,
-            None,
-        );
-        self.import_legacy_receipts(&mut journal)?;
-        // Recover every matching paid response before choosing a new batch size or scope.
-        let mut recovered_receipts = Vec::new();
-        for (receipt_key, receipt) in &journal.pending {
-            if receipt.request.candidate_only != options.candidate_only
-                || receipt.request.retranslation_id != options.retranslation_id
-            {
-                continue;
-            }
-            if let Some(response) = &receipt.response {
-                let requested: HashSet<_> = receipt
-                    .request
-                    .units
-                    .iter()
-                    .map(|unit| unit.id.as_str())
-                    .collect();
-                let keys: HashSet<_> = receipt
-                    .request
-                    .units
-                    .iter()
-                    .map(|unit| unit.memory_key.as_str())
-                    .collect();
-                let recovery_units: Vec<_> = all_units
-                    .iter()
-                    .filter(|unit| {
-                        // Receipts store representatives; recover identical texts in the selection too.
-                        (!options.candidate_only && options.retranslation_id.is_none()
-                            || requested.contains(unit.id.as_str())
-                            || selected
-                                .as_ref()
-                                .is_none_or(|ids| ids.contains(unit.id.as_str())))
-                            && keys.contains(memory_key(unit, policy).as_str())
-                    })
-                    .collect();
-                let committed = self
-                    .commit_response(
-                        &recovery_units,
-                        policy,
-                        options,
-                        &receipt.request,
-                        response,
-                        CommitState {
-                            memory,
-                            completed: BTreeMap::new(),
-                            issues,
-                        },
-                    )
-                    .await?;
-                memory = committed.memory;
-                issues = committed.issues;
-                for (id, text) in committed.completed {
-                    if selected
-                        .as_ref()
-                        .is_none_or(|ids| ids.contains(id.as_str()))
-                    {
-                        completed.insert(&id, &text)?;
-                    }
-                }
-                let compatible: HashSet<_> = recovery_units
-                    .iter()
-                    .map(|unit| memory_key(unit, policy))
-                    .collect();
-                if receipt
-                    .request
-                    .units
-                    .iter()
-                    .all(|unit| compatible.contains(&unit.memory_key))
-                {
-                    recovered_receipts.push(receipt_key.clone());
-                }
-            }
-        }
-        for key in recovered_receipts {
-            journal.pending.remove(&key);
-            if self
-                .directory
-                .join("responses")
-                .join(format!("{key}.request.json"))
-                .is_file()
-            {
-                journal.legacy_receipts.insert(key);
-            }
-        }
-        write_json(&journal_path, &journal)?;
+        let mut run = TranslationRun {
+            engine: self,
+            providers,
+            policy,
+            options,
+            cancellation,
+            journal,
+            journal_path,
+            completed: CompletedTranslations::new(&self.directory, options.collect_translations)?,
+            failed: BTreeSet::new(),
+            cache_hits: 0,
+            usage: TokenUsage::default(),
+            total: units.len(),
+            report,
+        };
+
+        run.emit("查询缓存", "正在加载历史译文。".into());
+        state = run
+            .recover_receipts(all_units, selected.as_ref(), state)
+            .await?;
+        drop(selected);
         let directory = self.directory.clone();
         let edit_store = tokio::task::spawn_blocking(move || EditStore::open(&directory))
             .await
             .map_err(|error| ExecutionError::Invalid(error.to_string()))??;
-        let history_units = edit_store.read(|edits| -> Result<Vec<_>, ExecutionError> {
-            let mut history_units = Vec::new();
-            for unit in &units {
-                cancelled(cancellation)?;
-                if options.candidate_only {
-                    if let Some(candidate) = edits.candidate(unit, &policy.target_language) {
-                        completed.insert(&unit.id, &candidate.text)?;
-                        cache_hits += 1;
-                    }
-                    continue;
-                }
-                let edit = edits.find(unit, &policy.target_language);
-                if options.retranslation_id.is_some()
-                    && edit.is_none_or(|edit| edit.retranslation_id != options.retranslation_id)
-                {
-                    continue;
-                }
-                if let Some(edit) = edit {
-                    completed.insert(&unit.id, &edit.text)?;
-                    cache_hits += 1;
-                } else {
-                    history_units.push(*unit);
-                }
-            }
-            Ok(history_units)
-        })??;
-        // Visit each prefix together so a bounded cache does not reread it for every source row.
-        let mut keyed_units: Vec<_> = history_units
-            .into_iter()
-            .map(|unit| (memory_key(unit, policy), unit))
-            .collect();
-        keyed_units.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
-        for (key, unit) in keyed_units {
-            cancelled(cancellation)?;
-            if let Some(text) = memory.find_with_key(unit, policy, key)?
-                && text::validate(unit, text).is_empty()
-            {
-                completed.insert(&unit.id, text)?;
-                cache_hits += 1;
-            }
-        }
-        memory.clear_cache();
-        issues.retain(|issue| {
-            issue
-                .unit_id
-                .as_ref()
-                .is_none_or(|id| !completed.contains_key(id))
-        });
-        write_json(&self.directory.join("translation-errors.json"), &issues)?;
-        let mut groups = Vec::<Vec<&TranslationUnit>>::new();
-        let mut by_key = HashMap::<String, usize>::new();
-        for unit in units
-            .iter()
-            .filter(|unit| !completed.contains_key(&unit.id))
-        {
-            let key = memory_key(unit, policy);
-            let index = *by_key.entry(key).or_insert_with(|| {
-                let index = groups.len();
-                groups.push(Vec::new());
-                index
-            });
-            groups[index].push(unit);
-        }
-        drop(by_key);
-        let uncertain: HashSet<_> = journal
-            .pending
-            .values()
-            .filter(|receipt| {
-                receipt.response.is_none()
-                    && receipt.request.candidate_only == options.candidate_only
-                    && receipt.request.retranslation_id == options.retranslation_id
-            })
-            .flat_map(|receipt| {
-                receipt
-                    .request
-                    .units
-                    .iter()
-                    .map(|unit| unit.memory_key.clone())
-            })
-            .collect();
-        if !options.retry_uncertain_requests {
-            let mut blocked = Vec::new();
-            groups.retain(|group| {
-                if uncertain.contains(&memory_key(group[0], policy)) {
-                    blocked.extend(group.iter().copied());
-                    false
-                } else {
-                    true
-                }
-            });
-            if !blocked.is_empty() {
-                mark_failed(
-                    &blocked,
-                    policy,
-                    "request-outcome-unknown",
-                    "上次请求结果未知，未授权重新发送；请确认后重试。",
-                    &mut issues,
-                    &mut failed,
-                );
-                write_json(&self.directory.join("translation-errors.json"), &issues)?;
-                if !continue_on_error {
-                    return Err(ExecutionError::Uncertain);
-                }
-            }
-        }
-        drop(uncertain);
-        emit(
+        run.load_history(&units, &edit_store, &mut state)?;
+        let groups = run.group_pending(&units, &mut state.issues)?;
+        run.emit(
             "查询缓存",
-            format!("已加载 {cache_hits} 条历史译文。"),
-            completed.len(),
-            cache_hits,
-            failed.len(),
-            &usage,
-            None,
+            format!("已加载 {} 条历史译文。", run.cache_hits),
         );
-        let batch_size = providers[0].maximum_batch_size().min(options.batch_size);
-        // A row refusal survives regrouping on resume and belongs to this provider and operation.
-        let refusal_scopes: Vec<_> = providers
-            .iter()
-            .map(|provider| request_key(provider.identity(), &[], policy, options))
-            .collect();
-        let mut batches = groups.into_iter();
-        let mut fallback_batches = VecDeque::new();
-        'batches: while let Some((start_provider, batch)) =
-            fallback_batches.pop_front().or_else(|| {
-                let batch: Vec<_> = batches.by_ref().take(batch_size).collect();
-                (!batch.is_empty()).then_some((0, batch))
-            })
-        {
-            cancelled(cancellation)?;
-            // Protect manual corrections saved during an ordinary background translation.
-            let mut current = Vec::<Vec<&TranslationUnit>>::new();
-            edit_store.read(|edits| -> Result<(), ExecutionError> {
-                for group in &batch {
-                    let mut remaining = Vec::new();
-                    for unit in group {
-                        if options.retranslation_id.is_none()
-                            && !options.candidate_only
-                            && let Some(edit) = edits.find(unit, &policy.target_language)
-                        {
-                            completed.insert(&unit.id, &edit.text)?;
-                            cache_hits += 1;
-                            continue;
-                        }
-                        remaining.push(*unit);
-                    }
-                    if !remaining.is_empty() {
-                        current.push(remaining);
-                    }
-                }
-                Ok(())
-            })??;
-            if current.is_empty() {
-                continue;
-            }
-            let representatives: Vec<_> = current.iter().map(|group| group[0].clone()).collect();
-            let feedback = representatives
-                .iter()
-                .map(|unit| {
-                    (
-                        unit.id.clone(),
-                        issues
-                            .iter()
-                            .filter(|issue| {
-                                issue.unit_id.as_deref() == Some(&unit.id)
-                                    && issue
-                                        .memory_key
-                                        .as_ref()
-                                        .is_none_or(|key| *key == memory_key(unit, policy))
-                                    && !matches!(
-                                        issue.code.as_str(),
-                                        "provider-refusal"
-                                            | "provider-request-failed"
-                                            | "request-outcome-unknown"
-                                    )
-                            })
-                            .map(|issue| issue.message.clone())
-                            .collect::<Vec<_>>(),
-                    )
-                })
-                .collect();
-            let mut response = None;
-            let mut batch_error = None;
-            let mut last_output_error = None;
-            for (provider_index, provider) in providers.iter().enumerate().skip(start_provider) {
-                cancelled(cancellation)?;
-                let refusal_scope = &refusal_scopes[provider_index];
-                if let Some(keys) = journal.refused_units.get(refusal_scope) {
-                    let (refused, remaining): (Vec<_>, Vec<_>) = current
-                        .into_iter()
-                        .partition(|group| keys.contains(&memory_key(group[0], policy)));
-                    if !refused.is_empty() {
-                        fallback_batches.push_front((provider_index + 1, refused));
-                        if !remaining.is_empty() {
-                            fallback_batches.push_front((provider_index, remaining));
-                        }
-                        continue 'batches;
-                    }
-                    current = remaining;
-                }
-                if current.len() > provider.maximum_batch_size() {
-                    // Continue the refused batch at this API; only it needs smaller requests.
-                    // Commit each split response before moving on, using the usual receipt path.
-                    for batch in current.chunks(provider.maximum_batch_size()).rev() {
-                        fallback_batches.push_front((provider_index, batch.to_vec()));
-                    }
-                    continue 'batches;
-                }
-                let request_key =
-                    request_key(provider.identity(), &representatives, policy, options);
-                let legacy_refusal = self
-                    .directory
-                    .join("responses")
-                    .join(format!("{request_key}.refusal.json"));
-                if journal.refusals.contains_key(&request_key) || legacy_refusal.is_file() {
-                    continue;
-                }
-                if let Some(saved) = journal
-                    .pending
-                    .get(&request_key)
-                    .and_then(|receipt| receipt.response.clone())
-                {
-                    response = Some((
-                        saved,
-                        journal.pending[&request_key].request.clone(),
-                        provider_index,
-                    ));
-                    break;
-                }
-                let intent = TranslationIntent {
-                    request_key: request_key.clone(),
-                    provider: provider.identity().into(),
-                    sent_at: now(),
-                    units: representatives
-                        .iter()
-                        .map(|unit| PendingTranslation {
-                            id: unit.id.clone(),
-                            memory_key: memory_key(unit, policy),
-                        })
-                        .collect(),
-                    candidate_only: options.candidate_only,
-                    retranslation_id: options.retranslation_id.clone(),
-                };
-                journal.pending.insert(
-                    request_key.clone(),
-                    Receipt {
-                        request: intent.clone(),
-                        response: None,
-                    },
-                );
-                write_json(&journal_path, &journal)?;
-                emit(
-                    "翻译",
-                    format!(
-                        "正在使用 {}（{}/{}）翻译 {} 条新文本。",
-                        provider.display_name(),
-                        provider_index + 1,
-                        providers.len(),
-                        representatives.len()
-                    ),
-                    completed.len(),
-                    cache_hits,
-                    failed.len(),
-                    &usage,
-                    None,
-                );
-                for attempt in 0..=5 {
-                    match provider
-                        .translate(&representatives, policy, &feedback, cancellation)
-                        .await
-                    {
-                        Ok(value) => {
-                            add_usage(&mut usage, &value.usage);
-                            add_usage(&mut journal.usage, &value.usage);
-                            if !value.refused_ids.is_empty() {
-                                let refused = journal
-                                    .refused_units
-                                    .entry(refusal_scope.clone())
-                                    .or_default();
-                                refused.extend(
-                                    intent
-                                        .units
-                                        .iter()
-                                        .filter(|unit| value.refused_ids.contains(&unit.id))
-                                        .map(|unit| unit.memory_key.clone()),
-                                );
-                            }
-                            // Persist the paid response before touching edits or memory shards.
-                            journal.pending.insert(
-                                request_key.clone(),
-                                Receipt {
-                                    request: intent.clone(),
-                                    response: Some(value.clone()),
-                                },
-                            );
-                            write_json(&journal_path, &journal)?;
-                            emit(
-                                "翻译",
-                                format!(
-                                    "{}（{}）已返回 {} 条译文，{} 条拒译。",
-                                    provider.display_name(),
-                                    provider.model(),
-                                    value.translations.len(),
-                                    value.refused_ids.len()
-                                ),
-                                completed.len(),
-                                cache_hits,
-                                failed.len(),
-                                &usage,
-                                None,
-                            );
-                            response = Some((value, intent.clone(), provider_index));
-                            break;
-                        }
-                        Err(error) => {
-                            if error.is_cancelled() {
-                                return Err(ExecutionError::Cancelled);
-                            }
-                            add_usage(&mut usage, &error.usage);
-                            add_usage(&mut journal.usage, &error.usage);
-                            self.log_provider_error(&intent, attempt + 1, &error)?;
-                            if error.is_refusal() || provider.unusable_batch_output(&error) {
-                                if error.is_refusal() {
-                                    journal.refusals.insert(request_key.clone(),json!({"request":intent,"recordedAt":now(),"diagnostic":error.diagnostic}));
-                                } else {
-                                    last_output_error = Some(ExecutionError::Invalid(format!(
-                                        "翻译 API 链未返回有效结果。{}。",
-                                        error.failure_summary()
-                                    )));
-                                }
-                                journal.pending.remove(&request_key);
-                                write_json(&journal_path, &journal)?;
-                                emit(
-                                    "切换翻译 API",
-                                    format!(
-                                        "第 {} 个翻译 API 未返回译文。{}。",
-                                        provider_index + 1,
-                                        error.failure_summary()
-                                    ),
-                                    completed.len(),
-                                    cache_hits,
-                                    failed.len(),
-                                    &usage,
-                                    None,
-                                );
-                                break;
-                            }
-                            if attempt == 5 {
-                                if !error.outcome_unknown {
-                                    journal.pending.remove(&request_key);
-                                }
-                                write_json(&journal_path, &journal)?;
-                                batch_error =
-                                    Some(ExecutionError::Retries(error.failure_summary()));
-                                break;
-                            }
-                            let immediate = error.is_response_format_error();
-                            let retry_timing = if immediate { "立即" } else { "10 秒后" };
-                            emit(
-                                if immediate {
-                                    "重试翻译"
-                                } else {
-                                    "等待重试"
-                                },
-                                format!(
-                                    "API 请求失败：{}。{retry_timing}进行第 {} / 5 次重试。",
-                                    error.failure_summary(),
-                                    attempt + 1
-                                ),
-                                completed.len(),
-                                cache_hits,
-                                failed.len(),
-                                &usage,
-                                None,
-                            );
-                            if !immediate {
-                                tokio::select! {biased;_=cancellation.cancelled()=>return Err(ExecutionError::Cancelled),_=tokio::time::sleep(Duration::from_secs(10))=>{}}
-                            }
-                        }
-                    }
-                }
-                if response.is_some() || batch_error.is_some() {
-                    break;
-                }
-            }
-            let Some((response, intent, provider_index)) = response else {
-                let error = batch_error
-                    .or(last_output_error)
-                    .unwrap_or(ExecutionError::Refused);
-                let reason = error.to_string();
-                let code = if matches!(error, ExecutionError::Refused) {
-                    "provider-refusal"
-                } else {
-                    "provider-request-failed"
-                };
-                let batch_units: Vec<_> = current.iter().flatten().copied().collect();
-                mark_failed(
-                    &batch_units,
-                    policy,
-                    code,
-                    &reason,
-                    &mut issues,
-                    &mut failed,
-                );
-                write_json(&self.directory.join("translation-errors.json"), &issues)?;
-                emit(
-                    "翻译",
-                    format!(
-                        "本批 {} 条文本翻译失败，{}",
-                        batch_units.len(),
-                        if continue_on_error {
-                            "继续后续文本。"
-                        } else {
-                            "已保存失败记录。"
-                        }
-                    ),
-                    completed.len(),
-                    cache_hits,
-                    failed.len(),
-                    &usage,
-                    Some((&batch_units, &BTreeMap::new(), &issues)),
-                );
-                if !continue_on_error {
-                    return Err(error);
-                }
-                continue;
-            };
-            if !response.refused_ids.is_empty() {
-                let (refused, remaining): (Vec<_>, Vec<_>) = current
-                    .into_iter()
-                    .partition(|group| response.refused_ids.contains(&group[0].id));
-                fallback_batches.push_front((provider_index + 1, refused));
-                current = remaining;
-            }
-            let batch_units: Vec<_> = current.iter().flatten().copied().collect();
-            let committed = self
-                .commit_response(
-                    &batch_units,
-                    policy,
-                    options,
-                    &intent,
-                    &response,
-                    CommitState {
-                        memory,
-                        completed: BTreeMap::new(),
-                        issues,
-                    },
-                )
-                .await?;
-            memory = committed.memory;
-            completed.extend(&committed.completed)?;
-            issues = committed.issues;
-            for group in &current {
-                if completed.contains_key(&group[0].id) {
-                    cache_hits += group.len() - 1;
-                }
-                for unit in group {
-                    if !completed.contains_key(&unit.id) {
-                        failed.insert(unit.id.clone());
-                    } else {
-                        failed.remove(&unit.id);
-                    }
-                }
-            }
-            journal.pending.remove(&intent.request_key);
-            write_json(&journal_path, &journal)?;
-            emit(
-                "翻译",
-                format!(
-                    "已完成 {} / {} 条文本，失败 {} 条。",
-                    completed.len(),
-                    units.len(),
-                    failed.len()
-                ),
-                completed.len(),
-                cache_hits,
-                failed.len(),
-                &usage,
-                Some((&batch_units, &committed.completed, &issues)),
-            );
-            if !continue_on_error && batch_units.iter().any(|unit| failed.contains(&unit.id)) {
-                return Err(ExecutionError::Invalid(
-                    "部分译文未通过格式检查，有效译文已保存。继续时只重试失败文本。".into(),
-                ));
-            }
-        }
-        // Existing edits remain usable after a failed retranslation, but do not fulfil that request.
-        if !options.candidate_only && options.retranslation_id.is_none() && !failed.is_empty() {
-            let mut resolved = Vec::new();
-            let mut updates = BTreeMap::new();
-            edit_store.read(|edits| -> Result<(), ExecutionError> {
-                for unit in &units {
-                    if failed.contains(&unit.id)
-                        && let Some(edit) = edits.find(unit, &policy.target_language)
-                        && text::validate(unit, &edit.text).is_empty()
-                    {
-                        completed.insert(&unit.id, &edit.text)?;
-                        updates.insert(unit.id.clone(), edit.text.clone());
-                        failed.remove(&unit.id);
-                        issues.retain(|issue| issue.unit_id.as_deref() != Some(&unit.id));
-                        resolved.push(*unit);
-                    }
-                }
-                Ok(())
-            })??;
-            if !resolved.is_empty() {
-                write_json(&self.directory.join("translation-errors.json"), &issues)?;
-                emit(
-                    "翻译",
-                    format!("已保存 {} 条手工修正的译文。", resolved.len()),
-                    completed.len(),
-                    cache_hits,
-                    failed.len(),
-                    &usage,
-                    Some((&resolved, &updates, &issues)),
-                );
-            }
-        }
+
+        state = run.execute_batches(groups, &edit_store, state).await?;
+        run.resolve_manual_edits(&units, &edit_store, &mut state.issues)?;
         tokio::task::spawn_blocking(move || edit_store.compact())
             .await
             .map_err(|error| ExecutionError::Invalid(error.to_string()))??;
-        let result = TranslationRunResult {
-            completed: completed.len(),
-            total: units.len(),
-            failed: failed.len(),
-            translations: completed.into_translations()?,
-            cache_hits,
-            usage,
-        };
-        emit(
-            if result.failed > 0 {
-                "翻译完成（有失败）"
-            } else {
-                "翻译完成"
-            },
-            format!(
-                "本次翻译已保存：成功 {} 条，失败 {} 条。",
-                result.completed, result.failed
-            ),
-            result.completed,
-            result.cache_hits,
-            result.failed,
-            &result.usage,
-            None,
-        );
-        Ok(result)
+        run.finish()
     }
 
     async fn commit_response(
@@ -1026,10 +344,10 @@ impl TranslationEngine {
         units: &[&TranslationUnit],
         policy: &TranslationPolicy,
         options: &TranslationOptions,
-        intent: &TranslationIntent,
-        response: &TranslationResponse,
+        intent: TranslationIntent,
+        response: TranslationResponse,
         mut state: CommitState,
-    ) -> Result<CommitState, ExecutionError> {
+    ) -> Result<(CommitState, BTreeMap<String, String>), ExecutionError> {
         let engine = Self::new(self.directory.clone(), None);
         let units: Vec<_> = units.iter().map(|unit| (*unit).clone()).collect();
         let policy = policy.clone();
@@ -1037,14 +355,11 @@ impl TranslationEngine {
             candidate_only: options.candidate_only,
             retranslation_id: options.retranslation_id.clone(),
         };
-        let intent = intent.clone();
-        let response = response.clone();
         tokio::task::spawn_blocking(move || {
-            let units: Vec<_> = units.iter().collect();
-            engine.commit_response_locked(
+            let updates = engine.commit_response_locked(
                 &units, &policy, &options, &intent, &response, &mut state,
             )?;
-            Ok(state)
+            Ok((state, updates))
         })
         .await
         .map_err(|error| ExecutionError::Invalid(format!("保存翻译结果失败：{error}")))?
@@ -1052,18 +367,15 @@ impl TranslationEngine {
 
     fn commit_response_locked(
         &self,
-        units: &[&TranslationUnit],
+        units: &[TranslationUnit],
         policy: &TranslationPolicy,
         options: &CommitOptions,
         intent: &TranslationIntent,
         response: &TranslationResponse,
         state: &mut CommitState,
-    ) -> Result<(), ExecutionError> {
-        let CommitState {
-            memory,
-            completed,
-            issues,
-        } = state;
+    ) -> Result<BTreeMap<String, String>, ExecutionError> {
+        let CommitState { memory, issues } = state;
+        let mut completed = BTreeMap::new();
         let translations: HashMap<_, _> = intent
             .units
             .iter()
@@ -1079,6 +391,7 @@ impl TranslationEngine {
         store.update(|edits| -> Result<_, ExecutionError> {
             let mut changes = EditChanges::default();
             for unit in units {
+                // A resumed retranslation preserves edits already saved by the same task.
                 if options.retranslation_id.is_some()
                     && let Some(edit) = edits
                         .find(unit, &policy.target_language)
@@ -1102,29 +415,15 @@ impl TranslationEngine {
                     }));
                     continue;
                 }
-                if options.candidate_only {
+                if options.candidate_only || options.retranslation_id.is_some() {
                     let mut edit =
                         TranslationEdit::new(unit, &policy.target_language, (*text).clone(), false);
                     edit.is_generated = true;
                     edit.origin = crate::storage::TranslationOrigin::Automatic;
-                    changes.candidates.insert(unit.id.clone(), Some(edit));
-                } else if options.retranslation_id.is_some() {
-                    // Keep review state changed after an interrupted task committed this exact result.
-                    if edits
-                        .find(unit, &policy.target_language)
-                        .is_none_or(|edit| {
-                            edit.retranslation_id != options.retranslation_id || edit.text != **text
-                        })
-                    {
-                        let mut edit = TranslationEdit::new(
-                            unit,
-                            &policy.target_language,
-                            (*text).clone(),
-                            false,
-                        );
+                    if options.candidate_only {
+                        changes.candidates.insert(unit.id.clone(), Some(edit));
+                    } else {
                         edit.retranslation_id = options.retranslation_id.clone();
-                        edit.is_generated = true;
-                        edit.origin = crate::storage::TranslationOrigin::Automatic;
                         changes.entries.insert(unit.id.clone(), Some(edit));
                         changes.candidates.insert(unit.id.clone(), None);
                     }
@@ -1147,7 +446,7 @@ impl TranslationEngine {
         })?;
         memory.store_batch(entries.into_iter().collect())?;
         write_json(&self.directory.join("translation-errors.json"), issues)?;
-        Ok(())
+        Ok(completed)
     }
 
     fn import_legacy_receipts(&self, journal: &mut ExecutionJournal) -> Result<(), ExecutionError> {
@@ -1207,6 +506,130 @@ impl TranslationEngine {
     }
 }
 
+impl<F: FnMut(TranslationProgress)> TranslationRun<'_, F> {
+    fn progress(&self, stage: &str, message: String) -> TranslationProgress {
+        TranslationProgress {
+            stage: stage.into(),
+            message,
+            completed: self.completed.len(),
+            total: self.total,
+            cache_hits: self.cache_hits,
+            failed: self.failed.len(),
+            usage: self.usage.clone(),
+            updates: BTreeMap::new(),
+            failure_updates: BTreeMap::new(),
+        }
+    }
+
+    fn emit(&mut self, stage: &str, message: String) {
+        let progress = self.progress(stage, message);
+        (self.report)(progress);
+    }
+
+    fn emit_changes(
+        &mut self,
+        message: String,
+        units: &[&TranslationUnit],
+        updates: BTreeMap<String, String>,
+        issues: &[RecordedIssue],
+    ) {
+        let mut progress = self.progress("翻译", message);
+        progress.failure_updates = units
+            .iter()
+            .map(|unit| {
+                let reason = if updates.contains_key(&unit.id) {
+                    None
+                } else {
+                    issues
+                        .iter()
+                        .find(|issue| issue.unit_id.as_deref() == Some(&unit.id))
+                        .map(|issue| issue.message.clone())
+                };
+                (unit.id.clone(), reason)
+            })
+            .collect();
+        progress.updates = updates;
+        (self.report)(progress);
+    }
+
+    fn save_journal(&self) -> Result<(), ExecutionError> {
+        Ok(write_json(&self.journal_path, &self.journal)?)
+    }
+
+    fn save_issues(&self, issues: &[RecordedIssue]) -> Result<(), ExecutionError> {
+        Ok(write_json(
+            &self.engine.directory.join("translation-errors.json"),
+            &issues,
+        )?)
+    }
+
+    fn resolve_manual_edits(
+        &mut self,
+        units: &[&TranslationUnit],
+        edit_store: &EditStore,
+        issues: &mut Vec<RecordedIssue>,
+    ) -> Result<(), ExecutionError> {
+        // Existing edits remain usable after a failed retranslation, but do not fulfil that request.
+        if self.options.candidate_only
+            || self.options.retranslation_id.is_some()
+            || self.failed.is_empty()
+        {
+            return Ok(());
+        }
+        let mut resolved = Vec::new();
+        let mut updates = BTreeMap::new();
+        edit_store.read(|edits| -> Result<(), ExecutionError> {
+            for &unit in units {
+                if self.failed.contains(&unit.id)
+                    && let Some(edit) = edits.find(unit, &self.policy.target_language)
+                    && text::validate(unit, &edit.text).is_empty()
+                {
+                    self.completed.insert(&unit.id, &edit.text)?;
+                    updates.insert(unit.id.clone(), edit.text.clone());
+                    self.failed.remove(&unit.id);
+                    issues.retain(|issue| issue.unit_id.as_deref() != Some(&unit.id));
+                    resolved.push(unit);
+                }
+            }
+            Ok(())
+        })??;
+        if !resolved.is_empty() {
+            self.save_issues(issues)?;
+            self.emit_changes(
+                format!("已保存 {} 条手工修正的译文。", resolved.len()),
+                &resolved,
+                updates,
+                issues,
+            );
+        }
+        Ok(())
+    }
+
+    fn finish(mut self) -> Result<TranslationRunResult, ExecutionError> {
+        let completed = self.completed.len();
+        let failed = self.failed.len();
+        let stage = if failed > 0 {
+            "翻译完成（有失败）"
+        } else {
+            "翻译完成"
+        };
+        let progress = self.progress(
+            stage,
+            format!("本次翻译已保存：成功 {completed} 条，失败 {failed} 条。"),
+        );
+        let translations = self.completed.into_translations()?;
+        (self.report)(progress);
+        Ok(TranslationRunResult {
+            completed,
+            failed,
+            cache_hits: self.cache_hits,
+            total: self.total,
+            usage: self.usage,
+            translations,
+        })
+    }
+}
+
 fn mark_failed(
     units: &[&TranslationUnit],
     policy: &TranslationPolicy,
@@ -1226,27 +649,6 @@ fn mark_failed(
             memory_key: Some(memory_key(unit, policy)),
         });
     }
-}
-
-fn request_key(
-    provider: &str,
-    units: &[TranslationUnit],
-    policy: &TranslationPolicy,
-    options: &TranslationOptions,
-) -> String {
-    hash_text(
-        &(legacy_json(
-            &json!({"Provider":provider,"Units":units.iter().map(|unit|json!({"Id":unit.id,"Key":memory_key(unit,policy)})).collect::<Vec<_>>()}),
-        ) + if options.candidate_only {
-            "\ncandidate"
-        } else {
-            ""
-        } + &options
-            .retranslation_id
-            .as_ref()
-            .map(|id| format!("\nretranslate:{id}"))
-            .unwrap_or_default()),
-    )
 }
 
 #[cfg(test)]
@@ -1681,6 +1083,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failed_memory_write_recovers_paid_response_without_another_request() {
+        let directory = tempfile::tempdir().unwrap();
+        let units = [unit("1", "Hello")];
+        let policy = TranslationPolicy::default();
+        let options = TranslationOptions::default();
+        let cancel = CancellationToken::new();
+        let shard = directory
+            .path()
+            .join("memory")
+            .join(format!("{}.json", &memory_key(&units[0], &policy)[..2]));
+        let server = mock_once(200, chat_reply(r#"{"0":"你好"}"#));
+        let providers = [local_provider(server.0)];
+        let engine = TranslationEngine::new(directory.path().into(), None);
+        // A directory at the shard path prevents the paid result from being committed.
+        let first = engine
+            .run(&units, &providers, &policy, &options, &cancel, |progress| {
+                if progress.message.contains("已返回") {
+                    fs::create_dir_all(&shard).unwrap();
+                }
+            })
+            .await;
+        assert!(matches!(first, Err(ExecutionError::Storage(_))));
+        server.2.join().unwrap();
+        fs::remove_dir(shard).unwrap();
+        let result = engine
+            .run(&units, &providers, &policy, &options, &cancel, |_| {})
+            .await
+            .unwrap();
+        assert_eq!(result.translations["1"], "你好");
+        assert_eq!(providers[0].request_count(), 1);
+    }
+
+    #[tokio::test]
     async fn explicit_api_refusal_uses_next_provider_and_accounts_cached_tokens() {
         let first = mock_once(
             200,
@@ -1911,6 +1346,7 @@ mod tests {
             unit("bad", "Blocked"),
             unit("copy", "Blocked"),
         ];
+        let mut reported = BTreeMap::new();
         let result = TranslationEngine::new(directory.path().into(), None)
             .run(
                 &units,
@@ -1920,11 +1356,16 @@ mod tests {
                 &CancellationToken::new(),
                 |progress| {
                     assert!(!matches!(progress.stage.as_str(), "重试翻译" | "等待重试"));
+                    for (id, text) in progress.updates {
+                        assert_eq!(progress.failure_updates.get(&id), Some(&None));
+                        assert!(reported.insert(id, text).is_none());
+                    }
                 },
             )
             .await
             .unwrap();
 
+        assert_eq!(reported, result.translations);
         assert_eq!(
             result.translations,
             BTreeMap::from([
@@ -2390,16 +1831,15 @@ mod tests {
             usage: TokenUsage::default(),
             provider_request_id: None,
         };
-        let mut committed = TranslationEngine::new(directory.path().into(), None)
+        let (mut committed, _) = TranslationEngine::new(directory.path().into(), None)
             .commit_response(
                 &[&units[0]],
                 &policy,
                 &options,
-                &intent,
-                &response,
+                intent,
+                response,
                 CommitState {
                     memory,
-                    completed: BTreeMap::new(),
                     issues: Vec::new(),
                 },
             )
