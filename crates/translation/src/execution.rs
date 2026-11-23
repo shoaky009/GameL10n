@@ -1,4 +1,4 @@
-//! Batch planning, durable request receipts, cache reuse and refusal-only API fallback.
+//! Batch planning, durable request receipts, cache reuse and translation API fallback.
 
 use crate::{
     TokenUsage, TranslationUnit,
@@ -91,7 +91,7 @@ pub enum ExecutionError {
     Cancelled,
     #[error("上次请求结果未知，服务商可能已处理或计费。请确认是否重新发送；已保存译文不会重发。")]
     Uncertain,
-    #[error("翻译 API 链均拒绝处理这批内容。已完成译文已保存。")]
+    #[error("翻译 API 链已用尽，仍有内容被拒译。已完成译文已保存。")]
     Refused,
     #[error("API 请求重试 5 次后仍失败。已完成译文已保存。最后一次失败：{0}")]
     Retries(String),
@@ -142,6 +142,8 @@ struct ExecutionJournal {
     pending: BTreeMap<String, Receipt>,
     #[serde(default)]
     refusals: BTreeMap<String, Value>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    refused_units: BTreeMap<String, BTreeSet<String>>,
     #[serde(default)]
     usage: TokenUsage,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
@@ -587,6 +589,11 @@ impl TranslationEngine {
             None,
         );
         let batch_size = providers[0].maximum_batch_size().min(options.batch_size);
+        // A row refusal survives regrouping on resume and belongs to this provider and operation.
+        let refusal_scopes: Vec<_> = providers
+            .iter()
+            .map(|provider| request_key(provider.identity(), &[], policy, options))
+            .collect();
         let mut batches = groups.into_iter();
         let mut fallback_batches = VecDeque::new();
         'batches: while let Some((start_provider, batch)) =
@@ -649,8 +656,23 @@ impl TranslationEngine {
                 .collect();
             let mut response = None;
             let mut batch_error = None;
+            let mut last_output_error = None;
             for (provider_index, provider) in providers.iter().enumerate().skip(start_provider) {
                 cancelled(cancellation)?;
+                let refusal_scope = &refusal_scopes[provider_index];
+                if let Some(keys) = journal.refused_units.get(refusal_scope) {
+                    let (refused, remaining): (Vec<_>, Vec<_>) = current
+                        .into_iter()
+                        .partition(|group| keys.contains(&memory_key(group[0], policy)));
+                    if !refused.is_empty() {
+                        fallback_batches.push_front((provider_index + 1, refused));
+                        if !remaining.is_empty() {
+                            fallback_batches.push_front((provider_index, remaining));
+                        }
+                        continue 'batches;
+                    }
+                    current = remaining;
+                }
                 if current.len() > provider.maximum_batch_size() {
                     // Continue the refused batch at this API; only it needs smaller requests.
                     // Commit each split response before moving on, using the usual receipt path.
@@ -673,7 +695,11 @@ impl TranslationEngine {
                     .get(&request_key)
                     .and_then(|receipt| receipt.response.clone())
                 {
-                    response = Some((saved, journal.pending[&request_key].request.clone()));
+                    response = Some((
+                        saved,
+                        journal.pending[&request_key].request.clone(),
+                        provider_index,
+                    ));
                     break;
                 }
                 let intent = TranslationIntent {
@@ -721,6 +747,19 @@ impl TranslationEngine {
                         Ok(value) => {
                             add_usage(&mut usage, &value.usage);
                             add_usage(&mut journal.usage, &value.usage);
+                            if !value.refused_ids.is_empty() {
+                                let refused = journal
+                                    .refused_units
+                                    .entry(refusal_scope.clone())
+                                    .or_default();
+                                refused.extend(
+                                    intent
+                                        .units
+                                        .iter()
+                                        .filter(|unit| value.refused_ids.contains(&unit.id))
+                                        .map(|unit| unit.memory_key.clone()),
+                                );
+                            }
                             // Persist the paid response before touching edits or memory shards.
                             journal.pending.insert(
                                 request_key.clone(),
@@ -733,10 +772,11 @@ impl TranslationEngine {
                             emit(
                                 "翻译",
                                 format!(
-                                    "{}（{}）已返回 {} 条译文，正在检查格式并保存。",
+                                    "{}（{}）已返回 {} 条译文，{} 条拒译。",
                                     provider.display_name(),
                                     provider.model(),
-                                    value.translations.len()
+                                    value.translations.len(),
+                                    value.refused_ids.len()
                                 ),
                                 completed.len(),
                                 cache_hits,
@@ -744,7 +784,7 @@ impl TranslationEngine {
                                 &usage,
                                 None,
                             );
-                            response = Some((value, intent.clone()));
+                            response = Some((value, intent.clone(), provider_index));
                             break;
                         }
                         Err(error) => {
@@ -754,15 +794,23 @@ impl TranslationEngine {
                             add_usage(&mut usage, &error.usage);
                             add_usage(&mut journal.usage, &error.usage);
                             self.log_provider_error(&intent, attempt + 1, &error)?;
-                            if error.is_refusal() {
-                                journal.refusals.insert(request_key.clone(),json!({"request":intent,"recordedAt":now(),"diagnostic":error.diagnostic}));
+                            if error.is_refusal() || provider.unusable_batch_output(&error) {
+                                if error.is_refusal() {
+                                    journal.refusals.insert(request_key.clone(),json!({"request":intent,"recordedAt":now(),"diagnostic":error.diagnostic}));
+                                } else {
+                                    last_output_error = Some(ExecutionError::Invalid(format!(
+                                        "翻译 API 链未返回有效结果。{}。",
+                                        error.failure_summary()
+                                    )));
+                                }
                                 journal.pending.remove(&request_key);
                                 write_json(&journal_path, &journal)?;
                                 emit(
                                     "切换翻译 API",
                                     format!(
-                                        "第 {} 个翻译 API 拒绝处理当前内容，尝试链中的后续接口。",
-                                        provider_index + 1
+                                        "第 {} 个翻译 API 未返回译文。{}。",
+                                        provider_index + 1,
+                                        error.failure_summary()
                                     ),
                                     completed.len(),
                                     cache_hits,
@@ -810,8 +858,10 @@ impl TranslationEngine {
                     break;
                 }
             }
-            let Some((response, intent)) = response else {
-                let error = batch_error.unwrap_or(ExecutionError::Refused);
+            let Some((response, intent, provider_index)) = response else {
+                let error = batch_error
+                    .or(last_output_error)
+                    .unwrap_or(ExecutionError::Refused);
                 let reason = error.to_string();
                 let code = if matches!(error, ExecutionError::Refused) {
                     "provider-refusal"
@@ -850,6 +900,13 @@ impl TranslationEngine {
                 }
                 continue;
             };
+            if !response.refused_ids.is_empty() {
+                let (refused, remaining): (Vec<_>, Vec<_>) = current
+                    .into_iter()
+                    .partition(|group| response.refused_ids.contains(&group[0].id));
+                fallback_batches.push_front((provider_index + 1, refused));
+                current = remaining;
+            }
             let batch_units: Vec<_> = current.iter().flatten().copied().collect();
             let committed = self
                 .commit_response(
@@ -1795,53 +1852,171 @@ mod tests {
         }
     }
 
+    fn chat_reply(content: &str) -> Value {
+        json!({"choices":[{"finish_reason":"stop","message":{"content":content}}],
+            "usage":{"prompt_tokens":10,"completion_tokens":2}})
+    }
+
     #[tokio::test]
-    async fn response_format_errors_retry_immediately_on_the_same_provider() {
-        let reply = |content: &str| json!({"choices":[{"finish_reason":"stop","message":{"content":content}}]});
-        let server = mock_sequence(vec![
+    async fn unusable_json_batches_advance_without_retrying() {
+        let replies = [
+            (400, json!({"error":{"code":"content_filter"}})),
             (200, json!({"choices":[]})),
-            (200, reply("invalid JSON")),
-            (200, reply("{}")),
-            (200, reply("{\"unknown\":\"你好\"}")),
-            (200, reply("{\"0\":42}")),
-            (200, reply("{\"0\":\"你好\"}")),
-        ]);
+            (200, chat_reply("このリクエストには対応できません。")),
+            (200, chat_reply("{}")),
+            (200, chat_reply(r#"{"unknown":null}"#)),
+            (200, chat_reply(r#"{"0":42}"#)),
+            (200, chat_reply(r#"{"0":null,"0":"你好"}"#)),
+            (200, chat_reply(r#"{"0":null}"#)),
+            (200, chat_reply(r#"{"0":"你好"}"#)),
+        ];
+        let servers: Vec<_> = replies
+            .into_iter()
+            .map(|(status, reply)| mock_once(status, reply))
+            .collect();
+        let providers: Vec<_> = servers
+            .iter()
+            .map(|server| local_provider(server.0.clone()))
+            .collect();
         let directory = tempfile::tempdir().unwrap();
-        let engine = TranslationEngine::new(directory.path().into(), None);
-        let providers = [local_provider(server.0), provider()];
-        let mut retries = Vec::new();
-        let result = tokio::time::timeout(
-            Duration::from_secs(5),
-            engine.run(
+        let result = TranslationEngine::new(directory.path().into(), None)
+            .run(
                 &[unit("1", "hello")],
                 &providers,
                 &TranslationPolicy::default(),
                 &TranslationOptions::default(),
                 &CancellationToken::new(),
-                |progress| {
-                    if matches!(progress.stage.as_str(), "重试翻译" | "等待重试") {
-                        retries.push(progress);
-                    }
-                },
-            ),
-        )
-        .await
-        .expect("format errors must retry without the 10-second delay")
-        .unwrap();
+                |progress| assert!(!matches!(progress.stage.as_str(), "重试翻译" | "等待重试")),
+            )
+            .await
+            .unwrap();
         assert_eq!(result.translations["1"], "你好");
-        assert_eq!(retries.len(), 5);
-        for (index, retry) in retries.iter().enumerate() {
-            assert_eq!(retry.stage, "重试翻译");
-            assert!(
-                retry
-                    .message
-                    .contains(&format!("立即进行第 {} / 5 次重试", index + 1))
-            );
+        for provider in providers {
+            assert_eq!(provider.request_count(), 1);
         }
-        assert_eq!(providers[0].request_count(), 6);
+        for (_, _, server) in servers {
+            server.join().unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn mixed_json_batch_forwards_only_nulls_and_marks_exhausted_rows() {
+        let first = mock_once(200, chat_reply(r#"{"0":"null","1":null,"2":null}"#));
+        let second = mock_once(200, chat_reply(r#"{"0":"再见","1":null}"#));
+        let providers = [local_provider(first.0), local_provider(second.0)];
+        let directory = tempfile::tempdir().unwrap();
+        let units = [
+            unit("word", "null"),
+            unit("bye", "Goodbye"),
+            unit("bad", "Blocked"),
+            unit("copy", "Blocked"),
+        ];
+        let result = TranslationEngine::new(directory.path().into(), None)
+            .run(
+                &units,
+                &providers,
+                &TranslationPolicy::default(),
+                &TranslationOptions::default(),
+                &CancellationToken::new(),
+                |progress| {
+                    assert!(!matches!(progress.stage.as_str(), "重试翻译" | "等待重试"));
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result.translations,
+            BTreeMap::from([
+                ("word".into(), "null".into()),
+                ("bye".into(), "再见".into())
+            ])
+        );
+        assert_eq!((result.completed, result.failed), (2, 2));
+        assert_eq!(
+            (result.usage.input_tokens, result.usage.output_tokens),
+            (20, 4)
+        );
+        let issues = load_issues(directory.path());
+        assert!(issues.iter().all(|issue| issue.code == "provider-refusal"));
+        assert_eq!(
+            issues
+                .iter()
+                .filter_map(|issue| issue.unit_id.as_deref())
+                .collect::<Vec<_>>(),
+            ["bad", "copy"]
+        );
+        let request = second.1.recv().unwrap();
+        let data: Value =
+            serde_json::from_str(request["messages"][1]["content"].as_str().unwrap()).unwrap();
+        let sources: Vec<_> = data["units"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["sourceText"].as_str().unwrap())
+            .collect();
+        assert_eq!(sources, ["Goodbye", "Blocked"]);
+        assert_eq!(
+            (providers[0].request_count(), providers[1].request_count()),
+            (1, 1)
+        );
+        first.2.join().unwrap();
+        second.2.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn resumed_json_refusals_skip_the_same_provider_after_regrouping() {
+        let first = mock_sequence(vec![
+            (200, chat_reply(r#"{"0":"你好","1":null}"#)),
+            (200, chat_reply(r#"{"0":"再见"}"#)),
+        ]);
+        let second = mock_once(200, chat_reply("null"));
+        let providers = [
+            local_provider(first.0),
+            local_provider_with_format(second.0, TranslationFormat::PlainText),
+        ];
+        let directory = tempfile::tempdir().unwrap();
+        let engine = TranslationEngine::new(directory.path().into(), None);
+        let units = [
+            unit("hello", "Hello"),
+            unit("word", "null"),
+            unit("bye", "Goodbye"),
+        ];
+        let policy = TranslationPolicy::default();
+        let options = TranslationOptions {
+            batch_size: 2,
+            ..Default::default()
+        };
+        let cancel = CancellationToken::new();
+        let stopped = engine
+            .run(&units, &providers, &policy, &options, &cancel, |progress| {
+                if progress.completed == 1 {
+                    cancel.cancel();
+                }
+            })
+            .await;
+        assert!(matches!(stopped, Err(ExecutionError::Cancelled)));
         assert_eq!(providers[1].request_count(), 0);
-        assert_eq!(server.1.try_iter().count(), 6);
-        server.2.join().unwrap();
+        let result = engine
+            .run(
+                &units,
+                &providers,
+                &policy,
+                &options,
+                &CancellationToken::new(),
+                |_| {},
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            (result.completed, result.failed, result.cache_hits),
+            (3, 0, 1)
+        );
+        assert_eq!(result.translations["word"], "null");
+        assert_eq!(providers[0].request_count(), 2);
+        assert_eq!(second.1.recv().unwrap()["messages"][1]["content"], "null");
+        first.2.join().unwrap();
+        second.2.join().unwrap();
     }
 
     #[tokio::test]
@@ -2006,6 +2181,7 @@ mod tests {
         };
         let response = TranslationResponse {
             translations: BTreeMap::from([("old-id".into(), "你好".into())]),
+            refused_ids: BTreeSet::new(),
             usage: TokenUsage {
                 input_tokens: 12,
                 output_tokens: 3,
@@ -2134,6 +2310,7 @@ mod tests {
                     request: intent,
                     response: Some(TranslationResponse {
                         translations: BTreeMap::from([("1".into(), "你好".into())]),
+                        refused_ids: BTreeSet::new(),
                         usage: TokenUsage::default(),
                         provider_request_id: Some("paid-request".into()),
                     }),
@@ -2209,6 +2386,7 @@ mod tests {
         };
         let response = TranslationResponse {
             translations: BTreeMap::from([("1".into(), "新译文".into())]),
+            refused_ids: BTreeSet::new(),
             usage: TokenUsage::default(),
             provider_request_id: None,
         };

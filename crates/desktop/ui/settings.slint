@@ -60,7 +60,7 @@ component ApiSelection inherits VerticalLayout {
     if App.apis.length > 0: ComboBox { model: App.api-names; current-index <=> App.analysis-index; selected => { App.action("analysis-api", ""); } }
     if App.apis.length > 0: Divider {}
     if App.apis.length > 0 || App.chain.length > 0: Label { text: "文本翻译 API 链"; font-weight: 600; }
-    if App.apis.length > 0 || App.chain.length > 0: Caption { text: "从上到下尝试，仅模型拒绝处理时切换下一项。网络、限流和格式错误在当前 API 重试。"; }
+    if App.apis.length > 0 || App.chain.length > 0: Caption { text: "拒译条目或格式无效的 JSON 批次转到下一接口。网络故障和限流在当前接口重试。"; }
     if App.chain.length > 0: ListPanel { height: min(176px, 2px + App.chain.length * 58px);
         chain-list := ListView { horizontal-scrollbar-policy: always-off;
             for item[index] in App.chain: ModelOption {
