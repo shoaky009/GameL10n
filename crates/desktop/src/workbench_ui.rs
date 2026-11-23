@@ -13,7 +13,7 @@ use serde_json::Value;
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use std::{
     collections::{BTreeSet, HashSet},
-    sync::atomic::Ordering,
+    sync::{Arc, atomic::Ordering},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -149,7 +149,10 @@ fn filter(ctx: &Context, input: &UiInput) -> WorkbenchFilter {
     }
 }
 
-pub(crate) async fn ensure_selection(ctx: &Context, id: &str) -> Result<Vec<String>, CoreError> {
+pub(crate) async fn ensure_selection(
+    ctx: &Context,
+    id: &str,
+) -> Result<Arc<Vec<String>>, CoreError> {
     if let Some(selection) = ctx
         .session
         .lock()
@@ -168,7 +171,7 @@ pub(crate) async fn ensure_selection(ctx: &Context, id: &str) -> Result<Vec<Stri
     Ok(session
         .text_selection
         .entry(id.into())
-        .or_insert(saved)
+        .or_insert_with(|| Arc::new(saved))
         .clone())
 }
 
@@ -182,7 +185,8 @@ async fn change_selection(ctx: &Context, action: &str, input: &UiInput) -> Resul
     let _gate = SELECTION_WRITES.lock().await;
     let mut selected: BTreeSet<_> = ensure_selection(ctx, &input.project_id)
         .await?
-        .into_iter()
+        .iter()
+        .cloned()
         .collect();
     match action {
         "toggle-text" => {
@@ -222,7 +226,7 @@ fn refresh_selection(ctx: &Context, id: &str) {
             .text_selection
             .get(&id)
             .into_iter()
-            .flatten()
+            .flat_map(|ids| ids.iter())
             .map(String::as_str)
             .collect();
         app.set_selected_texts(selection.len() as i32);
@@ -478,22 +482,35 @@ async fn texts(ctx: &Context, input: &UiInput) -> Result<(), CoreError> {
     };
     let app = ctx.app().await;
     let options = filter(ctx, input);
+    let generation = ctx.generation.clone();
+    let view_current = move || generation.load(Ordering::SeqCst) == revision;
     let page = app
-        .workbench_page(&input.project_id, &options, offset, PAGE_SIZE)
+        .workbench_page_while(
+            &input.project_id,
+            &options,
+            offset,
+            PAGE_SIZE,
+            view_current.clone(),
+        )
         .await;
     if !is_current() {
         return Ok(());
     }
     let mut page = page?;
     if page.rows.is_empty() && page.total > 0 && offset > 0 {
-        page = app
-            .workbench_page(
+        let last_page = app
+            .workbench_page_while(
                 &input.project_id,
                 &options,
                 (page.total - 1) / PAGE_SIZE * PAGE_SIZE,
                 PAGE_SIZE,
+                view_current,
             )
-            .await?;
+            .await;
+        if !is_current() {
+            return Ok(());
+        }
+        page = last_page?;
     }
     let preferred = if input.editor_id.is_empty() {
         &saved.active_text_id
@@ -533,7 +550,7 @@ async fn texts(ctx: &Context, input: &UiInput) -> Result<(), CoreError> {
             .text_selection
             .get(&id)
             .into_iter()
-            .flatten()
+            .flat_map(|ids| ids.iter())
             .map(String::as_str)
             .collect();
         let rows = page
@@ -882,7 +899,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                     options.retranslation_id =
                         Some(retranslation_id(&app, &input.project_id, &selection).await?);
                 }
-                options.unit_ids = Some(selection);
+                options.unit_ids = Some(selection.to_vec());
             }
             let result = app.translate_project(&input.project_id, options).await;
             ctx.refresh_texts(&input.project_id);

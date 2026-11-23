@@ -207,10 +207,21 @@ impl BuiltinFormat {
 
 /// Resources in a saved native extraction that belong to another script runtime.
 pub fn incompatible_resources(game: &Path, format: &str, resources: &[String]) -> BTreeSet<String> {
+    incompatible_resources_with(format, resources, |file| {
+        crate::discovery::resolve_relative(game, file).is_ok_and(|path| path.is_file())
+    })
+}
+
+/// A paged extraction can retain the observed marker files and recheck them on reopen.
+pub fn incompatible_resources_with(
+    format: &str,
+    resources: &[String],
+    exists: impl FnMut(&str) -> bool,
+) -> BTreeSet<String> {
     if format != "KirikiriKs" {
         return BTreeSet::new();
     }
-    let tyrano = crate::tyrano::TyranoData::from_resources(game, resources);
+    let tyrano = crate::tyrano::TyranoData::detect(resources.iter().map(String::as_str), exists);
     resources
         .iter()
         .filter(|path| tyrano.contains(path))

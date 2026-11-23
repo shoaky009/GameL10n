@@ -601,7 +601,11 @@ async fn handle_project_action(
         "generate-patch" => {
             crate::workbench_ui::flush_editor(ctx, input).await?;
             let ids = if input.patch_scope == 1 {
-                Some(crate::workbench_ui::ensure_selection(ctx, &input.project_id).await?)
+                Some(
+                    crate::workbench_ui::ensure_selection(ctx, &input.project_id)
+                        .await?
+                        .to_vec(),
+                )
             } else {
                 None
             };
@@ -1003,13 +1007,13 @@ pub async fn refresh_project(ctx: &Context, id: &str, opening: bool) -> Result<(
         &adaptation,
     );
     let recognition_failed = recognition.has_failure();
-    // Selection validation reads the full extraction. Defer it until text browsing or an action.
+    // Restore the persisted selection when the workbench or a selection action first needs it.
     let selected_count = {
         let mut session = ctx.session.lock().unwrap_or_else(|e| e.into_inner());
         if opening {
-            session.text_selection.remove(id);
+            session.text_selection.clear();
         }
-        session.text_selection.get(id).map_or(0, Vec::len)
+        session.text_selection.get(id).map_or(0, |ids| ids.len())
     };
     let selected_id = id.to_owned();
     crate::launch_ui::refresh(ctx, id, false).await?;

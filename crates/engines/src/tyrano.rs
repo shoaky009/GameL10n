@@ -10,7 +10,10 @@ pub(crate) struct TyranoData {
 }
 
 impl TyranoData {
-    fn detect<'a>(paths: impl Iterator<Item = &'a str>, exists: impl Fn(&str) -> bool) -> Self {
+    pub(crate) fn detect<'a>(
+        paths: impl Iterator<Item = &'a str>,
+        mut exists: impl FnMut(&str) -> bool,
+    ) -> Self {
         let mut roots = BTreeSet::new();
         for path in paths.filter(|p| {
             p.rsplit_once('.')

@@ -789,6 +789,7 @@ impl Application {
             self.workbench_revision
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             cache.remove(id);
+            self.invalidate_paged_workbench(id);
             result.map_err(|error| match error {
                 gamel10n_translation::execution::ExecutionError::Cancelled => {
                     CoreError::Engine(gamel10n_engines::EngineError::Cancelled)

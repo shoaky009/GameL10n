@@ -107,6 +107,58 @@ pub(crate) enum CachedAnalysis {
     Preview(Arc<ExtractionResult>),
 }
 
+pub(crate) fn load_analysis(
+    directory: &Path,
+    project: &GameProject,
+    markers: &mut BTreeMap<String, bool>,
+) -> Result<Option<CachedAnalysis>, CoreError> {
+    let path = directory.join("extraction/native.json");
+    if path.is_file() {
+        let mut native: StoredAnalysis = read_json(&path)?;
+        if !matches!(native.schema_version, 1 | 2) {
+            return Err(CoreError::InvalidData(
+                "不支持的提取缓存版本，请重新提取。".into(),
+            ));
+        }
+        validate_units(&native.extraction.units)?;
+        if let Some(gamel10n_engines::AdapterHandle::Native { format }) = &native.adapter {
+            let excluded = gamel10n_engines::vntextpatch::incompatible_resources_with(
+                format,
+                &native.resource_files,
+                |file| {
+                    let exists = gamel10n_engines::discovery::resolve_relative(
+                        &project.game_directory,
+                        file,
+                    )
+                    .is_ok_and(|p| p.is_file());
+                    markers.insert(file.to_owned(), exists);
+                    exists
+                },
+            );
+            if !excluded.is_empty() {
+                native
+                    .extraction
+                    .units
+                    .retain(|unit| !excluded.contains(&unit.resource_path));
+                if native.extraction.units.is_empty() {
+                    return Ok(None);
+                }
+                native
+                    .resource_files
+                    .retain(|path| !excluded.contains(path));
+                native
+                    .source_hashes
+                    .retain(|path, _| !excluded.contains(path));
+                if let Some(probe) = &mut native.probe {
+                    probe.required_files.retain(|path| !excluded.contains(path));
+                }
+            }
+        }
+        return Ok(Some(CachedAnalysis::Native(Box::new(native))));
+    }
+    Ok(crate::legacy::load(directory, project)?.map(CachedAnalysis::Legacy))
+}
+
 impl CachedAnalysis {
     pub(crate) fn extraction(&self) -> &ExtractionResult {
         match self {
@@ -246,6 +298,7 @@ pub struct Application {
     pub(crate) session_keys: Arc<Mutex<HashMap<String, String>>>,
     pub(crate) tools: ToolPaths,
     pub(crate) workbenches: Arc<Mutex<HashMap<String, Arc<Mutex<crate::workbench::Workbench>>>>>,
+    pub(crate) paged_workbench: Arc<std::sync::Mutex<Option<crate::workbench::paged::Session>>>,
     pub(crate) workbench_revision: Arc<AtomicU64>,
     pub(crate) translation_scheduler: Arc<crate::translation_tasks::TranslationScheduler>,
     pub(crate) game_check_errors: Arc<Mutex<Vec<crate::game_check::protocol::ErrorWindow>>>,
@@ -271,6 +324,7 @@ impl Application {
             tools: tools.clone(),
             workbenches: Arc::new(Mutex::new(HashMap::new())),
             workbench_revision: Default::default(),
+            paged_workbench: Default::default(),
             translation_scheduler: Arc::new(
                 crate::translation_tasks::TranslationScheduler::default(),
             ),
@@ -526,49 +580,10 @@ impl Application {
         }
         let directory = self.store.directory(id)?;
         let project = self.store.get(id).await?;
-        let stored =
-            tokio::task::spawn_blocking(move || -> Result<Option<CachedAnalysis>, CoreError> {
-                let path = directory.join("extraction/native.json");
-                if path.is_file() {
-                    let mut native: StoredAnalysis = read_json(&path)?;
-                    if !matches!(native.schema_version, 1 | 2) {
-                        return Err(CoreError::InvalidData(
-                            "不支持的提取缓存版本，请重新提取。".into(),
-                        ));
-                    }
-                    validate_units(&native.extraction.units)?;
-                    if let Some(gamel10n_engines::AdapterHandle::Native { format }) =
-                        &native.adapter
-                    {
-                        let excluded = gamel10n_engines::vntextpatch::incompatible_resources(
-                            &project.game_directory,
-                            format,
-                            &native.resource_files,
-                        );
-                        if !excluded.is_empty() {
-                            native
-                                .extraction
-                                .units
-                                .retain(|unit| !excluded.contains(&unit.resource_path));
-                            if native.extraction.units.is_empty() {
-                                return Ok(None);
-                            }
-                            native
-                                .resource_files
-                                .retain(|path| !excluded.contains(path));
-                            native
-                                .source_hashes
-                                .retain(|path, _| !excluded.contains(path));
-                            if let Some(probe) = &mut native.probe {
-                                probe.required_files.retain(|path| !excluded.contains(path));
-                            }
-                        }
-                    }
-                    return Ok(Some(CachedAnalysis::Native(Box::new(native))));
-                }
-                Ok(crate::legacy::load(&directory, &project)?.map(CachedAnalysis::Legacy))
-            })
-            .await??;
+        let stored = tokio::task::spawn_blocking(move || {
+            load_analysis(&directory, &project, &mut BTreeMap::new())
+        })
+        .await??;
         let Some(stored) = stored else {
             return Ok(None);
         };
@@ -579,6 +594,12 @@ impl Application {
         }
         cache.insert(id, Arc::clone(&stored));
         Ok(Some(stored))
+    }
+
+    pub(crate) async fn live_workbench(&self, id: &str) -> bool {
+        self.tasks.lock().await.get(id).is_some_and(|t| {
+            t.preview.is_some() || t.visible_state().running || t.translation.is_some()
+        })
     }
 
     pub(crate) async fn workbench_analysis(
@@ -1007,6 +1028,7 @@ impl Application {
             entry.clear_preview(&self.events);
         }
         self.workbenches.lock().await.remove(id);
+        self.invalidate_paged_workbench(id);
         self.store.save(&project).await?;
         let _ = self.events.send(AppEvent::ProjectsChanged);
         Ok(())
@@ -1021,6 +1043,7 @@ impl Application {
         }
         drop(cache);
         self.workbenches.lock().await.remove(id);
+        self.invalidate_paged_workbench(id);
         self.tasks.lock().await.remove(id);
         self.review_tasks().remove(id);
     }

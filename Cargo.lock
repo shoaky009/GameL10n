@@ -1534,8 +1534,10 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "clap",
+ "crc32fast",
  "gamel10n-engines",
  "gamel10n-translation",
+ "memchr",
  "serde",
  "serde_json",
  "tempfile",

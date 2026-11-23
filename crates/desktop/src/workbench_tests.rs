@@ -359,6 +359,18 @@ fn project_actions_keep_settings_selection_and_saved_edits_in_sync_across_tabs()
         assert_eq!(app.get_text_total(), 221);
         assert_eq!(app.get_texts().row_count(), 100);
 
+        app.set_text_query("STORY-A".into());
+        invoke_action(&ui, &ctx, "texts", "0").await;
+        assert_eq!(app.get_text_total(), 120);
+        invoke_action(&ui, &ctx, "texts", "next").await;
+        assert_eq!((app.get_offset(), app.get_texts().row_count()), (100, 20));
+        assert_eq!(app.get_texts().row_data(0).unwrap().id.as_str(), "line-100");
+        assert_eq!(app.get_texts().row_data(19).unwrap().id.as_str(), "line-119");
+        invoke_action(&ui, &ctx, "texts", "previous").await;
+        assert_eq!(app.get_texts().row_data(0).unwrap().id.as_str(), "line-000");
+        app.set_text_query("".into());
+        invoke_action(&ui, &ctx, "texts", "0").await;
+
         invoke_action(&ui, &ctx, "select-page", "").await;
         assert_eq!(app.get_selected_texts(), 100);
         assert!(app.get_texts().iter().all(|row| row.selected));

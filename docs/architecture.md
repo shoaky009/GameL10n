@@ -19,4 +19,6 @@ Rust 管理模型会话、预算、工具调度和验收。Python 负责格式�
 
 Core 管理项目状态和操作顺序。同一项目的资源修改串行执行，切换页面仍可查看运行进度。全自动流程复用识别、翻译、补丁和运行检查服务，已提交结果随项目数据保存。[全自动汉化流程](automatic-workflow.md) · [数据目录与迁移](data-storage.md)
 
+游戏项目的版本升级集中在 Core 的 `project_migrations` 模块。每个游戏独立记录已完成版本，新增升级步骤与对应的数据校验、恢复逻辑一同放在该目录。[项目迁移入口](../crates/core/src/project_migrations/mod.rs)
+
 仓库目录和技术路线见 [AGENTS.md](../AGENTS.md)。

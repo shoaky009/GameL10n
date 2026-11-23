@@ -14,6 +14,7 @@ mod legacy;
 pub mod logs;
 pub mod metrics;
 pub mod patching;
+mod project_migrations;
 mod project_views;
 pub mod projects;
 pub mod relocation;
@@ -39,6 +40,8 @@ pub fn native_formats() -> &'static [&'static str] {
 
 #[derive(Debug, Error)]
 pub enum CoreError {
+    #[error("工作台分页缓存损坏：{0}")]
+    DamagedWorkbench(String),
     #[error(transparent)]
     File(#[from] gamel10n_translation::files::FileError),
     #[error(transparent)]

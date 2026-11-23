@@ -61,7 +61,7 @@ pub struct UiSession {
     pub requested_project: String,
     pub project_selection: BTreeSet<String>,
     project_list_query: String,
-    pub text_selection: BTreeMap<String, Vec<String>>,
+    pub text_selection: BTreeMap<String, Arc<Vec<String>>>,
     pub workbench_views: BTreeMap<String, workbench_ui::WorkbenchView>,
 }
 
@@ -99,7 +99,7 @@ impl Context {
             .unwrap_or_else(|e| e.into_inner())
             .text_selection
             .get(id)
-            .cloned()
+            .map(|ids| ids.to_vec())
             .unwrap_or_default()
     }
     pub fn is_requested_project(&self, id: &str) -> bool {
@@ -114,7 +114,7 @@ impl Context {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .text_selection
-            .insert(id.into(), ids);
+            .insert(id.into(), Arc::new(ids));
     }
     pub fn refresh_texts(&self, id: &str) {
         let id = id.to_owned();

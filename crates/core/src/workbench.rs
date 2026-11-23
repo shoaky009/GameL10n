@@ -1,5 +1,10 @@
 //! UI-independent text browsing, saved edits, review state and candidates.
 
+mod editing;
+pub(crate) mod page_file;
+pub(crate) mod paged;
+mod query;
+
 use crate::{Application, CoreError, application::CachedAnalysis};
 use gamel10n_translation::{
     TranslationUnit, ValidationIssue,
@@ -20,7 +25,7 @@ use std::{
 };
 use tokio::sync::Mutex;
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct WorkbenchFilter {
     pub query: String,
@@ -66,7 +71,7 @@ pub struct WorkbenchPage {
     pub kinds: Vec<String>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct RowState {
     model: Option<String>,
     edit: Option<RowEdit>,
@@ -76,6 +81,7 @@ struct RowState {
     previous_edit: Option<String>,
 }
 
+#[derive(Clone)]
 struct RowEdit {
     text: String,
     reviewed: bool,
@@ -225,7 +231,7 @@ impl<'a> TranslationSource<'a> {
 }
 
 impl Workbench {
-    fn load(
+    pub(crate) fn load(
         directory: PathBuf,
         legacy_memory: PathBuf,
         analysis: &Arc<CachedAnalysis>,
@@ -370,7 +376,8 @@ impl Workbench {
         filter: &WorkbenchFilter,
         offset: usize,
         limit: usize,
-    ) -> WorkbenchPage {
+        current: &dyn Fn() -> bool,
+    ) -> Result<WorkbenchPage, CoreError> {
         let query = filter.query.to_lowercase();
         let source = filter.source_query.to_lowercase();
         let translation = filter.translation_query.to_lowercase();
@@ -383,6 +390,9 @@ impl Workbench {
         let mut summary = WorkbenchSummary::default();
         let limit = limit.clamp(1, 500);
         for (index, unit) in units.iter().enumerate() {
+            if index.is_multiple_of(page_file::SIZE) && !current() {
+                return Err(gamel10n_engines::EngineError::Cancelled.into());
+            }
             let row = self.state(index);
             summary.total += 1;
             summary.translated += usize::from(row.text().is_some());
@@ -406,14 +416,14 @@ impl Workbench {
             }
             total += 1;
         }
-        WorkbenchPage {
+        Ok(WorkbenchPage {
             total,
             offset: offset.min(total),
             rows,
             summary,
             resources: self.resources.clone(),
             kinds: self.kinds.clone(),
-        }
+        })
     }
     fn refresh_row(&mut self, index: usize, unit: &TranslationUnit) -> Result<(), CoreError> {
         self.edits
@@ -472,6 +482,26 @@ impl Workbench {
     }
 }
 
+fn context_text(
+    unit: &TranslationUnit,
+    before: Option<&TranslationUnit>,
+    after: Option<&TranslationUnit>,
+) -> String {
+    let before = before
+        .filter(|v| v.resource_path == unit.resource_path)
+        .map_or("（本资源首条文本）", |u| u.source_text.as_str());
+    let after = after
+        .filter(|v| v.resource_path == unit.resource_path)
+        .map_or("（本资源末条文本）", |u| u.source_text.as_str());
+    format!(
+        "上一条：{before}\n\n下一条：{after}{}",
+        if unit.context.is_empty() {
+            String::new()
+        } else {
+            format!("\n\n提取上下文：{}", unit.context)
+        }
+    )
+}
 fn matches_filter(
     unit: &TranslationUnit,
     row: &RowState,
@@ -490,20 +520,7 @@ fn matches_filter(
     {
         return false;
     }
-    let status = match filter.status.as_str() {
-        "missing" => row.text().is_none(),
-        "failed" => row.failure().is_some(),
-        "pending" => row.text().is_some() && !row.reviewed(),
-        "edited" => row.edited(),
-        "automatic" => row.text().is_some() && row.origin() == TranslationOrigin::Automatic,
-        "manual" => row.text().is_some() && row.origin() == TranslationOrigin::Manual,
-        "unknown" => row.text().is_some() && row.origin() == TranslationOrigin::Unknown,
-        "reviewed" => row.reviewed(),
-        "invalid" => !row.issues.is_empty(),
-        "candidate" => row.candidate.is_some(),
-        _ => true,
-    };
-    if !status
+    if !query::Status::effective(row).matches(&filter.status)
         || !source.is_empty() && !unit.source_text.to_lowercase().contains(source)
         || !translation.is_empty()
             && row
@@ -674,6 +691,25 @@ impl Application {
         offset: usize,
         limit: usize,
     ) -> Result<WorkbenchPage, CoreError> {
+        self.workbench_page_while(id, filter, offset, limit, || true)
+            .await
+    }
+
+    /// Stops scanning a superseded view between pages. A cancelled scan never replaces cached matches.
+    pub async fn workbench_page_while(
+        &self,
+        id: &str,
+        filter: &WorkbenchFilter,
+        offset: usize,
+        limit: usize,
+        current: impl Fn() -> bool + Clone + Send + 'static,
+    ) -> Result<WorkbenchPage, CoreError> {
+        if let Some(value) = self
+            .disk_page(id, filter, offset, limit, current.clone())
+            .await?
+        {
+            return Ok(value);
+        }
         let analysis = self.workbench_analysis(id).await?;
         if analysis.is_none() {
             return Ok(WorkbenchPage::default());
@@ -681,14 +717,21 @@ impl Application {
         let (analysis, workbench) = self.workbench_for(id, analysis).await?;
         let filter = filter.clone();
         tokio::task::spawn_blocking(move || {
-            workbench
-                .blocking_lock()
-                .page(&analysis.extraction().units, &filter, offset, limit)
+            workbench.blocking_lock().page(
+                &analysis.extraction().units,
+                &filter,
+                offset,
+                limit,
+                &current,
+            )
         })
-        .await
-        .map_err(CoreError::from)
+        .await?
     }
     pub async fn workbench_row(&self, id: &str, unit_id: &str) -> Result<WorkbenchRow, CoreError> {
+        if let Some(value) = self.disk_row(id, unit_id).await? {
+            return Ok(value);
+        }
+
         let (analysis, workbench) = self.workbench(id).await?;
         let workbench = workbench.lock().await;
         let units = &analysis.extraction().units;
@@ -700,6 +743,10 @@ impl Application {
         id: &str,
         filter: &WorkbenchFilter,
     ) -> Result<Vec<String>, CoreError> {
+        if let Some(value) = self.disk_ids(id, filter).await? {
+            return Ok(value);
+        }
+
         let (analysis, workbench) = self.workbench(id).await?;
         let filter = filter.clone();
         tokio::task::spawn_blocking(move || {
@@ -740,6 +787,10 @@ impl Application {
         current: &str,
         direction: i32,
     ) -> Result<Option<(String, usize)>, CoreError> {
+        if let Some(value) = self.disk_adjacent(id, filter, current, direction).await? {
+            return Ok(value);
+        }
+
         let (analysis, workbench) = self.workbench(id).await?;
         let workbench = workbench.lock().await;
         let units = &analysis.extraction().units;
@@ -777,6 +828,10 @@ impl Application {
         Ok(adjacent.map(|(unit, rank)| (unit.id.clone(), rank)))
     }
     pub async fn workbench_context(&self, id: &str, unit_id: &str) -> Result<String, CoreError> {
+        if let Some(value) = self.disk_context(id, unit_id).await? {
+            return Ok(value);
+        }
+
         let analysis = self
             .workbench_analysis(id)
             .await?
@@ -787,26 +842,10 @@ impl Application {
             .position(|unit| unit.id == unit_id)
             .ok_or_else(|| CoreError::InvalidData("找不到所选文本。".into()))?;
         let unit = &units[index];
-        let before = index
-            .checked_sub(1)
-            .and_then(|index| units.get(index))
-            .filter(|neighbor| neighbor.resource_path == unit.resource_path)
-            .map_or("（本资源首条文本）", |unit| {
-                unit.source_text.as_str()
-            });
-        let after = units
-            .get(index + 1)
-            .filter(|neighbor| neighbor.resource_path == unit.resource_path)
-            .map_or("（本资源末条文本）", |unit| {
-                unit.source_text.as_str()
-            });
-        Ok(format!(
-            "上一条：{before}\n\n下一条：{after}{}",
-            if unit.context.is_empty() {
-                String::new()
-            } else {
-                format!("\n\n提取上下文：{}", unit.context)
-            }
+        Ok(context_text(
+            unit,
+            index.checked_sub(1).and_then(|i| units.get(i)),
+            units.get(index + 1),
         ))
     }
     pub async fn load_text_selection(&self, id: &str) -> Result<Vec<String>, CoreError> {
@@ -818,6 +857,9 @@ impl Application {
         .unwrap_or_default();
         if selection.is_empty() {
             return Ok(selection);
+        }
+        if let Some(valid) = self.disk_selection(id, selection.clone(), false).await? {
+            return Ok(valid);
         }
         let Some(analysis) = self.workbench_analysis(id).await? else {
             return Ok(Vec::new());
@@ -840,20 +882,26 @@ impl Application {
     ) -> Result<(), CoreError> {
         let _project = self.lock_project(id).await?;
         self.store.ensure_writable().await?;
-        let analysis = self
-            .workbench_analysis(id)
+        if self
+            .disk_selection(id, selection.to_vec(), true)
             .await?
-            .ok_or_else(|| CoreError::InvalidData("请先提取游戏文本。".into()))?;
-        let mut remaining: HashSet<_> = analysis
-            .extraction()
-            .units
-            .iter()
-            .map(|unit| unit.id.as_str())
-            .collect();
-        if selection.iter().any(|id| !remaining.remove(id.as_str())) {
-            return Err(CoreError::InvalidData(
-                "文本选区已失效，请重新选择。".into(),
-            ));
+            .is_none()
+        {
+            let analysis = self
+                .workbench_analysis(id)
+                .await?
+                .ok_or_else(|| CoreError::InvalidData("请先提取游戏文本。".into()))?;
+            let mut remaining: HashSet<_> = analysis
+                .extraction()
+                .units
+                .iter()
+                .map(|unit| unit.id.as_str())
+                .collect();
+            if selection.iter().any(|id| !remaining.remove(id.as_str())) {
+                return Err(CoreError::InvalidData(
+                    "文本选区已失效，请重新选择。".into(),
+                ));
+            }
         }
         Ok(gamel10n_translation::files::write_json(
             &self.store.directory(id)?.join("trial-selection.json"),
@@ -879,41 +927,9 @@ impl Application {
         text: String,
         reviewed: bool,
     ) -> Result<(), CoreError> {
-        let _project = self.lock_project(id).await?;
-        self.ensure_editable(id).await?;
-        let (analysis, workbench) = self.workbench(id).await?;
-        let unit_id = unit_id.to_owned();
-        tokio::task::spawn_blocking(move || {
-            let mut workbench = workbench.blocking_lock();
-            let units = &analysis.extraction().units;
-            let index = workbench.selected_index(units, &unit_id)?;
-            let unit = &units[index];
-            if reviewed && !text::validate(unit, &text).is_empty() {
-                return Err(CoreError::InvalidData(
-                    "译文存在格式问题，修正后才能标记为已校对。".into(),
-                ));
-            }
-            workbench.edits.update(|edits| -> Result<_, CoreError> {
-                let mut changes = EditChanges::default();
-                let origin = workbench
-                    .rows
-                    .get(&index)
-                    .filter(|row| row.text() == Some(text.as_str()))
-                    .map(RowState::origin)
-                    .unwrap_or(TranslationOrigin::Manual);
-                let mut edit =
-                    TranslationEdit::new(unit, &workbench.policy.target_language, text, reviewed);
-                edit.origin = origin;
-                edit.retranslation_id = edits
-                    .find(unit, &workbench.policy.target_language)
-                    .and_then(|old| old.retranslation_id.clone());
-                changes.entries.insert(unit_id, Some(edit));
-                Ok(((), changes))
-            })?;
-            workbench.refresh_row(index, unit)?;
-            Ok(())
-        })
-        .await?
+        self.edit_rows(id, &[unit_id.into()], editing::Edit::Save(text, reviewed))
+            .await
+            .map(|_| ())
     }
     pub async fn mark_reviewed(
         &self,
@@ -921,138 +937,23 @@ impl Application {
         unit_ids: &[String],
         reviewed: bool,
     ) -> Result<usize, CoreError> {
-        let _project = self.lock_project(id).await?;
-        self.ensure_editable(id).await?;
-        let (analysis, workbench) = self.workbench(id).await?;
-        let unit_ids = unit_ids.to_vec();
-        tokio::task::spawn_blocking(move || {
-            let mut workbench = workbench.blocking_lock();
-            let ids: HashSet<_> = unit_ids.iter().map(String::as_str).collect();
-            let selected: Vec<_> = analysis
-                .extraction()
-                .units
-                .iter()
-                .enumerate()
-                .filter(|(_, unit)| ids.contains(unit.id.as_str()))
-                .collect();
-            if ids.is_empty() || selected.len() != ids.len() {
-                return Err(CoreError::InvalidData("文本选区为空或已失效。".into()));
-            }
-            let count = workbench.edits.update(|edits| -> Result<_, CoreError> {
-                let mut changes = EditChanges::default();
-                let mut count = 0;
-                for &(index, unit) in &selected {
-                    let Some(row) = workbench.rows.get(&index) else {
-                        continue;
-                    };
-                    let Some(text) = row.text() else {
-                        continue;
-                    };
-                    if reviewed && !row.issues.is_empty() {
-                        continue;
-                    }
-                    if row.reviewed() == reviewed && row.edit.is_some() {
-                        continue;
-                    }
-                    let mut edit = edits
-                        .find(unit, &workbench.policy.target_language)
-                        .cloned()
-                        .unwrap_or_else(|| {
-                            TranslationEdit::new(
-                                unit,
-                                &workbench.policy.target_language,
-                                text.into(),
-                                reviewed,
-                            )
-                        });
-                    edit.reviewed = reviewed;
-                    edit.origin = row.origin();
-                    edit.is_generated = false;
-                    edit.updated_at = gamel10n_translation::storage::now();
-                    changes.entries.insert(unit.id.clone(), Some(edit));
-                    count += 1;
-                }
-                Ok((count, changes))
-            })?;
-            for (index, unit) in selected {
-                workbench.refresh_row(index, unit)?;
-            }
-            Ok(count)
-        })
-        .await?
+        self.edit_rows(id, unit_ids, editing::Edit::Review(reviewed))
+            .await
     }
     pub async fn undo_translation_edit(&self, id: &str, unit_id: &str) -> Result<(), CoreError> {
-        let _project = self.lock_project(id).await?;
-        self.ensure_editable(id).await?;
-        let (analysis, workbench) = self.workbench(id).await?;
-        let unit_id = unit_id.to_owned();
-        tokio::task::spawn_blocking(move || {
-            let mut workbench = workbench.blocking_lock();
-            let units = &analysis.extraction().units;
-            let index = workbench.selected_index(units, &unit_id)?;
-            let unit = &units[index];
-            workbench.edits.update(|_| -> Result<_, CoreError> {
-                let mut changes = EditChanges::default();
-                changes.entries.insert(unit_id.clone(), None);
-                changes.candidates.insert(unit_id, None);
-                Ok(((), changes))
-            })?;
-            workbench.refresh_row(index, unit)?;
-            Ok(())
-        })
-        .await?
+        self.edit_rows(id, &[unit_id.into()], editing::Edit::Undo)
+            .await
+            .map(|_| ())
     }
     pub async fn adopt_candidate(&self, id: &str, unit_id: &str) -> Result<(), CoreError> {
-        let _project = self.lock_project(id).await?;
-        self.ensure_editable(id).await?;
-        let (analysis, workbench) = self.workbench(id).await?;
-        let unit_id = unit_id.to_owned();
-        tokio::task::spawn_blocking(move || {
-            let mut workbench = workbench.blocking_lock();
-            let units = &analysis.extraction().units;
-            let index = workbench.selected_index(units, &unit_id)?;
-            let unit = &units[index];
-            workbench.edits.update(|edits| -> Result<_, CoreError> {
-                let mut changes = EditChanges::default();
-                let mut candidate = edits
-                    .candidate(unit, &workbench.policy.target_language)
-                    .cloned()
-                    .ok_or_else(|| {
-                        CoreError::InvalidData("当前文本没有已保存的候选译文。".into())
-                    })?;
-                candidate.origin = TranslationOrigin::Automatic;
-                candidate.is_generated = false;
-                candidate.retranslation_id = edits
-                    .find(unit, &workbench.policy.target_language)
-                    .and_then(|old| old.retranslation_id.clone());
-                changes.entries.insert(unit_id.clone(), Some(candidate));
-                changes.candidates.insert(unit_id, None);
-                Ok(((), changes))
-            })?;
-            workbench.refresh_row(index, unit)?;
-            Ok(())
-        })
-        .await?
+        self.edit_rows(id, &[unit_id.into()], editing::Edit::Adopt)
+            .await
+            .map(|_| ())
     }
     pub async fn discard_candidate(&self, id: &str, unit_id: &str) -> Result<(), CoreError> {
-        let _project = self.lock_project(id).await?;
-        self.ensure_editable(id).await?;
-        let (analysis, workbench) = self.workbench(id).await?;
-        let unit_id = unit_id.to_owned();
-        tokio::task::spawn_blocking(move || {
-            let mut workbench = workbench.blocking_lock();
-            let units = &analysis.extraction().units;
-            let index = workbench.selected_index(units, &unit_id)?;
-            let unit = &units[index];
-            workbench.edits.update(|_| -> Result<_, CoreError> {
-                let mut changes = EditChanges::default();
-                changes.candidates.insert(unit_id, None);
-                Ok(((), changes))
-            })?;
-            workbench.refresh_row(index, unit)?;
-            Ok(())
-        })
-        .await?
+        self.edit_rows(id, &[unit_id.into()], editing::Edit::Discard)
+            .await
+            .map(|_| ())
     }
     pub(crate) async fn check_patch_copies(
         &self,
@@ -1293,6 +1194,7 @@ mod tests {
         );
         app.undo_translation_edit(&id, &unit.id).await.unwrap();
 
+        app.begin(&id, "translate", "翻译中").await.unwrap();
         let (_, workbench) = app.workbench(&id).await.unwrap();
         assert_eq!(workbench.lock().await.rows.len(), 2);
         let missing = WorkbenchFilter {
@@ -1424,6 +1326,7 @@ mod tests {
             BTreeMap::from([("2".into(), "再见".into())])
         );
 
+        app.begin(&id, "translate", "翻译中").await.unwrap();
         let (_, workbench) = app.workbench(&id).await.unwrap();
         workbench.lock().await.apply_progress(
             &gamel10n_translation::execution::TranslationProgress {
@@ -1617,50 +1520,5 @@ mod tests {
         assert!(edit.reviewed);
         assert!(!edit.is_generated);
     }
-    #[tokio::test]
-    async fn visiting_projects_evicts_old_drafts_and_keeps_recent_workbench() {
-        let (root, app, id, units) = fixture().await;
-        let mut first_new = None;
-        app.workbench_page(&id, &WorkbenchFilter::default(), 0, 1)
-            .await
-            .unwrap();
-        for index in 0..4 {
-            let game = root.path().join(format!("game-{index}"));
-            std::fs::create_dir(&game).unwrap();
-            let project = app.add_project(&game).await.unwrap();
-            if first_new.is_none() {
-                first_new = Some(project.id.clone());
-            }
-            gamel10n_translation::files::write_json(
-                &app.project_directory(&project.id)
-                    .unwrap()
-                    .join("extraction/native.json"),
-                &crate::StoredAnalysis {
-                    schema_version: 1,
-                    coverage_pending: false,
-                    format: "test".into(),
-                    source_directory: game,
-                    resource_files: Vec::new(),
-                    source_hashes: BTreeMap::new(),
-                    extraction: gamel10n_engines::protocol::ExtractionResult {
-                        units: units.clone(),
-                        warnings: Vec::new(),
-                    },
-                    adapter: None,
-                    probe: None,
-                },
-            )
-            .unwrap();
-            app.workbench_page(&project.id, &WorkbenchFilter::default(), 0, 1)
-                .await
-                .unwrap();
-            app.workbench_page(&id, &WorkbenchFilter::default(), 0, 1)
-                .await
-                .unwrap();
-        }
-        let cache = app.workbenches.lock().await;
-        assert_eq!(cache.len(), 4);
-        assert!(cache.contains_key(&id));
-        assert!(!cache.contains_key(first_new.as_deref().unwrap()));
-    }
+    mod pagination;
 }
