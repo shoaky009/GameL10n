@@ -9,7 +9,7 @@ export component DialogLayer inherits Rectangle {
     TouchArea {}
     Rectangle { width: min(parent.width - 100px, 660px); height: min(parent.height - 80px, modal-content.preferred-height); x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; background: Theme.surface; border-radius: 8px;
         modal-content := VerticalLayout { padding: 20px; spacing: 12px;
-            if App.modal != "engine-review": Heading { text: App.modal == "game-check" ? "游戏运行检查" : App.modal == "launch" ? "游戏启动设置" : App.modal == "api" ? (App.api-id == "" ? "新增模型配置" : "编辑模型配置") : App.modal == "patch-texts" ? "本次补丁文本" : App.modal == "install" ? "安装到游戏目录" : App.modal == "feedback" ? "任务需要处理" : App.modal-title; }
+            if App.modal != "engine-review": Heading { text: App.modal == "game-check" ? "游戏运行检查" : App.modal == "launch" ? "游戏启动设置" : App.modal == "api" ? (App.api-copying ? "复制模型配置" : App.api-id == "" ? "新增模型配置" : "编辑模型配置") : App.modal == "patch-texts" ? "本次补丁文本" : App.modal == "install" ? "安装到游戏目录" : App.modal == "feedback" ? "任务需要处理" : App.modal-title; }
             if App.modal == "install": VerticalLayout { spacing: 8px;
                 Label { text: App.patch-summary; }
                 ReportText { text: App.project-path; accessible-label: "安装位置"; }

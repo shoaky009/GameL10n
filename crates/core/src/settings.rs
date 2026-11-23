@@ -34,6 +34,8 @@ pub struct ApiProfile {
 }
 
 impl ApiProfile {
+    pub const MAX_NAME_CHARS: usize = 80;
+
     /// Maximum output tokens for each intelligent adaptation request.
     pub fn analysis_output_limit(&self) -> Result<u32, CoreError> {
         use gamel10n_engines::adaptation::AdaptationLimits;
@@ -277,9 +279,9 @@ impl Application {
         mut profile: ApiProfile,
         new_key: Option<String>,
         remember_key: bool,
-    ) -> Result<(), CoreError> {
+    ) -> Result<String, CoreError> {
         if profile.name.trim().is_empty()
-            || profile.name.chars().count() > 80
+            || profile.name.chars().count() > ApiProfile::MAX_NAME_CHARS
             || profile.name.chars().any(char::is_control)
             || profile.model.trim().is_empty()
         {
@@ -362,12 +364,12 @@ impl Application {
         if new_key.is_some() {
             let mut keys = self.session_keys.lock().await;
             if let Some(key) = session_key {
-                keys.insert(profile_id, key);
+                keys.insert(profile_id.clone(), key);
             } else {
                 keys.remove(&profile_id);
             }
         }
-        Ok(())
+        Ok(profile_id)
     }
 
     pub async fn delete_api_profile(&self, id: &str) -> Result<(), CoreError> {

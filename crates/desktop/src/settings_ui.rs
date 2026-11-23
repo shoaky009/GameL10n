@@ -57,6 +57,26 @@ pub fn cancel_api_test(ctx: &Context) {
 
 const REASONING_PRESETS: [&str; 6] = ["", "low", "medium", "high", "xhigh", "max"];
 
+fn profile_copy_name(original: &str, profiles: &[ApiProfile]) -> String {
+    let mut number = 1;
+    loop {
+        let suffix = if number == 1 {
+            "（副本）".to_owned()
+        } else {
+            format!("（副本 {number}）")
+        };
+        let mut name: String = original
+            .chars()
+            .take(ApiProfile::MAX_NAME_CHARS - suffix.chars().count())
+            .collect();
+        name.push_str(&suffix);
+        if !profiles.iter().any(|p| p.name.eq_ignore_ascii_case(&name)) {
+            return name;
+        }
+        number += 1;
+    }
+}
+
 fn update_api_profile(profile: &mut ApiProfile, input: &UiInput) -> Result<(), CoreError> {
     profile.analysis_max_output_tokens = if input.api_output_tokens.trim().is_empty() {
         None
@@ -70,7 +90,11 @@ fn update_api_profile(profile: &mut ApiProfile, input: &UiInput) -> Result<(), C
         )
     };
     profile.analysis_output_limit()?;
-    profile.id = input.api_id.clone();
+    if input.api_copying {
+        profile.id.clear();
+    } else {
+        profile.id.clone_from(&input.api_id);
+    }
     profile.name = input.api_name.trim().into();
     profile.endpoint = input.api_endpoint.trim().trim_end_matches('/').into();
     profile.model = input.api_model.trim().into();
@@ -386,6 +410,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
             ctx.update(|ui| {
                 let a = ui.global::<App>();
                 a.set_api_id("".into());
+                a.set_api_copying(false);
                 a.set_api_test_result("".into());
                 a.set_api_name("".into());
                 a.set_api_endpoint("".into());
@@ -401,18 +426,23 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                 a.set_modal("api".into());
             });
         }
-        "api-edit" => {
-            let settings = ctx.app().await.settings().await?;
-            let p = settings
-                .api_configuration
-                .profiles
-                .into_iter()
+        "api-edit" | "api-copy" => {
+            let host = ctx.app().await;
+            let profiles = host.settings().await?.api_configuration.profiles;
+            let mut p = profiles
+                .iter()
                 .find(|p| p.id == input.argument)
+                .cloned()
                 .ok_or_else(|| CoreError::InvalidData("API 配置不存在。".into()))?;
-            let key = ctx.app().await.decrypt_key(&p).await;
+            let key = host.decrypt_key(&p).await;
+            let copying = action == "api-copy";
+            if copying {
+                p.name = profile_copy_name(&p.name, &profiles);
+            }
             ctx.update(move |ui| {
                 let a = ui.global::<App>();
                 a.set_api_id(p.id.into());
+                a.set_api_copying(copying);
                 a.set_api_test_result("".into());
                 a.set_api_name(p.name.into());
                 a.set_api_endpoint(p.endpoint.into());
@@ -460,16 +490,22 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                 ctx.update(|ui| ui.global::<App>().set_modal("api".into()));
                 return Err(error);
             }
-            if let Err(error) = host
+            let id = match host
                 .save_api_profile(p, Some(input.api_key.trim().into()), input.api_remember_key)
                 .await
             {
-                ctx.update(|ui| ui.global::<App>().set_modal("api".into()));
-                return Err(error);
-            }
-            ctx.update(|ui| {
-                ui.global::<App>().set_api_key("".into());
-                ui.global::<App>().set_api_test_result("".into());
+                Ok(id) => id,
+                Err(error) => {
+                    ctx.update(|ui| ui.global::<App>().set_modal("api".into()));
+                    return Err(error);
+                }
+            };
+            ctx.update(move |ui| {
+                let a = ui.global::<App>();
+                a.set_api_id(id.into());
+                a.set_api_copying(false);
+                a.set_api_key("".into());
+                a.set_api_test_result("".into());
             });
             refresh(ctx, None).await?;
         }

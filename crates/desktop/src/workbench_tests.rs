@@ -745,6 +745,36 @@ fn project_actions_keep_settings_selection_and_saved_edits_in_sync_across_tabs()
         assert_eq!(host.settings().await.unwrap().api_configuration.profiles.len(),settings_before);
 
         app.set_modal("".into());
+        let mut source = host.settings().await.unwrap().api_configuration.profiles[1].clone();
+        source.translation_format = "PlainText".into();
+        source.analysis_reasoning_effort = Some("custom".into());
+        source.analysis_max_output_tokens = Some(8192);
+        source.extra.insert("providerOption".into(), serde_json::json!(42));
+        host.save_api_profile(source.clone(), Some("session-fixture".into()), false).await.unwrap();
+        invoke_action(&ui, &ctx, "api-copy", &source.id).await;
+        assert_eq!(app.get_api_name(), "second（副本）");
+        assert_eq!(app.get_api_key(), "session-fixture");
+        assert!(!app.get_api_remember_key());
+        assert_eq!(host.settings().await.unwrap().api_configuration.profiles.len(), settings_before);
+        app.set_api_model("another-model".into());
+        invoke_action(&ui, &ctx, "confirm", "api").await;
+        let config = host.settings().await.unwrap().api_configuration;
+        let copy = config.profiles.last().unwrap();
+        assert_eq!(copy.id, app.get_api_id().as_str());
+        assert_ne!(copy.id, source.id);
+        assert_eq!(copy.model, "another-model");
+        assert_eq!(config.profiles[1].model, source.model);
+        assert_eq!(copy.endpoint, source.endpoint);
+        assert_eq!(copy.protocol, source.protocol);
+        assert_eq!(copy.analysis_reasoning_effort, source.analysis_reasoning_effort);
+        assert_eq!(copy.analysis_max_output_tokens, source.analysis_max_output_tokens);
+        assert_eq!(copy.translation_format, source.translation_format);
+        assert_eq!(copy.extra, source.extra);
+        assert_eq!(host.decrypt_key(copy).await.unwrap(), "session-fixture");
+        assert!(copy.requires_session_key && copy.encrypted_api_key.is_none());
+        invoke_action(&ui, &ctx, "api-copy", &source.id).await;
+        assert_eq!(app.get_api_name(), "second（副本 2）");
+        app.set_modal("".into());
         invoke_action(&ui, &ctx, "project", &project.id).await;
         assert_eq!(
             app.get_project_files_path().as_str(),

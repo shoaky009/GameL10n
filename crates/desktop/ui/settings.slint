@@ -150,6 +150,7 @@ export component GlobalApis inherits VerticalLayout {
         HorizontalLayout { spacing: 8px;
             Button { text: "新增配置"; primary: true; enabled: !App.api-testing; clicked => { App.action("api-add", ""); } }
             if App.apis.length > 0: Button { text: "编辑所选配置"; enabled: App.api-id != "" && !App.api-testing; clicked => { App.action("api-edit", App.api-id); } }
+            if App.apis.length > 0: Button { text: "复制所选配置"; enabled: App.api-id != "" && !App.api-testing; clicked => { App.action("api-copy", App.api-id); } }
             if App.apis.length > 0: Button { text: "删除所选配置"; enabled: App.api-id != "" && !App.api-testing; clicked => { App.action("api-delete-dialog", App.api-id); } }
             Rectangle { horizontal-stretch: 1; }
         }
