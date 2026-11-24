@@ -71,6 +71,7 @@ async fn automatic_recognition_verifies_pfs_replacement_before_model_calls() {
         protocol: Default::default(),
         translation_format: Default::default(),
         analysis_reasoning_effort: None,
+        max_concurrency: None,
     })
     .expect("provider");
     let request = AdaptationRequest {

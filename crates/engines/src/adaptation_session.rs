@@ -245,6 +245,7 @@ mod tests {
             protocol: Default::default(),
             translation_format: Default::default(),
             analysis_reasoning_effort: None,
+            max_concurrency: None,
         })
         .unwrap();
         let service = EngineService::new(

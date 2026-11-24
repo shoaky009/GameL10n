@@ -658,6 +658,7 @@ impl Application {
                     TranslationFormat::JsonBatch
                 },
                 analysis_reasoning_effort: profile.analysis_reasoning_effort.clone(),
+                max_concurrency: Some(profile.concurrency_limit()?),
             })
             .map_err(|error| CoreError::InvalidData(error.to_string()))?
             .with_display_name(profile.name.clone());

@@ -1,4 +1,4 @@
-import { LineEdit, TextEdit, ComboBox, CheckBox, ScrollView, ProgressIndicator, StandardListView } from "std-widgets.slint";
+import { LineEdit, TextEdit, ComboBox, CheckBox, SpinBox, ScrollView, ProgressIndicator, StandardListView } from "std-widgets.slint";
 import { App, Theme, Label, Caption, TokenCaption, Heading, ReportText, Link, IconButton, ActionButton } from "state.slint";
 import { ApiTestControls, WorkflowControls } from "settings.slint";
 
@@ -115,6 +115,13 @@ export component DialogLayer inherits FocusScope {
                     Caption { text: "分析思考等级（仅用于智能识别与适配）"; } ComboBox { model: ["接口默认", "low", "medium", "high", "xhigh", "max", "自定义"]; current-index <=> App.api-reasoning; selected => { App.api-test-result = ""; } }
                     if App.api-reasoning == 6: LineEdit { text <=> App.api-reasoning-custom; placeholder-text: "输入服务商支持的等级值，留空使用接口默认"; edited => { App.api-test-result = ""; } }
                     Caption { text: "翻译输入格式"; } ComboBox { model: ["批量 JSON", "逐条纯文本（本地翻译模型）"]; current-index <=> App.api-format; selected => { App.api-test-result = ""; } }
+                    HorizontalLayout { spacing: 12px;
+                        VerticalLayout { spacing: 2px; horizontal-stretch: 1; alignment: center;
+                            Caption { text: "最大并行请求数（全局按该 API 限制）"; }
+                            Caption { text: "跨所有项目共享上限；调高可并行发送多个翻译批次（1–16）。"; font-size: 11px; }
+                        }
+                        SpinBox { value <=> App.api-concurrency; minimum: 1; maximum: 16; width: 100px; }
+                    }
                   }
                 }
                 if App.modal == "api": ApiTestControls {}

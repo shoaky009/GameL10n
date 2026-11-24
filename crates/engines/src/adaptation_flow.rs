@@ -1615,6 +1615,7 @@ mod tests {
             protocol,
             translation_format: TranslationFormat::JsonBatch,
             analysis_reasoning_effort: None,
+            max_concurrency: None,
         })
         .unwrap();
         (provider, thread)

@@ -676,6 +676,7 @@ mod tests {
             protocol: ApiProtocol::ChatCompletions,
             translation_format: TranslationFormat::JsonBatch,
             analysis_reasoning_effort: None,
+            max_concurrency: None,
         })
         .unwrap()
     }
@@ -757,6 +758,7 @@ mod tests {
             protocol: ApiProtocol::ChatCompletions,
             translation_format,
             analysis_reasoning_effort: Some("high".into()),
+            max_concurrency: None,
         })
         .unwrap()
     }
@@ -1500,6 +1502,7 @@ mod tests {
             protocol: ApiProtocol::ChatCompletions,
             translation_format: TranslationFormat::PlainText,
             analysis_reasoning_effort: Some("high".into()),
+            max_concurrency: None,
         })
         .unwrap();
         let directory = tempfile::tempdir().unwrap();
@@ -1536,6 +1539,7 @@ mod tests {
             protocol: ApiProtocol::Responses,
             translation_format: TranslationFormat::JsonBatch,
             analysis_reasoning_effort: None,
+            max_concurrency: None,
         })
         .unwrap();
         let directory = tempfile::tempdir().unwrap();
@@ -1591,6 +1595,7 @@ mod tests {
             protocol: ApiProtocol::Responses,
             translation_format: TranslationFormat::JsonBatch,
             analysis_reasoning_effort: Some("high".into()),
+            max_concurrency: None,
         })
         .unwrap();
         let completion=provider.complete(&[json!({"role":"user","content":"inspect"})],Some(&[json!({"type":"function","function":{"name":"read","description":"read","parameters":{"type":"object","properties":{}}}})]),32,&CancellationToken::new()).await.unwrap();
@@ -1854,5 +1859,129 @@ mod tests {
             committed.memory.find(&units[1], &policy).unwrap(),
             Some("旧译文")
         );
+    }
+
+    #[tokio::test]
+    async fn translation_engine_dispatches_batches_concurrently_up_to_api_limit() {
+        use std::io::Read;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_seen = Arc::new(AtomicUsize::new(0));
+        let active_server = Arc::clone(&active);
+        let max_seen_server = Arc::clone(&max_seen);
+        let server = std::thread::spawn(move || {
+            let mut handles = Vec::new();
+            for _ in 0..4 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let active = Arc::clone(&active_server);
+                let max_seen = Arc::clone(&max_seen_server);
+                handles.push(std::thread::spawn(move || {
+                    let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    max_seen.fetch_max(current, Ordering::SeqCst);
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(5)))
+                        .unwrap();
+                    let mut request = Vec::new();
+                    let mut buffer = [0_u8; 4096];
+                    let mut expected = None;
+                    loop {
+                        let size = stream.read(&mut buffer).unwrap();
+                        assert!(size > 0);
+                        request.extend_from_slice(&buffer[..size]);
+                        if expected.is_none()
+                            && let Some(start) =
+                                request.windows(4).position(|bytes| bytes == b"\r\n\r\n")
+                        {
+                            let headers = String::from_utf8_lossy(&request[..start]);
+                            let size = headers
+                                .lines()
+                                .find_map(|line| {
+                                    line.to_ascii_lowercase()
+                                        .strip_prefix("content-length:")
+                                        .map(|value| value.trim().parse::<usize>().unwrap())
+                                })
+                                .unwrap();
+                            expected = Some((start + 4, size));
+                        }
+                        if let Some((start, size)) = expected
+                            && request.len() >= start + size
+                        {
+                            break;
+                        }
+                    }
+                    let (start, size) = expected.unwrap();
+                    let req: Value =
+                        serde_json::from_slice(&request[start..start + size]).unwrap();
+                    let payload: Value =
+                        serde_json::from_str(req["messages"][1]["content"].as_str().unwrap())
+                            .unwrap();
+                    let text = payload["items"]["0"].as_str().unwrap();
+                    std::thread::sleep(Duration::from_millis(120));
+                    active.fetch_sub(1, Ordering::SeqCst);
+                    let reply = json!({"0": format!("zh:{text}")}).to_string();
+                    let body = json!({
+                        "choices": [{
+                            "finish_reason": "stop",
+                            "message": {"content": reply}
+                        }],
+                        "usage": {"prompt_tokens": 10, "completion_tokens": 5}
+                    })
+                    .to_string();
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .unwrap();
+                }));
+            }
+            for handle in handles {
+                handle.join().unwrap();
+            }
+        });
+
+        let provider = OpenAiProvider::new(ProviderSettings {
+            endpoint: format!("http://{address}/v1"),
+            api_key: String::new(),
+            model: "concurrent-batch".into(),
+            protocol: ApiProtocol::ChatCompletions,
+            translation_format: TranslationFormat::JsonBatch,
+            analysis_reasoning_effort: None,
+            max_concurrency: Some(2),
+        })
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let units = [
+            unit("u0", "one"),
+            unit("u1", "two"),
+            unit("u2", "three"),
+            unit("u3", "four"),
+        ];
+        let result = TranslationEngine::new(directory.path().into(), None)
+            .run(
+                &units,
+                &[provider],
+                &TranslationPolicy::default(),
+                &TranslationOptions {
+                    batch_size: 1,
+                    ..Default::default()
+                },
+                &CancellationToken::new(),
+                |_| {},
+            )
+            .await
+            .unwrap();
+        server.join().unwrap();
+        assert_eq!(result.completed, 4);
+        assert_eq!(result.failed, 0);
+        assert_eq!(result.translations["u0"], "zh:one");
+        assert_eq!(result.translations["u1"], "zh:two");
+        assert_eq!(result.translations["u2"], "zh:three");
+        assert_eq!(result.translations["u3"], "zh:four");
+        assert_eq!(max_seen.load(Ordering::SeqCst), 2);
     }
 }

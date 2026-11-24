@@ -85,6 +85,8 @@ pub struct ProviderSettings {
     pub translation_format: TranslationFormat,
     #[serde(default)]
     pub analysis_reasoning_effort: Option<String>,
+    #[serde(default)]
+    pub max_concurrency: Option<usize>,
 }
 impl fmt::Debug for ProviderSettings {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -515,6 +517,7 @@ pub struct OpenAiProvider {
     request_timeout: Duration,
     endpoint: reqwest::Url,
     identity: String,
+    max_concurrency: usize,
     account_limiter: Arc<AccountLimiter>,
     display_name: String,
     request_count: Arc<AtomicU64>,
@@ -559,30 +562,63 @@ fn shared_http_client() -> Result<reqwest::Client, ProviderError> {
         .map_err(|_| ProviderError::new("http-client", "无法初始化 HTTP 客户端。"))
 }
 
+struct LimiterState {
+    active: usize,
+    limit: usize,
+    cooldown_until: Option<std::time::Instant>,
+}
+
 struct AccountLimiter {
-    slot: Arc<tokio::sync::Semaphore>,
-    cooldown_until: Mutex<Option<std::time::Instant>>,
+    state: Mutex<LimiterState>,
+    changed: tokio::sync::Notify,
+}
+
+struct AccountPermit {
+    limiter: Arc<AccountLimiter>,
+}
+
+impl Drop for AccountPermit {
+    fn drop(&mut self) {
+        {
+            let mut state = self
+                .limiter
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            state.active = state.active.saturating_sub(1);
+        }
+        self.limiter.changed.notify_waiters();
+    }
 }
 
 impl AccountLimiter {
-    fn new() -> Self {
+    fn new(limit: usize) -> Self {
         Self {
-            slot: Arc::new(tokio::sync::Semaphore::new(1)),
-            cooldown_until: Mutex::new(None),
+            state: Mutex::new(LimiterState {
+                active: 0,
+                limit: limit.max(1),
+                cooldown_until: None,
+            }),
+            changed: tokio::sync::Notify::new(),
         }
     }
 
+    fn set_limit(&self, limit: usize) {
+        {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            state.limit = limit.max(1);
+        }
+        self.changed.notify_waiters();
+    }
+
     fn remaining_cooldown(&self) -> Option<Duration> {
-        let mut guard = self
-            .cooldown_until
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let deadline = (*guard)?;
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let deadline = state.cooldown_until?;
         let now = std::time::Instant::now();
         if deadline > now {
             Some(deadline.duration_since(now))
         } else {
-            *guard = None;
+            state.cooldown_until = None;
             None
         }
     }
@@ -592,12 +628,70 @@ impl AccountLimiter {
             return;
         }
         let deadline = std::time::Instant::now() + delay.min(Duration::from_secs(30));
-        let mut guard = self
-            .cooldown_until
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        if guard.is_none_or(|existing| deadline > existing) {
-            *guard = Some(deadline);
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if state.cooldown_until.is_none_or(|existing| deadline > existing) {
+            state.cooldown_until = Some(deadline);
+        }
+    }
+
+    async fn acquire(
+        self: &Arc<Self>,
+        cancellation: &CancellationToken,
+        metrics: &Mutex<RequestMetrics>,
+    ) -> Result<AccountPermit, ProviderError> {
+        loop {
+            if cancellation.is_cancelled() {
+                return Err(ProviderError::new("cancelled", "任务已取消。"));
+            }
+            let notified = self.changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let sleep_for = {
+                let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                let now = std::time::Instant::now();
+                if let Some(deadline) = state.cooldown_until {
+                    if deadline > now {
+                        Some(deadline.duration_since(now))
+                    } else {
+                        state.cooldown_until = None;
+                        if state.active < state.limit {
+                            state.active += 1;
+                            return Ok(AccountPermit {
+                                limiter: Arc::clone(self),
+                            });
+                        }
+                        None
+                    }
+                } else if state.active < state.limit {
+                    state.active += 1;
+                    return Ok(AccountPermit {
+                        limiter: Arc::clone(self),
+                    });
+                } else {
+                    None
+                }
+            };
+            let waiting = std::time::Instant::now();
+            let cancelled = if let Some(delay) = sleep_for {
+                tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => true,
+                    _ = tokio::time::sleep(delay) => false,
+                }
+            } else {
+                tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => true,
+                    _ = notified => false,
+                }
+            };
+            metrics
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .waiting_ms += milliseconds(waiting.elapsed());
+            if cancelled {
+                return Err(ProviderError::new("cancelled", "任务已取消。"));
+            }
         }
     }
 }
@@ -611,7 +705,19 @@ fn refusal_text(text: &str) -> bool {
     text.chars().count() <= 4096 && REFUSAL_PREFIX.is_match(text.trim())
 }
 impl OpenAiProvider {
+    pub const DEFAULT_MAX_CONCURRENCY: usize = 1;
+    pub const MAX_CONCURRENCY: usize = 16;
+
     pub fn new(settings: ProviderSettings) -> Result<Self, ProviderError> {
+        let max_concurrency = settings
+            .max_concurrency
+            .unwrap_or(Self::DEFAULT_MAX_CONCURRENCY);
+        if !(1..=Self::MAX_CONCURRENCY).contains(&max_concurrency) {
+            return Err(ProviderError::new(
+                "configuration",
+                &format!("API 最大并行请求数应为 1–{}。", Self::MAX_CONCURRENCY),
+            ));
+        }
         let mut endpoint = reqwest::Url::parse(&settings.endpoint).map_err(|_| {
             ProviderError::new("configuration", "API 地址必须是完整 HTTP(S) 地址。")
         })?;
@@ -680,8 +786,9 @@ impl OpenAiProvider {
         );
         let client = shared_http_client()?;
         let account_key = hash_text(&format!(
-            "{}\n{}",
+            "{}\n{}\n{}",
             endpoint.origin().ascii_serialization(),
+            settings.model,
             settings.api_key
         ));
         let account_limiter = {
@@ -691,11 +798,13 @@ impl OpenAiProvider {
             slots.retain(|_, limiter| {
                 Arc::strong_count(limiter) > 1 || limiter.remaining_cooldown().is_some()
             });
-            Arc::clone(
+            let limiter = Arc::clone(
                 slots
                     .entry(account_key)
-                    .or_insert_with(|| Arc::new(AccountLimiter::new())),
-            )
+                    .or_insert_with(|| Arc::new(AccountLimiter::new(max_concurrency))),
+            );
+            limiter.set_limit(max_concurrency);
+            limiter
         };
         let display_name = settings.model.clone();
         Ok(Self {
@@ -704,6 +813,7 @@ impl OpenAiProvider {
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             endpoint,
             identity,
+            max_concurrency,
             account_limiter,
             display_name,
             request_count: Arc::new(AtomicU64::new(0)),
@@ -711,6 +821,9 @@ impl OpenAiProvider {
             analysis_first_response_timeout: ANALYSIS_FIRST_RESPONSE_TIMEOUT,
             analysis_stream_idle_timeout: ANALYSIS_STREAM_IDLE_TIMEOUT,
         })
+    }
+    pub fn max_concurrency(&self) -> usize {
+        self.max_concurrency
     }
     pub fn identity(&self) -> &str {
         &self.identity
@@ -888,39 +1001,10 @@ impl OpenAiProvider {
         }
         let mut retries = 0;
         loop {
-            let account_permit = loop {
-                if let Some(delay) = self.account_limiter.remaining_cooldown() {
-                    let waiting = std::time::Instant::now();
-                    let cancelled = tokio::select! {
-                        biased;
-                        _ = cancellation.cancelled() => true,
-                        _ = tokio::time::sleep(delay) => false,
-                    };
-                    self.metrics
-                        .lock()
-                        .unwrap_or_else(|error| error.into_inner())
-                        .waiting_ms += milliseconds(waiting.elapsed());
-                    if cancelled {
-                        return Err(ProviderError::new("cancelled", "任务已取消。"));
-                    }
-                }
-                let waiting = std::time::Instant::now();
-                let permit = tokio::select! {
-                    biased;
-                    _=cancellation.cancelled()=>Err(ProviderError::new("cancelled","任务已取消。")),
-                    permit=self.account_limiter.slot.acquire()=>permit.map_err(|_|ProviderError::new("scheduler","API 请求调度器不可用。")),
-                };
-                self.metrics
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .waiting_ms += milliseconds(waiting.elapsed());
-                let permit = permit?;
-                if self.account_limiter.remaining_cooldown().is_some() {
-                    drop(permit);
-                    continue;
-                }
-                break permit;
-            };
+            let account_permit = self
+                .account_limiter
+                .acquire(cancellation, &self.metrics)
+                .await?;
             let result = self
                 .complete_once(
                     messages,
@@ -2351,6 +2435,7 @@ mod tests {
             protocol,
             translation_format: TranslationFormat::JsonBatch,
             analysis_reasoning_effort: Some("high".into()),
+            max_concurrency: None,
         })
         .unwrap()
     }
@@ -2609,9 +2694,10 @@ mod tests {
         provider.analysis_first_response_timeout = Duration::from_millis(500);
         let permit = provider
             .account_limiter
-            .slot
-            .clone()
-            .acquire_owned()
+            .acquire(
+                &CancellationToken::new(),
+                &Mutex::new(RequestMetrics::default()),
+            )
             .await
             .unwrap();
         tokio::spawn(async move {
@@ -2661,7 +2747,14 @@ mod tests {
             server.join().unwrap();
         }
         let provider = local_agent("http://127.0.0.1:1/v1".into(), ApiProtocol::ChatCompletions);
-        let _permit = provider.account_limiter.slot.acquire().await.unwrap();
+        let _permit = provider
+            .account_limiter
+            .acquire(
+                &CancellationToken::new(),
+                &Mutex::new(RequestMetrics::default()),
+            )
+            .await
+            .unwrap();
         let cancellation = CancellationToken::new();
         cancellation.cancel();
         assert!(
@@ -2699,6 +2792,7 @@ mod tests {
                     protocol,
                     translation_format: format,
                     analysis_reasoning_effort: Some("max".into()),
+                    max_concurrency: None,
                 })
                 .unwrap();
                 provider
@@ -2856,6 +2950,7 @@ mod tests {
                     protocol,
                     translation_format: TranslationFormat::JsonBatch,
                     analysis_reasoning_effort: effort.map(str::to_owned),
+                    max_concurrency: None,
                 })
                 .unwrap();
                 provider
@@ -3487,6 +3582,7 @@ mod tests {
             protocol: ApiProtocol::Responses,
             translation_format: TranslationFormat::JsonBatch,
             analysis_reasoning_effort: None,
+            max_concurrency: None,
         })
         .unwrap();
         provider.client = reqwest::Client::builder().no_proxy().build().unwrap();
@@ -3740,5 +3836,94 @@ mod tests {
         assert_eq!(retry_parsed["terms"], json!({"Alice": "爱丽丝"}));
         assert_eq!(retry_parsed["meta"]["0"]["markers"], json!({"{v0_0}": 1}));
         assert_eq!(retry_parsed["meta"]["0"]["feedback"], json!(["缺少占位符"]));
+    }
+
+    #[tokio::test]
+    async fn api_max_concurrency_is_enforced_globally_across_providers() {
+        use std::io::Write;
+        use std::net::TcpListener;
+        use std::sync::atomic::AtomicUsize;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let max_seen = Arc::new(AtomicUsize::new(0));
+        let in_flight_server = Arc::clone(&in_flight);
+        let max_seen_server = Arc::clone(&max_seen);
+        let server = std::thread::spawn(move || {
+            let mut handles = Vec::new();
+            for _ in 0..4 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let in_flight = Arc::clone(&in_flight_server);
+                let max_seen = Arc::clone(&max_seen_server);
+                handles.push(std::thread::spawn(move || {
+                    let current = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                    max_seen.fetch_max(current, Ordering::SeqCst);
+                    let _ = read_mock_request(&mut stream);
+                    std::thread::sleep(Duration::from_millis(120));
+                    in_flight.fetch_sub(1, Ordering::SeqCst);
+                    let body = json!({
+                        "choices": [{
+                            "finish_reason": "stop",
+                            "message": {"content": "{\"0\":\"你好\"}"}
+                        }]
+                    })
+                    .to_string();
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    stream.write_all(response.as_bytes()).unwrap();
+                }));
+            }
+            for handle in handles {
+                handle.join().unwrap();
+            }
+        });
+
+        let make = || {
+            let mut provider = OpenAiProvider::new(ProviderSettings {
+                endpoint: format!("http://{address}/v1"),
+                api_key: "shared-key".into(),
+                model: "parallel-model".into(),
+                protocol: ApiProtocol::ChatCompletions,
+                translation_format: TranslationFormat::JsonBatch,
+                analysis_reasoning_effort: None,
+                max_concurrency: Some(2),
+            })
+            .unwrap();
+            provider.client = reqwest::Client::builder().no_proxy().build().unwrap();
+            provider
+        };
+        let provider_a = make();
+        let provider_b = make();
+        assert_eq!(provider_a.max_concurrency(), 2);
+
+        let unit = TranslationUnit {
+            id: "u0".into(),
+            resource_path: "a.txt".into(),
+            locator: "0".into(),
+            source_text: "Hello".into(),
+            context: "a.txt".into(),
+            speaker: None,
+            kind: "dialogue".into(),
+            protected_tokens: None,
+        };
+        let policy = TranslationPolicy::default();
+        let feedback = BTreeMap::new();
+        let cancel = CancellationToken::new();
+
+        let (r1, r2, r3, r4) = tokio::join!(
+            provider_a.translate_batch(std::slice::from_ref(&unit), &policy, &feedback, &cancel),
+            provider_a.translate_batch(std::slice::from_ref(&unit), &policy, &feedback, &cancel),
+            provider_b.translate_batch(std::slice::from_ref(&unit), &policy, &feedback, &cancel),
+            provider_b.translate_batch(std::slice::from_ref(&unit), &policy, &feedback, &cancel),
+        );
+        r1.unwrap();
+        r2.unwrap();
+        r3.unwrap();
+        r4.unwrap();
+        server.join().unwrap();
+        assert_eq!(max_seen.load(Ordering::SeqCst), 2);
     }
 }

@@ -337,6 +337,7 @@ impl Application {
             },
             translation_format: TranslationFormat::JsonBatch,
             analysis_reasoning_effort: p.analysis_reasoning_effort.clone(),
+            max_concurrency: Some(p.concurrency_limit()?),
         })
         .map_err(|e| CoreError::InvalidData(e.to_string()))?
         .with_display_name(p.name.clone());

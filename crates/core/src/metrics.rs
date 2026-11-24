@@ -691,6 +691,7 @@ mod tests {
             protocol: Default::default(),
             translation_format: Default::default(),
             analysis_reasoning_effort: Some("high".into()),
+            max_concurrency: None,
         })
         .unwrap()
         .with_display_name("Profile A".into());

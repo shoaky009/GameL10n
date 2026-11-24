@@ -90,6 +90,12 @@ fn update_api_profile(profile: &mut ApiProfile, input: &UiInput) -> Result<(), C
         )
     };
     profile.analysis_output_limit()?;
+    profile.max_concurrency = if input.api_concurrency <= 0 {
+        None
+    } else {
+        Some(input.api_concurrency as usize)
+    };
+    profile.concurrency_limit()?;
     if input.api_copying {
         profile.id.clear();
     } else {
@@ -131,6 +137,7 @@ fn draft_matches(ui: &crate::view::MainWindow, input: &UiInput) -> bool {
         && app.get_api_reasoning() == input.api_reasoning
         && app.get_api_reasoning_custom().as_str() == input.api_reasoning_custom
         && app.get_api_output_tokens().as_str() == input.api_output_tokens
+        && app.get_api_concurrency() == input.api_concurrency
 }
 
 pub async fn refresh(ctx: &Context, project_id: Option<&str>) -> Result<(), CoreError> {
@@ -174,13 +181,17 @@ pub async fn refresh(ctx: &Context, project_id: Option<&str>) -> Result<(), Core
             id: p.id.clone().into(),
             name: p.name.clone().into(),
             detail: format!(
-                "{} · {}{}",
+                "{} · {}{}{}",
                 p.protocol,
                 p.model,
                 if p.translation_format == "PlainText" {
                     " · 逐条纯文本"
                 } else {
                     ""
+                },
+                match p.max_concurrency {
+                    Some(limit) if limit > 1 => format!(" · 并行 {limit}"),
+                    _ => String::new(),
                 }
             )
             .into(),
@@ -429,6 +440,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                 a.set_api_reasoning(0);
                 a.set_api_reasoning_custom("".into());
                 a.set_api_output_tokens("".into());
+                a.set_api_concurrency(ApiProfile::DEFAULT_MAX_CONCURRENCY as i32);
                 a.set_api_remember_key(true);
                 a.set_error("".into());
                 a.set_modal("api".into());
@@ -481,6 +493,10 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                         .map(|value| value.to_string())
                         .unwrap_or_default()
                         .into(),
+                );
+                a.set_api_concurrency(
+                    p.max_concurrency
+                        .unwrap_or(ApiProfile::DEFAULT_MAX_CONCURRENCY) as i32,
                 );
                 a.set_modal("api".into());
             });
@@ -646,6 +662,21 @@ mod tests {
             input.api_output_tokens = value.into();
             assert!(update_api_profile(&mut profile, &input).is_err());
         }
+    }
+
+    #[test]
+    fn api_concurrency_defaults_to_one_and_validates_bounds() {
+        let mut profile = ApiProfile::default();
+        let mut input = UiInput::default();
+        update_api_profile(&mut profile, &input).unwrap();
+        assert_eq!(profile.max_concurrency, None);
+        assert_eq!(profile.concurrency_limit().unwrap(), 1);
+        input.api_concurrency = 4;
+        update_api_profile(&mut profile, &input).unwrap();
+        assert_eq!(profile.max_concurrency, Some(4));
+        assert_eq!(profile.concurrency_limit().unwrap(), 4);
+        input.api_concurrency = 17;
+        assert!(update_api_profile(&mut profile, &input).is_err());
     }
 
     fn loaded_input() -> UiInput {

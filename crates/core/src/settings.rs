@@ -28,6 +28,8 @@ pub struct ApiProfile {
     pub analysis_reasoning_effort: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub analysis_max_output_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_concurrency: Option<usize>,
     pub translation_format: String,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
@@ -35,6 +37,22 @@ pub struct ApiProfile {
 
 impl ApiProfile {
     pub const MAX_NAME_CHARS: usize = 80;
+    pub const DEFAULT_MAX_CONCURRENCY: usize =
+        gamel10n_translation::provider::OpenAiProvider::DEFAULT_MAX_CONCURRENCY;
+    pub const MAX_CONCURRENCY: usize =
+        gamel10n_translation::provider::OpenAiProvider::MAX_CONCURRENCY;
+
+    /// Global maximum concurrent requests allowed for this API profile across all projects.
+    pub fn concurrency_limit(&self) -> Result<usize, CoreError> {
+        let limit = self.max_concurrency.unwrap_or(Self::DEFAULT_MAX_CONCURRENCY);
+        if !(1..=Self::MAX_CONCURRENCY).contains(&limit) {
+            return Err(CoreError::InvalidData(format!(
+                "API 最大并行请求数应为 1–{}。",
+                Self::MAX_CONCURRENCY
+            )));
+        }
+        Ok(limit)
+    }
 
     /// Maximum output tokens for each intelligent adaptation request.
     pub fn analysis_output_limit(&self) -> Result<u32, CoreError> {
@@ -142,6 +160,7 @@ impl Application {
                 TranslationFormat::JsonBatch
             },
             analysis_reasoning_effort: profile.analysis_reasoning_effort.clone(),
+            max_concurrency: Some(profile.concurrency_limit()?),
         })
         .map_err(|error| CoreError::InvalidData(error.to_string()))?;
         let started = std::time::Instant::now();
@@ -316,6 +335,7 @@ impl Application {
                 TranslationFormat::JsonBatch
             },
             analysis_reasoning_effort: profile.analysis_reasoning_effort.clone(),
+            max_concurrency: Some(profile.concurrency_limit()?),
         })
         .map_err(|e| CoreError::InvalidData(e.to_string()))?;
         if profile.id.is_empty() {
