@@ -160,13 +160,6 @@ impl PythonAdapter {
                 }
             }
             let mut write_paths = vec![directory.path().to_path_buf()];
-            if let Some(workspace) = self
-                .entry
-                .ancestors()
-                .find(|path| path.ends_with("adaptation/current"))
-            {
-                write_paths.push(workspace.into());
-            }
             if let Some(output) = &request.output_directory {
                 std::fs::create_dir_all(output)?;
                 write_paths.push(output.clone());

@@ -4,7 +4,7 @@ mod discover;
 mod display;
 mod verification;
 
-pub(crate) const VERIFIER_REVISION: u32 = 19;
+pub(crate) const VERIFIER_REVISION: u32 = 20;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -444,9 +444,12 @@ impl EngineService {
                     }
                 }
             }
+            let work = resolve_relative(&workspace, "work")?;
+            fs::create_dir_all(&work)?;
+            read_paths.push(workspace.clone());
             process = process
                 .with_current_directory(&workspace)
-                .with_isolation(self.tools.isolated_runner(), read_paths, vec![workspace])
+                .with_isolation(self.tools.isolated_runner(), read_paths, vec![work])
                 .with_isolated_inputs(input_paths);
         }
         let result: Value = process.execute(request, cancellation).await?;

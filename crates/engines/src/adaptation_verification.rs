@@ -1013,6 +1013,7 @@ struct TestPackage {
     implementation: String,
     directory: PathBuf,
     path: PathBuf,
+    manifest_hash: String,
     parsed: PackageManifest,
     handle: AdapterHandle,
     cached: Option<Value>,
@@ -1054,6 +1055,9 @@ async fn prepare_test_package(
         prepared
     } else {
         let package = directory.join("package");
+        if package.try_exists()? {
+            fs::remove_dir_all(&package)?;
+        }
         fs::create_dir_all(&package)?;
         let approved: BTreeMap<String, String> = serde_json::from_value(
             state
@@ -1118,6 +1122,7 @@ async fn prepare_test_package(
     Ok(TestPackage {
         implementation,
         directory,
+        manifest_hash: hash_file(&package.join("package.json")).map_err(file_error)?,
         path: package,
         parsed,
         handle,
@@ -1141,16 +1146,29 @@ async fn cached_test_package(
     let Some(path) = cache["package"]["directoryPath"].as_str().map(Path::new) else {
         return Ok(None);
     };
-    let Ok(manifest) = PackageManifest::load(path) else {
-        return Ok(None);
-    };
-    let Ok(handle) = manifest.handle(path) else {
+    let Ok((manifest, handle)) = checked_package(path, &cache["package"]) else {
         return Ok(None);
     };
     if service.tool_paths(Some(path), cancellation).await.is_err() {
         return Ok(None);
     }
     Ok(Some((path.to_owned(), manifest, handle)))
+}
+
+pub(super) fn checked_package(
+    path: &Path,
+    receipt: &Value,
+) -> Result<(PackageManifest, AdapterHandle), EngineError> {
+    let hash = hash_file(&path.join("package.json")).map_err(file_error)?;
+    let manifest = PackageManifest::load(path)?;
+    if receipt["manifestSha256"] != hash || receipt["manifest"] != serde_json::to_value(&manifest)?
+    {
+        return Err(EngineError::Rejected(
+            "验收包清单已变化，请重新完整验收。".into(),
+        ));
+    }
+    let handle = manifest.handle(path)?;
+    Ok((manifest, handle))
 }
 
 struct PreviousVerification {
@@ -1494,7 +1512,7 @@ impl AdapterTest<'_, '_> {
             .or_else(|| probe.as_ref().map(|probe| &probe.required_files))
             .map(Vec::as_slice)
             .unwrap_or_default();
-        let package_info = json!({"directoryPath":package.path,"id":id,"version":version,"manifest":package.parsed,"resourceFiles":selected,"resourceHashes":verification.as_ref().map(|result|&result.resource_hashes)});
+        let package_info = json!({"directoryPath":package.path,"id":id,"version":version,"manifest":package.parsed,"manifestSha256":package.manifest_hash,"resourceFiles":selected,"resourceHashes":verification.as_ref().map(|result|&result.resource_hashes)});
         if passed && stage == "finish-ready" {
             accept(
                 state,

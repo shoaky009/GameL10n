@@ -2324,8 +2324,7 @@ impl EngineService {
                 .as_str()
                 .ok_or_else(|| EngineError::Protocol("验收包目录无效。".into()))?,
         );
-        let manifest = PackageManifest::load(&source)?;
-        let handle = manifest.handle(&source)?;
+        let (manifest, handle) = verification::checked_package(&source, package)?;
         let game = request
             .inputs
             .inventory(Inventory::scan(&request.game_directory)?)?;
@@ -2407,7 +2406,7 @@ impl EngineService {
             write_json(&destination.join("verification.json"), &report).map_err(file_error)?;
             capability::publish(&destination, &manifest, verification)?;
         }
-        PackageManifest::load(&destination)?.handle(&destination)?;
+        verification::checked_package(&destination, package)?;
         let runtime_checks = coverage_list(state, "runtimeChecks");
         state.summary = format!(
             "{}{}{}{}",
