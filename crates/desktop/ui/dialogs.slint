@@ -1,15 +1,13 @@
 import { LineEdit, TextEdit, ComboBox, CheckBox, ScrollView, ProgressIndicator, StandardListView } from "std-widgets.slint";
 import { App, Theme, Label, Caption, TokenCaption, Heading, ReportText, Link, IconButton, ActionButton } from "state.slint";
 import { ApiTestControls, WorkflowControls } from "settings.slint";
-import { GameCheckControls } from "game-check.slint";
 
 export component DialogLayer inherits FocusScope {
     private property <bool> workflow-active: App.modal == "adapt" && App.adaptation-objective == 3;
     private property <bool> reuse-extracted-text: root.workflow-active && App.workflow-finish != 3 && App.workflow-use-existing-text;
     private property <bool> destructive-confirm: App.modal == "remove" || App.modal == "cleanup" || App.modal == "engine-delete" || App.modal == "version-delete" || App.modal == "api-delete" || App.modal == "restore";
-    private property <bool> readonly-modal: App.modal == "game-check" || App.modal == "engine-review" || App.modal == "feedback" || App.modal == "patch-texts";
+    private property <bool> readonly-modal: App.modal == "engine-review" || App.modal == "feedback" || App.modal == "patch-texts";
     function dismiss() {
-        if App.modal == "game-check" { App.action("game-check-close", ""); }
         if App.modal == "adapt" { App.action("adapt-cancel", ""); }
         if App.modal == "api" && App.api-testing { App.action("api-test-cancel", ""); }
         App.modal = "";
@@ -41,7 +39,7 @@ export component DialogLayer inherits FocusScope {
                 if App.modal != "engine-review": HorizontalLayout { spacing: 12px;
                     Heading {
                         horizontal-stretch: 1; vertical-alignment: center;
-                        text: App.modal == "game-check" ? "游戏运行检查" : App.modal == "launch" ? "游戏启动设置" : App.modal == "api" ? (App.api-copying ? "复制模型配置" : App.api-id == "" ? "新增模型配置" : "编辑模型配置") : App.modal == "patch-texts" ? "本次补丁文本" : App.modal == "install" ? "安装到游戏目录" : App.modal == "feedback" ? "任务需要处理" : App.modal-title;
+                        text: App.modal == "launch" ? "游戏启动设置" : App.modal == "api" ? (App.api-copying ? "复制模型配置" : App.api-id == "" ? "新增模型配置" : "编辑模型配置") : App.modal == "patch-texts" ? "本次补丁文本" : App.modal == "install" ? "安装到游戏目录" : App.modal == "feedback" ? "任务需要处理" : App.modal-title;
                     }
                     IconButton {
                         icon: "close"; button-size: 28px; icon-size: 16px;
@@ -59,7 +57,6 @@ export component DialogLayer inherits FocusScope {
                         install-warnings := ReportText { text: App.warnings; color: Theme.pending; }
                     }
                 }
-                if App.modal == "game-check": GameCheckControls { settings-height: min(320px, root.height - 390px); }
                 if App.modal == "workflow-settings": WorkflowControls {}
                 if App.modal == "project-adapter": VerticalLayout { spacing: 8px;
                     Label { text: App.project-name; font-weight: 600; }
@@ -147,7 +144,7 @@ export component DialogLayer inherits FocusScope {
                 if App.modal == "feedback": ScrollView { height: min(400px, root.height - 240px); horizontal-scrollbar-policy: always-off; content-width: self.visible-width;
                     VerticalLayout { padding-right: 16px; alignment: start; ReportText { text: App.error; } }
                 }
-                if App.modal-message != "" && App.modal != "install" && App.modal != "game-check" && App.modal != "api" && App.modal != "patch-texts" && App.modal != "engine-review" && App.modal != "feedback": Label { text: App.modal-message; }
+                if App.modal-message != "" && App.modal != "install" && App.modal != "api" && App.modal != "patch-texts" && App.modal != "engine-review" && App.modal != "feedback": Label { text: App.modal-message; }
                 if App.error != "" && App.modal != "engine-review" && App.modal != "feedback": ReportText { text: App.error; color: Theme.error; }
                 if App.modal == "adapt": ScrollView { height: min(adapt-fields.preferred-height, min(460px, root.height - 280px)); horizontal-scrollbar-policy: always-off; content-width: self.visible-width;
                   adapt-fields := VerticalLayout { spacing: 8px; padding-right: 12px; alignment: start;
@@ -163,7 +160,7 @@ export component DialogLayer inherits FocusScope {
                         ComboBox { model: ["游戏崩溃", "字体显示异常", "补丁没效果", "其他"]; current-index <=> App.repair-issue; horizontal-stretch: 1; }
                     }
                     if root.workflow-active: WorkflowControls {}
-                    if root.workflow-active: Caption { text: "运行期间可能安装补丁并启动游戏。开始前请关闭游戏。"; }
+                    if root.workflow-active: Caption { text: "运行期间会安装试译补丁；未提前勾选试译文本会在识别后暂停，装好试译补丁后等待你实机把关。开始前请关闭游戏。"; }
                     if !root.reuse-extracted-text: VerticalLayout { spacing: 8px;
                         if App.adaptation-objective == 0 || root.workflow-active: CheckBox { text: "强制智能识别（跳过常规匹配）"; checked <=> App.force-intelligent; }
                         if App.adaptation-objective != 1: Caption { text: App.adaptation-objective == 2 ? "使用智能适配调查并补齐对白、菜单、界面等遗漏文字。请在下方说明未汉化的位置或原文。" : App.force-intelligent ? "直接调用分析 API 检查游戏资源，复用已有源码和引擎经验；不会因常规解析器匹配成功而提前结束。" : "先进行常规适配；未找到可用适配器或提取不足 1,000 条文本时，自动继续智能检查。已有结果保留，缺少分析 API 配置时会提示错误。"; }
@@ -202,12 +199,6 @@ export component DialogLayer inherits FocusScope {
                 if App.modal == "directory": VerticalLayout { spacing: 10px; HorizontalLayout { spacing: 8px; LineEdit { text <=> App.new-directory; horizontal-stretch: 1; } ActionButton { text: "浏览…"; icon: "folder"; clicked => { App.action("browse-data", ""); } } } CheckBox { text: "迁移现有数据（保留原目录）"; checked <=> App.migrate-data; } }
                 HorizontalLayout {
                     spacing: 8px;
-                    if App.modal == "game-check": ActionButton {
-                        text: "保存检查设置"; icon: "save";
-                        enabled: !App.check-running;
-                        clicked => { App.action("game-check-save", ""); }
-                    }
-                    if App.modal == "game-check": Caption { text: "手动检查后游戏会保持打开。"; vertical-alignment: center; }
                     Rectangle { horizontal-stretch: 1; }
                     ActionButton {
                         text: root.readonly-modal ? "关闭" : "取消";

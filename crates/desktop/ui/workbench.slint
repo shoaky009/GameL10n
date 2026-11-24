@@ -61,7 +61,7 @@ export component Workbench inherits FocusScope {
             clicked => { App.action("translate", "all"); }
         }
         Caption {
-            text: (App.translation-preview ? (App.task-operation == "workflow" ? "识别中 · 自动汉化将在定位后试译 · " : "识别中 · ") : "") + App.counts;
+            text: (App.translation-preview ? (App.task-operation == "workflow" ? "识别中 · 自动汉化将在确定试译文本后试译 · " : "识别中 · ") : "") + App.counts;
             horizontal-stretch: 1; min-width: 0px; vertical-alignment: center; overflow: elide; wrap: no-wrap;
         }
         ActionButton {

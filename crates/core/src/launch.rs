@@ -350,8 +350,7 @@ impl Application {
                     || state.workflow.as_ref().is_some_and(|workflow| {
                         matches!(
                             workflow.action,
-                            crate::workflow::WorkflowAction::LocateText
-                                | crate::workflow::WorkflowAction::InstallPatch
+                            crate::workflow::WorkflowAction::InstallPatch
                         )
                     }))
         }) {
@@ -390,8 +389,7 @@ impl Application {
                     || state.workflow.as_ref().is_some_and(|workflow| {
                         matches!(
                             workflow.action,
-                            crate::workflow::WorkflowAction::LocateText
-                                | crate::workflow::WorkflowAction::InstallPatch
+                            crate::workflow::WorkflowAction::InstallPatch
                         )
                     }))
         }) {
@@ -541,9 +539,6 @@ mod tests {
         app.save_project_settings(&id, serde_json::json!({"targetLanguage":"en"}))
             .await
             .unwrap();
-        app.save_game_check_settings(&id, Default::default())
-            .await
-            .unwrap();
         let manual = configuration("game.exe", "--manual");
         app.save_launch(&id, Some(manual.clone()), &initial.revision)
             .await
@@ -576,7 +571,6 @@ mod tests {
         commit.await.unwrap();
         let project = app.open_project(&id).await.unwrap();
         assert_eq!(project.settings["targetLanguage"], "en");
-        assert!(project.extra.contains_key("gameCheck"));
         assert_eq!(
             app.launch_view(&id).await.unwrap().configuration,
             Some(manual)

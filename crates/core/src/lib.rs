@@ -7,7 +7,6 @@ pub mod catalog;
 pub mod cleanup;
 mod engine_review;
 pub mod engine_tasks;
-pub mod game_check;
 pub mod game_directory;
 pub mod launch;
 mod legacy;

@@ -16,6 +16,7 @@ pub struct ProjectSnapshot {
     pub progress: Value,
     pub adaptation: Value,
     pub can_resume_adaptation: bool,
+    pub workflow_session: Option<crate::workflow::WorkflowSession>,
     pub review: Value,
     pub warnings: Vec<String>,
 }
@@ -109,6 +110,13 @@ impl Application {
                     }
                 }
             };
+            let workflow_session = match crate::workflow::load_session(&directory) {
+                Ok(session) => session,
+                Err(error) => {
+                    warnings.push(format!("无法读取自动汉化进度：{error}"));
+                    None
+                }
+            };
             let preview_translation_resumable = preview_translation.is_none()
                 && crate::translation_tasks::saved_preview_slot(&directory).is_some();
             let task = if task.as_ref().is_some_and(|task| task.running) {
@@ -128,6 +136,7 @@ impl Application {
                 progress,
                 adaptation,
                 can_resume_adaptation,
+                workflow_session,
                 review,
                 warnings,
             })

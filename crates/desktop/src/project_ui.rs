@@ -3,7 +3,7 @@ use gamel10n_core::{
     CoreError,
     engine_tasks::{AdaptationObjective, RecognitionMode, RepairIssue},
     patching::PatchInstaller,
-    workflow::{WorkflowChoice, WorkflowFinish, WorkflowPreset},
+    workflow::{WorkflowChoice, WorkflowFinish, WorkflowPauseKind, WorkflowPreset},
 };
 use serde_json::Value;
 use slint::{ComponentHandle, Model, ModelRc};
@@ -112,9 +112,34 @@ pub fn handle<'a>(
         })
     } else if action == "adapt" {
         Box::pin(adapt(ctx, input))
+    } else if action == "workflow-resume-selection" {
+        Box::pin(resume_workflow_selection(ctx, input))
+    } else if action == "workflow-confirm-trial" {
+        Box::pin(confirm_workflow_trial(ctx, input))
     } else {
         Box::pin(handle_project_action(ctx, action, input))
     }
+}
+
+async fn resume_workflow_selection(ctx: &Context, input: &UiInput) -> Result<bool, CoreError> {
+    ctx.app()
+        .await
+        .resume_workflow_selection(&input.project_id)
+        .await?;
+    refresh_project(ctx, &input.project_id, false).await?;
+    Ok(true)
+}
+
+async fn confirm_workflow_trial(ctx: &Context, input: &UiInput) -> Result<bool, CoreError> {
+    ctx.app()
+        .await
+        .confirm_workflow_trial(&input.project_id)
+        .await?;
+    *ctx.catalog
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = None;
+    refresh_project(ctx, &input.project_id, false).await?;
+    Ok(true)
 }
 
 async fn adapt(ctx: &Context, input: &UiInput) -> Result<bool, CoreError> {
@@ -260,6 +285,12 @@ async fn handle_project_action(
                     app.set_error("".into());
                 }
             });
+        }
+        "workflow-repair" => open_workflow_repair(ctx, input).await?,
+        "workflow-dismiss" => {
+            ctx.app().await.dismiss_workflow(&input.project_id).await?;
+            refresh_project(ctx, &input.project_id, false).await?;
+            refresh_projects(ctx, &input.project_query).await?;
         }
         "review" => review_engine(ctx, input).await?,
         "cancel-preview-translation" => {
@@ -889,6 +920,27 @@ async fn record_runtime_feedback(ctx: &Context, input: &UiInput) -> Result<(), C
     Ok(())
 }
 
+async fn open_workflow_repair(ctx: &Context, input: &UiInput) -> Result<(), CoreError> {
+    settings_ui::refresh(ctx, Some(&input.project_id)).await?;
+    let id = input.project_id.clone();
+    let context = ctx.clone();
+    ctx.update(move |ui| {
+        let app = ui.global::<App>();
+        if app.get_project_id().as_str() != id || !context.is_requested_project(&id) {
+            return;
+        }
+        app.invoke_select_adaptation_objective(1);
+        app.set_error("".into());
+        app.set_modal_title("修复试译显示问题".into());
+        app.set_modal_message(
+            "请描述在游戏中看到的现象（如乱码、字体异常或补丁未生效），确认后会以修复模式调整当前适配器。"
+                .into(),
+        );
+        app.set_modal("adapt".into());
+    });
+    Ok(())
+}
+
 async fn show_patch_texts(ctx: &Context, input: &UiInput, opening: bool) -> Result<(), CoreError> {
     let offset = if opening {
         0
@@ -961,7 +1013,6 @@ async fn switch_directory(ctx: &Context, input: &UiInput) -> Result<(), CoreErro
         a.set_activity("正在暂停任务并保存进度…".into());
     });
     let host = ctx.app().await;
-    crate::game_check_ui::cancel(ctx);
     tokio::time::timeout(std::time::Duration::from_secs(60), async {
         loop {
             if !host.cancel_all_tasks().await && ctx.active_actions.load(Ordering::Acquire) <= 1 {
@@ -972,7 +1023,6 @@ async fn switch_directory(ctx: &Context, input: &UiInput) -> Result<(), CoreErro
     })
     .await
     .map_err(|_| CoreError::InvalidData("任务仍在退出，保存位置尚未切换。请稍后重试。".into()))?;
-    host.close_game_check_errors().await?;
     ctx.update(|ui| {
         ui.global::<App>()
             .set_activity("正在迁移并校验项目数据…".into())
@@ -1103,6 +1153,7 @@ pub async fn refresh_project(ctx: &Context, id: &str, opening: bool) -> Result<(
     let api_summary = host.task_api_summary(id).await?;
     let progress = snapshot.progress;
     let adaptation = snapshot.adaptation;
+    let workflow_session = snapshot.workflow_session;
     let review = snapshot.review;
     let recognition = crate::recognition_ui::RecognitionView::new(
         &project.extra,
@@ -1112,13 +1163,20 @@ pub async fn refresh_project(ctx: &Context, id: &str, opening: bool) -> Result<(
     );
     let recognition_failed = recognition.has_failure();
     // Restore the persisted selection when the workbench or a selection action first needs it.
-    let selected_count = {
+    let mut selected_count = {
         let mut session = ctx.session.lock().unwrap_or_else(|e| e.into_inner());
         if opening {
             session.text_selection.clear();
         }
         session.text_selection.get(id).map_or(0, |ids| ids.len())
     };
+    if workflow_session
+        .as_ref()
+        .is_some_and(|session| session.pause_kind == WorkflowPauseKind::SelectTrial)
+        && let Ok(saved) = crate::workbench_ui::ensure_selection(ctx, id).await
+    {
+        selected_count = saved.len();
+    }
     let selected_id = id.to_owned();
     crate::launch_ui::refresh(ctx, id, false).await?;
     let session = ctx.session.clone();
@@ -1224,6 +1282,21 @@ pub async fn refresh_project(ctx: &Context, id: &str, opening: bool) -> Result<(
         );
         recognition.apply(&a);
         a.set_can_resume_adaptation(snapshot.can_resume_adaptation);
+        if let Some(session) = &workflow_session {
+            let (stage, title) = match session.pause_kind {
+                WorkflowPauseKind::SelectTrial => ("select", "自动汉化 · 等待勾选试译文本"),
+                WorkflowPauseKind::ReviewTrial => ("review", "自动汉化 · 请进入游戏实机把关"),
+            };
+            a.set_workflow_pause_stage(stage.into());
+            a.set_workflow_pause_title(title.into());
+            a.set_workflow_pause_message(session.message.as_str().into());
+            a.set_workflow_pause_confirm_label(session.confirm_label().into());
+        } else {
+            a.set_workflow_pause_stage("".into());
+            a.set_workflow_pause_title("".into());
+            a.set_workflow_pause_message("".into());
+            a.set_workflow_pause_confirm_label("".into());
+        }
         a.set_selected_texts(selected_count as i32);
         let matches_operation = |operation: &str| {
             progress["operation"]

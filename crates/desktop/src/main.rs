@@ -1,7 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod catalog_ui;
 mod events;
-mod game_check_ui;
 mod launch_ui;
 mod log_ui;
 mod metrics_ui;
@@ -52,8 +51,6 @@ struct Arguments {
 
 #[derive(Default)]
 pub struct UiSession {
-    pub game_check: Option<gamel10n_core::CancellationToken>,
-    pub game_check_results: BTreeMap<String, gamel10n_core::game_check::CheckResult>,
     pub api_test: Option<gamel10n_core::CancellationToken>,
     pub engine_selection: BTreeSet<String>,
     pub engine_selection_anchor: Option<String>,
@@ -161,7 +158,8 @@ impl Context {
                     | "translate"
                     | "candidate"
                     | "generate-patch"
-                    | "game-check-dialog"
+                    | "workflow-resume-selection"
+                    | "workflow-confirm-trial"
                     | "close"
             ) {
             self.edit_generation.fetch_add(1, Ordering::SeqCst) + 1
@@ -208,7 +206,6 @@ impl Context {
 pub struct UiInput {
     pub workflow_finish: i32,
     pub workflow_use_existing_text: bool,
-    pub check: game_check_ui::CheckInput,
     pub metrics: metrics_ui::MetricsInput,
     pub view_revision: u64,
     pub editor_revision: u64,
@@ -290,7 +287,6 @@ impl UiInput {
     fn capture(ui: &MainWindow, argument: String) -> Self {
         let a = ui.global::<App>();
         Self {
-            check: game_check_ui::CheckInput::capture(&a),
             metrics: metrics_ui::MetricsInput::capture(&a),
             view_revision: 0,
             editor_revision: 0,
@@ -501,7 +497,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             window_state.capture(ui.window());
             let mut input = UiInput::capture(&ui, String::new());
             settings_ui::cancel_api_test(&ctx);
-            game_check_ui::cancel(&ctx);
             ctx.prepare_action(&ui, "close", &mut input);
             ui.global::<App>().set_ready(false);
             ui.global::<App>()
@@ -541,9 +536,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         "后台操作仍在退出，程序暂未关闭。请稍后重试。".into(),
                     );
                     return;
-                }
-                if let Err(error) = app.close_game_check_errors().await {
-                    eprintln!("无法关闭运行检查的错误窗口：{error}");
                 }
                 let _ = slint::quit_event_loop();
             });
@@ -605,14 +597,6 @@ fn install_actions(ui: &MainWindow, context: &Context) {
         } else {
             None
         };
-        let pending_game_check = if action == "game-check-run" {
-            let Some(pending) = game_check_ui::PendingGameCheck::start(&ctx, &ui) else {
-                return;
-            };
-            Some(pending)
-        } else {
-            None
-        };
         ctx.prepare_action(&ui, &action, &mut input);
         let ctx = ctx.clone();
         ctx.active_actions.fetch_add(1, Ordering::AcqRel);
@@ -620,7 +604,6 @@ fn install_actions(ui: &MainWindow, context: &Context) {
             let _pending = PendingAction(ctx.active_actions.clone());
             let _addition = pending_addition;
             let _api_test = pending_api_test;
-            let _game_check = pending_game_check;
             if let Err(error) = dispatch(&ctx, &action, &input).await {
                 let app = ctx.app().await;
                 let message = error.to_string();
@@ -742,7 +725,6 @@ async fn dispatch(ctx: &Context, action: &str, input: &UiInput) -> Result<(), Co
         settings_ui::cancel_api_test(ctx);
     }
     if metrics_ui::handle(ctx, action, input).await?
-        || game_check_ui::handle(ctx, action, input).await?
         || launch_ui::handle(ctx, action, input).await?
         || settings_ui::handle(ctx, action, input).await?
         || catalog_ui::handle(ctx, action, input).await?

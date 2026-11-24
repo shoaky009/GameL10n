@@ -422,10 +422,11 @@ mod tests {
         app.set_workflow_progress(
             &id,
             crate::workflow::WorkflowProgress {
-                step_id: "locate".into(),
-                action: crate::workflow::WorkflowAction::LocateText,
+                step_id: "select".into(),
+                action: crate::workflow::WorkflowAction::SelectTrial,
                 status: crate::workflow::WorkflowStatus::Running,
                 target_unit_id: None,
+                pause_kind: None,
             },
         )
         .await

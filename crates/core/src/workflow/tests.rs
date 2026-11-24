@@ -5,6 +5,8 @@ use crate::ToolPaths;
 #[cfg(unix)]
 use gamel10n_engines::protocol::ExtractionResult;
 #[cfg(unix)]
+use gamel10n_translation::TranslationUnit;
+#[cfg(unix)]
 use std::collections::BTreeMap;
 
 async fn fixture() -> (tempfile::TempDir, Application, String) {
@@ -28,7 +30,7 @@ fn definition(value: serde_json::Value) -> WorkflowDefinition {
 #[test]
 fn preset_success_path_stops_at_the_requested_goal() {
     for (finish, use_existing_text, expected) in [
-        (WorkflowFinish::Trial, true, "check"),
+        (WorkflowFinish::Trial, true, "review"),
         (WorkflowFinish::Build, true, "buildAll"),
         (WorkflowFinish::Install, false, "installAll"),
     ] {
@@ -40,7 +42,7 @@ fn preset_success_path_stops_at_the_requested_goal() {
         assert_eq!(
             config.entry,
             if use_existing_text {
-                "locate"
+                "select"
             } else {
                 "recognize"
             }
@@ -63,13 +65,23 @@ fn preset_success_path_stops_at_the_requested_goal() {
 async fn project_preset_takes_effect_without_replacing_a_custom_definition() {
     let (_root, app, id) = fixture().await;
     let path = app.workflow_configuration(&id).await.unwrap();
-    let mut legacy = WorkflowDefinition::default();
-    legacy
-        .steps
-        .iter_mut()
-        .find(|step| step.id == "input")
-        .unwrap()
-        .message = LEGACY_WAIT_MESSAGE.into();
+    let legacy = serde_json::json!({
+        "schemaVersion": 1,
+        "entry": "recognize",
+        "steps": [
+            {"id": "recognize", "action": "recognize"},
+            {"id": "locate", "action": "locateText", "onUnavailable": "input"},
+            {"id": "trialTranslate", "action": "translate"},
+            {"id": "trialBuild", "action": "buildPatch"},
+            {"id": "trialInstall", "action": "installPatch"},
+            {"id": "check", "action": "checkGame"},
+            {"id": "translateAll", "action": "translate", "scope": "all"},
+            {"id": "buildAll", "action": "buildPatch", "scope": "all"},
+            {"id": "installAll", "action": "installPatch", "scope": "all", "onSuccess": "done"},
+            {"id": "input", "action": "waitForInput", "message": LEGACY_WAIT_MESSAGE},
+            {"id": "done", "action": "complete"}
+        ]
+    });
     write_json(&path, &legacy).unwrap();
     assert_eq!(
         app.workflow_preferences(&id).await.unwrap(),
@@ -125,27 +137,11 @@ async fn project_preset_takes_effect_without_replacing_a_custom_definition() {
 }
 
 #[test]
-fn invalid_branches_and_ambiguous_text_require_correction() {
+fn invalid_branches_require_correction() {
     let mut config = WorkflowDefinition::default();
     config.validate().unwrap();
     config.steps[0].on_success = Some("missing".into());
     assert!(config.validate().is_err());
-    let mut units: Vec<TranslationUnit> = serde_json::from_value(serde_json::json!([
-        {"id":"menu", "sourceText":"Start game", "kind":"ui", "resourcePath":"text.json", "locator":"0", "context":""},
-        {"id":"opening", "sourceText":"[name]Opening dialogue", "kind":"dialogue", "resourcePath":"text.json", "locator":"1", "context":"", "protectedTokens":["[name]"]},
-        {"id":"later", "sourceText":"Later dialogue", "kind":"dialogue", "resourcePath":"text.json", "locator":"2", "context":""}
-    ])).unwrap();
-    assert_eq!(
-        match_visible_unit(&units, "Start game\nOpening dialogue\nLater dialogue").unwrap(),
-        "opening"
-    );
-    let mut duplicate = units[1].clone();
-    duplicate.id = "other-scene".into();
-    units.push(duplicate);
-    assert!(matches!(
-        match_visible_unit(&units, "Opening dialogue"),
-        Err(CoreError::WorkflowInput(_))
-    ));
 }
 
 #[tokio::test]
@@ -153,9 +149,9 @@ async fn branches_waiting_failure_and_restart_release_project_ownership() {
     let (root, app, id) = fixture().await;
     let path = app.workflow_configuration(&id).await.unwrap();
     let config = definition(
-        serde_json::json!({"schemaVersion":1,"entry":"locate","steps":[
-            {"id":"locate","action":"locateText","onFailure":"input"},
-            {"id":"input","action":"waitForInput","message":"请选择开场文本"}
+        serde_json::json!({"schemaVersion":1,"entry":"select","steps":[
+            {"id":"select","action":"selectTrial","onFailure":"input"},
+            {"id":"input","action":"waitForInput","message":"请选择试译文本"}
         ]}),
     );
     write_json(&path, &config).unwrap();
@@ -174,7 +170,7 @@ async fn branches_waiting_failure_and_restart_release_project_ownership() {
     // Configuration is project-owned and must survive opening its edit entry again.
     app.workflow_configuration(&id).await.unwrap();
     let saved: WorkflowDefinition = read_json(&path).unwrap();
-    assert_eq!(saved.entry, "locate");
+    assert_eq!(saved.entry, "select");
     let config = definition(serde_json::json!({"schemaVersion":1,"entry":"all","steps":[
         {"id":"all","action":"translate","scope":"all"}
     ]}));
@@ -183,17 +179,18 @@ async fn branches_waiting_failure_and_restart_release_project_ownership() {
         .run_workflow(&id, String::new(), RecognitionMode::Automatic)
         .await
         .unwrap_err();
-    assert!(error.to_string().contains("尚未通过"));
+    assert!(error.to_string().contains("尚未通过实机确认"));
     assert_eq!(app.task_state(&id).await.unwrap().succeeded, Some(false));
     // A persisted in-flight stage becomes interrupted, without resuming external actions.
     let _task = app.begin(&id, "workflow", "running").await.unwrap();
     app.set_workflow_progress(
         &id,
         WorkflowProgress {
-            step_id: "check".into(),
-            action: WorkflowAction::CheckGame,
+            step_id: "review".into(),
+            action: WorkflowAction::ReviewTrial,
             status: WorkflowStatus::Running,
             target_unit_id: None,
+            pause_kind: None,
         },
     )
     .await
@@ -209,19 +206,17 @@ async fn branches_waiting_failure_and_restart_release_project_ownership() {
     app.open_project(&id).await.unwrap();
     let state = app.task_state(&id).await.unwrap();
     assert!(!state.running);
-    assert!(state.message.contains("check"));
+    assert!(state.message.contains("review"));
     assert_eq!(state.workflow.unwrap().status, WorkflowStatus::Interrupted);
 }
 
 #[cfg(unix)]
-async fn pipeline_fixture(behavior: &str) -> (tempfile::TempDir, Application, String) {
-    use gamel10n_engines::{AdapterHandle, protocol::LaunchConfiguration};
+async fn pipeline_fixture() -> (tempfile::TempDir, Application, String) {
+    use gamel10n_engines::AdapterHandle;
     use gamel10n_translation::files::hash_file;
-    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::os::unix::fs::symlink;
     let (root, app, id) = fixture().await;
     let game = root.path().join("game");
-    std::fs::write(game.join("Game.exe"), "fixture").unwrap();
-    std::fs::write(game.join("check-behavior"), behavior).unwrap();
     std::fs::write(
         game.join("text.json"),
         r#"["Opening dialogue","Later dialogue"]"#,
@@ -298,123 +293,135 @@ async fn pipeline_fixture(behavior: &str) -> (tempfile::TempDir, Application, St
     app.save_translation_edit(&id, "1", "后续测试对白".into(), true)
         .await
         .unwrap();
-    app.save_launch(
-        &id,
-        Some(LaunchConfiguration {
-            executable: "Game.exe".into(),
-            arguments: String::new(),
-            working_directory: ".".into(),
-        }),
-        &app.launch_view(&id).await.unwrap().revision,
-    )
-    .await
-    .unwrap();
-    let driver = root.path().join("tools/game-check/GameL10n.GameCheck.exe");
-    std::fs::create_dir_all(driver.parent().unwrap()).unwrap();
-    std::fs::write(&driver, r#"#!/usr/bin/python3
-import json, sys, time
-from pathlib import Path
-r = json.load(sys.stdin)
-game = Path(r['gameDirectory'])
-behavior = (game / 'check-behavior').read_text()
-def emit(kind, status, message):
-    print(json.dumps(dict(kind=kind, value=dict(status=status, message=message))), flush=True)
-assert r['closeAfter']
-(game / ('locating' if r['mode'] == 'locateText' else 'checking')).touch()
-if behavior == 'wait' and r['mode'] != 'locateText':
-    time.sleep(60)
-elif behavior == 'launch-fail' and r['mode'] != 'locateText':
-    emit('launch', 'failed', '游戏错误：加载资源失败')
-else:
-    emit('launch', 'passed', '启动成功')
-    if r['mode'] == 'locateText':
-        if behavior == 'no-text':
-            emit('text', 'inconclusive', '没有稳定文字')
-        else:
-            print(json.dumps(dict(kind='visibleText',value='Opening dialogue')), flush=True)
-            emit('text', 'passed', '已定位')
-    else:
-        emit('text', 'failed' if behavior == 'text-fail' else 'passed', '目标译文检查')
-    emit('closed', 'failed' if behavior == 'close-fail' and r['mode'] != 'locateText' else 'passed', '关闭进程检查')
-"#).unwrap();
-    std::fs::set_permissions(&driver, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let config = WorkflowDefinition {
-        entry: "locate".into(),
-        ..Default::default()
-    };
-    write_json(&app.workflow_configuration(&id).await.unwrap(), &config).unwrap();
     (root, app, id)
 }
 
 #[cfg(unix)]
 #[tokio::test]
-async fn trial_verification_controls_full_install_and_cancellation() {
-    for behavior in [
-        "pass",
-        "no-text",
-        "launch-fail",
-        "text-fail",
-        "close-fail",
-        "wait",
-    ] {
-        let (root, app, id) = pipeline_fixture(behavior).await;
-        let game = root.path().join("game");
-        let app = std::sync::Arc::new(app);
-        let task_app = app.clone();
-        let task_id = id.clone();
-        let task = tokio::spawn(async move {
-            task_app
-                .run_workflow(&task_id, String::new(), RecognitionMode::Automatic)
-                .await
-        });
-        if behavior == "wait" {
-            tokio::time::timeout(std::time::Duration::from_secs(10), async {
-                while !game.join("checking").is_file() {
-                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-                }
-            })
-            .await
-            .unwrap();
-            app.cancel(&id).await;
-        }
-        let result = task.await.unwrap();
-        let state = app.task_state(&id).await.unwrap();
-        assert!(!state.running, "{behavior}");
-        if behavior == "pass" {
-            result.unwrap();
-            assert_eq!(state.succeeded, Some(true));
-            let text: Vec<String> = read_json(&game.join("text.json")).unwrap();
-            assert_eq!(text, ["开场测试对白", "后续测试对白"]);
-        } else {
-            assert!(result.is_err(), "{behavior}");
-            let progress = state.workflow.unwrap();
-            assert_eq!(
-                progress.status,
-                match behavior {
-                    "no-text" => WorkflowStatus::WaitingForInput,
-                    "wait" => WorkflowStatus::Interrupted,
-                    _ => WorkflowStatus::Failed,
-                }
-            );
-            assert_eq!(
-                progress.step_id,
-                if behavior == "no-text" {
-                    "input"
-                } else {
-                    "check"
-                }
-            );
-            if behavior != "no-text" {
-                let text: Vec<String> = read_json(&game.join("text.json")).unwrap();
-                assert_eq!(
-                    text,
-                    ["开场测试对白", "Later dialogue"],
-                    "full install must not run after {behavior}"
-                );
-            }
-            if behavior == "launch-fail" {
-                assert!(state.message.contains("加载资源失败"));
-            }
-        }
-    }
+async fn selection_pause_and_manual_trial_review_gate_drive_full_install() {
+    let (root, app, id) = pipeline_fixture().await;
+    let game = root.path().join("game");
+    let choice = WorkflowChoice::Preset(WorkflowPreset {
+        use_existing_text: true,
+        finish: WorkflowFinish::Install,
+    });
+
+    // Without pre-selected texts, workflow pauses cleanly for selection.
+    app.run_workflow_with_choice(&id, String::new(), RecognitionMode::Automatic, choice)
+        .await
+        .unwrap();
+    let state = app.task_state(&id).await.unwrap();
+    assert!(!state.running);
+    assert_eq!(state.succeeded, None);
+    assert_eq!(
+        state.workflow.as_ref().unwrap().status,
+        WorkflowStatus::WaitingForInput
+    );
+    assert_eq!(
+        state.workflow.as_ref().unwrap().pause_kind,
+        Some(WorkflowPauseKind::SelectTrial)
+    );
+    let session = app.workflow_session(&id).await.unwrap().unwrap();
+    assert_eq!(session.pause_kind, WorkflowPauseKind::SelectTrial);
+    assert!(app.resume_workflow_selection(&id).await.is_err());
+
+    // Selecting trial text and resuming builds and installs the trial patch, then pauses for review.
+    app.save_text_selection(&id, &["0".into()]).await.unwrap();
+    app.resume_workflow_selection(&id).await.unwrap();
+    let session = app.workflow_session(&id).await.unwrap().unwrap();
+    assert_eq!(session.pause_kind, WorkflowPauseKind::ReviewTrial);
+    assert_eq!(session.target_unit_ids, vec!["0"]);
+    assert_eq!(session.confirm_label(), "确认正常，继续全量安装");
+    let trial_text: Vec<String> = read_json(&game.join("text.json")).unwrap();
+    assert_eq!(trial_text, ["开场测试对白", "Later dialogue"]);
+
+    // Persisted review checkpoint survives reopening the application.
+    drop(app);
+    let app = Application::open(
+        root.path().join("data"),
+        &ToolPaths::new(root.path().join("tools")),
+    )
+    .await
+    .unwrap();
+    let snapshot = app.project_snapshot(&id).await.unwrap();
+    assert_eq!(
+        snapshot.workflow_session.as_ref().unwrap().pause_kind,
+        WorkflowPauseKind::ReviewTrial
+    );
+
+    // Confirming the trial patch completes full translation, build, and install.
+    app.confirm_workflow_trial(&id).await.unwrap();
+    assert!(app.workflow_session(&id).await.unwrap().is_none());
+    let state = app.task_state(&id).await.unwrap();
+    assert_eq!(state.succeeded, Some(true));
+    let full_text: Vec<String> = read_json(&game.join("text.json")).unwrap();
+    assert_eq!(full_text, ["开场测试对白", "后续测试对白"]);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn preselected_texts_skip_selection_pause_and_support_trial_build_and_dismiss() {
+    let (root, app, id) = pipeline_fixture().await;
+    let game = root.path().join("game");
+    app.save_text_selection(&id, &["0".into()]).await.unwrap();
+
+    // Trial-only preset installs trial patch and finishes on confirmation without full install.
+    app.run_workflow_with_choice(
+        &id,
+        String::new(),
+        RecognitionMode::Automatic,
+        WorkflowChoice::Preset(WorkflowPreset {
+            use_existing_text: true,
+            finish: WorkflowFinish::Trial,
+        }),
+    )
+    .await
+    .unwrap();
+    let session = app.workflow_session(&id).await.unwrap().unwrap();
+    assert_eq!(session.pause_kind, WorkflowPauseKind::ReviewTrial);
+    assert_eq!(session.confirm_label(), "确认正常，完成试译");
+    app.confirm_workflow_trial(&id).await.unwrap();
+    assert!(app.workflow_session(&id).await.unwrap().is_none());
+    let trial_only: Vec<String> = read_json(&game.join("text.json")).unwrap();
+    assert_eq!(trial_only, ["开场测试对白", "Later dialogue"]);
+
+    // Build-only preset generates full patch while keeping trial patch in game directory.
+    app.run_workflow_with_choice(
+        &id,
+        String::new(),
+        RecognitionMode::Automatic,
+        WorkflowChoice::Preset(WorkflowPreset {
+            use_existing_text: true,
+            finish: WorkflowFinish::Build,
+        }),
+    )
+    .await
+    .unwrap();
+    let session = app.workflow_session(&id).await.unwrap().unwrap();
+    assert_eq!(session.confirm_label(), "确认正常，生成全量补丁");
+    app.confirm_workflow_trial(&id).await.unwrap();
+    let built_only: Vec<String> = read_json(&game.join("text.json")).unwrap();
+    assert_eq!(built_only, ["开场测试对白", "Later dialogue"]);
+    let patch_texts = app.latest_patch_texts(&id, 0).await.unwrap();
+    assert_eq!(patch_texts.total, 2);
+
+    // Dismissing a paused workflow clears the gate without touching project files.
+    app.run_workflow_with_choice(
+        &id,
+        String::new(),
+        RecognitionMode::Automatic,
+        WorkflowChoice::Preset(WorkflowPreset {
+            use_existing_text: true,
+            finish: WorkflowFinish::Install,
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(app.workflow_session(&id).await.unwrap().is_some());
+    app.dismiss_workflow(&id).await.unwrap();
+    assert!(app.workflow_session(&id).await.unwrap().is_none());
+    assert_eq!(
+        app.task_state(&id).await.unwrap().workflow.unwrap().status,
+        WorkflowStatus::Interrupted
+    );
 }

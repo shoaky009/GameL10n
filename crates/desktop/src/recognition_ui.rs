@@ -28,10 +28,8 @@ fn saved_project_status(state: Option<&TaskState>, extra: &BTreeMap<String, Valu
     let saved = extra.get("taskSummary").unwrap_or(&Value::Null);
     let count = extra.get("analysis").and_then(|a| a["unitCount"].as_u64());
     if let Some(state) = state {
-        return task_status(
-            &state.operation,
-            state.running,
-            state.succeeded,
+        return task_state_status(
+            state,
             saved.get("adaptationStatus").and_then(Value::as_str),
             saved["pendingCoverageCount"].as_u64().unwrap_or(0) > 0,
         );
@@ -64,6 +62,31 @@ fn saved_project_status(state: Option<&TaskState>, extra: &BTreeMap<String, Valu
             }
         })
         .unwrap_or_else(|| "等待识别".into())
+}
+
+pub fn task_state_status(
+    state: &TaskState,
+    adaptation_status: Option<&str>,
+    partial: bool,
+) -> String {
+    if !state.running
+        && state.operation == "workflow"
+        && let Some(workflow) = &state.workflow
+        && workflow.status == gamel10n_core::workflow::WorkflowStatus::WaitingForInput
+    {
+        return match workflow.pause_kind {
+            Some(gamel10n_core::workflow::WorkflowPauseKind::SelectTrial) => "待选试译文本".into(),
+            Some(gamel10n_core::workflow::WorkflowPauseKind::ReviewTrial) => "待实机确认".into(),
+            None => "自动汉化待处理".into(),
+        };
+    }
+    task_status(
+        &state.operation,
+        state.running,
+        state.succeeded,
+        adaptation_status,
+        partial,
+    )
 }
 
 pub fn task_status(

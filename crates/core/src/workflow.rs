@@ -1,23 +1,22 @@
-//! Configurable project-owned translation and runtime verification workflow.
+//! Configurable project-owned translation workflow with manual trial review gates.
 
 use crate::{
     Application, CancellationToken, CoreError, GameProject,
     engine_tasks::{RecognitionMode, RecognitionResult},
-    game_check::{CheckMode, CheckResult, CheckSettings, CheckStatus, protocol::normalize_text},
     logs::LogSource,
 };
 use gamel10n_translation::{
-    TranslationUnit,
     execution::TranslationOptions,
     files::{io_error, read_json, write_json},
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashSet},
     path::{Path, PathBuf},
 };
 
 const WORKFLOW_KEY: &str = "automaticWorkflow";
+const WORKFLOW_STATE_FILE: &str = "workflow-state.json";
 const LEGACY_WAIT_MESSAGE: &str = "未能确定开场文本。请在运行检查中选择一条目标文本并设置进入场景的操作，或编辑 workflow.json 的定位步骤，然后重新开始。";
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -47,11 +46,13 @@ pub enum WorkflowChoice {
 #[serde(rename_all = "camelCase")]
 pub enum WorkflowAction {
     Recognize,
-    LocateText,
+    #[serde(alias = "locateText")]
+    SelectTrial,
     Translate,
     BuildPatch,
     InstallPatch,
-    CheckGame,
+    #[serde(alias = "checkGame")]
+    ReviewTrial,
     WaitForInput,
     Complete,
 }
@@ -60,12 +61,12 @@ impl WorkflowAction {
     pub fn title(self) -> &'static str {
         match self {
             Self::Recognize => "识别与适配",
-            Self::LocateText => "定位开场文本",
+            Self::SelectTrial => "确定试译文本",
             Self::Translate => "翻译文本",
             Self::BuildPatch => "生成补丁",
             Self::InstallPatch => "安装补丁",
-            Self::CheckGame => "检查游戏显示并关闭进程",
-            Self::WaitForInput => "等待补充运行场景",
+            Self::ReviewTrial => "等待实机把关",
+            Self::WaitForInput => "等待用户操作",
             Self::Complete => "完成流程",
         }
     }
@@ -84,7 +85,7 @@ fn target_scope(scope: &WorkflowScope) -> bool {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkflowStep {
     pub id: String,
     pub action: WorkflowAction,
@@ -92,8 +93,8 @@ pub struct WorkflowStep {
     pub scope: WorkflowScope,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub unit_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub settings: Option<CheckSettings>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unit_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub instruction: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -124,45 +125,44 @@ impl WorkflowDefinition {
     fn from_preset(preset: WorkflowPreset) -> Self {
         use WorkflowAction::*;
         let last_step = match preset.finish {
-            WorkflowFinish::Trial => "check",
+            WorkflowFinish::Trial => "review",
             WorkflowFinish::Build => "buildAll",
             WorkflowFinish::Install => "installAll",
         };
         let steps = [
             ("recognize", Recognize),
-            ("locate", LocateText),
+            ("select", SelectTrial),
             ("trialTranslate", Translate),
             ("trialBuild", BuildPatch),
             ("trialInstall", InstallPatch),
-            ("check", CheckGame),
+            ("review", ReviewTrial),
             ("translateAll", Translate),
             ("buildAll", BuildPatch),
             ("installAll", InstallPatch),
-            ("input", WaitForInput),
             ("done", Complete),
         ]
         .into_iter()
         .map(|(id, action)| WorkflowStep {
             id: id.into(),
             action,
-            scope: if matches!(id, "translateAll" | "buildAll") {
+            scope: if matches!(id, "translateAll" | "buildAll" | "installAll") {
                 WorkflowScope::All
             } else {
                 WorkflowScope::Target
             },
             unit_id: String::new(),
-            settings: None,
+            unit_ids: Vec::new(),
             instruction: String::new(),
             message: String::new(),
             on_success: (id == last_step || id == "installAll").then(|| "done".into()),
             on_failure: None,
-            on_unavailable: (id == "locate").then(|| "input".into()),
+            on_unavailable: None,
         })
         .collect();
         Self {
             schema_version: 1,
             entry: if preset.use_existing_text {
-                "locate"
+                "select"
             } else {
                 "recognize"
             }
@@ -185,9 +185,6 @@ impl WorkflowDefinition {
             if step.instruction.chars().count() > 6000 || step.message.chars().count() > 2000 {
                 return Err(invalid("步骤指令或提示过长。"));
             }
-            if let Some(settings) = &step.settings {
-                settings.validate().map_err(CoreError::InvalidData)?;
-            }
         }
         if !ids.contains(self.entry.as_str()) {
             return Err(invalid("入口步骤不存在。"));
@@ -204,6 +201,112 @@ impl WorkflowDefinition {
         }
         Ok(())
     }
+
+    fn step_index(&self, id: &str) -> Option<usize> {
+        self.steps.iter().position(|step| step.id == id)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum WorkflowStatus {
+    Running,
+    Completed,
+    Failed,
+    WaitingForInput,
+    Interrupted,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum WorkflowPauseKind {
+    SelectTrial,
+    ReviewTrial,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowProgress {
+    pub step_id: String,
+    pub action: WorkflowAction,
+    pub status: WorkflowStatus,
+    pub target_unit_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pause_kind: Option<WorkflowPauseKind>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowSession {
+    pub schema_version: u32,
+    pub definition: WorkflowDefinition,
+    pub next_step_id: String,
+    pub pause_kind: WorkflowPauseKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finish: Option<WorkflowFinish>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub target_unit_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trial_patch_directory: Option<PathBuf>,
+    #[serde(default)]
+    pub trial_verified: bool,
+    pub message: String,
+}
+
+impl WorkflowSession {
+    pub fn confirm_label(&self) -> &'static str {
+        let ends_after_review = self
+            .definition
+            .steps
+            .iter()
+            .find(|step| step.id == self.next_step_id)
+            .is_some_and(|step| step.action == WorkflowAction::Complete);
+        if ends_after_review || self.finish == Some(WorkflowFinish::Trial) {
+            return "确认正常，完成试译";
+        }
+        if self.trial_verified {
+            return "重试后续流程";
+        }
+        match self.finish {
+            Some(WorkflowFinish::Build) => "确认正常，生成全量补丁",
+            Some(WorkflowFinish::Install) => "确认正常，继续全量安装",
+            _ => "确认正常，继续后续流程",
+        }
+    }
+}
+
+pub(crate) fn load_session(directory: &Path) -> Result<Option<WorkflowSession>, CoreError> {
+    let path = directory.join(WORKFLOW_STATE_FILE);
+    if !path.try_exists()? {
+        return Ok(None);
+    }
+    let session: WorkflowSession = read_json(&path)?;
+    if session.schema_version != 1 {
+        return Err(CoreError::InvalidData("自动流程进度版本不受支持。".into()));
+    }
+    session.definition.validate()?;
+    if session
+        .definition
+        .step_index(&session.next_step_id)
+        .is_none()
+    {
+        return Err(CoreError::InvalidData("自动流程继续步骤不存在。".into()));
+    }
+    Ok(Some(session))
+}
+
+pub(crate) fn save_session(directory: &Path, session: &WorkflowSession) -> Result<(), CoreError> {
+    write_json(&directory.join(WORKFLOW_STATE_FILE), session)?;
+    Ok(())
+}
+
+pub(crate) fn clear_session(directory: &Path) -> Result<(), CoreError> {
+    let path = directory.join(WORKFLOW_STATE_FILE);
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(io_error(&path, error).into()),
+    }
 }
 
 fn saved_workflow_choice(project: &GameProject) -> Result<Option<WorkflowChoice>, CoreError> {
@@ -213,6 +316,31 @@ fn saved_workflow_choice(project: &GameProject) -> Result<Option<WorkflowChoice>
         .map(WorkflowChoice::deserialize)
         .transpose()
         .map_err(|error| CoreError::InvalidData(format!("自动汉化设置无效：{error}")))
+}
+
+fn is_legacy_default_definition(definition: &WorkflowDefinition) -> bool {
+    let ids: Vec<_> = definition
+        .steps
+        .iter()
+        .map(|step| (step.id.as_str(), step.action))
+        .collect();
+    use WorkflowAction::*;
+    definition.schema_version == 1
+        && definition.entry == "recognize"
+        && ids
+            == [
+                ("recognize", Recognize),
+                ("locate", SelectTrial),
+                ("trialTranslate", Translate),
+                ("trialBuild", BuildPatch),
+                ("trialInstall", InstallPatch),
+                ("check", ReviewTrial),
+                ("translateAll", Translate),
+                ("buildAll", BuildPatch),
+                ("installAll", InstallPatch),
+                ("input", WaitForInput),
+                ("done", Complete),
+            ]
 }
 
 fn read_definition(path: &Path) -> Result<WorkflowDefinition, CoreError> {
@@ -236,33 +364,19 @@ fn read_definition(path: &Path) -> Result<WorkflowDefinition, CoreError> {
     Ok(definition)
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub enum WorkflowStatus {
-    Running,
-    Completed,
-    Failed,
-    WaitingForInput,
-    Interrupted,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WorkflowProgress {
-    pub step_id: String,
-    pub action: WorkflowAction,
-    pub status: WorkflowStatus,
-    pub target_unit_id: Option<String>,
-}
-
 #[derive(Default)]
 struct RunContext {
-    target: Option<String>,
-    target_settings: Option<CheckSettings>,
+    targets: Vec<String>,
     built: Option<(PathBuf, WorkflowScope)>,
     installed: Option<PathBuf>,
-    verified: Option<(String, String)>,
+    verified: Option<PathBuf>,
     installed_all: bool,
+}
+
+enum StepOutcome {
+    Continue,
+    Paused(WorkflowSession),
+    Complete,
 }
 
 fn needs_workflow_input(error: &CoreError) -> bool {
@@ -282,8 +396,10 @@ impl Application {
         let project = self.store.get(id).await?;
         let path = self.project_directory(id)?.join("workflow.json");
         let has_custom = path.try_exists()?
-            && !read_definition(&path)
-                .is_ok_and(|definition| definition == WorkflowDefinition::default());
+            && !read_definition(&path).is_ok_and(|definition| {
+                definition == WorkflowDefinition::default()
+                    || is_legacy_default_definition(&definition)
+            });
         let choice = saved_workflow_choice(&project)?.unwrap_or_else(|| {
             if has_custom {
                 WorkflowChoice::Custom
@@ -322,6 +438,11 @@ impl Application {
         Ok(path)
     }
 
+    pub async fn workflow_session(&self, id: &str) -> Result<Option<WorkflowSession>, CoreError> {
+        let directory = self.project_directory(id)?;
+        tokio::task::spawn_blocking(move || load_session(&directory)).await?
+    }
+
     pub async fn run_workflow(
         &self,
         id: &str,
@@ -347,30 +468,147 @@ impl Application {
         mode: RecognitionMode,
         choice: WorkflowChoice,
     ) -> Result<(), CoreError> {
-        let definition = match choice {
-            WorkflowChoice::Preset(preset) => WorkflowDefinition::from_preset(preset),
-            WorkflowChoice::Custom => {
-                read_definition(&self.project_directory(id)?.join("workflow.json"))?
+        let (definition, finish) = match choice {
+            WorkflowChoice::Preset(preset) => {
+                (WorkflowDefinition::from_preset(preset), Some(preset.finish))
             }
+            WorkflowChoice::Custom => (
+                read_definition(&self.project_directory(id)?.join("workflow.json"))?,
+                None,
+            ),
+        };
+        let entry = definition.entry.clone();
+        self.execute_workflow(
+            id,
+            definition,
+            entry,
+            finish,
+            instruction,
+            mode,
+            RunContext::default(),
+            false,
+        )
+        .await
+    }
+
+    /// Resumes a workflow paused after recognition once the user selected trial texts.
+    pub async fn resume_workflow_selection(&self, id: &str) -> Result<(), CoreError> {
+        let session = self
+            .workflow_session(id)
+            .await?
+            .filter(|session| session.pause_kind == WorkflowPauseKind::SelectTrial)
+            .ok_or_else(|| CoreError::InvalidData("当前没有等待选择试译文本的自动流程。".into()))?;
+        let selected = self.load_text_selection(id).await?;
+        if selected.is_empty() {
+            return Err(CoreError::InvalidData(
+                "请先在「翻译与校对」勾选需要试译的文本，再点击「继续试译」。".into(),
+            ));
+        }
+        self.execute_workflow(
+            id,
+            session.definition,
+            session.next_step_id,
+            session.finish,
+            String::new(),
+            RecognitionMode::Automatic,
+            RunContext::default(),
+            true,
+        )
+        .await
+    }
+
+    /// Records the user's real-machine confirmation and continues the remaining workflow steps.
+    pub async fn confirm_workflow_trial(&self, id: &str) -> Result<(), CoreError> {
+        let mut session = self
+            .workflow_session(id)
+            .await?
+            .filter(|session| session.pause_kind == WorkflowPauseKind::ReviewTrial)
+            .ok_or_else(|| CoreError::InvalidData("当前没有等待实机把关的自动流程。".into()))?;
+        let trial_patch = session.trial_patch_directory.clone().ok_or_else(|| {
+            CoreError::InvalidData("缺少试译补丁记录，请重新运行自动流程。".into())
+        })?;
+        if !session.trial_verified {
+            let latest = self
+                .latest_patch(id)
+                .await?
+                .ok_or_else(|| CoreError::InvalidData("找不到已生成的试译补丁。".into()))?;
+            if latest.patch_directory != trial_patch {
+                return Err(CoreError::InvalidData(
+                    "当前补丁已变化，请重新运行试译或结束当前自动流程。".into(),
+                ));
+            }
+            self.record_patch_feedback(id, &trial_patch, "passed", "自动汉化试译实机确认正常")
+                .await?;
+            session.trial_verified = true;
+            let directory = self.project_directory(id)?;
+            let updated = session.clone();
+            tokio::task::spawn_blocking(move || save_session(&directory, &updated)).await??;
+        }
+        self.execute_workflow(
+            id,
+            session.definition,
+            session.next_step_id,
+            session.finish,
+            String::new(),
+            RecognitionMode::Automatic,
+            RunContext {
+                targets: session.target_unit_ids,
+                verified: Some(trial_patch),
+                ..Default::default()
+            },
+            true,
+        )
+        .await
+    }
+
+    /// Cancels a paused workflow gate without removing translations or patches.
+    pub async fn dismiss_workflow(&self, id: &str) -> Result<(), CoreError> {
+        let _project = self.lock_project(id).await?;
+        let _lifecycle = self.project_lifecycle.lock().await;
+        if self.task_state(id).await.is_some_and(|state| state.running) {
+            return Err(CoreError::ProjectBusy);
+        }
+        self.ensure_writable().await?;
+        let directory = self.project_directory(id)?;
+        tokio::task::spawn_blocking(move || clear_session(&directory)).await??;
+        self.finish_dismissed_workflow(id).await?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_workflow(
+        &self,
+        id: &str,
+        definition: WorkflowDefinition,
+        start_step_id: String,
+        finish: Option<WorkflowFinish>,
+        instruction: String,
+        mode: RecognitionMode,
+        mut context: RunContext,
+        preserve_existing_session_on_error: bool,
+    ) -> Result<(), CoreError> {
+        let start_position = definition
+            .step_index(&start_step_id)
+            .ok_or_else(|| CoreError::InvalidData("自动流程入口步骤不存在。".into()))?;
+        let writes_review_evidence = definition.steps[start_position..]
+            .iter()
+            .any(|step| step.action == WorkflowAction::Recognize);
+        let start_message = if preserve_existing_session_on_error {
+            "正在继续自动汉化流程。"
+        } else {
+            "正在开始全自动汉化流程。"
         };
         let cancellation = self
-            .begin_with_review_evidence(
-                id,
-                "workflow",
-                "正在开始全自动汉化流程。",
-                definition
-                    .steps
-                    .iter()
-                    .any(|step| step.action == WorkflowAction::Recognize),
-            )
+            .begin_with_review_evidence(id, "workflow", start_message, writes_review_evidence)
             .await?;
-        let mut context = RunContext::default();
-        let mut position = definition
-            .steps
-            .iter()
-            .position(|s| s.id == definition.entry)
-            .unwrap_or(0);
+        let directory = self.project_directory(id)?;
+        if !preserve_existing_session_on_error {
+            let dir = directory.clone();
+            tokio::task::spawn_blocking(move || clear_session(&dir)).await??;
+        }
+        let mut position = start_position;
         let mut last_step = String::new();
+        let mut paused_session: Option<WorkflowSession> = None;
         let result = async {
             for _ in 0..64 {
                 let step = &definition.steps[position];
@@ -381,7 +619,8 @@ impl Application {
                         step_id: step.id.clone(),
                         action: step.action,
                         status: WorkflowStatus::Running,
-                        target_unit_id: context.target.clone(),
+                        target_unit_id: context.targets.first().cloned(),
+                        pause_kind: None,
                     },
                 )
                 .await?;
@@ -389,38 +628,57 @@ impl Application {
                     return Err(gamel10n_engines::EngineError::Cancelled.into());
                 }
                 let outcome = self
-                    .run_workflow_step(id, step, &instruction, mode, &cancellation, &mut context)
+                    .run_workflow_step(
+                        id,
+                        &definition,
+                        position,
+                        finish,
+                        &instruction,
+                        mode,
+                        &cancellation,
+                        &mut context,
+                    )
                     .await;
                 if cancellation.is_cancelled() {
                     return Err(gamel10n_engines::EngineError::Cancelled.into());
                 }
-                if step.action == WorkflowAction::Complete && outcome.is_ok() {
-                    return Ok(());
-                }
-                let next = match &outcome {
-                    Ok(()) => step.on_success.as_ref(),
-                    Err(error) if needs_workflow_input(error) => step.on_unavailable.as_ref(),
-                    Err(_) => step.on_failure.as_ref(),
-                };
-                if let Err(error) = &outcome {
-                    self.log_task_message_from(
-                        id,
-                        &format!("{}：{error}", step.action.title()),
-                        LogSource::for_error(error),
-                    )
-                    .await;
-                }
-                if let Some(next) = next {
-                    position = definition
-                        .steps
-                        .iter()
-                        .position(|s| s.id == *next)
-                        .ok_or_else(|| CoreError::InvalidData("自动流程分支不存在。".into()))?;
-                } else {
-                    outcome?;
-                    position += 1;
-                    if position == definition.steps.len() {
+                match outcome {
+                    Ok(StepOutcome::Complete) => return Ok(()),
+                    Ok(StepOutcome::Paused(session)) => {
+                        paused_session = Some(session);
                         return Ok(());
+                    }
+                    Ok(StepOutcome::Continue) => {
+                        if let Some(next) = &step.on_success {
+                            position = definition.step_index(next).ok_or_else(|| {
+                                CoreError::InvalidData("自动流程分支不存在。".into())
+                            })?;
+                        } else {
+                            position += 1;
+                            if position == definition.steps.len() {
+                                return Ok(());
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        let next = if needs_workflow_input(&error) {
+                            step.on_unavailable.as_ref()
+                        } else {
+                            step.on_failure.as_ref()
+                        };
+                        self.log_task_message_from(
+                            id,
+                            &format!("{}：{error}", step.action.title()),
+                            LogSource::for_error(&error),
+                        )
+                        .await;
+                        if let Some(next) = next {
+                            position = definition.step_index(next).ok_or_else(|| {
+                                CoreError::InvalidData("自动流程分支不存在。".into())
+                            })?;
+                        } else {
+                            return Err(error);
+                        }
                     }
                 }
             }
@@ -429,23 +687,38 @@ impl Application {
             ))
         }
         .await;
-        if result.as_ref().is_err_and(needs_workflow_input) {
-            self.mark_workflow_waiting(id).await;
+
+        if let Some(session) = &paused_session {
+            let dir = directory.clone();
+            let saved = session.clone();
+            tokio::task::spawn_blocking(move || save_session(&dir, &saved)).await??;
+            self.mark_workflow_waiting(id, Some(session.pause_kind))
+                .await;
+        } else if result.is_ok() {
+            let dir = directory.clone();
+            tokio::task::spawn_blocking(move || clear_session(&dir)).await??;
+        } else if result.as_ref().is_err_and(needs_workflow_input) {
+            self.mark_workflow_waiting(id, None).await;
         }
-        let terminal = result
-            .as_ref()
-            .map(|()| {
-                if context.installed_all {
-                    "全自动汉化完成，全量补丁已安装。".into()
-                } else if matches!(context.built, Some((_, WorkflowScope::All))) {
-                    "全量补丁已生成。".into()
-                } else if context.verified.is_some() {
-                    "试译补丁已安装，游戏显示检查已通过。".into()
-                } else {
-                    "配置的自动流程已完成。".into()
-                }
-            })
-            .map_err(|error| format!("自动流程在步骤“{last_step}”停止：{error}"));
+
+        let terminal = if let Some(session) = &paused_session {
+            Ok(session.message.clone())
+        } else {
+            result
+                .as_ref()
+                .map(|()| {
+                    if context.installed_all {
+                        "自动汉化完成，全量补丁已安装。".into()
+                    } else if matches!(context.built, Some((_, WorkflowScope::All))) {
+                        "全量补丁已生成。".into()
+                    } else if context.verified.is_some() {
+                        "试译补丁已确认正常，自动汉化流程完成。".into()
+                    } else {
+                        "配置的自动流程已完成。".into()
+                    }
+                })
+                .map_err(|error| format!("自动流程在步骤“{last_step}”停止：{error}"))
+        };
         let source = result
             .as_ref()
             .err()
@@ -455,15 +728,19 @@ impl Application {
         result
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn run_workflow_step(
         &self,
         id: &str,
-        step: &WorkflowStep,
+        definition: &WorkflowDefinition,
+        position: usize,
+        finish: Option<WorkflowFinish>,
         instruction: &str,
         mode: RecognitionMode,
         cancellation: &CancellationToken,
         context: &mut RunContext,
-    ) -> Result<(), CoreError> {
+    ) -> Result<StepOutcome, CoreError> {
+        let step = &definition.steps[position];
         match step.action {
             WorkflowAction::Recognize => {
                 *context = RunContext::default();
@@ -500,23 +777,27 @@ impl Application {
                     return Err(CoreError::InvalidData("识别没有生成可用文本。".into()));
                 }
                 context.verified = None;
+                Ok(StepOutcome::Continue)
             }
-            WorkflowAction::LocateText => {
-                *context = RunContext::default();
-                self.locate_workflow_text(id, step, cancellation, context)
-                    .await?;
+            WorkflowAction::SelectTrial => {
+                context.targets.clear();
                 context.verified = None;
+                self.select_workflow_trial(id, definition, position, finish, context)
+                    .await
             }
             WorkflowAction::Translate | WorkflowAction::BuildPatch => {
                 let ids = match step.scope {
                     WorkflowScope::Target => {
                         context.verified = None;
-                        Some(vec![context.target.clone().ok_or_else(|| {
-                            CoreError::WorkflowInput("请先定位或选择一条开场文本。".into())
-                        })?])
+                        if context.targets.is_empty() {
+                            return Err(CoreError::WorkflowInput(
+                                "请先在「翻译与校对」勾选需要试译的文本。".into(),
+                            ));
+                        }
+                        Some(context.targets.clone())
                     }
                     WorkflowScope::All => {
-                        self.require_workflow_verification(id, context).await?;
+                        self.require_workflow_verification(context)?;
                         None
                     }
                 };
@@ -565,13 +846,14 @@ impl Application {
                         .await?;
                     context.built = Some((patch, step.scope));
                 }
+                Ok(StepOutcome::Continue)
             }
             WorkflowAction::InstallPatch => {
                 let Some((built, scope)) = &context.built else {
                     return Err(CoreError::InvalidData("请先在本次流程中生成补丁。".into()));
                 };
                 if *scope == WorkflowScope::All {
-                    self.require_workflow_verification(id, context).await?;
+                    self.require_workflow_verification(context)?;
                 } else {
                     context.verified = None;
                 }
@@ -581,8 +863,9 @@ impl Application {
                     .await?;
                 context.installed = Some(built.clone());
                 context.installed_all = *scope == WorkflowScope::All;
+                Ok(StepOutcome::Continue)
             }
-            WorkflowAction::CheckGame => {
+            WorkflowAction::ReviewTrial => {
                 context.verified = None;
                 let patch = self
                     .latest_patch(id)
@@ -594,226 +877,127 @@ impl Application {
                     })
                 {
                     return Err(CoreError::InvalidData(
-                        "请先生成并安装本次目标文本的试译补丁。".into(),
+                        "请先生成并安装本次试译补丁。".into(),
                     ));
                 }
-                let target = context
-                    .target
-                    .as_ref()
-                    .ok_or_else(|| CoreError::WorkflowInput("尚未确定目标文本。".into()))?;
-                let mut settings = match &step.settings {
-                    Some(settings) => settings.clone(),
-                    None => {
-                        let saved = self.game_check_settings(id).await?;
-                        match context.target_settings.clone() {
-                            Some(mut located) => {
-                                located.language = saved.language;
-                                located
-                            }
-                            None => saved,
-                        }
-                    }
+                let next_step_id = step
+                    .on_success
+                    .clone()
+                    .or_else(|| definition.steps.get(position + 1).map(|s| s.id.clone()))
+                    .unwrap_or_else(|| step.id.clone());
+                let count = context.targets.len();
+                let message = match finish {
+                    Some(WorkflowFinish::Trial) => format!(
+                        "试译补丁已安装（共 {count} 条文本）。请启动游戏检查中文显示、字体和换行，确认无误后点击「确认正常，完成试译」。"
+                    ),
+                    Some(WorkflowFinish::Build) => format!(
+                        "试译补丁已安装（共 {count} 条文本）。请启动游戏检查中文显示、字体和换行，确认无误后点击「确认正常，生成全量补丁」。"
+                    ),
+                    _ => format!(
+                        "试译补丁已安装（共 {count} 条文本）。请启动游戏检查中文显示、字体和换行，确认无误并关闭游戏后点击继续。"
+                    ),
                 };
-                settings.unit_ids = vec![target.clone()];
-                let expected = self.game_check_expected(id, &settings.unit_ids).await?;
-                let launch = self.launch_view(id).await?;
-                let request = self
-                    .game_check_request(
-                        id,
-                        CheckMode::LaunchAndText,
-                        settings,
-                        expected.clone(),
-                        true,
-                    )
-                    .await?;
-                self.execute_workflow_check(id, &request, cancellation)
-                    .await?;
-                if self.launch_view(id).await?.revision != launch.revision {
-                    return Err(CoreError::InvalidData(
-                        "检查期间启动设置已变化，请重新检查。".into(),
-                    ));
-                }
-                context.verified = Some((launch.revision, expected.join("\n")));
+                Ok(StepOutcome::Paused(WorkflowSession {
+                    schema_version: 1,
+                    definition: definition.clone(),
+                    next_step_id,
+                    pause_kind: WorkflowPauseKind::ReviewTrial,
+                    finish,
+                    target_unit_ids: context.targets.clone(),
+                    trial_patch_directory: Some(patch.patch_directory),
+                    trial_verified: false,
+                    message,
+                }))
             }
             WorkflowAction::WaitForInput => {
-                return Err(CoreError::WorkflowInput(if step.message.is_empty() {
-                    "未能定位验证文本。请在运行检查中调整进入场景的操作，或选择一条目标文本后重试。"
-                        .into()
+                Err(CoreError::WorkflowInput(if step.message.is_empty() {
+                    "当前流程需要你完成操作后继续。".into()
                 } else {
                     step.message.clone()
-                }));
+                }))
             }
-            WorkflowAction::Complete => {}
+            WorkflowAction::Complete => Ok(StepOutcome::Complete),
         }
-        Ok(())
     }
 
-    // Custom branches can enter full-scope steps directly. Check the trial and its inputs there.
-    async fn require_workflow_verification(
-        &self,
-        id: &str,
-        context: &RunContext,
-    ) -> Result<(), CoreError> {
-        let Some((revision, text)) = &context.verified else {
+    // Custom branches can enter full-scope steps directly. Require confirmed trial verification.
+    fn require_workflow_verification(&self, context: &RunContext) -> Result<(), CoreError> {
+        if context.verified.is_none() {
             return Err(CoreError::InvalidData(
-                "试译补丁尚未通过游戏显示检查，不能开始全量处理。".into(),
-            ));
-        };
-        let ids = vec![
-            context
-                .target
-                .clone()
-                .ok_or_else(|| CoreError::WorkflowInput("尚未确定目标文本。".into()))?,
-        ];
-        if self.launch_view(id).await?.revision != *revision
-            || self.game_check_expected(id, &ids).await?.join("\n") != *text
-        {
-            return Err(CoreError::InvalidData(
-                "已验证的启动配置或目标译文已变化，请重新检查。".into(),
+                "试译补丁尚未通过实机确认，不能开始全量处理。".into(),
             ));
         }
         Ok(())
     }
 
-    async fn execute_workflow_check(
+    async fn select_workflow_trial(
         &self,
         id: &str,
-        request: &crate::game_check::protocol::CheckRequest,
-        cancellation: &CancellationToken,
-    ) -> Result<CheckResult, CoreError> {
-        let _desktop = crate::game_check::DESKTOP_CHECK
-            .try_lock()
-            .map_err(|_| CoreError::InvalidData("已有运行检查正在使用桌面，请稍后重试。".into()))?;
-        let mut result = CheckResult::default();
-        self.run_game_check_tool(request, cancellation, cancellation, &mut result, &|_| {})
-            .await?;
-        for (name, observation) in [
-            ("启动", &result.launch),
-            ("关闭游戏进程", &result.closed),
-            ("文字显示", &result.text),
-        ] {
-            if observation.status != CheckStatus::Passed {
-                let message = format!("{name}未通过：{}", observation.message);
-                return Err(
-                    if name == "文字显示" && request.mode == CheckMode::LocateText {
-                        CoreError::WorkflowInput(message)
-                    } else {
-                        CoreError::InvalidData(message)
-                    },
-                );
-            }
-        }
-        self.log_task_message(id, "游戏启动、目标文字与进程关闭检查已通过。")
-            .await;
-        Ok(result)
-    }
-
-    async fn locate_workflow_text(
-        &self,
-        id: &str,
-        step: &WorkflowStep,
-        cancellation: &CancellationToken,
+        definition: &WorkflowDefinition,
+        position: usize,
+        finish: Option<WorkflowFinish>,
         context: &mut RunContext,
-    ) -> Result<(), CoreError> {
-        let mut settings = match &step.settings {
-            Some(settings) => settings.clone(),
-            None => self.game_check_settings(id).await?,
-        };
+    ) -> Result<StepOutcome, CoreError> {
+        let step = &definition.steps[position];
         let analysis = self
             .cached_analysis(id)
             .await?
             .ok_or_else(|| CoreError::InvalidData("请先识别并提取游戏文本。".into()))?;
-        let selected = if !step.unit_id.is_empty() {
-            Some(step.unit_id.clone())
+        let configured: Vec<String> = if !step.unit_ids.is_empty() {
+            step.unit_ids.clone()
+        } else if !step.unit_id.is_empty() {
+            vec![step.unit_id.clone()]
         } else {
-            match settings.unit_ids.as_slice() {
-                [id] => Some(id.clone()),
-                _ => None,
-            }
+            Vec::new()
         };
-        let target = if let Some(selected) = selected {
-            if !analysis.extraction().units.iter().any(|u| u.id == selected) {
+        let targets = if !configured.is_empty() {
+            let available: HashSet<_> = analysis
+                .extraction()
+                .units
+                .iter()
+                .map(|unit| unit.id.as_str())
+                .collect();
+            let mut seen = HashSet::new();
+            let valid: Vec<String> = configured
+                .into_iter()
+                .filter(|unit_id| {
+                    available.contains(unit_id.as_str()) && seen.insert(unit_id.clone())
+                })
+                .collect();
+            if valid.is_empty() {
                 return Err(CoreError::WorkflowInput(
-                    "配置的目标文本已不存在，请重新选择。".into(),
+                    "配置的试译文本已不存在，请重新选择。".into(),
                 ));
             }
-            selected
+            valid
         } else {
-            // OCR must observe original text, including after a previous interrupted trial.
-            let restored = self.restore_game_in_task(id, cancellation).await?;
-            if !restored.conflicts.is_empty() {
-                return Err(CoreError::InvalidData(format!(
-                    "恢复原文时发生冲突：{}",
-                    restored.conflicts.join("；")
-                )));
-            }
-            if step.settings.is_none() {
-                settings.language = source_ocr_language(&analysis.extraction().units).into();
-            }
-            let request = self
-                .game_check_request(id, CheckMode::LocateText, settings.clone(), vec![], true)
-                .await?;
-            let result = self
-                .execute_workflow_check(id, &request, cancellation)
-                .await?;
-            match_visible_unit(
-                &analysis.extraction().units,
-                result.visible_text.as_deref().unwrap_or_default(),
-            )?
+            self.load_text_selection(id).await?
         };
-        self.log_task_message(id, &format!("已确定运行验证目标：{target}"))
-            .await;
-        context.target = Some(target);
-        context.target_settings = Some(settings);
-        Ok(())
-    }
-}
-
-fn source_ocr_language(units: &[TranslationUnit]) -> &'static str {
-    let sample = units
-        .iter()
-        .take(64)
-        .flat_map(|u| u.source_text.chars().take(512));
-    let mut chinese = false;
-    for c in sample {
-        if ('\u{3040}'..='\u{30ff}').contains(&c) {
-            return "ja";
+        if targets.is_empty() {
+            if step.on_unavailable.is_some() {
+                return Err(CoreError::WorkflowInput(
+                    "尚未勾选试译文本，请前往「翻译与校对」勾选后继续。".into(),
+                ));
+            }
+            return Ok(StepOutcome::Paused(WorkflowSession {
+                schema_version: 1,
+                definition: definition.clone(),
+                next_step_id: step.id.clone(),
+                pause_kind: WorkflowPauseKind::SelectTrial,
+                finish,
+                target_unit_ids: Vec::new(),
+                trial_patch_directory: None,
+                trial_verified: false,
+                message: "识别已完成，但尚未勾选试译文本。请前往「翻译与校对」勾选需要试译的条目，然后点击「继续试译」。".into(),
+            }));
         }
-        chinese |= ('\u{4e00}'..='\u{9fff}').contains(&c);
-    }
-    if chinese { "zh-Hans" } else { "en" }
-}
-
-fn match_visible_unit(units: &[TranslationUnit], visible: &str) -> Result<String, CoreError> {
-    let visible = normalize_text(visible);
-    let mut best: Option<((usize, std::cmp::Reverse<usize>), &str)> = None;
-    let mut ambiguous = false;
-    for unit in units
-        .iter()
-        .filter(|u| matches!(u.kind.as_str(), "dialogue" | "narration"))
-    {
-        let text = crate::game_check::display_text(unit, &unit.source_text);
-        let normalized = normalize_text(&text);
-        let length = normalized.chars().count();
-        if length < 4 {
-            continue;
-        }
-        let Some(position) = visible.find(&normalized) else {
-            continue;
-        };
-        let key = (position, std::cmp::Reverse(length));
-        if best.is_none_or(|(previous, _)| key < previous) {
-            best = Some((key, &unit.id));
-            ambiguous = false;
-        } else if best.is_some_and(|(previous, _)| key == previous) {
-            ambiguous = true;
-        }
-    }
-    match best {
-        Some((_, id)) if !ambiguous => Ok(id.to_owned()),
-        _ => Err(CoreError::WorkflowInput(
-            "当前画面无法唯一匹配开场对白，请补充进入场景的操作或指定目标文本 ID。".into(),
-        )),
+        self.log_task_message(
+            id,
+            &format!("已确定试译目标，共 {} 条文本。", targets.len()),
+        )
+        .await;
+        context.targets = targets;
+        Ok(StepOutcome::Continue)
     }
 }
 

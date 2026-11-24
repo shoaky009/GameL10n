@@ -31,7 +31,7 @@ enum Operation {
     },
     /// 添加游戏目录，不自动识别。
     Add { directory: PathBuf },
-    /// 执行项目配置的自动汉化流程（可能启动游戏和安装补丁）。
+    /// 执行项目配置的自动汉化流程（可能安装补丁，并在需要选区或实机把关时暂停）。
     Workflow {
         project_id: String,
         #[arg(long, default_value = "")]

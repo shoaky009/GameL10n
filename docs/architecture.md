@@ -13,11 +13,11 @@
 
 Rust 管理模型会话、预算、工具调度和验收。Python 负责格式调查和资源解析。正式适配器通过 UTF-8 JSON CLI v1 与宿主通信。[适配器协议](adapters/protocol.md)
 
-自研原生工具位于 `tools/`，FFI 和平台 API 封装在独立组件，通过进程协议或明确 ABI 接入。现有 VNTextPatch 使用 NativeAOT。运行检查工具负责游戏窗口与 Windows OCR，执行隔离工具使用 AppContainer 限制生成代码的权限。[原生工具](../tools) · [执行隔离](adapters/execution-isolation.md)
+自研原生工具位于 `tools/`，FFI 和平台 API 封装在独立组件，通过进程协议或明确 ABI 接入。现有 VNTextPatch 使用 NativeAOT，执行隔离工具使用 AppContainer 限制生成代码的权限。[原生工具](../tools) · [执行隔离](adapters/execution-isolation.md)
 
 ## 任务与数据
 
-Core 管理项目状态和操作顺序。同一项目的资源修改串行执行，切换页面仍可查看运行进度。全自动流程复用识别、翻译、补丁和运行检查服务，已提交结果随项目数据保存。[全自动汉化流程](automatic-workflow.md) · [数据目录与迁移](data-storage.md)
+Core 管理项目状态和操作顺序。同一项目的资源修改串行执行，切换页面仍可查看运行进度。全自动流程复用识别、翻译与补丁服务，并在试译后等待人工实机把关，已提交结果随项目数据保存。[全自动汉化流程](automatic-workflow.md) · [数据目录与迁移](data-storage.md)
 
 游戏项目的版本升级集中在 Core 的 `project_migrations` 模块。每个游戏独立记录已完成版本，新增升级步骤与对应的数据校验、恢复逻辑一同放在该目录。[项目迁移入口](../crates/core/src/project_migrations/mod.rs)
 

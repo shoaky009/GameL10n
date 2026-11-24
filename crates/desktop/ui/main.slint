@@ -2,7 +2,7 @@ import { LineEdit, CheckBox, SpinBox, ScrollView, ListView } from "std-widgets.s
 import { App, Theme, Icon, Card, StatusDot, Label, Caption, Heading, SectionHeading, ReportText, Divider, ProjectRow, TextRow, NamedRow, EngineRow, TermRow, TokenDisplay, CleanupRow, NavigationButton, TabItem, IconButton, ActionButton, Link, HelpButton, CopyButton, ClipboardBuffer, ListPanel, SelectableListRow } from "state.slint";
 import { ProjectSettings, GlobalApis } from "settings.slint";
 import { Workbench } from "workbench.slint";
-import { Recognition, PatchPage, TaskFeedback } from "project.slint";
+import { Recognition, PatchPage, TaskFeedback, WorkflowGateBanner } from "project.slint";
 import { EngineLibrary } from "catalog.slint";
 import { DialogLayer } from "dialogs.slint";
 import { ConsumptionMetrics } from "metrics.slint";
@@ -176,6 +176,7 @@ export component MainWindow inherits Window {
                         }
                         Divider {}
                     }
+                    if !App.busy && App.workflow-pause-stage != "": WorkflowGateBanner {}
                     if App.tab == 0: Recognition {}
                     if App.tab == 1: Workbench {}
                     if App.tab == 2: PatchPage {}

@@ -153,14 +153,7 @@ fn update_project_row(app: &App, state: &TaskState) -> bool {
     };
     let running_changed = row.running != state.running;
     row.running = state.running;
-    row.status = recognition_ui::task_status(
-        &state.operation,
-        state.running,
-        state.succeeded,
-        None,
-        false,
-    )
-    .into();
+    row.status = recognition_ui::task_state_status(state, None, false).into();
     projects.set_row_data(index, row);
     running_changed
 }
@@ -187,16 +180,7 @@ fn update_current_task(app: &App, state: TaskState) {
                 "retranslate" | "extract" | "recognize" | "adapt" | "workflow"
             ),
     );
-    app.set_status(
-        recognition_ui::task_status(
-            &state.operation,
-            state.running,
-            state.succeeded,
-            None,
-            false,
-        )
-        .into(),
-    );
+    app.set_status(recognition_ui::task_state_status(&state, None, false).into());
     app.set_task_message(state.message.clone().into());
     app.set_adaptation_running(state.running && state.operation == "adapt");
     app.set_recognition_running(state.running && recognition);

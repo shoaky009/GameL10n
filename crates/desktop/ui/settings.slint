@@ -134,7 +134,6 @@ export component ProjectSettings inherits SettingsForm {
             HorizontalLayout { spacing: 8px;
                 ActionButton { text: "配置启动入口…"; icon: "play"; clicked => { App.action("launch-settings", ""); } }
                 ActionButton { text: "配置自动汉化…"; icon: "sparkles"; enabled: !App.busy; clicked => { App.action("workflow-settings", ""); } }
-                ActionButton { text: "运行检查…"; icon: "check-square"; enabled: !App.busy; clicked => { App.action("game-check-dialog", ""); } }
                 Rectangle { horizontal-stretch: 1; }
             }
         }

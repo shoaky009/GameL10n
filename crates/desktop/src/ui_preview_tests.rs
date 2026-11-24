@@ -426,9 +426,15 @@ fn render_desktop_preview_fixtures() {
         app.invoke_search_adapters("no-such-adapter".into());
         assert_eq!(app.get_adapter_items().row_count(), 0);
         app.set_tab(2);
-        app.set_modal("game-check".into());
-        app.set_check_scene(1);
-        capture(&format!("workflow-scene{suffix}"), 1120, 720);
+        app.set_workflow_pause_stage("review".into());
+        app.set_workflow_pause_title("自动汉化 · 请进入游戏实机把关".into());
+        app.set_workflow_pause_message(
+            "试译补丁已安装（共 3 条文本）。请启动游戏检查中文显示、字体和换行，确认无误并关闭游戏后点击继续。"
+                .into(),
+        );
+        app.set_workflow_pause_confirm_label("确认正常，继续全量安装".into());
+        capture(&format!("workflow-review{suffix}"), 1120, 720);
+        app.set_workflow_pause_stage("".into());
         app.set_modal("".into());
         app.set_page(2);
         app.set_engine_name("QLIE PACK 3.0 + ImoScripter FormatType=1".into());

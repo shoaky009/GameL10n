@@ -1,5 +1,92 @@
 import { LineEdit, TextEdit, ScrollView, ProgressIndicator } from "std-widgets.slint";
+import { Icon } from "icons.slint";
 import { App, Theme, Card, StatusDot, Label, Caption, TokenCaption, TokenDisplay, Heading, SectionHeading, Divider, ReportText, Link, IconButton, ActionButton } from "state.slint";
+
+export component WorkflowGateBanner inherits Rectangle {
+    height: gate-content.preferred-height + 20px;
+    background: Theme.tint;
+    border-width: 1px;
+    border-color: Theme.accent.with-alpha(0.35);
+    border-radius: 6px;
+    Rectangle {
+        x: 0px; y: 0px; width: 3px; height: parent.height;
+        border-radius: 2px;
+        background: Theme.accent;
+    }
+    gate-content := VerticalLayout {
+        x: 14px; y: 10px; width: parent.width - 26px; height: self.preferred-height;
+        spacing: 8px;
+        HorizontalLayout { spacing: 8px;
+            VerticalLayout { alignment: center; horizontal-stretch: 0;
+                Icon {
+                    name: App.workflow-pause-stage == "select" ? "languages" : "check-square";
+                    size: 16px;
+                    tint: Theme.accent;
+                }
+            }
+            Label {
+                text: App.workflow-pause-title;
+                color: Theme.title;
+                font-weight: 600;
+                horizontal-stretch: 1;
+                min-width: 0px;
+                overflow: elide;
+                wrap: no-wrap;
+                vertical-alignment: center;
+            }
+            IconButton {
+                icon: "close";
+                button-size: 26px;
+                icon-size: 14px;
+                tooltip: "结束本次自动流程";
+                clicked => { App.action("workflow-dismiss", ""); }
+            }
+        }
+        Label {
+            text: App.workflow-pause-message;
+            color: Theme.ink;
+            font-size: 13px;
+            wrap: word-wrap;
+        }
+        HorizontalLayout { spacing: 8px;
+            if App.workflow-pause-stage == "select" && App.tab != 1: ActionButton {
+                text: "前往选择文本"; icon: "languages"; compact: true;
+                clicked => { App.action("tab", "1"); }
+            }
+            if App.workflow-pause-stage == "select": ActionButton {
+                text: App.selected-texts > 0 ? "继续试译（已选 " + App.selected-texts + " 条）" : "请先勾选试译文本";
+                icon: "play"; primary: true; compact: true;
+                enabled: App.selected-texts > 0 && !App.selection-busy;
+                clicked => { App.action("workflow-resume-selection", ""); }
+            }
+            if App.workflow-pause-stage == "review": ActionButton {
+                text: "启动游戏"; icon: "play"; compact: true;
+                enabled: App.launch-can-run;
+                tooltip: App.launch-can-run ? "启动游戏检查试译效果" : "请先配置游戏启动入口";
+                clicked => { App.action("launch-game", ""); }
+            }
+            if App.workflow-pause-stage == "review" && !App.launch-can-run: ActionButton {
+                text: "启动设置…"; icon: "settings"; compact: true;
+                clicked => { App.action("launch-settings", ""); }
+            }
+            if App.workflow-pause-stage == "review": ActionButton {
+                text: "查看试译文本"; icon: "list"; compact: true;
+                enabled: App.patch-path != "";
+                clicked => { App.action("patch-texts", ""); }
+            }
+            if App.workflow-pause-stage == "review": ActionButton {
+                text: App.workflow-pause-confirm-label == "" ? "确认正常，继续后续流程" : App.workflow-pause-confirm-label;
+                icon: "check"; primary: true; compact: true;
+                clicked => { App.action("workflow-confirm-trial", ""); }
+            }
+            if App.workflow-pause-stage == "review": ActionButton {
+                text: "有问题，去修复"; icon: "wrench"; danger: true; compact: true;
+                clicked => { App.action("workflow-repair", ""); }
+            }
+            Rectangle { horizontal-stretch: 1; }
+        }
+    }
+}
 
 component RunningTask inherits VerticalLayout {
     in property <string> title;
@@ -355,7 +442,6 @@ export component PatchPage inherits ScrollView {
                 Caption { text: App.launch-summary; }
                 HorizontalLayout { spacing: 8px;
                     ActionButton { text: "启动游戏"; icon: "play"; enabled: !App.busy && App.launch-can-run; clicked => { App.action("launch-game", ""); } }
-                    ActionButton { text: "运行检查…"; icon: "check-square"; clicked => { App.action("game-check-dialog", ""); } }
                     ActionButton { text: "启动设置…"; icon: "settings"; clicked => { App.action("tab", "3"); } }
                     Rectangle { horizontal-stretch: 1; }
                 }

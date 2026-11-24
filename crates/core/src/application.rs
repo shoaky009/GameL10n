@@ -372,7 +372,6 @@ pub struct Application {
         Arc<std::sync::Mutex<Option<crate::workbench::paged::CachedProject>>>,
     pub(crate) workbench_revision: Arc<AtomicU64>,
     pub(crate) translation_scheduler: Arc<crate::translation_tasks::TranslationScheduler>,
-    pub(crate) game_check_errors: Arc<Mutex<Vec<crate::game_check::protocol::ErrorWindow>>>,
 }
 
 impl Application {
@@ -401,7 +400,6 @@ impl Application {
             translation_scheduler: Arc::new(
                 crate::translation_tasks::TranslationScheduler::default(),
             ),
-            game_check_errors: Arc::new(Mutex::new(Vec::new())),
         })
     }
 
@@ -1219,7 +1217,14 @@ impl Application {
             succeeded: None,
             workflow: None,
         };
-        let path = self.project_directory(id)?.join("rust-task.json");
+        let project_directory = self.project_directory(id)?;
+        if matches!(
+            operation,
+            "recognize" | "adapt" | "extract" | "install" | "restore"
+        ) {
+            let _ = crate::workflow::clear_session(&project_directory);
+        }
+        let path = project_directory.join("rust-task.json");
         let saved = state.clone();
         tokio::task::spawn_blocking(move || write_json(&path, &saved)).await??;
         let order = self.next_task_order.fetch_add(1, Ordering::Relaxed);
@@ -1324,7 +1329,11 @@ impl Application {
         Ok(())
     }
 
-    pub(crate) async fn mark_workflow_waiting(&self, id: &str) {
+    pub(crate) async fn mark_workflow_waiting(
+        &self,
+        id: &str,
+        pause_kind: Option<crate::workflow::WorkflowPauseKind>,
+    ) {
         if let Some(workflow) = self
             .tasks
             .lock()
@@ -1333,7 +1342,39 @@ impl Application {
             .and_then(|entry| entry.state.workflow.as_mut())
         {
             workflow.status = crate::workflow::WorkflowStatus::WaitingForInput;
+            workflow.pause_kind = pause_kind;
         }
+    }
+
+    pub(crate) async fn finish_dismissed_workflow(&self, id: &str) -> Result<(), CoreError> {
+        let state = {
+            let mut tasks = self.tasks.lock().await;
+            let Some(entry) = tasks.get_mut(id) else {
+                return Ok(());
+            };
+            if entry.state.running
+                || entry.state.workflow.as_ref().is_none_or(|workflow| {
+                    workflow.status != crate::workflow::WorkflowStatus::WaitingForInput
+                })
+            {
+                return Ok(());
+            }
+            if let Some(workflow) = entry.state.workflow.as_mut() {
+                workflow.status = crate::workflow::WorkflowStatus::Interrupted;
+                workflow.pause_kind = None;
+            }
+            entry.state.message = "已结束自动汉化流程，已保存的译文和补丁保留。".into();
+            entry.state.succeeded = None;
+            entry.state.clone()
+        };
+        let path = self.project_directory(id)?.join("rust-task.json");
+        let saved = StoredTaskState {
+            state: state.clone(),
+            task_summary: Some(task_summary(&state)),
+        };
+        tokio::task::spawn_blocking(move || write_json(&path, &saved)).await??;
+        let _ = self.events.send(AppEvent::TaskChanged(state));
+        Ok(())
     }
 
     pub(crate) async fn finish(

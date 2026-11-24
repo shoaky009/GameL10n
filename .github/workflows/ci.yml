@@ -32,7 +32,6 @@ jobs:
             . -> target
             tools/GameL10n.QlieLauncher -> ../../target/qlie-launcher/cargo
             tools/GameL10n.FontBridge -> ../../target/fontbridge/cargo
-            tools/GameL10n.GameCheck -> ../../target/game-check
             tools/GameL10n.ToolRunner -> ../../target/tool-runner
 
       - name: Check Rust formatting
@@ -43,8 +42,6 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Launcher formatting failed.' }
           cargo fmt --manifest-path tools/GameL10n.FontBridge/Cargo.toml -- --check
           if ($LASTEXITCODE -ne 0) { throw 'Font bridge formatting failed.' }
-          cargo fmt --manifest-path tools/GameL10n.GameCheck/Cargo.toml -- --check
-          if ($LASTEXITCODE -ne 0) { throw 'Game check formatting failed.' }
           cargo fmt --manifest-path tools/GameL10n.ToolRunner/Cargo.toml -- --check
           if ($LASTEXITCODE -ne 0) { throw 'Tool runner formatting failed.' }
 
@@ -65,8 +62,6 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Workspace Clippy failed.' }
           cargo clippy --manifest-path tools/GameL10n.QlieLauncher/Cargo.toml --target-dir target/qlie-launcher/cargo --all-targets --all-features --locked -- -D warnings
           if ($LASTEXITCODE -ne 0) { throw 'Launcher Clippy failed.' }
-          cargo clippy --manifest-path tools/GameL10n.GameCheck/Cargo.toml --target-dir target/game-check --all-targets --all-features --locked -- -D warnings
-          if ($LASTEXITCODE -ne 0) { throw 'Game check Clippy failed.' }
           cargo clippy --manifest-path tools/GameL10n.ToolRunner/Cargo.toml --target-dir target/tool-runner --all-targets --all-features --locked -- -D warnings
           if ($LASTEXITCODE -ne 0) { throw 'Tool runner Clippy failed.' }
 
@@ -75,9 +70,6 @@ jobs:
 
       - name: Test QLIE launcher
         run: cargo test --manifest-path tools/GameL10n.QlieLauncher/Cargo.toml --target-dir target/qlie-launcher/cargo --locked
-
-      - name: Test game checks
-        run: cargo test --manifest-path tools/GameL10n.GameCheck/Cargo.toml --target-dir target/game-check --locked
 
       - name: Test execution isolation
         run: cargo test --manifest-path tools/GameL10n.ToolRunner/Cargo.toml --target-dir target/tool-runner --locked
