@@ -1,6 +1,6 @@
 use std::{
     path::{Path, PathBuf},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use gamel10n_translation::files::{hash_file, hash_text};
@@ -130,6 +130,29 @@ impl EngineService {
 }
 
 impl Discovery<'_> {
+    async fn probe_with_remaining_budget(
+        &mut self,
+        adapter: &AdapterHandle,
+        resources: &[String],
+    ) -> Result<Option<ProbeResult>, EngineError> {
+        let budget = crate::process::ProcessBudget::new(
+            PACKAGE_PROBE_BUDGET.saturating_sub(self.probe_elapsed),
+        );
+        let result = self
+            .service
+            .probe_bounded_with_budget(
+                adapter,
+                self.source,
+                resources,
+                &self.service.discovery_inputs,
+                self.cancellation,
+                &budget,
+            )
+            .await;
+        self.probe_elapsed += budget.active_elapsed();
+        result.map(|(probe, _)| probe)
+    }
+
     async fn probe_smil(&mut self) -> Result<Option<(AdapterHandle, ProbeResult)>, EngineError> {
         const ID: &str = "engine.kirikiri-smil-smile";
         if self.service.ordered_packages_only
@@ -164,18 +187,9 @@ impl Discovery<'_> {
             "检查内置解析器",
             "正在检查 KiriKiri SMIL 映射、过滤器及脚本样本。",
         );
-        let started = Instant::now();
         let probe = self
-            .service
-            .probe_bounded_with_inputs(
-                &adapter,
-                self.source,
-                &resources,
-                &self.service.discovery_inputs,
-                self.cancellation,
-            )
+            .probe_with_remaining_budget(&adapter, &resources)
             .await?;
-        self.probe_elapsed += started.elapsed();
         let Some(probe) = probe else { return Ok(None) };
         if self.verification == DiscoveryVerification::ProbeOnly {
             return Ok(Some((adapter, probe)));
@@ -296,22 +310,9 @@ impl Discovery<'_> {
             let attempt = async {
                 let handle = manifest.handle(&candidate.directory)?;
                 phase = "probe";
-                let budget = crate::process::ProcessBudget::new(
-                    PACKAGE_PROBE_BUDGET.saturating_sub(self.probe_elapsed),
-                );
                 let probe = self
-                    .service
-                    .probe_bounded_with_budget(
-                        &handle,
-                        self.source,
-                        &candidate.resources,
-                        &self.service.discovery_inputs,
-                        self.cancellation,
-                        &budget,
-                    )
-                    .await;
-                self.probe_elapsed += budget.active_elapsed();
-                let (probe, _) = probe?;
+                    .probe_with_remaining_budget(&handle, &candidate.resources)
+                    .await?;
                 let Some(probe) = probe else { return Ok(None) };
                 recognized = true;
                 if !self.service.ordered_packages_only {

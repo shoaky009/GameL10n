@@ -114,18 +114,15 @@ impl ProcessBudget {
             notified.as_mut().enable();
             let remaining = {
                 let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-                if state.paused_waiters > 0 {
-                    None
-                } else {
-                    let elapsed = state.active_elapsed
-                        + state
-                            .active_started
-                            .map_or(Duration::ZERO, |started| started.elapsed());
-                    match state.limit.checked_sub(elapsed) {
-                        Some(remaining) if !remaining.is_zero() => Some(remaining),
-                        _ => return,
-                    }
+                let elapsed = state.active_elapsed
+                    + state
+                        .active_started
+                        .map_or(Duration::ZERO, |started| started.elapsed());
+                let remaining = state.limit.saturating_sub(elapsed);
+                if remaining.is_zero() {
+                    return;
                 }
+                (state.paused_waiters == 0).then_some(remaining)
             };
             match remaining {
                 None => notified.await,
