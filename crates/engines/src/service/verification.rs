@@ -17,6 +17,7 @@ struct Verification<'a> {
     phase: &'static str,
     phase_started: Instant,
     issue: Option<crate::VerificationIssue>,
+    cleanup_stage_outputs: bool,
 }
 
 impl EngineService {
@@ -35,6 +36,77 @@ impl EngineService {
         expected_source_hashes: Option<&BTreeMap<String, String>>,
         probe: Option<&ProbeResult>,
         preview: Option<&(dyn Fn(Arc<ExtractionResult>) + Send + Sync)>,
+        cancellation: &CancellationToken,
+        progress: ProgressCallback<'_>,
+    ) -> Result<VerificationResult, EngineError> {
+        self.verify_with_coverage_options(
+            adapter,
+            source,
+            resources,
+            directory,
+            baseline,
+            coverage,
+            expected_source_hashes,
+            probe,
+            preview,
+            false,
+            cancellation,
+            progress,
+        )
+        .await
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Coverage anchors are independent of resource and baseline verification inputs."
+    )]
+    pub(crate) async fn verify_with_coverage_cleanup<'a>(
+        &self,
+        adapter: &AdapterHandle,
+        source: &Path,
+        resources: &[String],
+        directory: &Path,
+        baseline: impl IntoIterator<Item = &'a TranslationUnit>,
+        coverage: &Value,
+        expected_source_hashes: Option<&BTreeMap<String, String>>,
+        probe: Option<&ProbeResult>,
+        preview: Option<&(dyn Fn(Arc<ExtractionResult>) + Send + Sync)>,
+        cancellation: &CancellationToken,
+        progress: ProgressCallback<'_>,
+    ) -> Result<VerificationResult, EngineError> {
+        self.verify_with_coverage_options(
+            adapter,
+            source,
+            resources,
+            directory,
+            baseline,
+            coverage,
+            expected_source_hashes,
+            probe,
+            preview,
+            true,
+            cancellation,
+            progress,
+        )
+        .await
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Coverage anchors are independent of resource and baseline verification inputs."
+    )]
+    async fn verify_with_coverage_options<'a>(
+        &self,
+        adapter: &AdapterHandle,
+        source: &Path,
+        resources: &[String],
+        directory: &Path,
+        baseline: impl IntoIterator<Item = &'a TranslationUnit>,
+        coverage: &Value,
+        expected_source_hashes: Option<&BTreeMap<String, String>>,
+        probe: Option<&ProbeResult>,
+        preview: Option<&(dyn Fn(Arc<ExtractionResult>) + Send + Sync)>,
+        cleanup_stage_outputs: bool,
         cancellation: &CancellationToken,
         progress: ProgressCallback<'_>,
     ) -> Result<VerificationResult, EngineError> {
@@ -109,6 +181,7 @@ impl EngineService {
             phase: "initial-extraction",
             phase_started,
             issue: None,
+            cleanup_stage_outputs,
         };
         let verified = run.verify(baseline, coverage, preview).await;
         let phase = run.phase;
@@ -453,6 +526,9 @@ impl Verification<'_> {
         self.check_output_files(stage, &output, overlay)?;
         if stage == "原文回填" && (!overlay || built.files.is_empty()) {
             self.result.original_roundtrip_passed = true;
+            if self.cleanup_stage_outputs {
+                let _ = fs::remove_dir_all(&output);
+            }
             return Ok(());
         }
         if let Some(check) = self.display_check
@@ -554,6 +630,9 @@ impl Verification<'_> {
         }
         if stage == "原文回填" {
             self.result.original_roundtrip_passed = true;
+        }
+        if self.cleanup_stage_outputs {
+            let _ = fs::remove_dir_all(&output);
         }
         Ok(())
     }

@@ -1382,7 +1382,7 @@ impl AdapterTest<'_, '_> {
         };
         let result = self
             .service
-            .verify_with_coverage(
+            .verify_with_coverage_cleanup(
                 &self.package.handle,
                 source.directory(),
                 resources,

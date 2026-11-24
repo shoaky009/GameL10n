@@ -1605,15 +1605,18 @@ fn token_set(unit: &TranslationUnit) -> BTreeSet<&str> {
 }
 
 fn validate_raw_units(units: &[TranslationUnit], source: &Path) -> Result<(), EngineError> {
-    let mut seen = BTreeSet::new();
+    let mut seen = std::collections::HashSet::with_capacity(units.len());
+    let mut checked_paths = std::collections::HashSet::new();
     for unit in units {
-        if unit.id.trim().is_empty() || !seen.insert(&unit.id) {
+        if unit.id.trim().is_empty() || !seen.insert(unit.id.as_str()) {
             return Err(EngineError::Incompatible {
                 stage: "extraction",
                 message: "提取包含空 ID 或重复 ID。".into(),
             });
         }
-        resolve_relative(source, &unit.resource_path)?;
+        if checked_paths.insert(unit.resource_path.as_str()) {
+            resolve_relative(source, &unit.resource_path)?;
+        }
         if let Some(tokens) = &unit.protected_tokens
             && (tokens.len() > 64
                 || tokens.iter().any(|token| {

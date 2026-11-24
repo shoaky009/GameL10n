@@ -656,17 +656,81 @@ fn validate_segments(value: &str, pattern: bool) -> Result<(), EngineError> {
     Ok(())
 }
 
+#[inline]
+fn norm_ascii(byte: u8) -> u8 {
+    if byte == b'\\' {
+        b'/'
+    } else {
+        byte.to_ascii_lowercase()
+    }
+}
+
+/// Zero-allocation O(P + S) matcher for ASCII patterns containing no `**`.
+fn glob_match_ascii_single(pattern: &[u8], path: &[u8]) -> bool {
+    let (mut pi, mut si) = (0usize, 0usize);
+    let mut star_pi: Option<usize> = None;
+    let mut star_si = 0usize;
+    while si < path.len() {
+        let sc = norm_ascii(path[si]);
+        if pi < pattern.len() && pattern[pi] == b'*' {
+            star_pi = Some(pi);
+            pi += 1;
+            star_si = si;
+        } else if pi < pattern.len()
+            && (norm_ascii(pattern[pi]) == sc || (pattern[pi] == b'?' && sc != b'/'))
+        {
+            pi += 1;
+            si += 1;
+        } else if let Some(sp) = star_pi {
+            if norm_ascii(path[star_si]) == b'/' {
+                return false;
+            }
+            star_si += 1;
+            si = star_si;
+            pi = sp + 1;
+        } else {
+            return false;
+        }
+    }
+    while pi < pattern.len() && pattern[pi] == b'*' {
+        pi += 1;
+    }
+    pi == pattern.len()
+}
+
 pub fn glob_match(pattern: &str, path: &str) -> bool {
     if pattern.len() > 1024 || path.len() > 4096 {
         return false;
     }
+    if pattern.is_ascii() && path.is_ascii() {
+        let pb = pattern.as_bytes();
+        let sb = path.as_bytes();
+        if !pb.windows(2).any(|w| w == b"**") {
+            return glob_match_ascii_single(pb, sb);
+        }
+        // Fast path for the most common manifest pattern: `**/<single-level-pattern>` (e.g. `**/*.ks`).
+        if (pb.starts_with(b"**/") || pb.starts_with(b"**\\"))
+            && !pb[3..].windows(2).any(|w| w == b"**")
+        {
+            let rest = &pb[3..];
+            if glob_match_ascii_single(rest, sb) {
+                return true;
+            }
+            for (idx, &b) in sb.iter().enumerate() {
+                if (b == b'/' || b == b'\\') && glob_match_ascii_single(rest, &sb[idx + 1..]) {
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
     let pattern: Vec<_> = pattern.replace('\\', "/").to_lowercase().chars().collect();
     let path: Vec<_> = path.replace('\\', "/").to_lowercase().chars().collect();
-    let mut memo = vec![None; (pattern.len() + 1) * (path.len() + 1)];
-    fn matched(p: &[char], s: &[char], i: usize, j: usize, memo: &mut [Option<bool>]) -> bool {
+    let mut memo = vec![0u8; (pattern.len() + 1) * (path.len() + 1)];
+    fn matched(p: &[char], s: &[char], i: usize, j: usize, memo: &mut [u8]) -> bool {
         let key = i * (s.len() + 1) + j;
-        if let Some(value) = memo[key] {
-            return value;
+        if memo[key] != 0 {
+            return memo[key] == 2;
         }
         let value = if i == p.len() {
             j == s.len()
@@ -683,7 +747,7 @@ pub fn glob_match(pattern: &str, path: &str) -> bool {
                 && (p[i] == s[j] || p[i] == '?' && s[j] != '/')
                 && matched(p, s, i + 1, j + 1, memo)
         };
-        memo[key] = Some(value);
+        memo[key] = if value { 2 } else { 1 };
         value
     }
     matched(&pattern, &path, 0, 0, &mut memo)
