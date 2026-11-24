@@ -720,16 +720,43 @@ impl Application {
         id: &str,
         extraction: Arc<ExtractionResult>,
     ) {
+        if extraction.units.is_empty() {
+            return;
+        }
+        let previous = {
+            let tasks = self.tasks.lock().await;
+            let Some(task) = tasks.get(id) else {
+                return;
+            };
+            if !task.state.running || task.cancellation.is_cancelled() {
+                return;
+            }
+            task.preview.clone()
+        };
+        if let Some(old) = previous.as_ref()
+            && (std::ptr::eq(old.extraction(), extraction.as_ref())
+                || old.extraction().units == extraction.units)
+        {
+            return;
+        }
         let mut tasks = self.tasks.lock().await;
         if let Some(task) = tasks.get_mut(id)
             && task.state.running
             && !task.cancellation.is_cancelled()
-            && !extraction.units.is_empty()
-            && task
-                .preview
-                .as_ref()
-                .is_none_or(|old| old.extraction().units != extraction.units)
         {
+            let same_previous = match (&previous, &task.preview) {
+                (None, None) => true,
+                (Some(prev), Some(current)) => Arc::ptr_eq(prev, current),
+                _ => false,
+            };
+            if !same_previous
+                && task.preview.as_ref().is_some_and(|current| {
+                    std::ptr::eq(current.extraction(), extraction.as_ref())
+                        || current.extraction().units == extraction.units
+                })
+            {
+                return;
+            }
             task.preview = Some(Arc::new(CachedAnalysis::Preview(extraction)));
             let _ = self.events.send(AppEvent::PreviewChanged {
                 project_id: id.into(),

@@ -818,26 +818,29 @@ impl OpenAiProvider {
                 json!({"model":self.settings.model,"messages":messages,"stream":false})
             }
             ApiProtocol::Responses => {
-                json!({"model":self.settings.model,"input":responses_messages(messages),"store":false,"stream":false,"max_output_tokens":maximum_output_tokens})
+                let mut body = json!({"model":self.settings.model,"store":false,"stream":false,"max_output_tokens":maximum_output_tokens});
+                if tools.is_some() {
+                    let (instructions, history): (Vec<_>, Vec<_>) = messages
+                        .iter()
+                        .partition(|message| message["role"] == "system");
+                    if !instructions.is_empty() {
+                        body["instructions"] = json!(
+                            instructions
+                                .iter()
+                                .filter_map(|message| message["content"].as_str())
+                                .collect::<Vec<_>>()
+                                .join("\n\n")
+                        );
+                        body["input"] = json!(responses_messages(history));
+                    } else {
+                        body["input"] = json!(responses_messages(messages));
+                    }
+                } else {
+                    body["input"] = json!(responses_messages(messages));
+                }
+                body
             }
         };
-        if tools.is_some() && self.settings.protocol == ApiProtocol::Responses {
-            let (instructions, history): (Vec<_>, Vec<_>) = messages
-                .iter()
-                .partition(|message| message["role"] == "system");
-            if !instructions.is_empty() {
-                body["instructions"] = json!(
-                    instructions
-                        .iter()
-                        .filter_map(|message| message["content"].as_str())
-                        .collect::<Vec<_>>()
-                        .join("\n\n")
-                );
-                body["input"] = json!(responses_messages(
-                    &history.into_iter().cloned().collect::<Vec<_>>()
-                ));
-            }
-        }
         if self.settings.protocol == ApiProtocol::ChatCompletions {
             let field = if self.settings.translation_format == TranslationFormat::PlainText
                 && tools.is_none()
@@ -888,7 +891,8 @@ impl OpenAiProvider {
         }
         let payload = serde_json::to_vec(&body)
             .map_err(|_| ProviderError::new("request-json", "无法编码 API 请求。"))?;
-        if payload.len()
+        let payload_len = payload.len();
+        if payload_len
             > if tools.is_some() {
                 4 * 1024 * 1024
             } else {
@@ -904,7 +908,7 @@ impl OpenAiProvider {
             .client
             .post(self.endpoint.clone())
             .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .body(payload.clone());
+            .body(payload);
         if !mode.streams() {
             request = request.timeout(self.request_timeout);
         }
@@ -916,7 +920,7 @@ impl OpenAiProvider {
         let result = if mode.streams() {
             self.receive_agent_stream(
                 request,
-                payload.len(),
+                payload_len,
                 known_tool_names,
                 cancellation,
                 &mut attempted,
@@ -925,7 +929,7 @@ impl OpenAiProvider {
         } else {
             self.receive_completion(
                 request,
-                payload.len(),
+                payload_len,
                 known_tool_names,
                 cancellation,
                 &mut attempted,
@@ -1823,7 +1827,7 @@ impl<'de> Deserialize<'de> for UniqueObject {
     }
 }
 
-fn responses_messages(messages: &[Value]) -> Vec<Value> {
+fn responses_messages<'a>(messages: impl IntoIterator<Item = &'a Value>) -> Vec<Value> {
     let mut result = Vec::new();
     for message in messages {
         if message
