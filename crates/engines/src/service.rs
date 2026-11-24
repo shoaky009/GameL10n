@@ -370,7 +370,8 @@ impl EngineService {
         }
         let manifest = PackageManifest::load(directory)?;
         manifest.handle(directory)?;
-        self.tool_paths(Some(directory), cancellation).await?;
+        self.tool_paths_checked(Some(directory), true, cancellation)
+            .await?;
         let files: Vec<_> = manifest
             .package_files
             .keys()
@@ -622,6 +623,14 @@ impl EngineService {
     }
 
     pub(crate) fn reference_library(&self, reference: &Value) -> Result<PathBuf, EngineError> {
+        self.reference_library_checked(reference, false)
+    }
+
+    fn reference_library_checked(
+        &self,
+        reference: &Value,
+        force_rehash: bool,
+    ) -> Result<PathBuf, EngineError> {
         let revision = reference
             .get("revision")
             .and_then(Value::as_str)
@@ -640,7 +649,7 @@ impl EngineService {
         ] {
             let path = resolve_relative(root, &relative)?;
             if path.is_file() {
-                if cached_file_hash(&path)? != expected {
+                if verified_file_hash(&path, force_rehash)? != expected {
                     return Err(EngineError::Rejected(
                         "共享引擎工具库内容已变化，请恢复固定版本。".into(),
                     ));
@@ -656,6 +665,15 @@ impl EngineService {
     pub(crate) async fn tool_paths(
         &self,
         package: Option<&Path>,
+        cancellation: &CancellationToken,
+    ) -> Result<Value, EngineError> {
+        self.tool_paths_checked(package, false, cancellation).await
+    }
+
+    async fn tool_paths_checked(
+        &self,
+        package: Option<&Path>,
+        force_rehash: bool,
         cancellation: &CancellationToken,
     ) -> Result<Value, EngineError> {
         let mut paths = json!({"python":self.tools.python()});
@@ -696,7 +714,7 @@ impl EngineService {
                     tokio::task::spawn_blocking(move || {
                         for (relative, expected) in checks {
                             let path = resolve_relative(&python_root, &relative)?;
-                            if cached_file_hash(&path)? != expected {
+                            if verified_file_hash(&path, force_rehash)? != expected {
                                 return Err(EngineError::Rejected(format!(
                                     "共享 Python 文件已变化：{relative}"
                                 )));
@@ -723,7 +741,7 @@ impl EngineService {
                             .ok_or_else(|| EngineError::Protocol("Siglus 工具路径无效。".into()))?,
                     )
                 } else {
-                    self.reference_library(reference)?
+                    self.reference_library_checked(reference, force_rehash)?
                 };
                 paths["engineLibrary"] = json!(library);
             }
@@ -1511,6 +1529,8 @@ fn directory_hashes(root: &Path) -> Result<BTreeMap<String, String>, EngineError
 struct FileStamp {
     len: u64,
     modified: Option<SystemTime>,
+    #[cfg(windows)]
+    creation_time: u64,
     #[cfg(unix)]
     ino: u64,
     #[cfg(unix)]
@@ -1523,9 +1543,13 @@ fn file_stamp(path: &Path) -> Result<FileStamp, EngineError> {
     let meta = fs::metadata(path)?;
     #[cfg(unix)]
     use std::os::unix::fs::MetadataExt;
+    #[cfg(windows)]
+    use std::os::windows::fs::MetadataExt;
     Ok(FileStamp {
         len: meta.len(),
         modified: meta.modified().ok(),
+        #[cfg(windows)]
+        creation_time: meta.creation_time(),
         #[cfg(unix)]
         ino: meta.ino(),
         #[cfg(unix)]
@@ -1535,12 +1559,18 @@ fn file_stamp(path: &Path) -> Result<FileStamp, EngineError> {
     })
 }
 
-/// Caches SHA-256 digests of immutable runtime/library files keyed by file metadata.
-fn cached_file_hash(path: &Path) -> Result<String, EngineError> {
+fn file_hash_cache() -> &'static Mutex<HashMap<PathBuf, (FileStamp, String)>> {
     static CACHE: OnceLock<Mutex<HashMap<PathBuf, (FileStamp, String)>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Caches SHA-256 digests of runtime/library files keyed by metadata for normal execution,
+/// while explicit integrity checks pass `force_rehash = true` to always recompute from disk.
+fn verified_file_hash(path: &Path, force_rehash: bool) -> Result<String, EngineError> {
     let stamp = file_stamp(path)?;
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Ok(guard) = cache.lock()
+    let cache = file_hash_cache();
+    if !force_rehash
+        && let Ok(guard) = cache.lock()
         && let Some((cached_stamp, digest)) = guard.get(path)
         && *cached_stamp == stamp
     {
@@ -2612,6 +2642,116 @@ with open(r['responseFile'],'w',encoding='utf-8') as output:
             .await;
         assert!(
             matches!(result,Err(EngineError::Rejected(message)) if message.contains("校验期间修改了补丁"))
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_package_verification_always_rehashes_pinned_runtime_files() {
+        let root = tempfile::tempdir().expect("fixture");
+        let tools_root = root.path().join("tools");
+        let python_root = tools_root.join("python");
+        let package = root.path().join("pkg");
+        fs::create_dir_all(&python_root).expect("python");
+        fs::create_dir_all(package.join("tools")).expect("pkg tools");
+
+        let runtime_file = python_root.join("python314.dll");
+        fs::write(&runtime_file, b"tampered-runtime-bytes").expect("runtime file");
+        let expected_digest = gamel10n_translation::files::hash_bytes(b"original-runtime-bytes");
+        let stamp = file_stamp(&runtime_file).expect("stamp");
+        file_hash_cache()
+            .lock()
+            .expect("cache")
+            .insert(runtime_file.clone(), (stamp, expected_digest.clone()));
+
+        // Normal cached lookup still trusts matching metadata, simulating preserved mtime/len.
+        assert_eq!(
+            verified_file_hash(&runtime_file, false).expect("cached"),
+            expected_digest
+        );
+
+        let revision = "0123456789abcdef0123456789abcdef01234567";
+        let library = tools_root
+            .join("engine-tools/references")
+            .join(revision)
+            .join("library.zip");
+        fs::create_dir_all(library.parent().expect("lib dir")).expect("create lib dir");
+        fs::write(&library, b"zip-content").expect("library");
+        let library_sha = hash_file(&library).expect("library sha");
+
+        write_json(
+            &python_root.join("runtime.json"),
+            &json!({
+                "archiveSha256": "archive-sha",
+                "files": { "python314.dll": expected_digest },
+            }),
+        )
+        .expect("runtime.json");
+        write_json(
+            &package.join("tools/engine-reference.json"),
+            &json!({
+                "pythonSha256": "archive-sha",
+                "pythonVersion": "3.14.10",
+                "reference": {
+                    "revision": revision,
+                    "librarySha256": library_sha,
+                },
+            }),
+        )
+        .expect("engine-reference.json");
+        fs::create_dir_all(package.join("src")).expect("pkg src");
+        let entry = package.join("src/adapter.py");
+        fs::write(&entry, "print('ok')\n").expect("adapter");
+        let entry_sha = hash_file(&entry).expect("entry sha");
+        write_json(
+            &package.join("package.json"),
+            &json!({
+                "manifestVersion": 4,
+                "protocolVersion": 1,
+                "id": "test.pkg",
+                "version": "1.0.0",
+                "packageFiles": { "src/adapter.py": entry_sha },
+            }),
+        )
+        .expect("package.json");
+
+        let service = EngineService::new(root.path(), ToolPaths::new(tools_root));
+        let error = service
+            .verify_package(&package, &CancellationToken::new())
+            .await
+            .expect_err("explicit verify_package must rehash instead of trusting stale cache");
+        assert!(
+            matches!(error, EngineError::Rejected(ref message) if message.contains("共享 Python 文件已变化")),
+            "unexpected error: {error}"
+        );
+        // Rehash also refreshed the cache with the actual on-disk digest.
+        let actual_runtime_sha = gamel10n_translation::files::hash_bytes(b"tampered-runtime-bytes");
+        assert_eq!(
+            verified_file_hash(&runtime_file, false).expect("refreshed"),
+            actual_runtime_sha
+        );
+
+        // Also verify library.zip bypasses a stale cache entry during verify_package.
+        write_json(
+            &python_root.join("runtime.json"),
+            &json!({
+                "archiveSha256": "archive-sha",
+                "files": { "python314.dll": actual_runtime_sha },
+            }),
+        )
+        .expect("updated runtime.json");
+        fs::write(&library, b"tampered-zip").expect("tampered library");
+        let lib_stamp = file_stamp(&library).expect("lib stamp");
+        file_hash_cache()
+            .lock()
+            .expect("cache")
+            .insert(library.clone(), (lib_stamp, library_sha));
+        let lib_error = service
+            .verify_package(&package, &CancellationToken::new())
+            .await
+            .expect_err("explicit verify_package must rehash library.zip");
+        assert!(
+            matches!(lib_error, EngineError::Rejected(ref message) if message.contains("共享引擎工具库内容已变化")),
+            "unexpected library error: {lib_error}"
         );
     }
 }
