@@ -10,6 +10,7 @@ export component DialogLayer inherits FocusScope {
     function dismiss() {
         if App.modal == "adapt" { App.action("adapt-cancel", ""); }
         if App.modal == "api" && App.api-testing { App.action("api-test-cancel", ""); }
+        if App.modal == "terminology-extract" && App.terminology-extracting { App.action("terminology-extract-cancel", ""); }
         App.modal = "";
         App.api-key = "";
     }
@@ -39,7 +40,7 @@ export component DialogLayer inherits FocusScope {
                 if App.modal != "engine-review": HorizontalLayout { spacing: 12px;
                     Heading {
                         horizontal-stretch: 1; vertical-alignment: center;
-                        text: App.modal == "launch" ? "游戏启动设置" : App.modal == "api" ? (App.api-copying ? "复制模型配置" : App.api-id == "" ? "新增模型配置" : "编辑模型配置") : App.modal == "patch-texts" ? "本次补丁文本" : App.modal == "install" ? "安装到游戏目录" : App.modal == "feedback" ? "任务需要处理" : App.modal-title;
+                        text: App.modal == "launch" ? "游戏启动设置" : App.modal == "api" ? (App.api-copying ? "复制模型配置" : App.api-id == "" ? "新增模型配置" : "编辑模型配置") : App.modal == "patch-texts" ? "本次补丁文本" : App.modal == "install" ? "安装到游戏目录" : App.modal == "feedback" ? "任务需要处理" : App.modal == "add-term" ? "添加术语" : App.modal == "terminology-extract" ? "自动提取术语" : App.modal-title;
                     }
                     IconButton {
                         icon: "close"; button-size: 28px; icon-size: 16px;
@@ -196,6 +197,76 @@ export component DialogLayer inherits FocusScope {
                 }
                 if App.modal == "patch": ComboBox { model: ["全部有效译文", "仅所选文本", "仅已校对译文"]; current-index <=> App.patch-scope; }
                 if App.modal == "verify-version": VerticalLayout { spacing: 8px; Caption { text: "用于验证的游戏项目"; } ComboBox { model: App.verification-project-names; current-index <=> App.verification-project-index; } }
+                if App.modal == "add-term": VerticalLayout { spacing: 10px;
+                    if App.editor-speaker != "": HorizontalLayout { spacing: 8px;
+                        ActionButton {
+                            text: "填入当前说话人：" + App.editor-speaker; icon: "plus"; compact: true;
+                            clicked => { App.term-draft-source = App.editor-speaker; }
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                    }
+                    Caption { text: "原文（不能包含 = 或换行）"; }
+                    LineEdit { text <=> App.term-draft-source; placeholder-text: "例如角色名或专有名词原文"; init => { self.focus(); } }
+                    Caption { text: "译文"; }
+                    LineEdit { text <=> App.term-draft-target; placeholder-text: "对应的目标语言译文"; }
+                }
+                if App.modal == "terminology-extract": VerticalLayout { spacing: 10px;
+                    if App.terminology-extracting: VerticalLayout { spacing: 8px;
+                        Caption { text: "正在统计高频角色名与代表性文本，并调用批量 JSON 翻译 API 提取术语…"; }
+                        ProgressIndicator { indeterminate: true; height: 3px; }
+                    }
+                    if !App.terminology-extracting && App.terminology-extract-message != "": Caption {
+                        text: App.terminology-extract-message;
+                    }
+                    if !App.terminology-extracting && App.terminology-candidates.length > 0: HorizontalLayout { spacing: 8px;
+                        ActionButton { text: "全选新词"; compact: true; clicked => { App.action("terminology-select-new", ""); } }
+                        ActionButton { text: "全选全部"; compact: true; clicked => { App.action("terminology-select-all", ""); } }
+                        ActionButton { text: "全不选"; compact: true; clicked => { App.action("terminology-select-none", ""); } }
+                        Rectangle { horizontal-stretch: 1; }
+                        Caption { text: "已选 " + App.terminology-selected-count + " / " + App.terminology-candidates.length + " 条"; vertical-alignment: center; }
+                    }
+                    if !App.terminology-extracting && App.terminology-candidates.length > 0: ScrollView {
+                        height: min(360px, root.height - 340px);
+                        horizontal-scrollbar-policy: always-off;
+                        content-width: self.visible-width;
+                        content-height: candidates-list.preferred-height;
+                        candidates-list := VerticalLayout { x: 0px; y: 0px; width: parent.visible-width; height: self.preferred-height; padding-right: 12px; spacing: 8px; alignment: start;
+                            for item[index] in App.terminology-candidates: Rectangle {
+                                height: row-content.preferred-height + 12px;
+                                background: item.selected ? Theme.tint : Theme.card;
+                                border-color: Theme.line;
+                                border-width: 1px;
+                                border-radius: 5px;
+                                row-content := HorizontalLayout {
+                                    x: 10px; y: 6px; width: parent.width - 20px; height: self.preferred-height; spacing: 10px;
+                                    VerticalLayout { alignment: center; horizontal-stretch: 0;
+                                        CheckBox {
+                                            checked: item.selected;
+                                            toggled => {
+                                                App.terminology-candidates[index].selected = self.checked;
+                                                App.action("terminology-selection-changed", "");
+                                            }
+                                        }
+                                    }
+                                    VerticalLayout { spacing: 2px; horizontal-stretch: 1; min-width: 0px; alignment: center;
+                                        Label { text: item.source; font-weight: 600; wrap: no-wrap; overflow: elide; }
+                                        Caption {
+                                            text: item.existing != ""
+                                                ? item.category + " · " + item.count + " 次 · 已有：" + item.existing
+                                                : item.category + " · " + item.count + " 次";
+                                            wrap: no-wrap; overflow: elide;
+                                        }
+                                    }
+                                    LineEdit {
+                                        width: 220px;
+                                        text: item.target;
+                                        edited(value) => { App.terminology-candidates[index].target = value; }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 if App.modal == "directory": VerticalLayout { spacing: 10px; HorizontalLayout { spacing: 8px; LineEdit { text <=> App.new-directory; horizontal-stretch: 1; } ActionButton { text: "浏览…"; icon: "folder"; clicked => { App.action("browse-data", ""); } } } CheckBox { text: "迁移现有数据（保留原目录）"; checked <=> App.migrate-data; } }
                 HorizontalLayout {
                     spacing: 8px;
@@ -221,9 +292,13 @@ export component DialogLayer inherits FocusScope {
                             : App.modal == "remove" ? "确认移除"
                             : App.modal == "restore" ? "恢复原版"
                             : App.modal == "api" ? "保存配置"
+                            : App.modal == "add-term" ? "保存术语"
+                            : App.modal == "terminology-extract" ? "合并到术语表（" + App.terminology-selected-count + " 条）"
                             : App.modal == "workflow-settings" ? "保存"
                             : root.workflow-active ? "开始自动汉化" : "确认";
                         enabled: (App.modal != "api" || !App.api-testing)
+                            && (App.modal != "add-term" || (App.term-draft-source != "" && App.term-draft-target != ""))
+                            && (App.modal != "terminology-extract" || (!App.terminology-extracting && App.terminology-selected-count > 0))
                             && (App.modal != "install" || App.can-install-patch)
                             && (App.modal != "project-adapter" || (App.adapter-index >= 0 && App.adapter-index < App.adapter-keys.length && !App.busy && !App.review-running))
                             && (App.modal != "cleanup" || (!App.cleanup-loading && App.cleanup-selected))

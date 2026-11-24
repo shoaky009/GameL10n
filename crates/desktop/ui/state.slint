@@ -6,6 +6,7 @@ export struct TextRow { id: string, location: string, source: string, translatio
 export struct NamedRow { id: string, name: string, detail: string, enabled: bool }
 export struct EngineRow { id: string, name: string, detail: string, enabled: bool, selected: bool }
 export struct TermRow { source: string, target: string }
+export struct TermCandidateRow { source: string, target: string, category: string, count: int, existing: string, selected: bool }
 export struct TokenDisplay { text: string, exact: string }
 export struct CleanupRow { id: string, title: string, description: string, size: string, selected: bool }
 export struct MetricGroupRow { label: string, detail: string, value: string, fraction: float }
@@ -249,6 +250,16 @@ export global App {
     in-out property <string> language: "简体中文";
     in-out property <string> style: "自然流畅，保留人物语气、情绪和原文含义。";
     in-out property <string> terminology;
+    in-out property <int> terminology-count;
+    in-out property <bool> has-json-batch-api;
+    in-out property <bool> terminology-extracting;
+    in-out property <string> terminology-extract-message;
+    in-out property <[TermCandidateRow]> terminology-candidates;
+    in-out property <int> terminology-selected-count;
+    in-out property <string> term-draft-source;
+    in-out property <string> term-draft-target;
+    in-out property <string> editor-speaker;
+    in-out property <int> terminology-affected-count;
     in-out property <int> batch-size: 24;
     in-out property <int> concurrency: 2;
     in-out property <bool> isolation-supported;

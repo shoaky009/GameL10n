@@ -153,7 +153,33 @@ export component ProjectSettings inherits SettingsForm {
             Heading { text: "翻译语言与术语"; font-size: 17px; }
             Caption { text: "目标语言"; } LineEdit { text <=> App.language; }
             Caption { text: "翻译风格"; } TextEdit { text <=> App.style; height: 70px; }
-            Caption { text: "术语表（每行：原文=译文）"; } TextEdit { text <=> App.terminology; height: 120px; }
+            HorizontalLayout { spacing: 8px;
+                Caption {
+                    text: App.terminology-count > 0 ? "术语表（每行：原文=译文 · 共 " + App.terminology-count + " 条）" : "术语表（每行：原文=译文）";
+                    vertical-alignment: center;
+                }
+                Rectangle { horizontal-stretch: 1; }
+                ActionButton {
+                    text: "自动提取术语…"; icon: "sparkles"; compact: true;
+                    enabled: !App.busy && App.recognition != "" && App.has-json-batch-api && !App.terminology-extracting;
+                    tooltip: App.has-json-batch-api ? "使用批量 JSON 翻译 API 提取角色名与专有名词" : "当前项目未配置批量 JSON 格式的翻译 API，可手动添加术语";
+                    clicked => { App.action("terminology-extract", ""); }
+                }
+            }
+            TextEdit { text <=> App.terminology; height: 120px; }
+            if App.terminology-affected-count > 0: Rectangle {
+                height: settings-affected-row.preferred-height + 12px;
+                background: Theme.tint; border-radius: 5px;
+                settings-affected-row := HorizontalLayout {
+                    x: 10px; y: 6px; width: parent.width - 20px; height: self.preferred-height; spacing: 8px;
+                    Label {
+                        text: "术语表已更新：有 " + App.terminology-affected-count + " 条已译文本包含变更的术语。";
+                        font-size: 13px; horizontal-stretch: 1; min-width: 0px; vertical-alignment: center;
+                    }
+                    ActionButton { text: "去工作台选中"; icon: "check-square"; compact: true; clicked => { App.action("terminology-select-affected", ""); } }
+                    IconButton { icon: "close"; button-size: 26px; icon-size: 14px; tooltip: "关闭提示"; clicked => { App.action("terminology-dismiss-affected", ""); } }
+                }
+            }
             HorizontalLayout { spacing: 16px;
                 Label { text: "每批文本数"; horizontal-stretch: 0; vertical-alignment: center; }
                 SpinBox { value <=> App.batch-size; minimum: 1; maximum: 80; width: 100px; horizontal-stretch: 0; }

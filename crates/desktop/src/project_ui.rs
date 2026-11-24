@@ -1352,6 +1352,7 @@ pub async fn refresh_project(ctx: &Context, id: &str, opening: bool) -> Result<(
     if opening {
         settings_ui::refresh(ctx, Some(id)).await?;
     }
+    crate::terminology_ui::sync_affected_count(ctx, id);
     refresh_patch(ctx, id).await?;
     Ok(())
 }

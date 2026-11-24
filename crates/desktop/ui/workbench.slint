@@ -65,6 +65,12 @@ export component Workbench inherits FocusScope {
             horizontal-stretch: 1; min-width: 0px; vertical-alignment: center; overflow: elide; wrap: no-wrap;
         }
         ActionButton {
+            text: "提取术语"; icon: "sparkles"; compact: true;
+            enabled: !App.busy && App.has-workbench-text && App.has-json-batch-api && !App.terminology-extracting;
+            tooltip: App.has-json-batch-api ? "使用批量 JSON 翻译 API 自动提取角色名与术语" : "需在项目翻译链中配置批量 JSON 格式的 API";
+            clicked => { App.action("terminology-extract", ""); }
+        }
+        ActionButton {
             text: "生成补丁"; icon: "package"; compact: true;
             enabled: App.selected-texts > 0 && root.selection-enabled && !App.busy;
             tooltip: "使用所选文本生成补丁，缺少的译文会先自动翻译。";
@@ -132,6 +138,30 @@ export component Workbench inherits FocusScope {
                 tooltip: "取消全部选择";
                 enabled: root.selection-enabled;
                 clicked => { App.action("select-clear", ""); }
+            }
+        }
+    }
+    if App.terminology-affected-count > 0: Rectangle {
+        height: affected-banner.preferred-height + 10px;
+        background: Theme.tint;
+        border-color: Theme.accent.with-alpha(0.3);
+        border-width: 1px;
+        border-radius: 5px;
+        affected-banner := HorizontalLayout {
+            x: 10px; y: 5px; width: parent.width - 20px; height: self.preferred-height; spacing: 8px;
+            Label {
+                text: "术语表已更新：有 " + App.terminology-affected-count + " 条已译文本包含变更的术语。";
+                font-size: 13px; horizontal-stretch: 1; min-width: 0px; vertical-alignment: center;
+            }
+            ActionButton {
+                text: "选中受影响文本"; icon: "check-square"; compact: true;
+                enabled: root.selection-enabled;
+                clicked => { App.action("terminology-select-affected", ""); }
+            }
+            IconButton {
+                icon: "close"; button-size: 26px; icon-size: 14px;
+                tooltip: "关闭提示";
+                clicked => { App.action("terminology-dismiss-affected", ""); }
             }
         }
     }
@@ -285,9 +315,15 @@ export component Workbench inherits FocusScope {
                         }
                     }
                 }
-                HorizontalLayout {
+                HorizontalLayout { spacing: 6px;
                     Label { text: "译文"; font-weight: 600; vertical-alignment: center; }
                     Rectangle { horizontal-stretch: 1; }
+                    ActionButton {
+                        text: "添加术语"; icon: "plus"; subtle: true; compact: true;
+                        tooltip: "将人名或专有名词快速添加到术语表";
+                        enabled: root.editor-ready;
+                        clicked => { App.action("add-term-dialog", ""); }
+                    }
                     CopyButton { label: "复制译文"; value: root.editor-ready ? App.editor-text : ""; copy(value) => { clipboard.copy-text(value); } }
                 }
                 translation-editor := TextEdit { text <=> App.editor-text; min-height: 100px; vertical-stretch: 2; enabled: root.editor-ready; read-only: !App.editor-editable; edited => { App.editor-dirty = true; App.action("edit-changed", ""); } }

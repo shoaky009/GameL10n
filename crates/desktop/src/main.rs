@@ -7,6 +7,7 @@ mod metrics_ui;
 mod project_ui;
 mod recognition_ui;
 mod settings_ui;
+mod terminology_ui;
 mod time_ui;
 mod token_ui;
 #[cfg(test)]
@@ -52,6 +53,8 @@ struct Arguments {
 #[derive(Default)]
 pub struct UiSession {
     pub api_test: Option<gamel10n_core::CancellationToken>,
+    pub terminology_extract: Option<gamel10n_core::CancellationToken>,
+    pub terminology_affected: BTreeMap<String, Vec<String>>,
     pub engine_selection: BTreeSet<String>,
     pub engine_selection_anchor: Option<String>,
     pub engine_visible_ids: Vec<String>,
@@ -260,6 +263,9 @@ pub struct UiInput {
     pub language: String,
     pub style: String,
     pub terminology: String,
+    pub term_draft_source: String,
+    pub term_draft_target: String,
+    pub terminology_selected: Vec<(String, String)>,
     pub batch_size: i32,
     pub concurrency: i32,
     pub isolate_llm_execution: bool,
@@ -372,6 +378,17 @@ impl UiInput {
             language: a.get_language().into(),
             style: a.get_style().into(),
             terminology: a.get_terminology().into(),
+            term_draft_source: a.get_term_draft_source().into(),
+            term_draft_target: a.get_term_draft_target().into(),
+            terminology_selected: if a.get_modal().as_str() == "terminology-extract" {
+                a.get_terminology_candidates()
+                    .iter()
+                    .filter(|row| row.selected)
+                    .map(|row| (row.source.to_string(), row.target.to_string()))
+                    .collect()
+            } else {
+                Vec::new()
+            },
             batch_size: a.get_batch_size(),
             concurrency: a.get_concurrency(),
             isolate_llm_execution: a.get_isolate_llm_execution(),
@@ -497,6 +514,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             window_state.capture(ui.window());
             let mut input = UiInput::capture(&ui, String::new());
             settings_ui::cancel_api_test(&ctx);
+            terminology_ui::cancel_extraction(&ctx);
             ctx.prepare_action(&ui, "close", &mut input);
             ui.global::<App>().set_ready(false);
             ui.global::<App>()
@@ -597,6 +615,14 @@ fn install_actions(ui: &MainWindow, context: &Context) {
         } else {
             None
         };
+        let pending_terminology = if action == "terminology-extract" {
+            let Some(pending) = terminology_ui::PendingTerminologyExtract::start(&ctx, &ui) else {
+                return;
+            };
+            Some(pending)
+        } else {
+            None
+        };
         ctx.prepare_action(&ui, &action, &mut input);
         let ctx = ctx.clone();
         ctx.active_actions.fetch_add(1, Ordering::AcqRel);
@@ -604,6 +630,7 @@ fn install_actions(ui: &MainWindow, context: &Context) {
             let _pending = PendingAction(ctx.active_actions.clone());
             let _addition = pending_addition;
             let _api_test = pending_api_test;
+            let _terminology = pending_terminology;
             if let Err(error) = dispatch(&ctx, &action, &input).await {
                 let app = ctx.app().await;
                 let message = error.to_string();
@@ -694,6 +721,8 @@ async fn dispatch(ctx: &Context, action: &str, input: &UiInput) -> Result<(), Co
             }
             "adapt" => "adapt",
             "workflow-settings" => "workflow-save",
+            "add-term" => "add-term-save",
+            "terminology-extract" => "terminology-apply",
             "remove" => "remove",
             "patch" => "generate-patch",
             "directory" => "switch-directory",
@@ -714,7 +743,10 @@ async fn dispatch(ctx: &Context, action: &str, input: &UiInput) -> Result<(), Co
             }
             _ => return Ok(()),
         };
-        if !matches!(input.argument.as_str(), "launch" | "workflow-settings") {
+        if !matches!(
+            input.argument.as_str(),
+            "launch" | "workflow-settings" | "add-term" | "terminology-extract"
+        ) {
             ctx.update(|ui| ui.global::<App>().set_modal("".into()));
         }
         (action, &confirmed)
@@ -723,9 +755,11 @@ async fn dispatch(ctx: &Context, action: &str, input: &UiInput) -> Result<(), Co
     };
     if action == "switch-directory" {
         settings_ui::cancel_api_test(ctx);
+        terminology_ui::cancel_extraction(ctx);
     }
     if metrics_ui::handle(ctx, action, input).await?
         || launch_ui::handle(ctx, action, input).await?
+        || terminology_ui::handle(ctx, action, input).await?
         || settings_ui::handle(ctx, action, input).await?
         || catalog_ui::handle(ctx, action, input).await?
         || workbench_ui::handle(ctx, action, input).await?

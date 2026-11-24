@@ -1043,6 +1043,42 @@ impl Application {
         }
         Ok(result)
     }
+
+    pub(crate) async fn translated_unit_ids_matching_terms(
+        &self,
+        id: &str,
+        terms: &[String],
+    ) -> Result<Vec<String>, CoreError> {
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
+        let Some(analysis) = self.cached_analysis(id).await? else {
+            return Ok(Vec::new());
+        };
+        let (analysis, workbench) = self.workbench_for(id, Some(analysis)).await?;
+        let workbench = workbench.lock().await;
+        let mut affected = Vec::new();
+        for (index, unit) in analysis.extraction().units.iter().enumerate() {
+            let Some(row) = workbench.rows.get(&index) else {
+                continue;
+            };
+            if row.text().is_none() {
+                continue;
+            }
+            if terms.iter().any(|term| {
+                !term.is_empty()
+                    && (unit.source_text.contains(term.as_str())
+                        || unit.context.contains(term.as_str())
+                        || unit
+                            .speaker
+                            .as_deref()
+                            .is_some_and(|speaker| speaker.contains(term.as_str())))
+            }) {
+                affected.push(unit.id.clone());
+            }
+        }
+        Ok(affected)
+    }
 }
 
 #[cfg(test)]

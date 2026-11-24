@@ -159,6 +159,13 @@ pub async fn refresh(ctx: &Context, project_id: Option<&str>) -> Result<(), Core
         .map(|i| i as i32)
         .unwrap_or(-1);
     let ids = config.project_translation_chain(&ps);
+    let has_json_batch_api = ids.iter().any(|profile_id| {
+        config
+            .profiles
+            .iter()
+            .find(|profile| profile.id == *profile_id)
+            .is_some_and(|profile| profile.translation_format != "PlainText")
+    });
     let chain = chain_rows(&settings, &ids);
     let apis = config
         .profiles
@@ -241,12 +248,13 @@ pub async fn refresh(ctx: &Context, project_id: Option<&str>) -> Result<(), Core
                 .unwrap_or("自然流畅，保留人物语气、情绪和原文含义。")
                 .into(),
         );
-        a.set_terminology(
-            ps.get("terminology")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .into(),
-        );
+        let terminology = ps.get("terminology").and_then(Value::as_str).unwrap_or("");
+        let terminology_count =
+            gamel10n_core::workbench::parse_terminology(&Value::String(terminology.to_owned()))
+                .len() as i32;
+        a.set_terminology(terminology.into());
+        a.set_terminology_count(terminology_count);
+        a.set_has_json_batch_api(has_json_batch_api);
         a.set_batch_size(ps.get("batchSize").and_then(Value::as_i64).unwrap_or(24) as i32);
     });
     Ok(())
@@ -577,9 +585,15 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                 refresh(ctx, None).await?;
             } else {
                 let updates = project_settings_updates(action, input, analysis, chain)?;
-                host.save_project_settings(&input.project_id, updates)
+                let saved = host
+                    .save_project_settings_with_terminology_impact(&input.project_id, updates)
                     .await?;
                 refresh(ctx, Some(&input.project_id)).await?;
+                if let Some(saved) = saved
+                    && !saved.changed_terms.is_empty()
+                {
+                    crate::terminology_ui::apply_save_result(ctx, &input.project_id, saved);
+                }
             }
             if action != "save-project-settings" {
                 let original = input.clone();

@@ -18,6 +18,7 @@ mod project_views;
 pub mod projects;
 pub mod relocation;
 pub mod settings;
+pub mod terminology;
 pub mod translation_tasks;
 pub mod workbench;
 pub mod workflow;

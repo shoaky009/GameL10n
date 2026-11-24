@@ -120,6 +120,7 @@ pub fn restore_view(app: &App<'_>, view: &WorkbenchView) {
 
 pub(crate) fn clear_editor(app: &App<'_>) {
     app.set_editor_id("".into());
+    app.set_editor_speaker("".into());
     app.set_editor_text("".into());
     app.set_editor_dirty(false);
     app.set_editor_location("".into());
@@ -440,6 +441,7 @@ async fn render_editor(ctx: &Context, input: &UiInput, editor_id: &str) -> Resul
         a.set_editor_origin(origin_code(&row));
         a.set_editor_invalid(!row.issues.is_empty());
         a.set_editor_source(row.unit.source_text.into());
+        a.set_editor_speaker(row.unit.speaker.unwrap_or_default().into());
         a.set_editor_context(context.into());
         a.set_editor_text(row.text.unwrap_or_default().into());
         a.set_editor_draft(row.model_text.unwrap_or_default().into());
