@@ -322,6 +322,7 @@ struct TaskEntry {
     active: Option<Arc<()>>,
     preview: Option<Arc<CachedAnalysis>>,
     translation: Option<PreviewTranslation>,
+    engine_progress: Option<serde_json::Value>,
     state: TaskState,
     writes_review_evidence: bool,
     terminal_persisted: bool,
@@ -544,6 +545,7 @@ impl Application {
                 TaskEntry {
                     preview: None,
                     translation: None,
+                    engine_progress: None,
                     state: saved.state.clone(),
                     writes_review_evidence: false,
                     active: None,
@@ -777,6 +779,23 @@ impl Application {
             task.is_some_and(|entry| entry.preview.is_some()),
             task.and_then(|entry| entry.translation.as_ref().map(|run| run.status.clone())),
         )
+    }
+
+    pub(crate) async fn set_task_engine_progress(&self, id: &str, snapshot: serde_json::Value) {
+        let mut tasks = self.tasks.lock().await;
+        if let Some(entry) = tasks.get_mut(id)
+            && entry.state.running
+        {
+            entry.engine_progress = Some(snapshot);
+        }
+    }
+
+    pub(crate) async fn running_engine_progress(&self, id: &str) -> Option<serde_json::Value> {
+        let tasks = self.tasks.lock().await;
+        tasks
+            .get(id)
+            .filter(|entry| entry.state.running)
+            .and_then(|entry| entry.engine_progress.clone())
     }
 
     pub(crate) async fn begin_preview_translation(
@@ -1273,6 +1292,7 @@ impl Application {
                 active: Some(active),
                 preview: None,
                 translation,
+                engine_progress: None,
                 state: state.clone(),
                 writes_review_evidence,
                 terminal_persisted: false,

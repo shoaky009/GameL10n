@@ -124,9 +124,15 @@ impl Application {
         let saved = line.clone();
         let _guard = self.lock_log(id).await;
         tokio::task::spawn_blocking(move || -> Result<(), CoreError> {
-            fs::create_dir_all(directory)?;
-            let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-            writeln!(file, "{saved}")?;
+            fs::create_dir_all(&directory)
+                .map_err(|error| gamel10n_translation::files::io_error(&directory, error))?;
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .map_err(|error| gamel10n_translation::files::io_error(&path, error))?;
+            writeln!(file, "{saved}")
+                .map_err(|error| gamel10n_translation::files::io_error(&path, error))?;
             Ok(())
         })
         .await??;

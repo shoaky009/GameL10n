@@ -78,6 +78,7 @@ impl Application {
     pub async fn project_snapshot(&self, id: &str) -> Result<ProjectSnapshot, CoreError> {
         let project = self.open_project(id).await?;
         let (task, translation_preview, preview_translation) = self.project_task_snapshot(id).await;
+        let live_progress = self.running_engine_progress(id).await;
         let directory = self.project_directory(id)?;
         tokio::task::spawn_blocking(move || {
             let mut warnings = Vec::new();
@@ -96,7 +97,8 @@ impl Application {
                     }
                 }
             };
-            let progress = optional("adaptation-progress.json", "适配进度");
+            let progress =
+                live_progress.unwrap_or_else(|| optional("adaptation-progress.json", "适配进度"));
             let adaptation = optional("adaptation-result.json", "适配详情");
             let review = optional("engine-review-result.json", "经验总结");
             let can_resume_adaptation = if task.as_ref().is_some_and(|task| task.running) {
@@ -218,5 +220,39 @@ mod tests {
         assert_eq!(snapshot.project.id, project.id);
         assert_eq!(snapshot.warnings.len(), 1);
         assert!(snapshot.adaptation.is_null());
+    }
+
+    #[tokio::test]
+    async fn running_task_progress_is_served_from_memory_without_reading_progress_file() {
+        let root = tempfile::tempdir().unwrap();
+        let game = root.path().join("game");
+        std::fs::create_dir(&game).unwrap();
+        let app = Application::open(root.path().join("data"), &crate::ToolPaths::new("missing"))
+            .await
+            .unwrap();
+        let project = app.add_project(&game).await.unwrap();
+        let progress_path = app
+            .project_directory(&project.id)
+            .unwrap()
+            .join("adaptation-progress.json");
+        std::fs::write(&progress_path, "broken json").unwrap();
+
+        let _guard = app.begin(&project.id, "adapt", "正在适配").await.unwrap();
+        app.set_task_engine_progress(
+            &project.id,
+            serde_json::json!({"stage": "验收原文回填", "message": "正在检查原文回填。", "operation": "adapt"}),
+        )
+        .await;
+
+        let snapshot = app.project_snapshot(&project.id).await.unwrap();
+        assert_eq!(snapshot.progress["stage"], "验收原文回填");
+        assert!(snapshot.warnings.is_empty());
+
+        app.finish(&project.id, "adapt", Ok("完成".into()))
+            .await
+            .unwrap();
+        std::fs::write(&progress_path, r#"{"stage":"已完成","operation":"adapt"}"#).unwrap();
+        let after = app.project_snapshot(&project.id).await.unwrap();
+        assert_eq!(after.progress["stage"], "已完成");
     }
 }

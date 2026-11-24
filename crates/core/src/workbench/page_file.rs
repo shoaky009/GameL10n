@@ -231,7 +231,7 @@ fn read_markers(file: &mut File, game: &Path) -> Result<(), CoreError> {
 }
 fn publish(temp: NamedTempFile, path: &Path) -> Result<(), CoreError> {
     temp.as_file().sync_all()?;
-    temp.persist(path).map_err(|e| e.error)?;
+    gamel10n_translation::files::persist_temp(temp, path)?;
     Ok(())
 }
 impl Pages {

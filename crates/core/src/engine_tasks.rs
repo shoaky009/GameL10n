@@ -1590,6 +1590,9 @@ impl Application {
         operation: &str,
         mut progress: EngineProgress,
     ) -> Result<(), CoreError> {
+        let mut snapshot = json!(&progress);
+        snapshot["operation"] = json!(operation);
+        self.set_task_engine_progress(id, snapshot.clone()).await;
         if let Some(preview) = progress.translation_preview.take() {
             self.publish_translation_preview(id, preview).await;
         }
@@ -1606,24 +1609,19 @@ impl Application {
             )
             .await;
         }
-        let mut snapshot = json!(&progress);
-        snapshot["operation"] = json!(operation);
         let progress_path = self.project_directory(id)?.join("adaptation-progress.json");
-        tokio::task::spawn_blocking(move || -> Result<(), CoreError> {
-            if let Some(parent) = progress_path.parent() {
-                fs::create_dir_all(parent)?;
+        // Ephemeral progress snapshots must not abort an active task if briefly locked on Windows.
+        match tokio::task::spawn_blocking(move || write_json(&progress_path, &snapshot)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                self.log_task_message(id, &format!("进度快照暂未写入（任务继续）：{error}"))
+                    .await;
             }
-            let bytes = serde_json::to_vec(&snapshot)
-                .map_err(|error| CoreError::InvalidData(error.to_string()))?;
-            let mut temp = tempfile::NamedTempFile::new_in(
-                progress_path.parent().unwrap_or_else(|| Path::new(".")),
-            )?;
-            use std::io::Write;
-            temp.write_all(&bytes)?;
-            temp.persist(&progress_path).map_err(|error| error.error)?;
-            Ok(())
-        })
-        .await??;
+            Err(error) => {
+                self.log_task_message(id, &format!("进度快照暂未写入（任务继续）：{error}"))
+                    .await;
+            }
+        }
         let _ = self.events.send(crate::AppEvent::EngineProgress {
             project_id: id.into(),
             progress,

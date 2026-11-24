@@ -29,8 +29,53 @@ pub fn io_error(path: &Path, source: io::Error) -> FileError {
     }
 }
 
+fn is_transient_windows_error(error: &io::Error) -> bool {
+    #[cfg(windows)]
+    {
+        matches!(error.raw_os_error(), Some(5 | 32))
+            || error.kind() == io::ErrorKind::PermissionDenied
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = error;
+        false
+    }
+}
+
+/// Replaces `path` atomically, retrying briefly on transient Windows sharing/access conflicts.
+pub fn persist_temp(mut temp: NamedTempFile, path: &Path) -> Result<(), FileError> {
+    const DELAYS_MS: [u64; 8] = [5, 10, 15, 25, 40, 60, 80, 100];
+    for delay in DELAYS_MS {
+        match temp.persist(path) {
+            Ok(_) => return Ok(()),
+            Err(error) if is_transient_windows_error(&error.error) => {
+                temp = error.file;
+                std::thread::sleep(std::time::Duration::from_millis(delay));
+            }
+            Err(error) => return Err(io_error(path, error.error)),
+        }
+    }
+    temp.persist(path)
+        .map(|_| ())
+        .map_err(|error| io_error(path, error.error))
+}
+
+fn open_for_read(path: &Path) -> Result<File, FileError> {
+    const DELAYS_MS: [u64; 3] = [5, 15, 30];
+    for delay in DELAYS_MS {
+        match File::open(path) {
+            Ok(file) => return Ok(file),
+            Err(error) if is_transient_windows_error(&error) => {
+                std::thread::sleep(std::time::Duration::from_millis(delay));
+            }
+            Err(error) => return Err(io_error(path, error)),
+        }
+    }
+    File::open(path).map_err(|error| io_error(path, error))
+}
+
 pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T, FileError> {
-    let input = File::open(path).map_err(|error| io_error(path, error))?;
+    let input = open_for_read(path)?;
     serde_json::from_reader(BufReader::new(input)).map_err(|source| FileError::Json {
         path: path.display().to_string(),
         source,
@@ -53,9 +98,7 @@ pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), FileError>
     temp.as_file()
         .sync_all()
         .map_err(|error| io_error(path, error))?;
-    temp.persist(path)
-        .map_err(|error| io_error(path, error.error))?;
-    Ok(())
+    persist_temp(temp, path)
 }
 
 /// A newline commits one record. An interrupted final record is ignored; complete bad records fail.
@@ -198,4 +241,28 @@ fn hex_digest(bytes: &[u8]) -> String {
         output.push(HEX[(byte & 15) as usize] as char);
     }
     output
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn write_json_retries_while_target_is_briefly_open_for_reading() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("adaptation-progress.json");
+        write_json(&path, &serde_json::json!({"stage": "initial"})).unwrap();
+
+        let reader = File::open(&path).unwrap();
+        let handle = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            drop(reader);
+        });
+
+        write_json(&path, &serde_json::json!({"stage": "updated"})).unwrap();
+        handle.join().unwrap();
+
+        let value: serde_json::Value = read_json(&path).unwrap();
+        assert_eq!(value["stage"], "updated");
+    }
 }
