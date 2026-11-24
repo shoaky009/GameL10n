@@ -768,7 +768,7 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             assert_eq!(app.list_projects("").await.len(), 2);
             app.open_project(&other.id).await.unwrap();
-            app.begin(&other.id, "translate", "test").await.unwrap();
+            let _task = app.begin(&other.id, "translate", "test").await.unwrap();
             app.finish(&other.id, "translate", Ok("done".into()))
                 .await
                 .unwrap();

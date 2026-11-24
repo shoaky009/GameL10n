@@ -680,7 +680,8 @@ mod tests {
             .await
             .unwrap();
         let project = app.add_project(&game).await.unwrap();
-        app.begin(&project.id, "adapt", "Preparing adapter")
+        let _task = app
+            .begin(&project.id, "adapt", "Preparing adapter")
             .await
             .unwrap();
         let provider = OpenAiProvider::new(gamel10n_translation::provider::ProviderSettings {
@@ -756,6 +757,8 @@ mod tests {
                     && record.api.requests == 0)
         );
         let directory = app.data_directory().to_owned();
+        drop(token);
+        drop(_task);
         drop(app);
         let reopened = Application::open(directory, &tools).await.unwrap();
         assert_eq!(

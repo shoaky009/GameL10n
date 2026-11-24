@@ -1202,7 +1202,7 @@ mod tests {
         );
         app.undo_translation_edit(&id, &unit.id).await.unwrap();
 
-        app.begin(&id, "translate", "翻译中").await.unwrap();
+        let _task = app.begin(&id, "translate", "翻译中").await.unwrap();
         let (_, workbench) = app.workbench(&id).await.unwrap();
         assert_eq!(workbench.lock().await.rows.len(), 2);
         let missing = WorkbenchFilter {
@@ -1334,7 +1334,7 @@ mod tests {
             BTreeMap::from([("2".into(), "再见".into())])
         );
 
-        app.begin(&id, "translate", "翻译中").await.unwrap();
+        let _task = app.begin(&id, "translate", "翻译中").await.unwrap();
         let (_, workbench) = app.workbench(&id).await.unwrap();
         workbench.lock().await.apply_progress(
             &gamel10n_translation::execution::TranslationProgress {

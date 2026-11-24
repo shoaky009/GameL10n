@@ -665,7 +665,7 @@ mod tests {
         family["versionLifecycle"]["imported"]["requiresConfirmation"] = json!(false);
         write_json(&state_path, &state).unwrap();
 
-        app.begin(&other, "translate", "running").await.unwrap();
+        let _task = app.begin(&other, "translate", "running").await.unwrap();
         let patch = patch(&app, &id, "v2");
         app.record_patch_feedback(&id, &patch, "passed", "")
             .await
@@ -698,6 +698,7 @@ mod tests {
             .unwrap();
         assert!(reopened.clean_replaced_adapters().await.is_err());
         assert!(old.is_dir());
+        std::mem::forget(_task); // The previous writer exited with an active task.
         drop(app);
         reopened.clean_replaced_adapters().await.unwrap();
         assert!(!old.exists());
@@ -762,7 +763,7 @@ mod tests {
         pin(&app, &other, "v2").await;
         app.clean_replaced_adapters().await.unwrap();
         assert!(old.is_dir(), "publication alone is not user confirmation");
-        app.begin(&other, "translate", "running").await.unwrap();
+        let _task = app.begin(&other, "translate", "running").await.unwrap();
         let confirmed_patch = patch(&app, &id, "v2");
         app.record_patch_feedback(&id, &confirmed_patch, "passed", "显示正常")
             .await

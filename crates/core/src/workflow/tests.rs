@@ -186,7 +186,7 @@ async fn branches_waiting_failure_and_restart_release_project_ownership() {
     assert!(error.to_string().contains("尚未通过"));
     assert_eq!(app.task_state(&id).await.unwrap().succeeded, Some(false));
     // A persisted in-flight stage becomes interrupted, without resuming external actions.
-    app.begin(&id, "workflow", "running").await.unwrap();
+    let _task = app.begin(&id, "workflow", "running").await.unwrap();
     app.set_workflow_progress(
         &id,
         WorkflowProgress {
@@ -198,6 +198,7 @@ async fn branches_waiting_failure_and_restart_release_project_ownership() {
     )
     .await
     .unwrap();
+    std::mem::forget(_task); // Simulate a process exit during the persisted stage.
     drop(app);
     let app = Application::open(
         root.path().join("data"),

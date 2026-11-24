@@ -263,6 +263,7 @@ mod tests {
         app.finish(&id, "adapt", Ok("识别完成。".into()))
             .await
             .unwrap();
+        drop(recognition);
         drop(app);
 
         let app = Application::open(
@@ -332,7 +333,7 @@ mod tests {
         let mut same = analysis.extraction.units[1].clone();
         same.id = "same-input".into();
         analysis.extraction.units.push(same);
-        app.begin(&id, "adapt", "识别资源").await.unwrap();
+        let _task = app.begin(&id, "adapt", "识别资源").await.unwrap();
         app.publish_translation_preview(&id, Arc::new(analysis.extraction.clone()))
             .await;
 
@@ -396,7 +397,7 @@ mod tests {
     #[tokio::test]
     async fn workflow_can_browse_early_text_and_owns_its_translation_steps() {
         let (_root, app, id, _) = trial_fixture().await;
-        app.begin(&id, "workflow", "自动汉化").await.unwrap();
+        let _task = app.begin(&id, "workflow", "自动汉化").await.unwrap();
         let mut early = app
             .cached_analysis(&id)
             .await
@@ -789,6 +790,7 @@ impl Application {
             self.workbench_revision
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             cache.remove(id);
+            drop(cache);
             self.invalidate_paged_workbench(id);
             result.map_err(|error| match error {
                 gamel10n_translation::execution::ExecutionError::Cancelled => {

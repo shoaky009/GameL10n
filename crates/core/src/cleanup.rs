@@ -567,7 +567,8 @@ mod tests {
         let project = app.add_project(&game).await.unwrap();
         let root = app.project_directory(&project.id).unwrap();
         write(&root, "adaptation/current/work/data", "keep");
-        app.begin(&project.id, "translate", "translating")
+        let _task = app
+            .begin(&project.id, "translate", "translating")
             .await
             .unwrap();
         assert!(matches!(

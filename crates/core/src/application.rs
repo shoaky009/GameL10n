@@ -246,12 +246,80 @@ pub struct PreviewTranslationStatus {
     pub usage: gamel10n_translation::TokenUsage,
 }
 
+#[derive(Clone)]
+pub(crate) enum TaskKind {
+    Project(String),
+    Preview,
+    Review,
+}
+
+#[must_use = "keep the task guard until its terminal state is recorded"]
+pub(crate) struct TaskGuard<'a> {
+    app: &'a Application,
+    id: String,
+    kind: TaskKind,
+    active: Weak<()>,
+    runtime: tokio::runtime::Handle,
+    token: CancellationToken,
+}
+
+impl<'a> TaskGuard<'a> {
+    pub(crate) fn new(
+        app: &'a Application,
+        id: &str,
+        kind: TaskKind,
+        active: &Arc<()>,
+        token: CancellationToken,
+    ) -> Self {
+        Self {
+            app,
+            id: id.into(),
+            kind,
+            active: Arc::downgrade(active),
+            runtime: tokio::runtime::Handle::current(),
+            token,
+        }
+    }
+}
+
+impl std::ops::Deref for TaskGuard<'_> {
+    type Target = CancellationToken;
+    fn deref(&self) -> &CancellationToken {
+        &self.token
+    }
+}
+
+impl Drop for TaskGuard<'_> {
+    fn drop(&mut self) {
+        if self.active.strong_count() == 0 {
+            return;
+        }
+        self.token.cancel();
+        let app = self.app.clone();
+        let id = self.id.clone();
+        let kind = self.kind.clone();
+        self.runtime.spawn(async move {
+            let reason = "任务已中断，已保存的结果可继续使用。".to_owned();
+            let result = match kind {
+                TaskKind::Project(operation) => app.finish(&id, &operation, Err(reason)).await,
+                TaskKind::Preview => app.finish_preview_translation(&id, Err(reason)).await,
+                TaskKind::Review => app.finish_review(&id, Err(reason)).await,
+            };
+            if let Err(error) = result {
+                app.report_task_warning(&id, &error.to_string());
+            }
+        });
+    }
+}
+
 struct PreviewTranslation {
+    _active: Arc<()>,
     cancellation: CancellationToken,
     status: PreviewTranslationStatus,
 }
 
 struct TaskEntry {
+    active: Option<Arc<()>>,
     preview: Option<Arc<CachedAnalysis>>,
     translation: Option<PreviewTranslation>,
     state: TaskState,
@@ -300,7 +368,8 @@ pub struct Application {
     pub(crate) session_keys: Arc<Mutex<HashMap<String, String>>>,
     pub(crate) tools: ToolPaths,
     pub(crate) workbenches: Arc<Mutex<HashMap<String, Arc<Mutex<crate::workbench::Workbench>>>>>,
-    pub(crate) paged_workbench: Arc<std::sync::Mutex<Option<crate::workbench::paged::Session>>>,
+    pub(crate) paged_workbench:
+        Arc<std::sync::Mutex<Option<crate::workbench::paged::CachedProject>>>,
     pub(crate) workbench_revision: Arc<AtomicU64>,
     pub(crate) translation_scheduler: Arc<crate::translation_tasks::TranslationScheduler>,
     pub(crate) game_check_errors: Arc<Mutex<Vec<crate::game_check::protocol::ErrorWindow>>>,
@@ -477,6 +546,7 @@ impl Application {
                     translation: None,
                     state: saved.state.clone(),
                     writes_review_evidence: false,
+                    active: None,
                     terminal_persisted: true,
                     summary: saved.task_summary.clone(),
                     cancellation: CancellationToken::new(),
@@ -686,7 +756,7 @@ impl Application {
         &self,
         id: &str,
         resuming: bool,
-    ) -> Result<Option<(CancellationToken, Option<Arc<CachedAnalysis>>)>, CoreError> {
+    ) -> Result<Option<(TaskGuard<'_>, Option<Arc<CachedAnalysis>>)>, CoreError> {
         let _project = self.lock_project(id).await?;
         if resuming {
             self.ensure_writable().await?;
@@ -719,7 +789,10 @@ impl Application {
             workflow: None,
         };
         let cancellation = CancellationToken::new();
+        let active = Arc::new(());
+        let guard = TaskGuard::new(self, id, TaskKind::Preview, &active, cancellation.clone());
         entry.translation = Some(PreviewTranslation {
+            _active: active,
             cancellation: cancellation.clone(),
             status: PreviewTranslationStatus {
                 task: state,
@@ -731,7 +804,7 @@ impl Application {
         let _ = self.events.send(AppEvent::PreviewChanged {
             project_id: id.into(),
         });
-        Ok(Some((cancellation, entry.preview.clone())))
+        Ok(Some((guard, entry.preview.clone())))
     }
 
     pub(crate) async fn preview_translation_progress(
@@ -1103,7 +1176,7 @@ impl Application {
         id: &str,
         operation: &str,
         message: &str,
-    ) -> Result<CancellationToken, CoreError> {
+    ) -> Result<TaskGuard<'_>, CoreError> {
         self.begin_with_review_evidence(
             id,
             operation,
@@ -1119,7 +1192,7 @@ impl Application {
         operation: &str,
         message: &str,
         writes_review_evidence: bool,
-    ) -> Result<CancellationToken, CoreError> {
+    ) -> Result<TaskGuard<'_>, CoreError> {
         let _project = self.lock_project(id).await?;
         let _lifecycle = self.project_lifecycle.lock().await;
         if self.store.get(id).await?.is_removed {
@@ -1152,9 +1225,18 @@ impl Application {
         let order = self.next_task_order.fetch_add(1, Ordering::Relaxed);
         let mut tasks = self.tasks.lock().await;
         let translation = tasks.get_mut(id).and_then(|entry| entry.translation.take());
+        let active = Arc::new(());
+        let guard = TaskGuard::new(
+            self,
+            id,
+            TaskKind::Project(operation.into()),
+            &active,
+            cancellation.clone(),
+        );
         tasks.insert(
             id.into(),
             TaskEntry {
+                active: Some(active),
                 preview: None,
                 translation,
                 state: state.clone(),
@@ -1170,7 +1252,7 @@ impl Application {
         let _ = self.events.send(AppEvent::TaskChanged(state));
         drop(_lifecycle);
         self.log_task_message(id, message).await;
-        Ok(cancellation)
+        Ok(guard)
     }
 
     pub(crate) async fn progress(&self, id: &str, operation: &str, message: &str) {
@@ -1336,6 +1418,7 @@ impl Application {
         }
         if let Some(entry) = self.tasks.lock().await.get_mut(id) {
             entry.clear_preview(&self.events);
+            entry.active = None;
             entry.state = state.clone();
             entry.terminal_persisted = persisted.is_ok();
             entry.summary = Some(summary.clone());
@@ -1513,7 +1596,7 @@ mod tests {
             app.save_project_settings(&id, serde_json::json!({"recognitionGoal": "recognize"}))
                 .await
                 .unwrap();
-            app.begin(&id, operation, "识别中").await.unwrap();
+            let _task = app.begin(&id, operation, "识别中").await.unwrap();
             write_json(&details, &serde_json::json!({"status": status})).unwrap();
             let result = if succeeded {
                 Ok("结束".into())
@@ -1551,12 +1634,14 @@ mod tests {
             &serde_json::json!({"status":"Activated", "pendingCoverage":[]}),
         )
         .unwrap();
-        app.begin(&project.id, "adapt", "first adaptation")
+        let _task = app
+            .begin(&project.id, "adapt", "first adaptation")
             .await
             .unwrap();
         app.finish(&project.id, "adapt", Ok("first result".into()))
             .await
             .unwrap();
+        drop(_task);
         let metadata = directory.join("game.json");
         let previous = fs::read(&metadata).unwrap();
 
@@ -1565,7 +1650,8 @@ mod tests {
             &serde_json::json!({"status":"Activated", "pendingCoverage":["menu", "settings"]}),
         )
         .unwrap();
-        app.begin(&project.id, "adapt", "second adaptation")
+        let _task = app
+            .begin(&project.id, "adapt", "second adaptation")
             .await
             .unwrap();
         fs::remove_file(&metadata).unwrap();
@@ -1576,6 +1662,7 @@ mod tests {
         fs::remove_dir(&metadata).unwrap();
         fs::write(&metadata, previous).unwrap();
         fs::write(&details, "must recover from the committed task summary").unwrap();
+        drop(_task);
         drop(app);
 
         let reopened = Application::open(data, &ToolPaths::new("missing"))
@@ -1606,7 +1693,7 @@ mod tests {
             "invalid detail payload",
         )
         .unwrap();
-        app.begin(&project.id, "adapt", "starting").await.unwrap();
+        let _task = app.begin(&project.id, "adapt", "starting").await.unwrap();
         let mut events = app.subscribe();
 
         app.finish(&project.id, "adapt", Ok("finished".into()))
@@ -1637,7 +1724,7 @@ mod tests {
             }),
         )
         .unwrap();
-        app.begin(&project.id, "adapt", "starting").await.unwrap();
+        let _task = app.begin(&project.id, "adapt", "starting").await.unwrap();
         app.finish(&project.id, "adapt", Ok("finished".into()))
             .await
             .unwrap();
@@ -1670,7 +1757,8 @@ mod tests {
         fs::write(directory.join("logs"), "unavailable").unwrap();
         let mut events = app.subscribe();
 
-        app.begin(&project.id, "translate", "starting")
+        let _task = app
+            .begin(&project.id, "translate", "starting")
             .await
             .unwrap();
         assert!(matches!(
@@ -1701,7 +1789,8 @@ mod tests {
             .await
             .unwrap();
         let project = app.add_project(&game).await.unwrap();
-        app.begin(&project.id, "translate", "starting")
+        let _task = app
+            .begin(&project.id, "translate", "starting")
             .await
             .unwrap();
         app.finish(&project.id, "translate", Ok("finished".into()))
@@ -1728,7 +1817,8 @@ mod tests {
             .await
             .unwrap();
         let project = app.add_project(&game).await.unwrap();
-        app.begin(&project.id, "translate", "starting")
+        let _task = app
+            .begin(&project.id, "translate", "starting")
             .await
             .unwrap();
         let path = app
@@ -1755,7 +1845,7 @@ mod tests {
                 .await
         );
         fs::remove_dir(&path).unwrap();
-        app.begin(&project.id, "build", "next task").await.unwrap();
+        let _task = app.begin(&project.id, "build", "next task").await.unwrap();
     }
 
     #[tokio::test]
@@ -1768,9 +1858,12 @@ mod tests {
             .await
             .unwrap();
         let project = app.add_project(&game).await.unwrap();
-        app.begin(&project.id, "translate", "starting")
+        let _task = app
+            .begin(&project.id, "translate", "starting")
             .await
             .unwrap();
+        // A process exit skips the task guard destructor.
+        std::mem::forget(_task);
         drop(app);
 
         let reopened = Application::open(data, &ToolPaths::new("missing"))
@@ -1807,7 +1900,8 @@ mod tests {
             .await
             .unwrap();
         let project = app.add_project(&game).await.unwrap();
-        app.begin(&project.id, "translate", "starting")
+        let _task = app
+            .begin(&project.id, "translate", "starting")
             .await
             .unwrap();
         let path = app
@@ -1826,6 +1920,7 @@ mod tests {
         );
         fs::remove_dir(&path).unwrap();
         write_json(&path, &project).unwrap();
+        drop(_task);
         drop(app);
 
         let reopened = Application::open(data, &ToolPaths::new("missing"))
@@ -1855,7 +1950,7 @@ mod tests {
             &serde_json::json!({"status":"Activated", "pendingCoverage":["设置文字"]}),
         )
         .unwrap();
-        app.begin(&project.id, "adapt", "starting").await.unwrap();
+        let _task = app.begin(&project.id, "adapt", "starting").await.unwrap();
         app.finish(&project.id, "adapt", Ok(message.into()))
             .await
             .unwrap();
@@ -1902,8 +1997,8 @@ mod tests {
             app.store.save(&project).await.unwrap();
             ids.push(project.id);
         }
-        app.begin(&ids[0], "translate", "queued").await.unwrap();
-        app.begin(&ids[1], "translate", "queued").await.unwrap();
+        let _task = app.begin(&ids[0], "translate", "queued").await.unwrap();
+        let _task = app.begin(&ids[1], "translate", "queued").await.unwrap();
         let initial: Vec<_> = app
             .list_projects("")
             .await

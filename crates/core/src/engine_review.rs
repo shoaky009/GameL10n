@@ -1,5 +1,7 @@
+use crate::application::{TaskGuard, TaskKind};
 use gamel10n_engines::{EngineProgress, review::EngineReviewResult};
 use gamel10n_translation::files::write_json;
+use std::sync::Arc;
 
 use crate::{
     AppEvent, Application, CancellationToken, CoreError, catalog::EngineCatalog, logs::LogSource,
@@ -14,6 +16,7 @@ pub struct ReviewState {
 }
 
 pub(crate) struct ReviewTask {
+    active: Option<Arc<()>>,
     pub(crate) state: ReviewState,
     pub(crate) cancellation: CancellationToken,
     pub(crate) order: u64,
@@ -44,7 +47,7 @@ impl Application {
         }
     }
 
-    pub(crate) async fn begin_review(&self, id: &str) -> Result<CancellationToken, CoreError> {
+    pub(crate) async fn begin_review(&self, id: &str) -> Result<TaskGuard<'_>, CoreError> {
         let _project = self.lock_project(id).await?;
         let _lifecycle = self.project_lifecycle.lock().await;
         if self.store.get(id).await?.is_removed {
@@ -65,9 +68,12 @@ impl Application {
             ..ReviewState::default()
         };
         let cancellation = CancellationToken::new();
+        let active = Arc::new(());
+        let guard = TaskGuard::new(self, id, TaskKind::Review, &active, cancellation.clone());
         self.review_tasks().insert(
             id.into(),
             ReviewTask {
+                active: Some(active),
                 state: state.clone(),
                 cancellation: cancellation.clone(),
                 order: self
@@ -79,7 +85,7 @@ impl Application {
         self.publish_review(id, &state);
         drop(_lifecycle);
         self.log_task_message(id, &state.message).await;
-        Ok(cancellation)
+        Ok(guard)
     }
 
     fn publish_review(&self, id: &str, state: &ReviewState) {
@@ -142,6 +148,7 @@ impl Application {
                     ..EngineProgress::default()
                 });
             }
+            task.active = None;
             task.state.running = false;
             task.state.succeeded = succeeded;
             task.state.message.clone_from(&message);

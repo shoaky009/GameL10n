@@ -535,7 +535,7 @@ mod tests {
     #[tokio::test]
     async fn settings_remain_editable_during_recognition_and_launch_changes_require_confirmation() {
         let (_root, app, id) = fixture().await;
-        app.begin(&id, "recognize", "recognizing").await.unwrap();
+        let _task = app.begin(&id, "recognize", "recognizing").await.unwrap();
         app.detect_launch(&id).await.unwrap();
         let initial = app.launch_view(&id).await.unwrap();
         app.save_project_settings(&id, serde_json::json!({"targetLanguage":"en"}))

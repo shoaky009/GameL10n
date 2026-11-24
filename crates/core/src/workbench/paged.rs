@@ -7,8 +7,12 @@ use crate::project_migrations::{self, Stamps, stamps};
 use gamel10n_translation::edits::EditStore;
 use std::{io, path::Path};
 
-pub(crate) struct Session {
+pub(crate) struct CachedProject {
     pub(super) id: String,
+    session: Arc<std::sync::Mutex<Option<Session>>>,
+}
+
+struct Session {
     policy: TranslationPolicy,
     pages: Pages,
     edits: Arc<EditStore>,
@@ -43,7 +47,7 @@ impl Session {
             };
             let latest = stamps(dir, legacy)?;
             if latest == observed {
-                return Self::new(project.id.clone(), policy.clone(), pages, dir, latest).map(Some);
+                return Self::new(policy.clone(), pages, dir, latest).map(Some);
             }
             // The upgrade itself or a concurrent writer committed new files. Reopen that generation.
             observed = latest;
@@ -51,7 +55,6 @@ impl Session {
         }
     }
     fn new(
-        id: String,
         policy: TranslationPolicy,
         pages: Pages,
         dir: &Path,
@@ -60,7 +63,6 @@ impl Session {
         let summary = pages.directory.summary.clone();
         let edits = EditStore::open(dir)?;
         let mut s = Self {
-            id,
             policy,
             pages,
             edits,
@@ -385,16 +387,29 @@ impl Application {
         let policy = validated_policy(&project.settings)?;
         let dir = self.store.directory(id)?;
         let legacy = self.data_directory().join("memory").join(id);
-        let cache = self.paged_workbench.clone();
+        let cache = {
+            let mut slot = self
+                .paged_workbench
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if slot.as_ref().is_none_or(|cached| cached.id != id) {
+                *slot = Some(CachedProject {
+                    id: id.into(),
+                    session: Default::default(),
+                });
+            }
+            Arc::clone(&slot.as_ref().expect("selected project").session)
+        };
         tokio::task::spawn_blocking(move || {
             let _project = project_guard;
             let mut slot = cache.lock().unwrap_or_else(|e| e.into_inner());
             let mut repair = false;
             loop {
                 let observed = stamps(&dir, &legacy)?;
-                if slot.as_ref().is_some_and(|s| {
-                    s.id != project.id || s.policy != policy || s.stamps != observed
-                }) {
+                if slot
+                    .as_ref()
+                    .is_some_and(|s| s.policy != policy || s.stamps != observed)
+                {
                     *slot = None;
                 }
                 let result = (|| {

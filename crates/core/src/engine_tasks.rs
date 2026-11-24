@@ -519,24 +519,27 @@ impl Application {
         } else {
             "recognize"
         };
+        let task;
         let cancellation = if let Some(cancellation) = task_cancellation {
             self.start_metrics(id, operation).await;
             cancellation.clone()
         } else {
-            self.begin(
-                id,
-                operation,
-                if recover_missing {
-                    "正在常规适配：优先找回此游戏已有的适配器并重新提取文本。"
-                } else if continuing {
-                    "正在智能适配：恢复上次中断的会话和已有进度。"
-                } else if forced {
-                    "正在智能适配：跳过常规匹配，准备分析游戏资源。"
-                } else {
-                    "正在常规适配：扫描游戏目录并筛选已有适配器。"
-                },
-            )
-            .await?
+            task = self
+                .begin(
+                    id,
+                    operation,
+                    if recover_missing {
+                        "正在常规适配：优先找回此游戏已有的适配器并重新提取文本。"
+                    } else if continuing {
+                        "正在智能适配：恢复上次中断的会话和已有进度。"
+                    } else if forced {
+                        "正在智能适配：跳过常规匹配，准备分析游戏资源。"
+                    } else {
+                        "正在常规适配：扫描游戏目录并筛选已有适配器。"
+                    },
+                )
+                .await?;
+            task.clone()
         };
         self.metrics_details(
             id,
@@ -4576,7 +4579,7 @@ mod tests {
                 "message":"服务商异常（HTTP 502）", "nextAction":"服务恢复后继续适配"}
         }))
         .unwrap();
-        app.begin(&project.id, "adapt", "正在分析").await.unwrap();
+        let _task = app.begin(&project.id, "adapt", "正在分析").await.unwrap();
         app.finish(&project.id, "adapt", adaptation_task_outcome(&result))
             .await
             .unwrap();
