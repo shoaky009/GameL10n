@@ -87,7 +87,7 @@ impl Application {
         ids: &[String],
         operation: Edit,
     ) -> Result<usize, CoreError> {
-        let _guard = self.lock_project(id).await?;
+        let guard = Arc::new(self.lock_project(id).await?);
         self.ensure_editable(id).await?;
         if ids.is_empty() {
             return Err(CoreError::InvalidData("文本选区为空。".into()));
@@ -100,7 +100,7 @@ impl Application {
             .collect::<Vec<_>>();
         let operation = Arc::new(operation);
         if let Some(count) = self
-            .disk_edit(id, keys.clone(), Arc::clone(&operation))
+            .disk_edit(id, guard.clone(), keys.clone(), Arc::clone(&operation))
             .await?
         {
             self.workbenches.lock().await.remove(id);

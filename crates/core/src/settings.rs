@@ -513,8 +513,8 @@ impl Application {
         }
         self.ensure_writable().await?;
         for id in ids {
-            self.store.remove(id, delete_data).await?;
             self.invalidate_project_cache(id).await;
+            self.store.remove(id, delete_data).await?;
             let _ = self.events.send(AppEvent::ProjectsChanged);
             if delete_data {
                 let root = self.data_directory().to_path_buf();

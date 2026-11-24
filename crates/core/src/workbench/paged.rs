@@ -372,17 +372,22 @@ impl Application {
     async fn paged<T: Send + 'static>(
         &self,
         id: &str,
+        project_guard: Arc<tokio::sync::OwnedMutexGuard<()>>,
         mut read: impl FnMut(&mut Session) -> Result<T, CoreError> + Send + 'static,
     ) -> Result<Option<T>, CoreError> {
         if self.live_workbench(id).await {
             return Ok(None);
         }
         let project = self.store.get(id).await?;
+        if project.is_removed {
+            return Err(CoreError::ProjectMissing(id.into()));
+        }
         let policy = validated_policy(&project.settings)?;
         let dir = self.store.directory(id)?;
         let legacy = self.data_directory().join("memory").join(id);
         let cache = self.paged_workbench.clone();
         tokio::task::spawn_blocking(move || {
+            let _project = project_guard;
             let mut slot = cache.lock().unwrap_or_else(|e| e.into_inner());
             let mut repair = false;
             loop {
@@ -415,10 +420,11 @@ impl Application {
     pub(super) async fn disk_edit(
         &self,
         id: &str,
+        project: Arc<tokio::sync::OwnedMutexGuard<()>>,
         keys: Vec<String>,
         edit: Arc<editing::Edit>,
     ) -> Result<Option<usize>, CoreError> {
-        self.paged(id, move |s| {
+        self.paged(id, project, move |s| {
             let mut rows = Vec::with_capacity(keys.len());
             let positions = s.positions(&keys, true)?;
             let mut loaded = None;
@@ -447,10 +453,11 @@ impl Application {
     pub(super) async fn disk_selection(
         &self,
         id: &str,
+        project: Arc<tokio::sync::OwnedMutexGuard<()>>,
         keys: Vec<String>,
         strict: bool,
     ) -> Result<Option<Vec<String>>, CoreError> {
-        self.paged(id, move |s| {
+        self.paged(id, project, move |s| {
             let mut positions = s.positions(&keys, strict)?;
             positions.sort_unstable_by_key(|(_, order)| *order);
             Ok(positions
@@ -469,8 +476,10 @@ impl Application {
         current: impl Fn() -> bool + Send + 'static,
     ) -> Result<Option<WorkbenchPage>, CoreError> {
         let f = f.clone();
-        self.paged(id, move |s| s.page(&f, offset, limit, &current))
-            .await
+        self.paged(id, Arc::new(self.lock_project(id).await?), move |s| {
+            s.page(&f, offset, limit, &current)
+        })
+        .await
     }
     pub(super) async fn disk_row(
         &self,
@@ -478,7 +487,10 @@ impl Application {
         unit: &str,
     ) -> Result<Option<WorkbenchRow>, CoreError> {
         let unit = unit.to_owned();
-        self.paged(id, move |s| s.row(&unit)).await
+        self.paged(id, Arc::new(self.lock_project(id).await?), move |s| {
+            s.row(&unit)
+        })
+        .await
     }
     pub(super) async fn disk_context(
         &self,
@@ -486,7 +498,10 @@ impl Application {
         unit: &str,
     ) -> Result<Option<String>, CoreError> {
         let unit = unit.to_owned();
-        self.paged(id, move |s| s.context(&unit)).await
+        self.paged(id, Arc::new(self.lock_project(id).await?), move |s| {
+            s.context(&unit)
+        })
+        .await
     }
     pub(super) async fn disk_ids(
         &self,
@@ -494,7 +509,10 @@ impl Application {
         f: &WorkbenchFilter,
     ) -> Result<Option<Vec<String>>, CoreError> {
         let f = f.clone();
-        self.paged(id, move |s| s.ids(&f)).await
+        self.paged(id, Arc::new(self.lock_project(id).await?), move |s| {
+            s.ids(&f)
+        })
+        .await
     }
     pub(super) async fn disk_adjacent(
         &self,
@@ -505,7 +523,9 @@ impl Application {
     ) -> Result<Option<Option<(String, usize)>>, CoreError> {
         let f = f.clone();
         let unit = unit.to_owned();
-        self.paged(id, move |s| s.adjacent(&f, &unit, direction))
-            .await
+        self.paged(id, Arc::new(self.lock_project(id).await?), move |s| {
+            s.adjacent(&f, &unit, direction)
+        })
+        .await
     }
 }

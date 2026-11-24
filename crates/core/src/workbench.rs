@@ -858,7 +858,15 @@ impl Application {
         if selection.is_empty() {
             return Ok(selection);
         }
-        if let Some(valid) = self.disk_selection(id, selection.clone(), false).await? {
+        if let Some(valid) = self
+            .disk_selection(
+                id,
+                Arc::new(self.lock_project(id).await?),
+                selection.clone(),
+                false,
+            )
+            .await?
+        {
             return Ok(valid);
         }
         let Some(analysis) = self.workbench_analysis(id).await? else {
@@ -880,10 +888,10 @@ impl Application {
         id: &str,
         selection: &[String],
     ) -> Result<(), CoreError> {
-        let _project = self.lock_project(id).await?;
+        let project = Arc::new(self.lock_project(id).await?);
         self.ensure_writable().await?;
         if self
-            .disk_selection(id, selection.to_vec(), true)
+            .disk_selection(id, project.clone(), selection.to_vec(), true)
             .await?
             .is_none()
         {
