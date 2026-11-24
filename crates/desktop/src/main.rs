@@ -169,6 +169,10 @@ impl Context {
             self.edit_generation.load(Ordering::SeqCst)
         };
         let app = ui.global::<App>();
+        if action == "confirm" && input.argument == "version-delete" {
+            input.engine_id = app.get_engine_delete_target().into();
+            input.version_id = app.get_version_delete_target().into();
+        }
         if selection {
             app.set_selection_busy(true);
             if action == "select-page" {

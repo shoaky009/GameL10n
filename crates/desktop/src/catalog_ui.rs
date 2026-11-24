@@ -466,20 +466,27 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                     "内置版本随程序提供，不能删除。".into(),
                 ));
             }
-            crate::show_dialog(
-                ctx,
-                "version-delete",
-                "删除引擎版本？",
-                format!(
-                    "{}\n版本：{}\n{}\n\n将删除此版本的扩展文件、兼容记录、激活记录和索引条目。游戏项目的原文、译文及补丁保留；生成新补丁前需要可用的适配器。此操作无法撤销。",
-                    detail.adapter_id,
-                    detail.version,
-                    detail
-                        .directory_path
-                        .map(|path| path.display().to_string())
-                        .unwrap_or_default()
-                ),
+            let message = format!(
+                "{}\n版本：{}\n{}\n\n将删除此版本的扩展文件、兼容记录、激活记录和索引条目。游戏项目的原文、译文及补丁保留；生成新补丁前需要可用的适配器。此操作无法撤销。",
+                detail.adapter_id,
+                detail.version,
+                detail
+                    .directory_path
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_default()
             );
+            ctx.update(move |ui| {
+                let app = ui.global::<App>();
+                if app.get_engine_id().as_str() == detail.adapter_id
+                    && app.get_version_id().as_str() == detail.version
+                {
+                    app.set_engine_delete_target(detail.adapter_id.into());
+                    app.set_version_delete_target(detail.version.into());
+                    app.set_modal_title("删除引擎版本？".into());
+                    app.set_modal_message(message.into());
+                    app.set_modal("version-delete".into());
+                }
+            });
         }
         "verify-version" => {
             let catalog = catalog(ctx, false).await?;
@@ -572,8 +579,9 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                     .task_state(&project.id)
                     .await
                     .is_some_and(|task| task.running)
+                    || app.review_running(&project.id)
                 {
-                    return Err(CoreError::InvalidData("有运行中的项目任务，任务可能正在使用此版本。请先等待任务完成或暂停，再删除扩展版本。".into()));
+                    return Err(CoreError::InvalidData("有运行中的项目任务或经验总结，可能正在使用此版本。请先等待任务完成或暂停，再删除扩展版本。".into()));
                 }
             }
             let library = catalog(ctx, false).await?;
