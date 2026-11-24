@@ -127,7 +127,7 @@ fn template_skip_reason(
         "previous-reuse-failure"
     } else if has_adapter_source(workspace, prepare_for_model)? {
         "existing-source-files"
-    } else if !prepare_for_model && !state.messages.is_empty() {
+    } else if !prepare_for_model && session_store::has_history(state) {
         "existing-conversation"
     } else if !request.user_instruction.trim().is_empty()
         || !state.user_instruction.trim().is_empty()

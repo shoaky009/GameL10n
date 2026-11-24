@@ -516,6 +516,19 @@ pub(crate) fn tokens(usage: &TokenUsage) -> u64 {
     usage.input_tokens.saturating_add(usage.output_tokens)
 }
 
+fn adaptation_inventory<'a>(
+    request: &'a AdaptationRequest<'_>,
+) -> Result<Cow<'a, Inventory>, EngineError> {
+    let mut inventory = match &request.discovery_inventory {
+        Some(inventory) => Cow::Borrowed(inventory),
+        None => Cow::Owned(Inventory::scan(&request.game_directory)?),
+    };
+    if !request.inputs.files.is_empty() || !request.inputs.excluded.is_empty() {
+        inventory = Cow::Owned(request.inputs.inventory(inventory.into_owned())?);
+    }
+    Ok(inventory)
+}
+
 fn validate_tool_arguments(args: &Value) -> Result<(), EngineError> {
     if !args.is_object() || serde_json::to_vec(args)?.len() > 512 * 1024 {
         return Err(EngineError::Protocol(
@@ -628,7 +641,7 @@ impl EngineService {
         flow::recover(&mut state, request, provider.identity());
         // Older sessions first saved model messages after automatic preparation completed.
         let prepared_for_model = request.resume_session
-            && !state.messages.is_empty()
+            && session_store::has_history(&state)
             && state
                 .extra
                 .get("modelPreparationComplete")
@@ -810,14 +823,7 @@ impl EngineService {
                 Self::report(progress, "继续智能识别", "正在沿用已保存的模型会话和工作文件。");
                 return Ok(None);
             }
-            let mut inventory = match &request.discovery_inventory {
-                Some(inventory) => Cow::Borrowed(inventory),
-                None => Cow::Owned(Inventory::scan(&request.game_directory)?),
-            };
-            if !request.inputs.files.is_empty() || !request.inputs.excluded.is_empty() {
-                inventory = Cow::Owned(request.inputs.inventory(inventory.into_owned())?);
-            }
-            let inventory = preparation_inventory.insert(inventory);
+            let inventory = preparation_inventory.insert(adaptation_inventory(request)?);
             Self::report(progress, "检查已有工作样本", "正在复用解析器检查已暂存或解密的脚本样本。");
             automatic::inspect_workspace(self, &workspace, &mut state, cancellation).await?;
             automatic::inspect_archives(self, request, inventory, &workspace, &mut state, cancellation)
@@ -903,6 +909,9 @@ impl EngineService {
                 return Ok(completed);
             }
         };
+        if state.messages.is_empty() && preparation_inventory.is_none() {
+            preparation_inventory = Some(adaptation_inventory(request)?);
+        }
         let continuation = flow::continuation(
             &state,
             &workspace,

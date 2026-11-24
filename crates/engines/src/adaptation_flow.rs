@@ -282,11 +282,32 @@ pub(super) fn continuation(
     if let Some(binding) = state.extra.get("inputBinding") {
         context.push_str(&format!("\n宿主制作输入：{binding}。game 读取、暂存、验收与发布使用相同的原文输入；installed 读取当前安装文件，仅供故障诊断。已有基线绑定只保证文本身份一致，不证明资源从未被外部修改。"));
     }
+    let has_prior_progress = !state.messages.is_empty()
+        || state.total_turns > 0
+        || !state.notes.is_empty()
+        || state.verified_package.is_some()
+        || !state.repairs.is_empty()
+        || matches!(
+            state.last_status,
+            AdaptationStatus::Activated | AdaptationStatus::Reused
+        );
     if state.messages.is_empty() {
-        let inventory =
-            inventory.ok_or_else(|| EngineError::Protocol("首次智能识别缺少资源清单。".into()))?;
-        context.push_str(&format!("\n分析此游戏并实现可复用的引擎解析与回填。游戏目录：{}\n资源清单：{}",state.game_directory.display(),json!({"files":inventory.files.iter().take(100).collect::<Vec<_>>(),"fileCount":inventory.files.len(),"inventoryComplete":inventory.complete,"baselineUnits":baseline})));
-    } else {
+        let inventory = inventory
+            .ok_or_else(|| EngineError::Protocol("缺少资源清单，无法初始化模型会话。".into()))?;
+        let summary = format!(
+            "游戏目录：{}\n资源清单：{}",
+            state.game_directory.display(),
+            json!({"files":inventory.files.iter().take(100).collect::<Vec<_>>(),"fileCount":inventory.files.len(),"inventoryComplete":inventory.complete,"baselineUnits":baseline})
+        );
+        if has_prior_progress {
+            context.push('\n');
+            context.push_str(&summary);
+        } else {
+            context.push_str("\n分析此游戏并实现可复用的引擎解析与回填。");
+            context.push_str(&summary);
+        }
+    }
+    if has_prior_progress {
         context.push_str("\n继续完成当前目标。先解决最近的验证失败和未完成步骤，复用现有代码及调查结论。编码、字体和回填问题属于适配工作；继续调查和验证可行方案。只有确实缺少用户信息或已有证据表明无法支持时，调用 report_blocker 说明具体原因和下一步。");
         let input = repair::input_key(state);
         if let Some(ticket) = repair::pending(state, &input).next_back() {
@@ -4000,5 +4021,142 @@ mod tests {
         let (prefix_hash, full_hash) = hash_message_slices(&empty, Some(0));
         assert_eq!(full_hash, hash_text("[]"));
         assert_eq!(prefix_hash, Some(hash_text("[]")));
+    }
+
+    #[test]
+    fn continuation_after_model_switch_keeps_inventory_and_prior_progress_guidance() {
+        let root = tempfile::tempdir().unwrap();
+        let game = root.path().join("game");
+        fs::create_dir(&game).unwrap();
+        fs::write(game.join("data.xp3"), b"fixture").unwrap();
+        let inventory = Inventory::scan(&game).unwrap();
+
+        let mut fresh_after_switch = Session {
+            game_id: "g".into(),
+            game_directory: game.clone(),
+            objective: "Develop".into(),
+            last_status: AdaptationStatus::Failed,
+            history_storage: Some(session_store::HistoryStorage {
+                bytes: 100,
+                count: 2,
+                base: 2,
+                offset: 100,
+                digest: "digest".into(),
+            }),
+            ..Session::default()
+        };
+        let prompt = continuation(
+            &fresh_after_switch,
+            root.path(),
+            Some(&inventory),
+            0,
+            &BTreeSet::new(),
+        )
+        .unwrap();
+        assert!(prompt.contains("分析此游戏并实现可复用的引擎解析与回填。"));
+        assert!(prompt.contains("资源清单："));
+        assert!(prompt.contains("data.xp3"));
+        assert!(!prompt.contains("继续完成当前目标。"));
+
+        fresh_after_switch.total_turns = 2;
+        fresh_after_switch.last_status = AdaptationStatus::Activated;
+        let resumed = continuation(
+            &fresh_after_switch,
+            root.path(),
+            Some(&inventory),
+            0,
+            &BTreeSet::new(),
+        )
+        .unwrap();
+        assert!(!resumed.contains("分析此游戏并实现可复用的引擎解析与回填。"));
+        assert!(resumed.contains("资源清单："));
+        assert!(resumed.contains("data.xp3"));
+        assert!(resumed.contains("继续完成当前目标。"));
+        assert!(resumed.contains("此前适配已通过验证"));
+    }
+
+    #[tokio::test]
+    async fn resuming_with_different_model_after_first_turn_failure_rebuilds_inventory_without_repeating_preparation()
+     {
+        let root = tempfile::tempdir().unwrap();
+        let assets = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let service = EngineService::new(&assets, crate::ToolPaths::development())
+            .with_shared_directory(root.path().join("shared"));
+        if !service.tools.python().is_file() {
+            return;
+        }
+        let game = root.path().join("game");
+        fs::create_dir_all(&game).unwrap();
+        fs::write(game.join("script.bin"), b"opaque fixture").unwrap();
+        let mut request = AdaptationRequest {
+            game_id: "fixture".into(),
+            game_directory: game,
+            inputs: AdaptationInputs::default(),
+            project_directory: root.path().join("project"),
+            package_directory: root.path().join("extensions"),
+            package_directories: vec![],
+            reference_package_directories: vec![],
+            indexed_packages: Default::default(),
+            user_instruction: String::new(),
+            objective: "Develop".into(),
+            improve_existing: false,
+            require_model_analysis: true,
+            resume_session: false,
+            reuse_failures: vec![],
+            builtin_probes: vec![],
+            discovery_inventory: None,
+            limits: AdaptationLimits::default(),
+            baseline_units: &[],
+        };
+        let bad_stream = json!("event: response.unsupported\ndata: {\"type\":\"response.unsupported\"}\n\n");
+        let (provider_a, server_a) = model_with_protocol(
+            vec![bad_stream.clone(), bad_stream.clone(), bad_stream],
+            ApiProtocol::Responses,
+        );
+        let first = service
+            .adapt(&request, &provider_a, &CancellationToken::new(), None)
+            .await
+            .unwrap();
+        assert_eq!(first.status, AdaptationStatus::Failed);
+        assert_eq!(server_a.join().unwrap().len(), 3);
+
+        request.resume_session = true;
+        let (provider_b, server_b) = model(vec![input_required_response("blocker")]);
+        let events = std::sync::Mutex::new(Vec::new());
+        let report = |event: EngineProgress| events.lock().unwrap().push(event);
+        let second = service
+            .adapt(
+                &request,
+                &provider_b,
+                &CancellationToken::new(),
+                Some(&report),
+            )
+            .await
+            .unwrap();
+        assert_eq!(second.status, AdaptationStatus::WaitingForUser);
+        let requests = server_b.join().unwrap();
+        assert_eq!(requests.len(), 1);
+        let prompt = requests[0]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|message| message["content"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(prompt.contains("资源清单："));
+        assert!(prompt.contains("script.bin"));
+        assert!(
+            events
+                .into_inner()
+                .unwrap()
+                .iter()
+                .any(|event| event.message.contains("正在沿用已保存的模型会话和工作文件")),
+            "expected resume to skip completed automatic preparation"
+        );
+        let session =
+            load_session(&request.project_directory.join("adaptation/current/session.json"))
+                .unwrap();
+        assert_eq!(session.extra["modelPreparationComplete"], json!(true));
+        assert!(session_store::base(&session) > 0);
     }
 }

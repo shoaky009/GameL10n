@@ -108,6 +108,10 @@ pub(super) fn base(state: &Session) -> usize {
         .map_or(0, |storage| storage.base)
 }
 
+pub(super) fn has_history(state: &Session) -> bool {
+    base(state) + state.messages.len() > 0
+}
+
 /// Visits the archive without retaining it, then includes the current in-memory messages.
 pub(super) fn visit(
     state: &Session,
