@@ -2,10 +2,14 @@ use std::{
     collections::BTreeMap,
     ffi::{OsStr, c_void},
     fs,
-    io::{self, Read, Seek, SeekFrom, Write},
+    io::{self, BufRead, Read, Seek, SeekFrom, Write},
     mem::{size_of, size_of_val},
     os::windows::{ffi::OsStrExt, fs::MetadataExt, io::AsRawHandle},
     path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -14,7 +18,7 @@ use windows::{
     Win32::{
         Foundation::{
             CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, HANDLE, HLOCAL, LocalFree,
-            WAIT_ABANDONED, WAIT_OBJECT_0, WIN32_ERROR,
+            WAIT_ABANDONED, WAIT_OBJECT_0, WAIT_TIMEOUT, WIN32_ERROR,
         },
         Security::{
             ACL,
@@ -43,7 +47,7 @@ use windows::{
             Threading::{
                 CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateMutexW,
                 CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
-                GetCurrentProcess, GetExitCodeProcess, INFINITE, InitializeProcThreadAttributeList,
+                GetCurrentProcess, GetExitCodeProcess, InitializeProcThreadAttributeList,
                 LPPROC_THREAD_ATTRIBUTE_LIST, OpenProcessToken, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
                 PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, PROCESS_INFORMATION, ReleaseMutex,
                 ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOEXW, TerminateProcess,
@@ -416,7 +420,12 @@ fn environment(executable: &Path, temporary: &Path, inputs: &str) -> Result<Vec<
     Ok(block)
 }
 
-fn execute(request: &Request, container: &Container, temporary: &Path) -> Result<u32> {
+fn execute(
+    request: &Request,
+    container: &Container,
+    temporary: &Path,
+    cancelled: &AtomicBool,
+) -> Result<u32> {
     let mut input = tempfile::tempfile_in(temporary)?;
     serde_json::to_writer(&mut input, &request.input)?;
     input.flush()?;
@@ -547,8 +556,16 @@ fn execute(request: &Request, container: &Container, temporary: &Path) -> Result
         }
         return Err(error);
     }
-    if unsafe { WaitForSingleObject(process.0, INFINITE) } != WAIT_OBJECT_0 {
-        return Err(windows::core::Error::from_thread().into());
+    loop {
+        match unsafe { WaitForSingleObject(process.0, 100) } {
+            WAIT_OBJECT_0 => break,
+            WAIT_TIMEOUT if cancelled.load(Ordering::Acquire) => {
+                unsafe { TerminateJobObject(job.0, 1)? };
+                return Ok(1);
+            }
+            WAIT_TIMEOUT => continue,
+            _ => return Err(windows::core::Error::from_thread().into()),
+        }
     }
     let mut code = 1;
     unsafe {
@@ -566,9 +583,22 @@ fn execute(request: &Request, container: &Container, temporary: &Path) -> Result
 
 pub fn run() -> Result<u32> {
     let mut bytes = Vec::new();
-    std::io::stdin()
-        .take(64 * 1024 * 1024 + 1)
-        .read_to_end(&mut bytes)?;
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let mut stdin = io::stdin().lock().take(64 * 1024 * 1024 + 1);
+    if std::env::args_os().nth(1).as_deref() == Some(OsStr::new("--control-stdin")) {
+        stdin.read_until(b'\n', &mut bytes)?;
+        if bytes.pop() != Some(b'\n') {
+            return Err("隔离执行请求不完整或超过大小限制。".into());
+        }
+        drop(stdin);
+        let signal = Arc::clone(&cancelled);
+        std::thread::spawn(move || {
+            let _ = io::stdin().read(&mut [0]);
+            signal.store(true, Ordering::Release);
+        });
+    } else {
+        stdin.read_to_end(&mut bytes)?;
+    }
     if bytes.len() > 64 * 1024 * 1024 {
         return Err("隔离执行请求超过大小限制。".into());
     }
@@ -615,6 +645,9 @@ pub fn run() -> Result<u32> {
         paths.insert(temporary.path().to_path_buf(), true);
         let mut granted: Vec<(PathBuf, bool)> = Vec::new();
         for (path, writable) in paths {
+            if cancelled.load(Ordering::Acquire) {
+                return Ok(1);
+            }
             if granted.iter().any(|(root, root_writable)| {
                 path.starts_with(root) && (*root_writable || !writable)
             }) {
@@ -624,7 +657,7 @@ pub fn run() -> Result<u32> {
             granted.push((path, writable));
         }
     }
-    execute(&request, &container, temporary.path())
+    execute(&request, &container, temporary.path(), &cancelled)
 }
 
 #[cfg(test)]

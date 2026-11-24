@@ -147,14 +147,16 @@ impl ToolProcess {
         let maximum_output_bytes = self.maximum_output_bytes;
         let preserve_failure_response = self.preserve_failure_response;
         let mut command = Command::new(executable);
-        if self.isolation.is_none() {
+        if self.isolation.is_some() {
+            command.arg("--control-stdin");
+        } else {
             command.args(&self.arguments);
         }
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true);
+            .kill_on_drop(self.isolation.is_none());
         if let Some(directory) = &self.directory {
             command.current_dir(directory);
         }
@@ -171,7 +173,7 @@ impl ToolProcess {
             }
         })?;
         let process_id = child.id();
-        let mut stdin = child
+        let stdin = child
             .stdin
             .take()
             .ok_or_else(|| EngineError::Protocol("工具的标准输入不可用。".into()))?;
@@ -183,12 +185,18 @@ impl ToolProcess {
             .stderr
             .take()
             .ok_or_else(|| EngineError::Protocol("工具的错误输出不可用。".into()))?;
-        let work = async move {
+        let mut control = Some(stdin);
+        let mut process_finished = false;
+        let work = async {
             // Read both pipes while writing; fail promptly if a helper floods either pipe.
-            let write = async move {
-                let result = stdin.write_all(&input).await;
-                drop(stdin);
-                result
+            let write = async {
+                let mut stdin = control.take().expect("child stdin");
+                stdin.write_all(&input).await?;
+                if isolated {
+                    stdin.write_all(b"\n").await?;
+                    control = Some(stdin);
+                }
+                Ok::<(), std::io::Error>(())
             };
             let (written, stdout, stderr, status) = tokio::try_join!(
                 async { Ok::<_, EngineError>(write.await) },
@@ -196,6 +204,7 @@ impl ToolProcess {
                 read_limited(stderr, maximum_output_bytes.unwrap_or(2 * 1024 * 1024)),
                 async { Ok::<_, EngineError>(child.wait().await?) },
             )?;
+            process_finished = true;
             if maximum_output_bytes
                 .is_some_and(|maximum| stdout.len() as u64 + stderr.len() as u64 > maximum)
             {
@@ -292,10 +301,15 @@ impl ToolProcess {
             () = cancellation.cancelled() => Err(EngineError::Cancelled),
             result = tokio::time::timeout(self.timeout, &mut work) => result.unwrap_or(Err(EngineError::Timeout)),
         };
-        if matches!(result, Err(EngineError::Cancelled | EngineError::Timeout))
-            && let Some(process_id) = process_id
-        {
-            terminate_process_tree(process_id).await;
+        drop(work);
+        drop(control);
+        if !process_finished {
+            if isolated {
+                // EOF stops the job. Leave the runner alive to finish revoking its ACLs.
+                let _ = tokio::time::timeout(Duration::from_secs(30), child.wait()).await;
+            } else if let Some(pid) = process_id {
+                terminate_process_tree(pid).await;
+            }
         }
         result
     }
