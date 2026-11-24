@@ -282,7 +282,7 @@ export component Workbench inherits FocusScope {
                     Rectangle { horizontal-stretch: 1; }
                     CopyButton { label: "复制原文"; value: root.editor-ready ? App.editor-source : ""; copy(value) => { clipboard.copy-text(value); } }
                 }
-                ScrollView { vertical-stretch: 1; min-height: 24px; max-height: root.editor-details ? 10000px : 48px; content-y <=> App.editor-scroll-y;
+                ScrollView { vertical-stretch: root.editor-details ? 2 : 1; min-height: 88px; content-y <=> App.editor-scroll-y;
                     VerticalLayout { spacing: 8px;
                         if !root.editor-ready: Caption { text: "选择一条文本开始校对"; }
                         SelectableText { text: App.editor-source; }
@@ -327,7 +327,7 @@ export component Workbench inherits FocusScope {
                     }
                     CopyButton { label: "复制译文"; value: root.editor-ready ? App.editor-text : ""; copy(value) => { clipboard.copy-text(value); } }
                 }
-                translation-editor := TextEdit { text <=> App.editor-text; min-height: 100px; vertical-stretch: 2; enabled: root.editor-ready; read-only: !App.editor-editable; edited => { App.editor-dirty = true; App.action("edit-changed", ""); } }
+                translation-editor := TextEdit { text <=> App.editor-text; min-height: 96px; vertical-stretch: 1; enabled: root.editor-ready; read-only: !App.editor-editable; edited => { App.editor-dirty = true; App.action("edit-changed", ""); } }
                 if App.editor-dirty || App.editor-status != "": Caption { text: App.editor-dirty ? "未保存" : App.editor-status; color: App.editor-dirty ? Theme.pending : Theme.secondary; wrap: no-wrap; overflow: elide; }
                 HorizontalLayout { spacing: 6px;
                     IconButton {
