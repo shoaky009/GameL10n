@@ -118,7 +118,7 @@ pub fn restore_view(app: &App<'_>, view: &WorkbenchView) {
     app.set_editor_scroll_y(view.editor_scroll_y);
 }
 
-fn clear_editor(app: &App<'_>) {
+pub(crate) fn clear_editor(app: &App<'_>) {
     app.set_editor_id("".into());
     app.set_editor_text("".into());
     app.set_editor_dirty(false);
@@ -253,7 +253,7 @@ fn refresh_selection(ctx: &Context, id: &str) {
 }
 
 async fn save_editor(ctx: &Context, input: &UiInput, reviewed: bool) -> Result<(), CoreError> {
-    if input.editor_id.is_empty() {
+    if input.project_id.is_empty() || input.editor_id.is_empty() {
         return Ok(());
     }
     let _gate = EDIT_WRITES.lock().await;

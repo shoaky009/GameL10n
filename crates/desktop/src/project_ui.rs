@@ -588,26 +588,33 @@ async fn remove_projects(ctx: &Context, input: &UiInput) -> Result<(), CoreError
     if ids.is_empty() && !input.project_id.is_empty() {
         ids.push(input.project_id.clone());
     }
+    if !input.delete_files && ids.contains(&input.project_id) {
+        crate::workbench_ui::flush_editor(ctx, input).await?;
+    }
     ctx.app()
         .await
         .remove_projects(&ids, input.delete_files)
         .await?;
-    ctx.session
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .project_selection
-        .clear();
-    if ids.contains(&input.project_id) {
-        ctx.update(|ui| {
-            let a = ui.global::<App>();
-            a.set_project_id("".into());
-            a.set_project_name("".into());
-            a.set_project_files_path("".into());
-            a.set_log_text("".into());
-            a.set_page(0);
-            a.set_texts(ModelRc::default());
-        });
+    {
+        let mut session = ctx.session.lock().unwrap_or_else(|e| e.into_inner());
+        session.project_selection.clear();
+        if ids.contains(&session.requested_project) {
+            session.requested_project.clear();
+        }
     }
+    ctx.update(move |ui| {
+        let a = ui.global::<App>();
+        if !ids.iter().any(|id| id == a.get_project_id().as_str()) {
+            return;
+        }
+        crate::workbench_ui::clear_editor(&a);
+        a.set_project_id("".into());
+        a.set_project_name("".into());
+        a.set_project_files_path("".into());
+        a.set_log_text("".into());
+        a.set_page(0);
+        a.set_texts(ModelRc::default());
+    });
     refresh_projects(ctx, &input.project_query).await?;
 
     Ok(())
