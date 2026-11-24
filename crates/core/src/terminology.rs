@@ -279,6 +279,11 @@ impl Application {
             .map_err(|error| {
                 if error.is_cancelled() {
                     CoreError::Engine(gamel10n_engines::EngineError::Cancelled)
+                } else if error.diagnostic.code == "output-token-limit" {
+                    CoreError::InvalidData(
+                        "术语提取失败：模型输出达到长度上限，结果被截断（常见于推理模型思考过长），请重试或在项目翻译链中优先配置非推理模型。"
+                            .into(),
+                    )
                 } else {
                     CoreError::InvalidData(format!("术语提取失败：{}", error.failure_summary()))
                 }
