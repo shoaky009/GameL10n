@@ -405,14 +405,41 @@ impl EngineService {
         cancellation: &CancellationToken,
     ) -> Result<Value, EngineError> {
         const SOURCE: &str = include_str!("../python/host.py");
-        // Fresh files inherit grantable ACLs instead of retaining permissions from an old install.
-        let directory = tempfile::tempdir()?;
-        let helper = directory.path().join("rust-host-v1.py");
-        fs::write(&helper, SOURCE)?;
-        fs::write(
-            directory.path().join("readonly_inputs.py"),
-            include_str!("../python/readonly_inputs.py"),
-        )?;
+        const READONLY_INPUTS: &str = include_str!("../python/readonly_inputs.py");
+        let isolated = self.isolate_execution
+            && matches!(request["operation"].as_str(), Some("run" | "run_tool"));
+        let (_fresh_dir, helper_dir, helper) = if isolated {
+            // Fresh files inherit grantable ACLs instead of retaining permissions from an old install.
+            let directory = tempfile::tempdir()?;
+            let helper = directory.path().join("rust-host-v1.py");
+            fs::write(&helper, SOURCE)?;
+            fs::write(directory.path().join("readonly_inputs.py"), READONLY_INPUTS)?;
+            let dir_path = directory.path().to_path_buf();
+            (Some(directory), dir_path, helper)
+        } else {
+            static SHARED_HELPER: OnceLock<Mutex<Option<tempfile::TempDir>>> = OnceLock::new();
+            let slot = SHARED_HELPER.get_or_init(|| Mutex::new(None));
+            let mut guard = slot
+                .lock()
+                .map_err(|_| EngineError::Protocol("辅助脚本缓存不可用。".into()))?;
+            let needs_init = guard.as_ref().is_none_or(|dir| {
+                !dir.path().join("rust-host-v1.py").is_file()
+                    || !dir.path().join("readonly_inputs.py").is_file()
+            });
+            if needs_init {
+                let directory = tempfile::tempdir()?;
+                fs::write(directory.path().join("rust-host-v1.py"), SOURCE)?;
+                fs::write(directory.path().join("readonly_inputs.py"), READONLY_INPUTS)?;
+                *guard = Some(directory);
+            }
+            let dir_path = guard
+                .as_ref()
+                .expect("shared helper initialized")
+                .path()
+                .to_path_buf();
+            let helper = dir_path.join("rust-host-v1.py");
+            (None, dir_path, helper)
+        };
         let mut process = ToolProcess::new(self.tools.python())
             .with_arguments([
                 OsString::from("-I"),
@@ -428,11 +455,9 @@ impl EngineService {
                     .clamp(1, 600)
                     + 10,
             ));
-        if self.isolate_execution
-            && matches!(request["operation"].as_str(), Some("run" | "run_tool"))
-        {
+        if isolated {
             fs::write(
-                directory.path().join("isolation.py"),
+                helper_dir.join("isolation.py"),
                 include_str!("../python/isolation.py"),
             )?;
             process = process.with_arguments([OsString::from("--isolated")]);
@@ -441,7 +466,7 @@ impl EngineService {
                     .as_str()
                     .ok_or_else(|| EngineError::Protocol("缺少执行工作目录。".into()))?,
             );
-            let mut read_paths = vec![self.tools.root.clone(), directory.path().to_path_buf()];
+            let mut read_paths = vec![self.tools.root.clone(), helper_dir];
             let mut input_paths = Vec::new();
             if let Some(paths) = request["resourcePaths"].as_object() {
                 input_paths.extend(paths.values().filter_map(Value::as_str).map(PathBuf::from));

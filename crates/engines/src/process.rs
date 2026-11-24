@@ -1,13 +1,26 @@
-use std::{ffi::OsString, io::BufReader, path::PathBuf, process::Stdio, time::Duration};
+use std::{
+    ffi::OsString, io::BufReader, path::PathBuf, process::Stdio, sync::OnceLock, time::Duration,
+};
 
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     process::Command,
+    sync::Semaphore,
 };
 use tokio_util::sync::CancellationToken;
 
 use crate::EngineError;
+
+fn process_slots() -> &'static Semaphore {
+    static SLOTS: OnceLock<Semaphore> = OnceLock::new();
+    SLOTS.get_or_init(|| {
+        let permits = std::thread::available_parallelism()
+            .map(|count| count.get().clamp(2, 6))
+            .unwrap_or(4);
+        Semaphore::new(permits)
+    })
+}
 
 /// JSON subprocess execution, optionally through the isolated native runner.
 #[derive(Clone, Debug)]
@@ -164,6 +177,13 @@ impl ToolProcess {
         command.creation_flags(0x08000000); // CREATE_NO_WINDOW: CLI helpers must not open consoles.
         #[cfg(unix)]
         command.process_group(0);
+        let _permit = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return Err(EngineError::Cancelled),
+            permit = process_slots().acquire() => {
+                permit.map_err(|_| EngineError::Protocol("子进程调度器不可用。".into()))?
+            }
+        };
         let isolated = self.isolation.is_some();
         let mut child = command.spawn().map_err(|error| {
             if isolated {
