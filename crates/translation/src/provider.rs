@@ -275,6 +275,8 @@ pub struct AnalysisStreamTiming {
     pub maximum_idle_ms: Option<u64>,
     pub stream_duration_ms: Option<u64>,
     pub timeout_stage: Option<&'static str>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub ignored_events: Vec<String>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]

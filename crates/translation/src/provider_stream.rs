@@ -4,12 +4,30 @@ use std::time::Instant;
 
 const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_STREAM_BYTES: usize = 64 * 1024 * 1024;
+const MAX_IGNORED_EVENT_TYPES: usize = 16;
 
 fn invalid(detail: &str) -> ProviderError {
     let mut error = ProviderError::new("stream-format", "API 流式响应格式无效，未接受本次结果。");
     error.diagnostic.detail = Some(detail.into());
     error.outcome_unknown = true;
     error
+}
+
+fn is_valid_event_type(kind: &str) -> bool {
+    !kind.is_empty()
+        && kind.len() <= 128
+        && kind
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+fn sanitize_event_type(kind: &str) -> String {
+    kind.chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .take(80)
+        .collect::<String>()
+        .trim()
+        .to_owned()
 }
 
 #[derive(Default)]
@@ -293,6 +311,7 @@ struct Assembly {
     response: Value,
     response_id: Value,
     items: BTreeMap<u64, (Value, Value)>,
+    ignored_events: BTreeSet<String>,
     done: bool,
 }
 
@@ -304,6 +323,7 @@ impl Assembly {
             response: Value::Null,
             response_id: Value::Null,
             items: BTreeMap::new(),
+            ignored_events: BTreeSet::new(),
             done: false,
         }
     }
@@ -348,10 +368,17 @@ impl Assembly {
             .as_str()
             .ok_or_else(|| invalid("Responses event has no type."))?;
         if !event.name.is_empty() && event.name != kind {
-            return Err(invalid("SSE event name and payload type disagree."));
+            return Err(invalid(&format!(
+                "SSE event name ({}) and payload type ({}) disagree.",
+                sanitize_event_type(&event.name),
+                sanitize_event_type(kind),
+            )));
         }
         match kind {
-            "response.completed" | "response.incomplete" | "response.failed" => {
+            "response.completed"
+            | "response.incomplete"
+            | "response.failed"
+            | "response.cancelled" => {
                 let status = kind.strip_prefix("response.").unwrap_or_default();
                 let response = &value["response"];
                 self.response = response.clone();
@@ -429,7 +456,26 @@ impl Assembly {
                 }
                 self.output_identity(&value)?;
             }
-            _ => return Err(invalid("Unsupported Responses stream event.")),
+            _ => {
+                if !is_valid_event_type(kind) {
+                    return Err(invalid(&format!(
+                        "Unsupported Responses stream event: {}.",
+                        sanitize_event_type(kind),
+                    )));
+                }
+                if let Some(id) = value.get("response").and_then(|response| response.get("id")) {
+                    identity(&mut self.response_id, id)?;
+                }
+                if let Some(index) = value.get("output_index").and_then(Value::as_u64)
+                    && value.get("item_id").is_some()
+                    && self.items.contains_key(&index)
+                {
+                    self.output_identity(&value)?;
+                }
+                if self.ignored_events.len() < MAX_IGNORED_EVENT_TYPES {
+                    self.ignored_events.insert(kind.to_owned());
+                }
+            }
         }
         Ok(())
     }
@@ -614,6 +660,11 @@ impl OpenAiProvider {
                 maximum_idle = maximum_idle.max(ended.duration_since(last));
             }
             timing.maximum_idle_ms = Some(milliseconds(maximum_idle));
+        }
+        if !assembly.ignored_events.is_empty() {
+            timing.ignored_events = std::mem::take(&mut assembly.ignored_events)
+                .into_iter()
+                .collect();
         }
         match outcome {
             Ok(mut completion) => {
@@ -1172,5 +1223,77 @@ mod tests {
         assert!(error.message.contains("流式传输"));
         assert!(error.outcome_unknown);
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn responses_ignore_well_formed_extension_events_and_report_invalid_event_names() {
+        let final_response = response_done();
+        let events = [
+            json!({"type":"response.created","response":{"id":"resp-stream","status":"in_progress"}}),
+            json!({"type":"keepalive"}),
+            json!({"type":"codex.rate_limits","remaining":42}),
+            json!({"type":"response.output_item.added","output_index":0,"item":{"id":"reason-1","type":"reasoning"}}),
+            json!({"type":"response.reasoning_summary.delta","output_index":0,"item_id":"reason-1","delta":"thinking"}),
+            json!({"type":"response.output_item.added","output_index":1,"item":{"id":"item-1","type":"function_call"}}),
+            json!({"type":"response.output_item.done","output_index":1,"item":{"id":"item-1","type":"function_call"}}),
+            json!({"type":"response.completed","response":final_response}),
+        ];
+        let wire = events.into_iter().map(data).collect::<String>();
+        let mut assembly = Assembly::new(ApiProtocol::Responses);
+        let mut decoder = Decoder::default();
+        decode(&mut assembly, &mut decoder, wire.as_bytes()).unwrap();
+        assert!(assembly.done);
+        assert_eq!(
+            assembly.ignored_events,
+            BTreeSet::from([
+                "codex.rate_limits".to_owned(),
+                "keepalive".to_owned(),
+                "response.reasoning_summary.delta".to_owned(),
+            ])
+        );
+
+        let mut bad = Assembly::new(ApiProtocol::Responses);
+        let mut decoder = Decoder::default();
+        let err = decode(
+            &mut bad,
+            &mut decoder,
+            data(json!({"type":"bad event!"})).as_bytes(),
+        )
+        .unwrap_err();
+        assert_eq!(err.diagnostic.code, "stream-format");
+        assert!(
+            err.diagnostic
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("bad event!")),
+            "{:?}",
+            err.diagnostic.detail
+        );
+
+        let mut mismatch = Assembly::new(ApiProtocol::Responses);
+        let mut decoder = Decoder::default();
+        decode(
+            &mut mismatch,
+            &mut decoder,
+            data(json!({"type":"response.created","response":{"id":"resp-stream"}})).as_bytes(),
+        )
+        .unwrap();
+        let err = decode(
+            &mut mismatch,
+            &mut decoder,
+            data(json!({"type":"response.custom_ping","response":{"id":"other-resp"}})).as_bytes(),
+        )
+        .unwrap_err();
+        assert_eq!(err.diagnostic.code, "stream-format");
+
+        let mut cancelled = Assembly::new(ApiProtocol::Responses);
+        let mut decoder = Decoder::default();
+        decode(
+            &mut cancelled,
+            &mut decoder,
+            data(json!({"type":"response.cancelled","response":{"id":"resp-stream","status":"cancelled"}})).as_bytes(),
+        )
+        .unwrap();
+        assert!(cancelled.done);
     }
 }
