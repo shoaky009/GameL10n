@@ -1,80 +1,135 @@
-import { Button, LineEdit, ComboBox, CheckBox, ScrollView, ListView } from "std-widgets.slint";
-import { App, Theme, Label, Caption, Heading, Link, ListPanel, SelectableListRow } from "state.slint";
+import { LineEdit, ComboBox, CheckBox, ScrollView, ListView } from "std-widgets.slint";
+import { App, Theme, StatusDot, Divider, Label, Caption, Heading, Link, ListPanel, SelectableListRow, TabItem, IconButton, ActionButton } from "state.slint";
+
 export component EngineLibrary inherits VerticalLayout {
-    spacing: 12px; Heading { text: "全局引擎库"; font-size: 26px; }
-    HorizontalLayout {
-        LineEdit { text <=> App.catalog-query; placeholder-text: "搜索引擎、模板或兼容游戏"; edited => { App.action("catalog", "0"); } horizontal-stretch: 1; }
+    spacing: 12px;
+    HorizontalLayout { spacing: 8px;
+        Heading { text: "全局引擎库"; font-size: 24px; vertical-alignment: center; horizontal-stretch: 1; }
+        IconButton {
+            icon: "refresh"; button-size: 30px; icon-size: 16px;
+            tooltip: "刷新全局引擎库";
+            clicked => { App.action("catalog-refresh", ""); }
+        }
+    }
+    HorizontalLayout { spacing: 8px;
+        LineEdit { text <=> App.catalog-query; placeholder-text: "搜索引擎、模板或兼容游戏"; edited => { App.action("catalog", "0"); } horizontal-stretch: 1; min-width: 120px; }
+        if App.catalog-query != "": IconButton {
+            icon: "close"; button-size: 30px; icon-size: 14px;
+            tooltip: "清空搜索";
+            clicked => { App.catalog-query = ""; App.action("catalog", "0"); }
+        }
         ComboBox { model: ["全部来源", "内置", "扩展", "仅历史记录"]; current-index <=> App.catalog-filter; selected => { App.action("catalog", "0"); } }
         ComboBox { model: ["全部状态", "已启用", "已停用"]; current-index <=> App.catalog-enabled-filter; selected => { App.action("catalog", "0"); } }
         ComboBox { model: ["名称", "最近更新", "兼容游戏数"]; current-index <=> App.catalog-sort; selected => { App.action("catalog", "0"); } }
-        Button { text: "刷新"; clicked => { App.action("catalog-refresh", ""); } }
     }
     HorizontalLayout { spacing: 16px;
-        ListPanel { width: 300px;
+        ListPanel { width: 304px;
             HorizontalLayout { padding: 8px; spacing: 6px;
-                Button { text: "多选"; checkable: true; checked <=> App.catalog-multi; }
-                Button { text: "启用所选"; enabled: App.engine-id != ""; clicked => { App.action("engine-enable", "true"); } }
-                Button { text: "停用所选"; enabled: App.engine-id != ""; clicked => { App.action("engine-enable", "false"); } }
+                IconButton {
+                    icon: "list-checks"; button-size: 28px; icon-size: 15px;
+                    active: App.catalog-multi;
+                    tooltip: App.catalog-multi ? "退出多选模式" : "批量多选引擎（也支持 Ctrl / Shift 点击）";
+                    clicked => { App.catalog-multi = !App.catalog-multi; }
+                }
+                ActionButton { text: "启用所选"; icon: "check"; compact: true; enabled: App.engine-id != ""; clicked => { App.action("engine-enable", "true"); } }
+                ActionButton { text: "停用所选"; icon: "pause"; compact: true; enabled: App.engine-id != ""; clicked => { App.action("engine-enable", "false"); } }
+                Rectangle { horizontal-stretch: 1; }
             }
-            Rectangle { height: 1px; background: Theme.line; }
+            Divider {}
             list := ListView { vertical-stretch: 1; content-y <=> App.catalog-scroll-y;
                 horizontal-scrollbar-policy: always-off;
                 for engine in App.engines: SelectableListRow {
                     width: list.visible-width; height: App.catalog-row-height;
                     selected: engine.selected; hovered: hit.has-hover;
-                    VerticalLayout { padding-left: 12px; padding-right: 12px; alignment: center; spacing: 3px;
-                        Label { text: engine.name; color: Theme.title; font-weight: 600; height: self.preferred-height; overflow: elide; wrap: no-wrap; }
-                        Caption { text: engine.detail; height: self.preferred-height; overflow: elide; wrap: no-wrap; }
-                    }
-                    hit := TouchArea { pointer-event(event) => {
-                        if event.kind == PointerEventKind.down && event.button == PointerEventButton.left {
-                            App.action(event.modifiers.shift ? "engine-range" : event.modifiers.control || App.catalog-multi ? "engine-toggle" : "engine", engine.id);
+                    VerticalLayout { padding-left: 12px; padding-right: 12px; alignment: center; spacing: 4px;
+                        HorizontalLayout { spacing: 6px; alignment: start;
+                            VerticalLayout { alignment: center; horizontal-stretch: 0;
+                                StatusDot { size: 7px; tint: engine.enabled ? Theme.success : Theme.muted; }
+                            }
+                            Label { text: engine.name; color: Theme.title; font-weight: 600; height: self.preferred-height; horizontal-stretch: 1; overflow: elide; wrap: no-wrap; }
                         }
-                    } }
+                        Caption { text: engine.detail; font-size: 12px; height: self.preferred-height; overflow: elide; wrap: no-wrap; }
+                    }
+                    hit := TouchArea {
+                        mouse-cursor: pointer;
+                        pointer-event(event) => {
+                            if event.kind == PointerEventKind.down && event.button == PointerEventButton.left {
+                                App.action(event.modifiers.shift ? "engine-range" : event.modifiers.control || App.catalog-multi ? "engine-toggle" : "engine", engine.id);
+                            }
+                        }
+                    }
                 }
             }
-            Rectangle { height: 1px; background: Theme.line; }
-            HorizontalLayout { padding-left: 12px; padding-right: 8px; padding-top: 8px; padding-bottom: 8px; spacing: 6px;
+            Divider {}
+            HorizontalLayout { padding-left: 12px; padding-right: 8px; padding-top: 6px; padding-bottom: 6px; spacing: 4px;
                 Caption {
                     text: App.catalog-total <= 100 ? "共 " + App.catalog-total + " 个"
                         : (App.catalog-offset + 1) + "–" + (App.catalog-offset + App.engines.length) + " / " + App.catalog-total;
                     horizontal-stretch: 1; vertical-alignment: center; wrap: no-wrap;
                 }
-                if App.catalog-total > 100: Button { text: "上一页"; enabled: App.catalog-offset > 0; clicked => { App.action("catalog", "previous"); } }
-                if App.catalog-total > 100: Button { text: "下一页"; enabled: App.catalog-offset + 100 < App.catalog-total; clicked => { App.action("catalog", "next"); } }
+                if App.catalog-total > 100: IconButton {
+                    icon: "chevron-left"; button-size: 26px; icon-size: 15px;
+                    tooltip: "上一页";
+                    enabled: App.catalog-offset > 0;
+                    clicked => { App.action("catalog", "previous"); }
+                }
+                if App.catalog-total > 100: IconButton {
+                    icon: "chevron-right"; button-size: 26px; icon-size: 15px;
+                    tooltip: "下一页";
+                    enabled: App.catalog-offset + 100 < App.catalog-total;
+                    clicked => { App.action("catalog", "next"); }
+                }
             }
         }
-        VerticalLayout { spacing: 12px;
-            Heading { text: App.engine-name == "" ? "选择引擎或资源模板" : App.engine-name; }
-            HorizontalLayout {
-                Button { text: "概览"; clicked => { App.engine-tab = 0; } }
-                Button { text: "版本"; clicked => { App.engine-tab = 1; } }
-                Button { text: "兼容游戏"; clicked => { App.engine-tab = 2; } }
-                Button { text: "相关经验"; clicked => { App.engine-tab = 3; } }
-                Rectangle { horizontal-stretch: 1; }
+        VerticalLayout { spacing: 10px;
+            Heading { text: App.engine-name == "" ? "选择引擎或资源模板" : App.engine-name; font-size: 20px; }
+            VerticalLayout { spacing: 0px;
+                HorizontalLayout { spacing: 4px;
+                    TabItem { text: "概览"; icon: "info"; selected: App.engine-tab == 0; clicked => { App.engine-tab = 0; } }
+                    TabItem { text: "版本"; icon: "package"; selected: App.engine-tab == 1; clicked => { App.engine-tab = 1; } }
+                    TabItem { text: "兼容游戏"; icon: "gamepad"; selected: App.engine-tab == 2; clicked => { App.engine-tab = 2; } }
+                    TabItem { text: "相关经验"; icon: "book"; selected: App.engine-tab == 3; clicked => { App.engine-tab = 3; } }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+                Divider {}
             }
             if App.engine-tab == 0: ScrollView {
                 VerticalLayout { alignment: start; spacing: 12px;
                     Label { text: App.engine-summary; }
-                    if App.engine-deletable: HorizontalLayout { alignment: start;
-                        Button { text: "删除引擎…"; clicked => { App.action("engine-delete-dialog", App.engine-id); } }
+                    if App.engine-deletable: HorizontalLayout { alignment: start; spacing: 8px;
+                        ActionButton { text: "删除引擎…"; icon: "trash"; danger: true; clicked => { App.action("engine-delete-dialog", App.engine-id); } }
                     }
                 }
             }
-            if App.engine-tab == 1: VerticalLayout {
-                ListView { for version in App.versions: Rectangle { height: 68px; background: App.version-id == version.id ? Theme.tint : Theme.surface;
-                    VerticalLayout { padding: 8px; Label { text: version.name; } Caption { text: version.detail; } }
-                    TouchArea { clicked => { App.action("version", version.id); } }
-                } }
-                Caption { text: App.version-detail; }
-                HorizontalLayout { Button { text: "打开所在文件夹"; enabled: App.version-id != ""; clicked => { App.action("open", "version"); } } Button { text: "验证发布包…"; enabled: App.version-id != ""; clicked => { App.action("verify-version", ""); } } Button { text: "删除版本…"; enabled: App.version-id != ""; clicked => { App.action("version-delete-dialog", ""); } } }
+            if App.engine-tab == 1: VerticalLayout { spacing: 10px;
+                ListPanel { vertical-stretch: 1;
+                    version-list := ListView { horizontal-scrollbar-policy: always-off;
+                        for version in App.versions: SelectableListRow {
+                            width: version-list.visible-width; height: 64px;
+                            selected: App.version-id == version.id; hovered: version-hit.has-hover;
+                            VerticalLayout { padding-left: 12px; padding-right: 12px; alignment: center; spacing: 3px;
+                                Label { text: version.name; color: Theme.title; font-weight: 600; wrap: no-wrap; overflow: elide; }
+                                Caption { text: version.detail; wrap: no-wrap; overflow: elide; }
+                            }
+                            version-hit := TouchArea { mouse-cursor: pointer; clicked => { App.action("version", version.id); } }
+                        }
+                    }
+                }
+                if App.version-detail != "": Caption { text: App.version-detail; }
+                HorizontalLayout { spacing: 8px;
+                    ActionButton { text: "打开所在文件夹"; icon: "folder-open"; enabled: App.version-id != ""; clicked => { App.action("open", "version"); } }
+                    ActionButton { text: "验证发布包…"; icon: "check-square"; enabled: App.version-id != ""; clicked => { App.action("verify-version", ""); } }
+                    ActionButton { text: "删除版本…"; icon: "trash"; danger: true; enabled: App.version-id != ""; clicked => { App.action("version-delete-dialog", ""); } }
+                    Rectangle { horizontal-stretch: 1; }
+                }
             }
-            if App.engine-tab == 2: VerticalLayout {
+            if App.engine-tab == 2: VerticalLayout { spacing: 8px;
                 LineEdit { text <=> App.compatible-query; placeholder-text: "筛选游戏名称或版本"; edited => { App.action("compatible-games", ""); } }
-                ListView { for game in App.games: Rectangle { height: max(78px, game-content.preferred-height);
-                    game-content := VerticalLayout { padding: 8px; spacing: 6px; alignment: start;
+                ListView { for game in App.games: Rectangle { height: max(74px, game-content.preferred-height);
+                    game-content := VerticalLayout { padding: 8px; spacing: 4px; alignment: start;
                         Link { text: game.name; horizontal-stretch: 1; clicked => { App.action("project-reference", game.id); } }
                         Caption { text: game.detail; }
+                        Divider {}
                     }
                 } }
             }
@@ -85,16 +140,19 @@ export component EngineLibrary inherits VerticalLayout {
                     content-width: self.visible-width;
                     content-height: entries.preferred-height;
                     entries := VerticalLayout { spacing: 4px; alignment: start;
-                        for knowledge in App.knowledge: Rectangle {
+                        for knowledge in App.knowledge: SelectableListRow {
                             height: entry-content.preferred-height;
-                            background: App.knowledge-id == knowledge.id ? Theme.tint : Theme.surface;
-                            border-radius: 4px;
+                            selected: App.knowledge-id == knowledge.id;
+                            hovered: knowledge-hit.has-hover;
+                            border-radius: 5px;
+                            border-width: 1px;
+                            border-color: App.knowledge-id == knowledge.id ? Theme.accent.with-alpha(0.35) : Theme.line;
                             entry-content := VerticalLayout {
                                 width: parent.width; padding: 12px; spacing: 4px; alignment: start;
-                                Label { text: knowledge.name; }
+                                Label { text: knowledge.name; color: Theme.title; }
                                 Caption { text: knowledge.detail; }
                             }
-                            TouchArea { clicked => { App.action("knowledge", knowledge.id); } }
+                            knowledge-hit := TouchArea { mouse-cursor: pointer; clicked => { App.action("knowledge", knowledge.id); } }
                         }
                     }
                 }

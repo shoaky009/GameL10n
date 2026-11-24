@@ -1,5 +1,5 @@
-import { Button, CheckBox, LineEdit, TextEdit, ComboBox, SpinBox, ScrollView, ListView, ProgressIndicator } from "std-widgets.slint";
-import { App, Theme, Label, Caption, TokenCaption, Heading, Divider, ReportText, ListPanel, SelectableListRow } from "state.slint";
+import { CheckBox, LineEdit, TextEdit, ComboBox, SpinBox, ScrollView, ListView, ProgressIndicator } from "std-widgets.slint";
+import { App, Theme, Card, Label, Caption, TokenCaption, Heading, Divider, ReportText, ListPanel, SelectableListRow, IconButton, ActionButton } from "state.slint";
 
 component SettingsForm inherits ScrollView {
     horizontal-scrollbar-policy: always-off;
@@ -37,9 +37,9 @@ export component ApiTestControls inherits VerticalLayout {
     spacing: 8px; alignment: start;
     private property <bool> available: !App.api-testing && (App.modal == "api" ? App.api-endpoint != "" && App.api-model != "" : App.api-id != "");
     HorizontalLayout { spacing: 8px;
-        Button { text: "测试翻译"; enabled: root.available; clicked => { App.action("api-test", "translation"); } }
-        Button { text: "测试分析"; enabled: root.available; clicked => { App.action("api-test", "analysis"); } }
-        if App.api-testing: Button { text: "取消测试"; clicked => { App.action("api-test-cancel", ""); } }
+        ActionButton { text: "测试翻译"; icon: "languages"; compact: true; enabled: root.available; clicked => { App.action("api-test", "translation"); } }
+        ActionButton { text: "测试分析"; icon: "sparkles"; compact: true; enabled: root.available; clicked => { App.action("api-test", "analysis"); } }
+        if App.api-testing: ActionButton { text: "取消测试"; icon: "stop"; danger: true; compact: true; clicked => { App.action("api-test-cancel", ""); } }
         Rectangle { horizontal-stretch: 1; }
     }
     if App.api-testing: VerticalLayout { spacing: 5px;
@@ -59,7 +59,27 @@ component ApiSelection inherits VerticalLayout {
     if App.apis.length > 0: Label { text: "智能识别与适配 API"; font-weight: 600; }
     if App.apis.length > 0: ComboBox { model: App.api-names; current-index <=> App.analysis-index; selected => { App.action("analysis-api", ""); } }
     if App.apis.length > 0: Divider {}
-    if App.apis.length > 0 || App.chain.length > 0: Label { text: "文本翻译 API 链"; font-weight: 600; }
+    if App.apis.length > 0 || App.chain.length > 0: HorizontalLayout { spacing: 8px;
+        Label { text: "文本翻译 API 链"; font-weight: 600; vertical-alignment: center; horizontal-stretch: 1; }
+        if App.chain.length > 0: IconButton {
+            icon: "arrow-up"; button-size: 28px; icon-size: 15px;
+            tooltip: "上移所选接口";
+            enabled: App.chain-index > 0;
+            clicked => { App.action("chain-up", ""); }
+        }
+        if App.chain.length > 0: IconButton {
+            icon: "arrow-down"; button-size: 28px; icon-size: 15px;
+            tooltip: "下移所选接口";
+            enabled: App.chain-index >= 0 && App.chain-index < App.chain.length - 1;
+            clicked => { App.action("chain-down", ""); }
+        }
+        if App.chain.length > 0: IconButton {
+            icon: "trash"; danger: true; button-size: 28px; icon-size: 15px;
+            tooltip: "从翻译链中移除所选接口";
+            enabled: App.chain-index >= 0;
+            clicked => { App.action("chain-remove", ""); }
+        }
+    }
     if App.apis.length > 0 || App.chain.length > 0: Caption { text: "拒译条目或格式无效的 JSON 批次转到下一接口。网络故障和限流在当前接口重试。"; }
     if App.chain.length > 0: ListPanel { height: min(176px, 2px + App.chain.length * 58px);
         chain-list := ListView { horizontal-scrollbar-policy: always-off;
@@ -71,15 +91,9 @@ component ApiSelection inherits VerticalLayout {
         }
     }
     if App.chain.length == 0 && App.apis.length > 0: Caption { text: "尚未配置翻译 API。"; }
-    if App.chain.length > 0: HorizontalLayout { spacing: 8px;
-        Button { text: "上移"; enabled: App.chain-index > 0; clicked => { App.action("chain-up", ""); } }
-        Button { text: "下移"; enabled: App.chain-index >= 0 && App.chain-index < App.chain.length - 1; clicked => { App.action("chain-down", ""); } }
-        Button { text: "从链中移除"; enabled: App.chain-index >= 0; clicked => { App.action("chain-remove", ""); } }
-        Rectangle { horizontal-stretch: 1; }
-    }
     if App.apis.length > 0: HorizontalLayout { spacing: 8px;
         ComboBox { model: App.api-names; current-index <=> App.candidate-api-index; horizontal-stretch: 1; }
-        Button { text: "添加到链末尾"; enabled: App.candidate-api-index >= 0; clicked => { App.action("chain-add", ""); } }
+        ActionButton { text: "添加到链末尾"; icon: "plus"; enabled: App.candidate-api-index >= 0; clicked => { App.action("chain-add", ""); } }
     }
     if App.apis.length > 0 || App.chain.length > 0: Divider {}
     Label { text: "智能适配预算"; font-weight: 600; }
@@ -113,61 +127,90 @@ export component WorkflowControls inherits VerticalLayout {
 }
 
 export component ProjectSettings inherits SettingsForm {
-    Heading { text: "游戏启动"; }
-    Caption { text: App.launch-summary; }
-    HorizontalLayout { Button { text: "配置启动入口…"; clicked => { App.action("launch-settings", ""); } } Rectangle { horizontal-stretch: 1; } }
-    Divider {}
-    Heading { text: "自动汉化"; }
-    HorizontalLayout { spacing: 8px;
-        Button { text: "配置自动汉化…"; enabled: !App.busy; clicked => { App.action("workflow-settings", ""); } }
-        Button { text: "运行检查…"; enabled: !App.busy; clicked => { App.action("game-check-dialog", ""); } }
-        Rectangle { horizontal-stretch: 1; }
+    Card {
+        VerticalLayout { padding: 16px; spacing: 10px; alignment: start;
+            Heading { text: "游戏启动与自动汉化"; font-size: 17px; }
+            Caption { text: App.launch-summary; }
+            HorizontalLayout { spacing: 8px;
+                ActionButton { text: "配置启动入口…"; icon: "play"; clicked => { App.action("launch-settings", ""); } }
+                ActionButton { text: "配置自动汉化…"; icon: "sparkles"; enabled: !App.busy; clicked => { App.action("workflow-settings", ""); } }
+                ActionButton { text: "运行检查…"; icon: "check-square"; enabled: !App.busy; clicked => { App.action("game-check-dialog", ""); } }
+                Rectangle { horizontal-stretch: 1; }
+            }
+        }
     }
-    Divider {}
-    HorizontalLayout { Button { text: "管理模型配置"; clicked => { App.action("navigate", "apis"); } } Rectangle { horizontal-stretch: 1; } }
-    Caption { text: "未单独配置的项自动使用全局设置，修改后仅对当前项目生效。"; }
-    ApiSelection {}
-    Divider {} Heading { text: "翻译语言与术语"; }
-    Caption { text: "目标语言"; } LineEdit { text <=> App.language; }
-    Caption { text: "翻译风格"; } TextEdit { text <=> App.style; height: 70px; }
-    Caption { text: "术语表（每行：原文=译文）"; } TextEdit { text <=> App.terminology; height: 120px; }
-    HorizontalLayout { spacing: 16px;
-        Label { text: "每批文本数"; horizontal-stretch: 0; vertical-alignment: center; }
-        SpinBox { value <=> App.batch-size; minimum: 1; maximum: 80; width: 100px; horizontal-stretch: 0; }
-        Rectangle { horizontal-stretch: 1; }
+    Card {
+        VerticalLayout { padding: 16px; spacing: 12px; alignment: start;
+            HorizontalLayout { spacing: 12px;
+                Heading { text: "模型与预算"; font-size: 17px; vertical-alignment: center; horizontal-stretch: 1; }
+                ActionButton { text: "管理全局配置"; icon: "sliders"; compact: true; clicked => { App.action("navigate", "apis"); } }
+            }
+            Caption { text: "未单独配置的项自动使用全局设置，修改后仅对当前项目生效。"; }
+            ApiSelection {}
+        }
     }
-    HorizontalLayout { Button { text: "保存项目设置"; primary: true; clicked => { App.action("save-project-settings", ""); } } Rectangle { horizontal-stretch: 1; } }
-    Divider {}
-    HorizontalLayout { spacing: 12px;
-        Button { text: "清理项目文件…"; enabled: !App.busy; clicked => { App.action("cleanup-dialog", ""); } }
-        Caption { text: App.source-materials-cleared ? "原文工作资源已清理，项目、译文和当前补丁已保留。" : "按类别清理适配工作文件、原文资源副本、历史补丁和日志。"; horizontal-stretch: 1; }
+    Card {
+        VerticalLayout { padding: 16px; spacing: 10px; alignment: start;
+            Heading { text: "翻译语言与术语"; font-size: 17px; }
+            Caption { text: "目标语言"; } LineEdit { text <=> App.language; }
+            Caption { text: "翻译风格"; } TextEdit { text <=> App.style; height: 70px; }
+            Caption { text: "术语表（每行：原文=译文）"; } TextEdit { text <=> App.terminology; height: 120px; }
+            HorizontalLayout { spacing: 16px;
+                Label { text: "每批文本数"; horizontal-stretch: 0; vertical-alignment: center; }
+                SpinBox { value <=> App.batch-size; minimum: 1; maximum: 80; width: 100px; horizontal-stretch: 0; }
+                Rectangle { horizontal-stretch: 1; }
+            }
+            HorizontalLayout { spacing: 8px; padding-top: 4px;
+                ActionButton { text: "保存项目设置"; icon: "save"; primary: true; clicked => { App.action("save-project-settings", ""); } }
+                Rectangle { horizontal-stretch: 1; }
+            }
+        }
+    }
+    Card {
+        VerticalLayout { padding: 16px; spacing: 10px; alignment: start;
+            HorizontalLayout { spacing: 12px;
+                ActionButton { text: "清理项目文件…"; icon: "trash"; danger: true; enabled: !App.busy; clicked => { App.action("cleanup-dialog", ""); } }
+                Caption { text: App.source-materials-cleared ? "原文工作资源已清理，项目、译文和当前补丁已保留。" : "按类别清理适配工作文件、原文资源副本、历史补丁和日志。"; horizontal-stretch: 1; vertical-alignment: center; }
+            }
+        }
     }
 }
 
 export component GlobalApis inherits VerticalLayout {
-    spacing: 16px; Heading { text: "模型配置"; font-size: 26px; }
+    spacing: 14px; Heading { text: "模型配置"; font-size: 24px; }
     SettingsForm {
-        HorizontalLayout { spacing: 8px;
-            Button { text: "新增配置"; primary: true; enabled: !App.api-testing; clicked => { App.action("api-add", ""); } }
-            if App.apis.length > 0: Button { text: "编辑所选配置"; enabled: App.api-id != "" && !App.api-testing; clicked => { App.action("api-edit", App.api-id); } }
-            if App.apis.length > 0: Button { text: "复制所选配置"; enabled: App.api-id != "" && !App.api-testing; clicked => { App.action("api-copy", App.api-id); } }
-            if App.apis.length > 0: Button { text: "删除所选配置"; enabled: App.api-id != "" && !App.api-testing; clicked => { App.action("api-delete-dialog", App.api-id); } }
-            Rectangle { horizontal-stretch: 1; }
-        }
-        if App.apis.length > 0: ListPanel { height: min(210px, 2px + App.apis.length * 58px);
-            profiles := ListView { horizontal-scrollbar-policy: always-off;
-                for api in App.apis: ModelOption {
-                    width: profiles.visible-width; selected: App.api-id == api.id; enabled: !App.api-testing;
-                    title: api.name; detail: api.detail;
-                    choose => { App.api-id = api.id; App.api-test-result = ""; }
+        Card {
+            VerticalLayout { padding: 16px; spacing: 12px; alignment: start;
+                HorizontalLayout { spacing: 8px;
+                    ActionButton { text: "新增配置"; icon: "plus"; primary: true; enabled: !App.api-testing; clicked => { App.action("api-add", ""); } }
+                    if App.apis.length > 0: ActionButton { text: "编辑"; icon: "edit"; tooltip: "编辑所选模型配置"; enabled: App.api-id != "" && !App.api-testing; clicked => { App.action("api-edit", App.api-id); } }
+                    if App.apis.length > 0: ActionButton { text: "复制"; icon: "copy"; tooltip: "复制所选模型配置"; enabled: App.api-id != "" && !App.api-testing; clicked => { App.action("api-copy", App.api-id); } }
+                    if App.apis.length > 0: ActionButton { text: "删除"; icon: "trash"; danger: true; tooltip: "删除所选模型配置"; enabled: App.api-id != "" && !App.api-testing; clicked => { App.action("api-delete-dialog", App.api-id); } }
+                    Rectangle { horizontal-stretch: 1; }
                 }
+                if App.apis.length > 0: ListPanel { height: min(210px, 2px + App.apis.length * 58px);
+                    profiles := ListView { horizontal-scrollbar-policy: always-off;
+                        for api in App.apis: ModelOption {
+                            width: profiles.visible-width; selected: App.api-id == api.id; enabled: !App.api-testing;
+                            title: api.name; detail: api.detail;
+                            choose => { App.api-id = api.id; App.api-test-result = ""; }
+                        }
+                    }
+                }
+                if App.apis.length == 0: Caption { text: "尚未添加模型配置。第一份配置同时用作分析和翻译的全局默认。"; }
+                if App.apis.length > 0: ApiTestControls {}
             }
         }
-        if App.apis.length == 0: Caption { text: "尚未添加模型配置。第一份配置同时用作分析和翻译的全局默认。"; }
-        if App.apis.length > 0: ApiTestControls {}
-        Divider {}
-        ApiSelection {}
-        HorizontalLayout { Button { text: "保存默认预算"; primary: true; clicked => { App.action("save-defaults", ""); } } Rectangle { horizontal-stretch: 1; } }
-        Caption { text: "项目未单独配置的项自动使用这里的全局设置。修改后用于后续任务，无需重启。"; }
+        Card {
+            VerticalLayout { padding: 16px; spacing: 12px; alignment: start;
+                Heading { text: "全局默认分配与预算"; font-size: 17px; }
+                ApiSelection {}
+                HorizontalLayout { spacing: 8px; padding-top: 4px;
+                    ActionButton { text: "保存默认预算"; icon: "save"; primary: true; clicked => { App.action("save-defaults", ""); } }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+                Caption { text: "项目未单独配置的项自动使用这里的全局设置。修改后用于后续任务，无需重启。"; }
+            }
+        }
     }
 }

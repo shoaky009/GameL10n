@@ -1,5 +1,5 @@
-import { Button, LineEdit, TextEdit, ScrollView, ProgressIndicator } from "std-widgets.slint";
-import { App, Theme, Label, Caption, TokenCaption, TokenDisplay, Heading, SectionHeading, Divider, ReportText, Link } from "state.slint";
+import { LineEdit, TextEdit, ScrollView, ProgressIndicator } from "std-widgets.slint";
+import { App, Theme, Card, StatusDot, Label, Caption, TokenCaption, TokenDisplay, Heading, SectionHeading, Divider, ReportText, Link, IconButton, ActionButton } from "state.slint";
 
 component RunningTask inherits VerticalLayout {
     in property <string> title;
@@ -8,17 +8,23 @@ component RunningTask inherits VerticalLayout {
     in property <TokenDisplay> usage;
     in property <float> progress;
     in property <string> stop-label;
+    in property <string> stop-icon: "stop";
     callback stop();
     private property <bool> expanded;
     spacing: 4px;
-    HorizontalLayout { spacing: 10px;
+    HorizontalLayout { spacing: 8px;
         Label { text: App.project-name; color: Theme.secondary; max-width: 180px; min-width: 0px; overflow: elide; wrap: no-wrap; vertical-alignment: center; }
-        Label { text: root.title; color: Theme.ink; min-width: 0px; horizontal-stretch: 1; overflow: elide; wrap: no-wrap; vertical-alignment: center; }
-        Button { text: root.stop-label; clicked => { root.stop(); } }
-        Button { text: root.expanded ? "收起详情" : "任务详情"; accessible-label: root.title + "详情"; clicked => { root.expanded = !root.expanded; } }
+        Label { text: root.title; color: Theme.ink; font-weight: 600; min-width: 0px; horizontal-stretch: 1; overflow: elide; wrap: no-wrap; vertical-alignment: center; }
+        ActionButton { text: root.stop-label; icon: root.stop-icon; danger: true; compact: true; clicked => { root.stop(); } }
+        IconButton {
+            icon: root.expanded ? "chevron-up" : "chevron-down";
+            button-size: 28px; icon-size: 15px;
+            tooltip: root.expanded ? "收起任务详情" : "展开任务详情";
+            clicked => { root.expanded = !root.expanded; }
+        }
     }
     ProgressIndicator { height: 3px; progress: root.progress; indeterminate: root.progress == 0; }
-    if root.expanded: VerticalLayout { spacing: 4px;
+    if root.expanded: VerticalLayout { spacing: 4px; padding-top: 2px;
         if root.api != "": Caption { text: "API：" + root.api; }
         if root.usage.text != "": TokenCaption { value: root.usage; }
         ScrollView { height: 64px; horizontal-scrollbar-policy: always-off; content-width: self.visible-width;
@@ -31,33 +37,36 @@ export component TaskFeedback inherits Rectangle {
     private property <bool> show-task: App.busy && App.project-id != "";
     private property <bool> show-review: App.review-running && App.project-id != "";
     private property <bool> show-recognition-failure: !App.busy && App.error == "" && App.recognition-failure-message != "";
-    height: feedback-content.preferred-height + 20px;
+    height: feedback-content.preferred-height + 18px;
     background: App.error != "" || root.show-recognition-failure ? Theme.error-bg : Theme.automatic-bg;
-    border-radius: 5px;
-    feedback-content := VerticalLayout { x: 12px; y: 10px; width: parent.width - 24px; height: self.preferred-height; spacing: 6px;
+    border-width: 1px;
+    border-color: App.error != "" || root.show-recognition-failure ? Theme.error.with-alpha(0.25) : Theme.accent.with-alpha(0.2);
+    border-radius: 6px;
+    feedback-content := VerticalLayout { x: 12px; y: 9px; width: parent.width - 24px; height: self.preferred-height; spacing: 6px;
         if root.show-task: RunningTask {
             title: App.status; message: App.task-message; api: App.task-api; usage: App.task-usage; progress: App.progress;
             stop-label: App.task-operation == "translate" || App.task-operation == "retranslate" || App.task-operation == "candidate" ? "暂停翻译" : "停止任务";
+            stop-icon: App.task-operation == "translate" || App.task-operation == "retranslate" || App.task-operation == "candidate" ? "pause" : "stop";
             stop => { App.action("cancel", ""); }
         }
         if App.preview-translation-running && App.task-operation != "translate": RunningTask {
             title: "正在翻译"; message: App.preview-translation-message;
             api: App.task-api-for("translate", App.task-api-summary);
             usage: App.preview-translation-usage; progress: App.preview-translation-progress;
-            stop-label: "暂停翻译"; stop => { App.action("cancel-preview-translation", ""); }
+            stop-label: "暂停翻译"; stop-icon: "pause"; stop => { App.action("cancel-preview-translation", ""); }
         }
         if root.show-task && root.show-review: Divider {}
         if root.show-review: RunningTask {
             title: "正在总结经验"; message: App.review-message;
             api: App.task-api-for("review", App.task-api-summary); usage: App.review-usage;
-            stop-label: "停止总结"; stop => { App.action("cancel-review", ""); }
+            stop-label: "停止总结"; stop-icon: "stop"; stop => { App.action("cancel-review", ""); }
         }
-        if App.error != "" || root.show-recognition-failure || App.activity != "": HorizontalLayout { spacing: 10px;
+        if App.error != "" || root.show-recognition-failure || App.activity != "": HorizontalLayout { spacing: 8px;
             Label { text: App.page == 0 && App.project-name != "" ? App.project-name : "操作提示"; color: Theme.secondary; max-width: 180px; min-width: 0px; overflow: elide; wrap: no-wrap; vertical-alignment: center; }
             Label { text: App.concise-text(App.error != "" ? App.error : root.show-recognition-failure ? App.recognition-failure-message : App.activity); color: App.error != "" || root.show-recognition-failure ? Theme.error : Theme.ink; min-width: 0px; horizontal-stretch: 1; overflow: elide; wrap: no-wrap; vertical-alignment: center; }
-            if App.error != "": Button { text: "查看原因"; clicked => { App.modal = "feedback"; } }
-            if root.show-recognition-failure: Button { text: "查看原因"; clicked => { App.action("tab", "0"); } }
-            if App.error != "": Button { text: "关闭"; clicked => { App.error = ""; } }
+            if App.error != "": ActionButton { text: "查看原因"; compact: true; clicked => { App.modal = "feedback"; } }
+            if root.show-recognition-failure: ActionButton { text: "查看原因"; compact: true; clicked => { App.action("tab", "0"); } }
+            if App.error != "": IconButton { icon: "close"; button-size: 26px; icon-size: 14px; tooltip: "关闭错误提示"; clicked => { App.error = ""; } }
         }
     }
 }
@@ -135,7 +144,7 @@ component RunningRecognition inherits ScrollView {
     content-width: self.visible-width;
     private property <string> project-key: App.project-id;
     changed project-key => { self.content-y = 0px; }
-    VerticalLayout { padding: 8px; spacing: 8px; alignment: start;
+    VerticalLayout { padding: 10px; spacing: 8px; alignment: start;
         if App.task-api != "": ResultLine { title: "使用 API"; value: App.task-api; }
         ProgressIndicator { height: 3px; indeterminate: true; }
         ResultLine {
@@ -159,7 +168,7 @@ component CompletedRecognition inherits ScrollView {
     content-width: self.visible-width;
     private property <string> project-key: App.project-id;
     changed project-key => { self.content-y = 0px; }
-    VerticalLayout { padding: 8px; spacing: 8px; alignment: start;
+    VerticalLayout { padding: 10px; spacing: 8px; alignment: start;
         if App.recognition-failure-message != "": RecognitionFailure {}
         if App.source-materials-cleared || App.recognition-failure-message != "" || App.adaptation-result-title == "上次适配结果": Caption {
             text: App.source-materials-cleared ? "工作文件已清理，成果已保留" : "已有提取结果仍可用";
@@ -197,17 +206,37 @@ component CompletedRecognition inherits ScrollView {
 
 export component Recognition inherits VerticalLayout {
     spacing: 12px;
-    HorizontalLayout { spacing: 20px;
+    HorizontalLayout { spacing: 16px;
         HorizontalLayout { spacing: 8px; horizontal-stretch: 0;
-            if App.can-resume-adaptation: Button { text: "继续智能识别"; primary: true; enabled: (!App.busy || (App.preview-translation-running && App.task-operation == "translate")) && !App.review-running; clicked => { App.action("resume-adaptation", ""); } }
-            Button { text: App.recognition-ready || App.can-resume-adaptation ? "重新识别…" : "识别与适配"; primary: !App.recognition-ready && !App.can-resume-adaptation; enabled: !App.busy; clicked => { App.action("adapt-dialog", ""); } }
-            Button { text: App.translation-preview ? "查看已提取文本" : App.recognition-ready ? "查看文本并试译" : "查看保留文本"; primary: App.translation-preview || (App.recognition-ready && !App.can-resume-adaptation); enabled: App.has-workbench-text; clicked => { App.action("tab", "1"); } }
+            if App.can-resume-adaptation: ActionButton {
+                text: "继续智能识别"; icon: "play"; primary: true;
+                enabled: (!App.busy || (App.preview-translation-running && App.task-operation == "translate")) && !App.review-running;
+                clicked => { App.action("resume-adaptation", ""); }
+            }
+            ActionButton {
+                text: App.recognition-ready || App.can-resume-adaptation ? "重新识别…" : "识别与适配";
+                icon: App.recognition-ready || App.can-resume-adaptation ? "refresh" : "search";
+                primary: !App.recognition-ready && !App.can-resume-adaptation;
+                enabled: !App.busy;
+                clicked => { App.action("adapt-dialog", ""); }
+            }
+            ActionButton {
+                text: App.translation-preview ? "查看已提取文本" : App.recognition-ready ? "查看文本并试译" : "查看保留文本";
+                icon: "languages";
+                primary: App.translation-preview || (App.recognition-ready && !App.can-resume-adaptation);
+                enabled: App.has-workbench-text;
+                clicked => { App.action("tab", "1"); }
+            }
         }
         Rectangle { width: 1px;
             Rectangle { width: 1px; height: 20px; y: (parent.height - self.height) / 2; background: Theme.line; }
         }
-        HorizontalLayout { spacing: 12px; horizontal-stretch: 0;
-            Button { text: "总结经验"; enabled: !App.review-running; clicked => { App.action("review", ""); } }
+        HorizontalLayout { spacing: 10px; horizontal-stretch: 0;
+            ActionButton {
+                text: "总结经验"; icon: "book";
+                enabled: !App.review-running;
+                clicked => { App.action("review", ""); }
+            }
             VerticalLayout { alignment: center; horizontal-stretch: 0;
                 HorizontalLayout { spacing: 12px;
                     if App.review-summary != "": Link { text: "查看总结"; clicked => { App.modal = "engine-review"; } }
@@ -220,24 +249,28 @@ export component Recognition inherits VerticalLayout {
     if !App.review-running && App.review-message != "": Caption {
         text: App.review-message; wrap: word-wrap;
     }
-    HorizontalLayout { padding-left: 8px; padding-right: 8px; spacing: 10px;
-        Rectangle { width: 8px;
-            Rectangle { width: 8px; height: 8px; y: (parent.height - self.height) / 2; border-radius: 4px;
-                background: App.recognition-running ? Theme.automatic : App.recognition-failure-message != "" ? Theme.error : App.recognition-ready ? App.adaptation-pending-coverage != "" ? Theme.pending : Theme.success : App.recognition != "" ? Theme.pending : Theme.muted;
+    Card {
+        HorizontalLayout { padding-left: 12px; padding-right: 12px; padding-top: 8px; padding-bottom: 8px; spacing: 10px;
+            VerticalLayout { alignment: center; horizontal-stretch: 0;
+                StatusDot {
+                    size: 9px;
+                    tint: App.recognition-running ? Theme.automatic : App.recognition-failure-message != "" ? Theme.error : App.recognition-ready ? App.adaptation-pending-coverage != "" ? Theme.pending : Theme.success : App.recognition != "" ? Theme.pending : Theme.muted;
+                }
             }
-        }
-        Heading {
-            text: App.recognition-running ? App.status : App.recognition-failure-message != "" ? "识别未完成" : App.recognition-ready ? App.adaptation-pending-coverage != "" ? "部分文字可试译" : "文本可试译" : App.recognition != "" ? "覆盖待确认" : "等待识别";
-            font-size: 18px;
-        }
-        Rectangle { horizontal-stretch: 1; }
-        if App.recognition-running ? App.task-usage.text != "" : App.adaptation-usage.text != "": TokenCaption {
-            value: App.recognition-running ? App.task-usage : App.adaptation-usage; color: Theme.secondary;
-            max-width: root.width * 0.55; vertical-alignment: center;
-        }
-        if !App.recognition-running: Link {
-            text: "手动执行适配器…"; enabled: !App.busy && !App.review-running;
-            clicked => { App.action("project-adapter-dialog", ""); }
+            Heading {
+                text: App.recognition-running ? App.status : App.recognition-failure-message != "" ? "识别未完成" : App.recognition-ready ? App.adaptation-pending-coverage != "" ? "部分文字可试译" : "文本可试译" : App.recognition != "" ? "覆盖待确认" : "等待识别";
+                font-size: 16px; vertical-alignment: center;
+            }
+            Rectangle { horizontal-stretch: 1; }
+            if App.recognition-running ? App.task-usage.text != "" : App.adaptation-usage.text != "": TokenCaption {
+                value: App.recognition-running ? App.task-usage : App.adaptation-usage; color: Theme.secondary;
+                max-width: root.width * 0.52; vertical-alignment: center;
+            }
+            if !App.recognition-running: ActionButton {
+                text: "手动执行适配器…"; icon: "wrench"; subtle: true; compact: true;
+                enabled: !App.busy && !App.review-running;
+                clicked => { App.action("project-adapter-dialog", ""); }
+            }
         }
     }
     if App.recognition-ready && !App.recognition-running: CompletedRecognition {}
@@ -267,51 +300,76 @@ export component Recognition inherits VerticalLayout {
     }
 }
 
+component StepHeader inherits HorizontalLayout {
+    in property <string> step;
+    in property <string> title;
+    spacing: 8px;
+    alignment: start;
+    Rectangle {
+        width: 22px; height: 22px; border-radius: 11px; background: Theme.tint;
+        Text { text: root.step; color: Theme.accent; font-size: 12px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
+    }
+    Heading { text: root.title; font-size: 17px; vertical-alignment: center; }
+}
+
 export component PatchPage inherits ScrollView {
-    horizontal-scrollbar-policy: always-off; content-width: self.visible-width;
-    VerticalLayout { padding: 8px; spacing: 14px; alignment: start;
-        Heading { text: "1 · 生成补丁"; font-size: 18px; }
-        Label { text: App.patch-summary == "" ? "使用已保存译文生成补丁，不会调用翻译 API。" : App.patch-summary; }
-        HorizontalLayout { spacing: 8px;
-            Button { text: "生成补丁…"; primary: App.patch-path == ""; enabled: !App.busy && App.recognition != "" && !App.source-materials-cleared; clicked => { App.action("patch-dialog", ""); } }
-            Button { text: "查看本次文本"; enabled: App.patch-path != ""; clicked => { App.action("patch-texts", ""); } }
-            Button { text: "打开补丁文件"; enabled: App.patch-path != ""; clicked => { App.action("open", "patch"); } }
-            Rectangle { horizontal-stretch: 1; }
+    horizontal-scrollbar-policy: always-off;
+    content-width: self.visible-width;
+    content-height: patch-content.preferred-height;
+    patch-content := VerticalLayout { x: 0px; y: 0px; width: min(root.visible-width, 920px); height: self.preferred-height; padding: 4px; padding-right: 12px; spacing: 14px; alignment: start;
+        Card {
+            VerticalLayout { padding: 16px; spacing: 10px; alignment: start;
+                StepHeader { step: "1"; title: "生成补丁"; }
+                Label { text: App.patch-summary == "" ? "使用已保存译文生成补丁，不会调用翻译 API。" : App.patch-summary; }
+                HorizontalLayout { spacing: 8px;
+                    ActionButton { text: "生成补丁…"; icon: "package"; primary: App.patch-path == ""; enabled: !App.busy && App.recognition != "" && !App.source-materials-cleared; clicked => { App.action("patch-dialog", ""); } }
+                    ActionButton { text: "查看本次文本"; icon: "list"; enabled: App.patch-path != ""; clicked => { App.action("patch-texts", ""); } }
+                    ActionButton { text: "打开补丁文件"; icon: "folder-open"; enabled: App.patch-path != ""; clicked => { App.action("open", "patch"); } }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+                if App.patch-path != "": LineEdit { text: App.patch-path; read-only: true; }
+                if App.recognition == "" || App.source-materials-cleared: HorizontalLayout { spacing: 12px;
+                    Caption { text: "生成补丁需要先识别游戏并准备原文资源。"; }
+                    Link { text: "前往识别"; clicked => { App.action("tab", "0"); } }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+                if App.warnings != "": VerticalLayout { spacing: 6px; SectionHeading { text: "补丁注意事项"; color: Theme.pending; } ReportText { text: App.warnings; } }
+            }
         }
-        if App.patch-path != "": LineEdit { text: App.patch-path; read-only: true; }
-        if App.recognition == "" || App.source-materials-cleared: HorizontalLayout { spacing: 12px;
-            Caption { text: "生成补丁需要先识别游戏并准备原文资源。"; }
-            Link { text: "前往识别"; clicked => { App.action("tab", "0"); } }
-            Rectangle { horizontal-stretch: 1; }
+        Card {
+            VerticalLayout { padding: 16px; spacing: 10px; alignment: start;
+                StepHeader { step: "2"; title: "安装到游戏"; }
+                Caption { text: "安装或恢复前请关闭游戏。安装位置：" + App.project-path; }
+                HorizontalLayout { spacing: 8px;
+                    ActionButton { text: "安装汉化补丁…"; icon: "download"; primary: App.patch-path != ""; enabled: App.can-install-patch; clicked => { App.modal = "install"; } }
+                    ActionButton { text: "恢复原版…"; icon: "rotate-ccw"; danger: true; enabled: !App.busy; clicked => { App.action("restore-dialog", ""); } }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+                Caption { text: "手动安装可将补丁 files 文件夹中的全部内容复制到游戏目录并覆盖。"; }
+            }
         }
-        if App.warnings != "": VerticalLayout { spacing: 6px; SectionHeading { text: "补丁注意事项"; color: Theme.pending; } ReportText { text: App.warnings; } }
-        Divider {}
-        Heading { text: "2 · 安装到游戏"; font-size: 18px; }
-        Caption { text: "安装或恢复前请关闭游戏。安装位置：" + App.project-path; }
-        HorizontalLayout { spacing: 8px;
-            Button { text: "安装汉化补丁…"; primary: App.patch-path != ""; enabled: App.can-install-patch; clicked => { App.modal = "install"; } }
-            Button { text: "恢复原版…"; enabled: !App.busy; clicked => { App.action("restore-dialog", ""); } }
-            Rectangle { horizontal-stretch: 1; }
-        }
-        Caption { text: "手动安装可将补丁 files 文件夹中的全部内容复制到游戏目录并覆盖。"; }
-        Divider {}
-        Heading { text: "3 · 启动与验证"; font-size: 18px; }
-        if App.patch-launch != "": Label { text: App.patch-launch; }
-        Caption { text: App.launch-summary; }
-        HorizontalLayout { spacing: 8px;
-            Button { text: "启动游戏"; enabled: !App.busy && App.launch-can-run; clicked => { App.action("launch-game", ""); } }
-            Button { text: "运行检查…"; clicked => { App.action("game-check-dialog", ""); } }
-            Button { text: "启动设置…"; clicked => { App.action("tab", "3"); } }
-            Rectangle { horizontal-stretch: 1; }
-        }
-        Label { text: App.runtime-check == "" ? "尚未记录游戏内显示结果；结构校验不代表中文显示已经验证。" : App.runtime-check; }
-        Caption { text: "运行备注"; }
-        TextEdit { text <=> App.runtime-note; height: 76px; }
-        Caption { text: "确认试用的是上方这份补丁后记录结果。有问题时先填写说明，再继续修复。"; }
-        HorizontalLayout { spacing: 8px;
-            Button { text: "效果正常"; enabled: !App.busy && App.patch-path != ""; clicked => { App.action("runtime", "passed"); } }
-            Button { text: "有问题，继续修复"; enabled: !App.busy && App.patch-path != ""; clicked => { App.action("runtime", "failed"); } }
-            Rectangle { horizontal-stretch: 1; }
+        Card {
+            VerticalLayout { padding: 16px; spacing: 10px; alignment: start;
+                StepHeader { step: "3"; title: "启动与验证"; }
+                if App.patch-launch != "": Label { text: App.patch-launch; }
+                Caption { text: App.launch-summary; }
+                HorizontalLayout { spacing: 8px;
+                    ActionButton { text: "启动游戏"; icon: "play"; enabled: !App.busy && App.launch-can-run; clicked => { App.action("launch-game", ""); } }
+                    ActionButton { text: "运行检查…"; icon: "check-square"; clicked => { App.action("game-check-dialog", ""); } }
+                    ActionButton { text: "启动设置…"; icon: "settings"; clicked => { App.action("tab", "3"); } }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+                Divider {}
+                Label { text: App.runtime-check == "" ? "尚未记录游戏内显示结果；结构校验不代表中文显示已经验证。" : App.runtime-check; }
+                Caption { text: "运行备注"; }
+                TextEdit { text <=> App.runtime-note; height: 76px; }
+                Caption { text: "确认试用的是上方这份补丁后记录结果。有问题时先填写说明，再继续修复。"; }
+                HorizontalLayout { spacing: 8px;
+                    ActionButton { text: "效果正常"; icon: "check"; enabled: !App.busy && App.patch-path != ""; clicked => { App.action("runtime", "passed"); } }
+                    ActionButton { text: "有问题，继续修复"; icon: "wrench"; danger: true; enabled: !App.busy && App.patch-path != ""; clicked => { App.action("runtime", "failed"); } }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+            }
         }
     }
 }

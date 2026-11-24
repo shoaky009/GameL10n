@@ -1,5 +1,5 @@
-import { Button, ComboBox, SpinBox, TextEdit, ScrollView, ProgressIndicator } from "std-widgets.slint";
-import { App, Theme, Caption, Label, ReportText, Divider } from "state.slint";
+import { ComboBox, SpinBox, TextEdit, ScrollView, ProgressIndicator } from "std-widgets.slint";
+import { App, Theme, Caption, Label, ReportText, Divider, ActionButton } from "state.slint";
 
 export component GameCheckControls inherits VerticalLayout {
     in property <length> settings-height: 300px;
@@ -14,11 +14,11 @@ export component GameCheckControls inherits VerticalLayout {
         ReportText { text: App.check-text-result; color: App.check-text-failed ? Theme.error : Theme.ink; horizontal-stretch: 1; min-width: 0px; }
     }
     HorizontalLayout { spacing: 8px;
-        Button { text: "检查启动"; enabled: !App.check-running && !App.busy && App.launch-can-run; clicked => { App.action("game-check-run", "launch"); } }
-        Button { text: "检查当前译文"; enabled: !App.check-running && !App.busy && App.launch-can-run && App.check-has-expected; clicked => { App.action("game-check-run", "text"); } }
-        Button { text: "启动并检查"; enabled: !App.check-running && !App.busy && App.launch-can-run && App.check-has-expected; clicked => { App.action("game-check-run", "both"); } }
+        ActionButton { text: "检查启动"; icon: "play"; compact: true; enabled: !App.check-running && !App.busy && App.launch-can-run; clicked => { App.action("game-check-run", "launch"); } }
+        ActionButton { text: "检查当前译文"; icon: "check-square"; compact: true; enabled: !App.check-running && !App.busy && App.launch-can-run && App.check-has-expected; clicked => { App.action("game-check-run", "text"); } }
+        ActionButton { text: "启动并检查"; icon: "play"; primary: true; compact: true; enabled: !App.check-running && !App.busy && App.launch-can-run && App.check-has-expected; clicked => { App.action("game-check-run", "both"); } }
         Rectangle { horizontal-stretch: 1; }
-        if App.check-running: Button { text: "停止"; clicked => { App.action("game-check-cancel", ""); } }
+        if App.check-running: ActionButton { text: "停止"; icon: "stop"; danger: true; compact: true; clicked => { App.action("game-check-cancel", ""); } }
     }
     if App.check-running: ProgressIndicator { height: 3px; indeterminate: true; }
     if App.check-message != "": ReportText { text: App.check-message; color: Theme.error; }
@@ -39,10 +39,10 @@ export component GameCheckControls inherits VerticalLayout {
             Caption { text: App.check-unit-ids.length == 0 ? "检查目标（未选择）" : "检查目标 · " + App.check-unit-ids.length + " 条"; }
             if App.check-expected != "": ReportText { text: App.check-expected; }
             HorizontalLayout { spacing: 8px;
-                Button { text: "使用文本页选区"; enabled: !App.check-running; clicked => { App.action("game-check-selection", ""); } }
-                Button { text: "选择文本…"; enabled: !App.check-running; clicked => { App.modal = ""; App.action("tab", "1"); } }
+                ActionButton { text: "使用文本页选区"; compact: true; enabled: !App.check-running; clicked => { App.action("game-check-selection", ""); } }
+                ActionButton { text: "选择文本…"; icon: "languages"; compact: true; enabled: !App.check-running; clicked => { App.modal = ""; App.action("tab", "1"); } }
                 Rectangle { horizontal-stretch: 1; }
-                if App.check-unit-ids.length > 0: Button { text: "清除目标"; enabled: !App.check-running; clicked => { App.action("game-check-selection", "clear"); } }
+                if App.check-unit-ids.length > 0: ActionButton { text: "清除目标"; icon: "trash"; danger: true; compact: true; enabled: !App.check-running; clicked => { App.action("game-check-selection", "clear"); } }
             }
             if App.check-has-expected: Caption { text: "任意一条所选译文稳定出现即通过。"; }
             Divider {}

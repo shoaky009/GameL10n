@@ -1,5 +1,5 @@
-import { Button, LineEdit, CheckBox, SpinBox, ScrollView, ListView } from "std-widgets.slint";
-import { App, Theme, Label, Caption, Heading, SectionHeading, ReportText, Divider, ProjectRow, TextRow, NamedRow, EngineRow, TermRow, TokenDisplay, CleanupRow, NavigationButton, Link, HelpButton, CopyButton, ClipboardBuffer, ListPanel, SelectableListRow } from "state.slint";
+import { LineEdit, CheckBox, SpinBox, ScrollView, ListView } from "std-widgets.slint";
+import { App, Theme, Icon, Card, StatusDot, Label, Caption, Heading, SectionHeading, ReportText, Divider, ProjectRow, TextRow, NamedRow, EngineRow, TermRow, TokenDisplay, CleanupRow, NavigationButton, TabItem, IconButton, ActionButton, Link, HelpButton, CopyButton, ClipboardBuffer, ListPanel, SelectableListRow } from "state.slint";
 import { ProjectSettings, GlobalApis } from "settings.slint";
 import { Workbench } from "workbench.slint";
 import { Recognition, PatchPage, TaskFeedback } from "project.slint";
@@ -13,19 +13,52 @@ export component MainWindow inherits Window {
     title: "GameL10n"; preferred-width: 1420px; preferred-height: 900px; min-width: 1120px; min-height: 720px;
     icon: @image-url("../assets/GameL10n.png");
     default-font-family: "Microsoft YaHei UI"; default-font-size: 14px; background: Theme.background;
-    private property <bool> logs-expanded: true;
+    private property <bool> logs-expanded: false;
     clipboard := ClipboardBuffer {}
     HorizontalLayout { padding: 16px; spacing: 20px;
-        VerticalLayout { width: 220px; spacing: 8px;
-            HorizontalLayout { Heading { text: "游戏项目"; font-size: 18px; } Rectangle { horizontal-stretch: 1; } }
+        VerticalLayout { width: 244px; spacing: 8px;
+            HorizontalLayout { spacing: 4px; alignment: start;
+                Heading { text: "游戏项目"; font-size: 18px; vertical-alignment: center; horizontal-stretch: 1; }
+                IconButton {
+                    icon: "plus"; primary: true; button-size: 28px; icon-size: 15px;
+                    tooltip: "添加游戏目录";
+                    enabled: App.ready && !App.adding-game;
+                    clicked => { App.action("browse", ""); }
+                }
+                IconButton {
+                    icon: "list-checks"; button-size: 28px; icon-size: 15px;
+                    active: App.multi-projects;
+                    tooltip: App.multi-projects ? "取消多选" : "批量选择项目";
+                    clicked => { App.action("project-selection", App.multi-projects ? "cancel" : "start"); }
+                }
+                IconButton {
+                    icon: "trash"; danger: true; button-size: 28px; icon-size: 15px;
+                    tooltip: App.multi-projects ? "移除所选项目" : "移除当前项目";
+                    enabled: App.multi-projects ? App.selected-projects > 0 : App.project-id != "";
+                    clicked => { App.action("remove-dialog", ""); }
+                }
+            }
             ListPanel { vertical-stretch: 1;
                 VerticalLayout { padding: 8px; spacing: 6px;
-                    HorizontalLayout { spacing: 6px;
-                        Button { text: "添加游戏"; enabled: App.ready && !App.adding-game; clicked => { App.action("browse", ""); } }
-                        Button { text: App.multi-projects ? "取消" : "多选"; clicked => { App.action("project-selection", App.multi-projects ? "cancel" : "start"); } }
-                        Button { text: "移除"; enabled: App.multi-projects ? App.selected-projects > 0 : App.project-id != ""; clicked => { App.action("remove-dialog", ""); } }
+                    HorizontalLayout { spacing: 4px;
+                        LineEdit {
+                            text <=> App.project-query; placeholder-text: "搜索名称或路径";
+                            horizontal-stretch: 1; min-width: 0px;
+                            edited => { App.action("projects", ""); }
+                        }
+                        if App.project-query != "": IconButton {
+                            icon: "close"; button-size: 28px; icon-size: 14px;
+                            tooltip: "清空搜索";
+                            clicked => { App.project-query = ""; App.action("projects", ""); }
+                        }
                     }
-                    LineEdit { text <=> App.project-query; placeholder-text: "搜索名称或路径"; edited => { App.action("projects", ""); } }
+                    if App.multi-projects: Rectangle {
+                        height: 30px; border-radius: 4px; background: Theme.tint;
+                        HorizontalLayout { padding-left: 8px; padding-right: 6px; spacing: 6px;
+                            Caption { text: "已选 " + App.selected-projects + " 项"; color: Theme.accent; font-weight: 600; vertical-alignment: center; horizontal-stretch: 1; wrap: no-wrap; }
+                            Link { text: "取消"; font-size: 12px; clicked => { App.action("project-selection", "cancel"); } }
+                        }
+                    }
                 }
                 Divider {}
                 project-list := ListView { vertical-stretch: 1; content-y <=> App.project-scroll-y; horizontal-scrollbar-policy: always-off;
@@ -35,28 +68,44 @@ export component MainWindow inherits Window {
                         hovered: project-hit.has-hover;
                         border-width: project-key.has-focus && !self.selected ? 1px : 0px; border-color: Theme.accent;
                         project-key := FocusScope { key-pressed(event) => { if event.text == Key.Return || event.text == " " { App.action("project", project.id); return accept; } return reject; } }
-                        project-hit := TouchArea { mouse-cursor: pointer; clicked => { project-key.focus(); App.action("project", project.id); } }
-                        HorizontalLayout { padding-left: 12px; padding-right: 12px; spacing: 6px;
+                        project-hit := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { project-key.focus(); App.action("project", project.id); }
+                            Tooltip { text: @markdown("**\{project.name}**\n\{project.path}"); }
+                        }
+                        HorizontalLayout { padding-left: 12px; padding-right: 10px; spacing: 8px;
                             if App.multi-projects: CheckBox {
                                 checked: project.selected; horizontal-stretch: 0; accessible-label: project.name;
                                 toggled => { App.action("toggle-project", project.id); }
                             }
-                            VerticalLayout { horizontal-stretch: 1; alignment: center; spacing: 3px;
+                            VerticalLayout { horizontal-stretch: 1; alignment: center; spacing: 4px;
                                 Label { text: App.concise-text(project.name); height: self.preferred-height; color: Theme.title; font-weight: 600; overflow: elide; wrap: no-wrap; }
-                                Caption { text: project.review-running ? project.running ? project.status + " · 总结经验" : "正在总结经验" : App.concise-text(project.status); height: self.preferred-height; line-height-factor: 1; color: project.running || project.review-running ? Theme.accent : Theme.secondary; overflow: elide; wrap: no-wrap; }
-                                Caption { text: App.concise-text(project.path); height: self.preferred-height; font-size: 12px; line-height-factor: 1; overflow: elide; wrap: no-wrap; }
+                                HorizontalLayout { spacing: 6px; alignment: start;
+                                    VerticalLayout { alignment: center; horizontal-stretch: 0;
+                                        StatusDot { size: 7px; tint: project.running || project.review-running ? Theme.accent : Theme.muted; }
+                                    }
+                                    Caption {
+                                        text: project.review-running ? project.running ? project.status + " · 总结经验" : "正在总结经验" : App.concise-text(project.status);
+                                        height: self.preferred-height; font-size: 12px; line-height-factor: 1;
+                                        color: project.running || project.review-running ? Theme.accent : Theme.secondary;
+                                        horizontal-stretch: 1; overflow: elide; wrap: no-wrap;
+                                    }
+                                }
                             }
                         }
                     }
                 }
             }
-            NavigationButton { text: "模型配置"; selected: App.page == 1; clicked => { App.action("navigate", "apis"); } }
-            NavigationButton { text: "全局引擎库"; selected: App.page == 2; clicked => { App.action("navigate", "catalog"); } }
-            NavigationButton { text: "消耗指标"; selected: App.page == 5; clicked => { App.action("navigate", "metrics"); } }
-            NavigationButton { text: "程序设置"; selected: App.page == 3; clicked => { App.action("navigate", "settings"); } }
-            NavigationButton { text: "关于"; selected: App.page == 4; clicked => { App.action("navigate", "about"); } }
+            Divider {}
+            VerticalLayout { spacing: 2px;
+                NavigationButton { text: "模型配置"; icon: "sliders"; selected: App.page == 1; clicked => { App.action("navigate", "apis"); } }
+                NavigationButton { text: "全局引擎库"; icon: "library"; selected: App.page == 2; clicked => { App.action("navigate", "catalog"); } }
+                NavigationButton { text: "消耗指标"; icon: "chart"; selected: App.page == 5; clicked => { App.action("navigate", "metrics"); } }
+                NavigationButton { text: "程序设置"; icon: "settings"; selected: App.page == 3; clicked => { App.action("navigate", "settings"); } }
+                NavigationButton { text: "关于"; icon: "info"; selected: App.page == 4; clicked => { App.action("navigate", "about"); } }
+            }
         }
-        VerticalLayout { spacing: 12px;
+        VerticalLayout { spacing: 10px;
             if App.page == 0: project-area := ScrollView {
                 vertical-stretch: 1;
                 horizontal-scrollbar-policy: always-off;
@@ -66,79 +115,158 @@ export component MainWindow inherits Window {
                 private property <int> tab-key: App.tab;
                 changed project-key => { self.content-y = 0px; }
                 changed tab-key => { self.content-y = 0px; }
-                project-content := VerticalLayout { width: project-area.visible-width; height: project-area.content-height; spacing: 12px;
-                if App.project-id == "": Heading { text: "选择或添加游戏"; font-size: 24px; }
-                if App.project-id != "": VerticalLayout { spacing: 12px;
-                    HorizontalLayout { spacing: 16px;
-                        Heading { text: App.project-name; font-size: 24px; wrap: no-wrap; overflow: elide; min-width: 0px; max-width: parent.width - project-actions.preferred-width - 2 * parent.spacing; horizontal-stretch: 0; }
-                        project-actions := VerticalLayout { alignment: center; horizontal-stretch: 0;
-                            HorizontalLayout { spacing: 16px;
-                                HorizontalLayout { spacing: 8px;
-                                    Link { text: "项目文件"; font-size: 13px; clicked => { App.action("open", "project"); } }
+                project-content := VerticalLayout { width: project-area.visible-width; height: project-area.content-height; spacing: 10px;
+                if App.project-id == "": VerticalLayout { vertical-stretch: 1; alignment: center;
+                    HorizontalLayout { alignment: center;
+                        Card { width: min(500px, project-area.visible-width - 48px);
+                            VerticalLayout { padding: 28px; spacing: 14px; alignment: center;
+                                HorizontalLayout { alignment: center;
+                                    Rectangle { width: 52px; height: 52px; border-radius: 12px; background: Theme.tint;
+                                        Icon { x: 12px; y: 12px; name: "gamepad"; size: 28px; tint: Theme.accent; }
+                                    }
+                                }
+                                Heading { text: "选择或添加游戏"; font-size: 22px; horizontal-alignment: center; }
+                                Label { text: "从左侧选择已有项目，或添加一个游戏目录开始汉化流程。"; color: Theme.secondary; horizontal-alignment: center; }
+                                Caption { text: "1. 识别引擎与文本  →  2. 翻译与校对  →  3. 生成并安装补丁"; horizontal-alignment: center; }
+                                HorizontalLayout { alignment: center; padding-top: 6px;
+                                    ActionButton {
+                                        text: "添加游戏目录"; icon: "plus"; primary: true;
+                                        enabled: App.ready && !App.adding-game;
+                                        clicked => { App.action("browse", ""); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if App.project-id != "": VerticalLayout { spacing: 10px;
+                    VerticalLayout { spacing: 4px;
+                        HorizontalLayout { spacing: 12px;
+                            Heading { text: App.project-name; font-size: 22px; wrap: no-wrap; overflow: elide; min-width: 0px; max-width: parent.width - project-actions.preferred-width - 2 * parent.spacing; horizontal-stretch: 0; vertical-alignment: center; }
+                            project-actions := HorizontalLayout { spacing: 6px; horizontal-stretch: 0; alignment: center;
+                                ActionButton {
+                                    text: "项目文件"; icon: "folder"; subtle: true; compact: true;
+                                    tooltip: "打开项目数据目录";
+                                    clicked => { App.action("open", "project"); }
+                                }
+                                VerticalLayout { alignment: center; horizontal-stretch: 0;
                                     CopyButton {
                                         label: "复制项目文件路径";
                                         value: App.ready ? App.project-files-path : "";
                                         copy(value) => { clipboard.copy-text(value); }
                                     }
                                 }
-                                Link { text: "游戏目录"; font-size: 13px; clicked => { App.action("open", "game"); } }
+                                ActionButton {
+                                    text: "游戏目录"; icon: "folder-open"; subtle: true; compact: true;
+                                    tooltip: "打开游戏安装目录";
+                                    clicked => { App.action("open", "game"); }
+                                }
                             }
+                            Rectangle { horizontal-stretch: 1; }
                         }
-                        Rectangle { horizontal-stretch: 1; }
+                        ReportText { text: App.project-path; color: Theme.muted; font-size: 12px; height: 18px; wrap: no-wrap; }
                     }
-                    ReportText { text: App.project-path; font-size: 12px; height: 20px; wrap: no-wrap; }
-                    HorizontalLayout { spacing: 4px;
-                        NavigationButton { text: "识别与适配"; width: 124px; selected: App.tab == 0; clicked => { App.action("tab", "0"); } }
-                        NavigationButton { text: "翻译与校对"; width: 124px; selected: App.tab == 1; clicked => { App.action("tab", "1"); } }
-                        NavigationButton { text: "补丁与验证"; width: 124px; selected: App.tab == 2; clicked => { App.action("tab", "2"); } }
-                        NavigationButton { text: "项目设置"; width: 124px; selected: App.tab == 3; clicked => { App.action("tab", "3"); } }
-                        Rectangle { horizontal-stretch: 1; }
+                    VerticalLayout { spacing: 0px;
+                        HorizontalLayout { spacing: 4px;
+                            TabItem { text: "识别与适配"; icon: "search"; selected: App.tab == 0; has-indicator: App.recognition-running || App.recognition-failure-message != ""; indicator-color: App.recognition-failure-message != "" ? Theme.error : Theme.accent; clicked => { App.action("tab", "0"); } }
+                            TabItem { text: "翻译与校对"; icon: "languages"; selected: App.tab == 1; has-indicator: App.preview-translation-running || App.editor-dirty; indicator-color: App.editor-dirty ? Theme.pending : Theme.accent; clicked => { App.action("tab", "1"); } }
+                            TabItem { text: "补丁与验证"; icon: "package"; selected: App.tab == 2; has-indicator: App.patch-path != ""; indicator-color: Theme.success; clicked => { App.action("tab", "2"); } }
+                            TabItem { text: "项目设置"; icon: "settings"; selected: App.tab == 3; clicked => { App.action("tab", "3"); } }
+                            Rectangle { horizontal-stretch: 1; }
+                        }
+                        Divider {}
                     }
                     if App.tab == 0: Recognition {}
                     if App.tab == 1: Workbench {}
                     if App.tab == 2: PatchPage {}
                     if App.tab == 3: ProjectSettings {}
                 }
-                if App.project-id == "": VerticalLayout { Label { text: "添加游戏目录，然后选择识别方式。已有项目直接读取上次保存的结果。"; } Rectangle { vertical-stretch: 1; } }
                 }
             }
             if App.page == 1: GlobalApis {}
             if App.page == 2: EngineLibrary {}
             if App.page == 5: ConsumptionMetrics {}
-            if App.page == 3: VerticalLayout { spacing: 18px;
-                Heading { text: "程序设置"; font-size: 26px; }
-                HorizontalLayout { spacing: 4px; alignment: start;
-                    Label { text: "数据保存位置"; font-weight: 600; vertical-alignment: center; }
-                    HelpButton { topic: "数据保存位置"; description: "更换位置时可以迁移现有数据，也可以直接切换目录。运行中的任务会先暂停并保存进度，切换完成后立即生效。"; }
-                }
-                LineEdit { text: App.data-directory; read-only: true; }
-                HorizontalLayout { Button { text: "更换保存位置"; clicked => { App.action("directory-dialog", ""); } } Button { text: "打开数据目录"; clicked => { App.action("open", "data"); } } Rectangle { horizontal-stretch: 1; } }
-                Divider {} Label { text: "同时翻译的游戏数量"; }
-                HorizontalLayout { SpinBox { value <=> App.concurrency; minimum: 1; maximum: 8; } Rectangle { horizontal-stretch: 1; } }
-                Divider {}
-                HorizontalLayout { spacing: 4px; alignment: start;
-                    CheckBox { text: "LLM 执行隔离"; checked <=> App.isolate-llm-execution; enabled: App.isolation-supported; }
-                    HelpButton { topic: "LLM 执行隔离";
-                        description: App.isolation-supported
-                            ? "默认开启。隔离环境限制模型生成的脚本和适配器可以读写的文件。关闭后，它们将以当前用户权限运行，可能泄露、修改或删除文件。保存后对后续执行生效。"
-                            : "当前平台不支持执行隔离。模型生成的脚本和适配器会以当前用户权限运行。";
+            if App.page == 3: app-settings := ScrollView {
+                vertical-stretch: 1; horizontal-scrollbar-policy: always-off;
+                content-width: self.visible-width; content-height: app-settings-content.preferred-height;
+                app-settings-content := VerticalLayout { x: 0px; y: 0px; width: min(app-settings.visible-width, 820px); height: self.preferred-height; padding-right: 12px; spacing: 16px; alignment: start;
+                    Heading { text: "程序设置"; font-size: 24px; }
+                    Card {
+                        VerticalLayout { padding: 16px; spacing: 10px;
+                            HorizontalLayout { spacing: 6px; alignment: start;
+                                Label { text: "数据保存位置"; font-weight: 600; vertical-alignment: center; }
+                                HelpButton { topic: "数据保存位置"; description: "更换位置时可以迁移现有数据，也可以直接切换目录。运行中的任务会先暂停并保存进度，切换完成后立即生效。"; }
+                            }
+                            LineEdit { text: App.data-directory; read-only: true; }
+                            HorizontalLayout { spacing: 8px;
+                                ActionButton { text: "更换保存位置…"; icon: "folder"; clicked => { App.action("directory-dialog", ""); } }
+                                ActionButton { text: "打开数据目录"; icon: "folder-open"; clicked => { App.action("open", "data"); } }
+                                Rectangle { horizontal-stretch: 1; }
+                            }
+                        }
                     }
-                    if !App.isolation-supported: Caption { text: "当前平台不支持"; vertical-alignment: center; }
+                    Card {
+                        VerticalLayout { padding: 16px; spacing: 14px;
+                            HorizontalLayout { spacing: 16px; alignment: start;
+                                VerticalLayout { spacing: 2px; horizontal-stretch: 1;
+                                    Label { text: "同时翻译的游戏数量"; font-weight: 600; }
+                                    Caption { text: "允许并行执行翻译任务的最大项目数（1–8）。"; }
+                                }
+                                SpinBox { value <=> App.concurrency; minimum: 1; maximum: 8; width: 100px; }
+                            }
+                            Divider {}
+                            HorizontalLayout { spacing: 6px; alignment: start;
+                                VerticalLayout { alignment: center; horizontal-stretch: 0;
+                                    Icon { name: "shield"; size: 16px; tint: App.isolate-llm-execution ? Theme.success : Theme.pending; }
+                                }
+                                CheckBox { text: "LLM 执行隔离"; checked <=> App.isolate-llm-execution; enabled: App.isolation-supported; }
+                                HelpButton { topic: "LLM 执行隔离";
+                                    description: App.isolation-supported
+                                        ? "默认开启。隔离环境限制模型生成的脚本和适配器可以读写的文件。关闭后，它们将以当前用户权限运行，可能泄露、修改或删除文件。保存后对后续执行生效。"
+                                        : "当前平台不支持执行隔离。模型生成的脚本和适配器会以当前用户权限运行。";
+                                }
+                                if !App.isolation-supported: Caption { text: "当前平台不支持"; vertical-alignment: center; }
+                            }
+                        }
+                    }
+                    HorizontalLayout { spacing: 8px;
+                        ActionButton { text: "保存程序设置"; icon: "save"; primary: true; clicked => { App.action("save-application", ""); } }
+                        Rectangle { horizontal-stretch: 1; }
+                    }
                 }
-                HorizontalLayout { Button { text: "保存程序设置"; primary: true; clicked => { App.action("save-application", ""); } } Rectangle { horizontal-stretch: 1; } }
-                Rectangle { vertical-stretch: 1; }
             }
             if App.page == 4: About {}
             if App.busy || App.review-running || App.activity != "" || App.error != "" || App.recognition-failure-message != "": TaskFeedback {}
-            if App.page == 0 && App.project-id != "": VerticalLayout { spacing: 8px; vertical-stretch: 0;
+            if App.page == 0 && App.project-id != "": VerticalLayout { spacing: root.logs-expanded ? 6px : 0px; vertical-stretch: 0;
                 Divider {}
-                HorizontalLayout { spacing: 16px;
-                    Link { text: root.logs-expanded ? "收起日志" : "展开日志"; font-size: 13px; clicked => { root.logs-expanded = !root.logs-expanded; } }
-                    if root.logs-expanded: Link { text: "回到最新"; font-size: 13px; enabled: !logs.follow-tail; clicked => { logs.follow-tail = true; logs.scroll-to-end(); } }
-                    Link { text: "打开日志目录"; font-size: 13px; enabled: App.project-id != ""; clicked => { App.action("open", "logs"); } }
-                    Rectangle { horizontal-stretch: 1; }
+                HorizontalLayout { spacing: 8px; padding-top: 4px; height: 32px;
+                    ActionButton {
+                        text: root.logs-expanded ? "收起日志" : "项目日志";
+                        icon: root.logs-expanded ? "chevron-down" : "chevron-up";
+                        subtle: true; compact: true;
+                        tooltip: root.logs-expanded ? "收起项目日志面板" : "展开项目日志面板";
+                        clicked => { root.logs-expanded = !root.logs-expanded; }
+                    }
+                    if !root.logs-expanded && App.log-text != "": Caption {
+                        text: App.concise-text(App.log-text);
+                        font-size: 12px; color: Theme.muted;
+                        horizontal-stretch: 1; min-width: 0px; vertical-alignment: center;
+                        overflow: elide; wrap: no-wrap;
+                    }
+                    if root.logs-expanded || App.log-text == "": Rectangle { horizontal-stretch: 1; }
+                    if root.logs-expanded: ActionButton {
+                        text: "回到最新"; icon: "arrow-down-to-line"; subtle: true; compact: true;
+                        enabled: !logs.follow-tail;
+                        clicked => { logs.follow-tail = true; logs.scroll-to-end(); }
+                    }
+                    IconButton {
+                        icon: "folder-open"; button-size: 28px; icon-size: 15px;
+                        tooltip: "打开日志目录";
+                        enabled: App.project-id != "";
+                        clicked => { App.action("open", "logs"); }
+                    }
                 }
-                Rectangle { visible: root.logs-expanded; height: root.logs-expanded ? 128px : 0px; background: Theme.surface; border-color: Theme.line; border-width: 1px;
+                Rectangle { visible: root.logs-expanded; height: root.logs-expanded ? 136px : 0px; background: Theme.surface; border-color: Theme.line; border-width: root.logs-expanded ? 1px : 0px; border-radius: 5px;
                     logs := ScrollView {
                         property <bool> follow-tail: true;
                         property <string> project-key: App.project-id;

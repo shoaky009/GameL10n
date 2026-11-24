@@ -1,4 +1,6 @@
 import { Palette } from "std-widgets.slint";
+import { Icon } from "icons.slint";
+export { Icon }
 export struct ProjectRow { id: string, name: string, path: string, status: string, running: bool, review-running: bool, selected: bool }
 export struct TextRow { id: string, location: string, source: string, translation: string, metadata: string, selected: bool, origin: int, reviewed: bool, invalid: bool, failed: bool, candidate: bool }
 export struct NamedRow { id: string, name: string, detail: string, enabled: bool }
@@ -35,6 +37,13 @@ export global Theme {
     out property <color> pending: dark ? #e9c484 : #885b17;
     out property <color> pending-bg: dark ? #423622 : #fbf1df;
     out property <color> error-bg: dark ? #482d2d : #fcecea;
+    out property <color> danger-solid: dark ? #d64b3e : #c13224;
+    out property <color> danger-solid-hover: dark ? #e05b4f : #a8281c;
+    out property <color> accent-hover: dark ? #a9d0ff : #1c4c82;
+    out property <color> on-accent: dark ? #0f1722 : #ffffff;
+    out property <color> on-danger: #ffffff;
+    out property <color> card: dark ? #1e242c : #ffffff;
+    out property <color> subtle-bg: dark ? #202731 : #f2f5f9;
     out property <color> token-input: dark ? #94c5ff : #235b99;
     out property <color> token-output: dark ? #ffb366 : #a84d0d;
     out property <color> token-cached: dark ? #c5a6ed : #895db5;
@@ -78,7 +87,7 @@ export global App {
     in-out property <string> metrics-empty;
     in-out property <[ProjectRow]> projects;
     in-out property <length> project-scroll-y;
-    out property <length> project-row-height: 80px;
+    out property <length> project-row-height: 62px;
     in-out property <[TextRow]> texts;
     in-out property <[NamedRow]> apis;
     in-out property <[NamedRow]> chain;
@@ -342,17 +351,228 @@ export component Badge inherits Rectangle {
     }
 }
 
+export component Card inherits Rectangle {
+    background: Theme.card;
+    border-width: 1px;
+    border-color: Theme.line;
+    border-radius: 6px;
+    VerticalLayout { padding: root.border-width; @children }
+}
+
+export component StatusDot inherits Rectangle {
+    in property <color> tint: Theme.muted;
+    in property <length> size: 8px;
+    width: root.size;
+    height: root.size;
+    border-radius: root.size / 2;
+    background: root.tint;
+    horizontal-stretch: 0;
+    vertical-stretch: 0;
+}
+
 export component NavigationButton inherits Rectangle {
     in property <string> text;
+    in property <string> icon;
     in property <bool> selected;
     callback clicked;
-    height: 36px; border-radius: 5px;
+    height: 36px; border-radius: 6px;
     background: selected ? Theme.tint : hit.has-hover ? Theme.hover : transparent;
     border-width: keyboard.has-focus ? 1px : 0px; border-color: Theme.accent;
     accessible-role: button; accessible-label: text; accessible-action-default => { root.clicked(); }
-    Text { x: 12px; width: parent.width - 24px; height: parent.height; text: root.text; color: root.selected ? Theme.accent : Theme.ink; font-weight: root.selected ? 600 : 400; vertical-alignment: center; }
+    HorizontalLayout { padding-left: 10px; padding-right: 12px; spacing: 9px; alignment: start;
+        if root.icon != "": VerticalLayout { alignment: center; horizontal-stretch: 0;
+            Icon { name: root.icon; size: 16px; tint: root.selected ? Theme.accent : Theme.secondary; }
+        }
+        Text {
+            horizontal-stretch: 1; height: parent.height;
+            text: root.text; color: root.selected ? Theme.accent : Theme.ink;
+            font-weight: root.selected ? 600 : 400; vertical-alignment: center;
+            overflow: elide; wrap: no-wrap;
+        }
+    }
     keyboard := FocusScope { key-pressed(event) => { if event.text == Key.Return || event.text == " " { root.clicked(); return accept; } return reject; } }
     hit := TouchArea { mouse-cursor: pointer; clicked => { keyboard.focus(); root.clicked(); } }
+}
+
+export component TabItem inherits Rectangle {
+    in property <string> text;
+    in property <string> icon;
+    in property <bool> selected;
+    in property <bool> has-indicator;
+    in property <color> indicator-color: Theme.accent;
+    callback clicked;
+    height: 36px;
+    preferred-width: content.preferred-width;
+    min-width: content.min-width;
+    horizontal-stretch: 0;
+    border-radius: 5px;
+    background: hit.has-hover && !root.selected ? Theme.hover : transparent;
+    border-width: keyboard.has-focus ? 1px : 0px;
+    border-color: Theme.accent;
+    accessible-role: tab;
+    accessible-label: root.text;
+    accessible-action-default => { root.clicked(); }
+    content := HorizontalLayout { padding-left: 12px; padding-right: 12px; spacing: 7px; alignment: center;
+        if root.icon != "": VerticalLayout { alignment: center; horizontal-stretch: 0;
+            Icon { name: root.icon; size: 15px; tint: root.selected ? Theme.accent : Theme.secondary; }
+        }
+        Text {
+            text: root.text;
+            color: root.selected ? Theme.accent : Theme.ink;
+            font-weight: root.selected ? 600 : 400;
+            vertical-alignment: center;
+            wrap: no-wrap;
+        }
+        if root.has-indicator: VerticalLayout { alignment: center; horizontal-stretch: 0;
+            StatusDot { size: 6px; tint: root.indicator-color; }
+        }
+    }
+    if root.selected: Rectangle {
+        x: 8px;
+        y: parent.height - 2px;
+        width: parent.width - 16px;
+        height: 2px;
+        border-radius: 1px;
+        background: Theme.accent;
+    }
+    keyboard := FocusScope { key-pressed(event) => { if event.text == Key.Return || event.text == " " { root.clicked(); return accept; } return reject; } }
+    hit := TouchArea { mouse-cursor: pointer; clicked => { keyboard.focus(); root.clicked(); } }
+}
+
+export component IconButton inherits Rectangle {
+    in property <string> icon;
+    in property <string> tooltip;
+    in property <bool> enabled: true;
+    in property <bool> active;
+    in property <bool> danger;
+    in property <bool> primary;
+    in property <length> button-size: 28px;
+    in property <length> icon-size: 15px;
+    callback clicked;
+    width: root.button-size;
+    height: root.button-size;
+    horizontal-stretch: 0;
+    vertical-stretch: 0;
+    border-radius: 5px;
+    background: !root.enabled ? transparent
+        : root.primary ? (hit.has-hover ? Theme.accent-hover : Theme.accent)
+        : root.active ? Theme.tint
+        : hit.has-hover ? (root.danger ? Theme.error-bg : Theme.hover)
+        : transparent;
+    border-width: keyboard.has-focus && root.enabled ? 1px : (root.active ? 1px : 0px);
+    border-color: root.danger ? Theme.error : Theme.accent;
+    accessible-role: button;
+    accessible-label: root.tooltip;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if root.enabled { root.clicked(); } }
+    if root.tooltip != "": Tooltip { text: @markdown("\{root.tooltip}"); }
+    Icon {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        name: root.icon;
+        size: root.icon-size;
+        tint: !root.enabled ? Theme.muted
+            : root.primary ? Theme.on-accent
+            : root.danger ? (hit.has-hover ? Theme.error : Theme.secondary)
+            : root.active ? Theme.accent
+            : hit.has-hover ? Theme.title : Theme.secondary;
+        opacity: root.enabled ? 1 : 0.45;
+    }
+    keyboard := FocusScope {
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if event.text == Key.Return || event.text == Key.Space { root.clicked(); return accept; }
+            return reject;
+        }
+    }
+    hit := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => { keyboard.focus(); root.clicked(); }
+    }
+}
+
+export component ActionButton inherits Rectangle {
+    in property <string> text;
+    in property <string> icon;
+    in property <string> tooltip;
+    in property <bool> primary;
+    in property <bool> danger;
+    in property <bool> danger-solid;
+    in property <bool> subtle;
+    in property <bool> checked;
+    in property <bool> enabled: true;
+    in property <bool> compact;
+    callback clicked;
+    height: root.compact ? 28px : 32px;
+    preferred-width: content.preferred-width;
+    min-width: content.min-width;
+    horizontal-stretch: 0;
+    vertical-stretch: 0;
+    border-radius: 5px;
+    background: !root.enabled ? (root.subtle ? transparent : Theme.subtle-bg)
+        : root.danger-solid ? (hit.has-hover ? Theme.danger-solid-hover : Theme.danger-solid)
+        : root.primary ? (hit.has-hover ? Theme.accent-hover : Theme.accent)
+        : root.danger ? (hit.has-hover ? Theme.error-bg : Theme.surface)
+        : root.checked ? Theme.tint
+        : root.subtle ? (hit.has-hover ? Theme.hover : transparent)
+        : (hit.has-hover ? Theme.hover : Theme.surface);
+    border-width: root.primary || root.danger-solid ? (keyboard.has-focus ? 1px : 0px) : (root.subtle && !root.checked && !keyboard.has-focus ? 0px : 1px);
+    border-color: keyboard.has-focus && root.enabled ? Theme.accent
+        : !root.enabled ? Theme.line
+        : root.danger ? Theme.error.with-alpha(0.45)
+        : root.checked ? Theme.accent
+        : Theme.line;
+    accessible-role: button;
+    accessible-label: root.text != "" ? root.text : root.tooltip;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if root.enabled { root.clicked(); } }
+    if root.tooltip != "": Tooltip { text: @markdown("\{root.tooltip}"); }
+    content := HorizontalLayout {
+        padding-left: root.compact ? 9px : 12px;
+        padding-right: root.compact ? 9px : 12px;
+        spacing: 6px;
+        alignment: center;
+        if root.icon != "": VerticalLayout { alignment: center; horizontal-stretch: 0;
+            Icon {
+                name: root.icon;
+                size: root.compact ? 14px : 15px;
+                tint: !root.enabled ? Theme.muted
+                    : root.danger-solid ? Theme.on-danger
+                    : root.primary ? Theme.on-accent
+                    : root.danger ? Theme.error
+                    : root.checked ? Theme.accent
+                    : Theme.ink;
+                opacity: root.enabled ? 1 : 0.5;
+            }
+        }
+        if root.text != "": Text {
+            text: root.text;
+            font-size: root.compact ? 13px : 14px;
+            font-weight: root.primary || root.danger-solid || root.checked ? 600 : 400;
+            color: !root.enabled ? Theme.muted
+                : root.danger-solid ? Theme.on-danger
+                : root.primary ? Theme.on-accent
+                : root.danger ? Theme.error
+                : root.checked ? Theme.accent
+                : Theme.ink;
+            opacity: root.enabled ? 1 : 0.6;
+            vertical-alignment: center;
+            wrap: no-wrap;
+        }
+    }
+    keyboard := FocusScope {
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if event.text == Key.Return || event.text == Key.Space { root.clicked(); return accept; }
+            return reject;
+        }
+    }
+    hit := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => { keyboard.focus(); root.clicked(); }
+    }
 }
 component LinkControl inherits Rectangle {
     in property <bool> enabled: true;
@@ -436,20 +656,14 @@ export component CopyButton inherits LinkControl {
     accessible-label: root.label;
     enabled: root.value != "";
     width: 24px; height: 24px;
+    border-radius: 4px;
     background: root.highlighted ? Theme.hover : transparent;
     Tooltip { text: root.copied ? @markdown("已复制") : @markdown("\{root.label}"); }
-    if !root.copied: Path {
-        x: 5px; y: 5px; width: 14px; height: 14px;
-        viewbox-width: 16; viewbox-height: 16;
-        stroke: root.enabled ? Theme.accent : Theme.muted; opacity: root.enabled ? 1 : 0.45;
-        stroke-width: 1.4px;
-        commands: "M 4 11 H 2 Q 1 11 1 10 V 2 Q 1 1 2 1 H 10 Q 11 1 11 2 V 4 M 6 5 H 14 Q 15 5 15 6 V 14 Q 15 15 14 15 H 6 Q 5 15 5 14 V 6 Q 5 5 6 5 Z";
-    }
-    if root.copied: Path {
-        x: 5px; y: 5px; width: 14px; height: 14px;
-        viewbox-width: 16; viewbox-height: 16;
-        stroke: Theme.accent; stroke-width: 1.8px;
-        commands: "M 2 8 L 6 12 L 14 3";
+    Icon {
+        x: 5px; y: 5px; size: 14px; stroke-width: 1.9px;
+        name: root.copied ? "check" : "copy";
+        tint: root.copied ? Theme.success : root.enabled ? Theme.accent : Theme.muted;
+        opacity: root.enabled ? 1 : 0.45;
     }
     changed value => { root.copied = false; }
     clicked => {

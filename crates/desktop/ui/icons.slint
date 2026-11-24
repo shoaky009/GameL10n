@@ -1,0 +1,68 @@
+component IconPath inherits Path {
+    in property <color> tint;
+    in property <length> line-width: 1.8px;
+    width: 100%;
+    height: 100%;
+    viewbox-width: 24;
+    viewbox-height: 24;
+    fill: transparent;
+    stroke: root.tint;
+    stroke-width: root.line-width;
+    stroke-line-cap: round;
+    stroke-line-join: round;
+    accessible-role: none;
+}
+
+export component Icon inherits Rectangle {
+    in property <string> name;
+    in property <length> size: 16px;
+    in property <color> tint: #34465b;
+    in property <length> stroke-width: 1.8px;
+    width: root.size;
+    height: root.size;
+    horizontal-stretch: 0;
+    vertical-stretch: 0;
+    accessible-role: none;
+
+    if root.name == "plus": IconPath { tint: root.tint; line-width: root.stroke-width; commands: "M 12 5 V 19 M 5 12 H 19"; }
+    if root.name == "close": IconPath { tint: root.tint; line-width: root.stroke-width; commands: "M 18 6 L 6 18 M 6 6 L 18 18"; }
+    if root.name == "check": IconPath { tint: root.tint; line-width: root.stroke-width; commands: "M 20 6 L 9 17 L 4 12"; }
+    if root.name == "check-square": IconPath { tint: root.tint; line-width: root.stroke-width; commands: "M 9 11 L 12 14 L 20 6 M 20 12 V 18 A 2 2 0 0 1 18 20 H 6 A 2 2 0 0 1 4 18 V 6 A 2 2 0 0 1 6 4 H 15"; }
+    if root.name == "list-checks": IconPath { tint: root.tint; line-width: root.stroke-width; commands: "M 3 7 L 5 9 L 8 6 M 3 15 L 5 17 L 8 14 M 11 7 H 21 M 11 12 H 21 M 11 17 H 21"; }
+    if root.name == "trash": IconPath { tint: root.tint; line-width: root.stroke-width; commands: "M 3 6 H 21 M 8 6 V 4 A 1 1 0 0 1 9 3 H 15 A 1 1 0 0 1 16 4 V 6 M 19 6 L 18 20 A 2 2 0 0 1 16 21 H 8 A 2 2 0 0 1 6 20 L 5 6 M 10 11 V 16 M 14 11 V 16"; }
+    if root.name == "copy": IconPath { tint: root.tint; line-width: root.stroke-width; commands: "M 8 16 H 5 A 2 2 0 0 1 3 14 V 5 A 2 2 0 0 1 5 3 H 14 A 2 2 0 0 1 16 5 V 8 M 10 8 H 19 A 2 2 0 0 1 21 10 V 19 A 2 2 0 0 1 19 21 H 10 A 2 2 0 0 1 8 19 V 10 A 2 2 0 0 1 10 8 Z"; }
+    if root.name == "edit": IconPath { tint: root.tint; line-width: root.stroke-width; commands: "M 12 20 H 21 M 16.5 3.5 A 2.12 2.12 0 0 1 19.5 6.5 L 7 19 L 3 20 L 4 16 Z"; }
+    if root.name == "save": IconPath { tint: root.tint; line-width: root.stroke-width; commands: "M 19 21 H 5 A 2 2 0 0 1 3 19 V 5 A 2 2 0 0 1 5 3 H 16 L 21 8 V 19 A 2 2 0 0 1 19 21 Z M 17 21 V 13 H 7 V 21 M 7 3 V 8 H 15"; }
+    if root.name == "folder": IconPath { tint: root.tint; line-width: root.stroke-width; commands: "M 3 7 A 2 2 0 0 1 5 5 H 9 L 11 7 H 19 A 2 2 0 0 1 21 9 V 18 A 2 2 0 0 1 19 20 H 5 A 2 2 0 0 1 3 18 Z"; }
+    if root.name == "folder-open": IconPath { tint: root.tint; line-width: root.stroke-width; commands: "M 3 18 V 6 A 2 2 0 0 1 5 4 H 9 L 11 6 H 18 A 2 2 0 0 1 20 8 V 10 M 3 18 L 5.5 11 H 21 L 18.5 18 A 2 2 0 0 1 16.6 19.5 H 5 A 2 2 0 0 1 3 18 Z"; }
+    if root.name == "search": IconPath { tint: root.tint; line-width: root.stroke-width; commands: "M 11 4 A 7 7 0 1 0 11 18 A 7 7 0 1 0 11 4 Z M 20 20 L 16.2 16.2"; }
+    if root.name == "languages": IconPath { tint: root.tint; line-width: root.stroke-width; commands: "M 4 6 H 14 M 9 4 V 6 M 6 6 C 6 10 8.5 13 12 15 M 12 6 C 11.5 10 9 13 5 15 M 13 20 L 17 11 L 21 20 M 14.5 17 H 19.5"; }
+    if root.name == "package": IconPath { tint: root.tint; line-width: root.stroke-width; commands: "M 12 3 L 20 7.5 V 16.5 L 12 21 L 4 16.5 V 7.5 Z M 12 12 L 20 7.5 M 12 12 V 21 M 12 12 L 4 7.5"; }
+    if root.name == "download": IconPath { tint: root.tint; line-width: root.stroke-width; commands: "M 12 4 V 15 M 8 11 L 12 15 L 16 11 M 4 17 V 19 A 2 2 0 0 0 6 21 H 18 A 2 2 0 0 0 20 19 V 17"; }
+    if root.name == "settings": IconPath { tint: root.tint; line-width: root.stroke-width; commands: "M 12 9 A 3 3 0 1 0 12 15 A 3 3 0 1 0 12 9 Z M 12 3 V 5 M 12 19 V 21 M 3 12 H 5 M 19 12 H 21 M 5.6 5.6 L 7.1 7.1 M 16.9 16.9 L 18.4 18.4 M 18.4 5.6 L 16.9 7.1 M 7.1 16.9 L 5.6 18.4"; }
+    if root.name == "sliders": IconPath { tint: root.tint; line-width: root.stroke-width; commands: "M 4 6 H 20 M 4 12 H 20 M 4 18 H 20 M 9 4 V 8 M 15 10 V 14 M 11 16 V 20"; }
+    if root.name == "library": IconPath { tint: root.tint; line-width: root.stroke-width; commands: "M 4 5 V 19 M 9 5 V 19 M 14 5 V 19 M 18 6 L 21 19"; }
+    if root.name == "chart": IconPath { tint: root.tint; line-width: root.stroke-width; commands: "M 4 19 H 20 M 7 15 L 11 10 L 14 13 L 19 6"; }
+    if root.name == "info": IconPath { tint: root.tint; line-width: root.stroke-width; commands: "M 12 3 A 9 9 0 1 0 12 21 A 9 9 0 1 0 12 3 Z M 12 11 V 16 M 12 8 V 8.2"; }
+    if root.name == "refresh": IconPath { tint: root.tint; line-width: root.stroke-width; commands: "M 20 12 A 8 8 0 1 1 17.6 6.3 L 20 8.5 M 20 4 V 8.5 H 15.5"; }
+    if root.name == "rotate-ccw": IconPath { tint: root.tint; line-width: root.stroke-width; commands: "M 4 12 A 8 8 0 1 0 6.4 6.3 L 4 8.5 M 4 4 V 8.5 H 8.5"; }
+    if root.name == "chevron-up": IconPath { tint: root.tint; line-width: root.stroke-width; commands: "M 6 15 L 12 9 L 18 15"; }
+    if root.name == "chevron-down": IconPath { tint: root.tint; line-width: root.stroke-width; commands: "M 6 9 L 12 15 L 18 9"; }
+    if root.name == "chevron-left": IconPath { tint: root.tint; line-width: root.stroke-width; commands: "M 15 6 L 9 12 L 15 18"; }
+    if root.name == "chevron-right": IconPath { tint: root.tint; line-width: root.stroke-width; commands: "M 9 6 L 15 12 L 9 18"; }
+    if root.name == "arrow-up": IconPath { tint: root.tint; line-width: root.stroke-width; commands: "M 12 19 V 5 M 6 11 L 12 5 L 18 11"; }
+    if root.name == "arrow-down": IconPath { tint: root.tint; line-width: root.stroke-width; commands: "M 12 5 V 19 M 6 13 L 12 19 L 18 13"; }
+    if root.name == "play": IconPath { tint: root.tint; line-width: root.stroke-width; commands: "M 7 5 L 19 12 L 7 19 Z"; }
+    if root.name == "pause": IconPath { tint: root.tint; line-width: root.stroke-width; commands: "M 8 5 V 19 M 16 5 V 19"; }
+    if root.name == "stop": IconPath { tint: root.tint; line-width: root.stroke-width; commands: "M 6 6 H 18 V 18 H 6 Z"; }
+    if root.name == "sparkles": IconPath { tint: root.tint; line-width: root.stroke-width; commands: "M 12 3 L 13.8 8.2 L 19 10 L 13.8 11.8 L 12 17 L 10.2 11.8 L 5 10 L 10.2 8.2 Z M 19 16 L 19.7 18.3 L 22 19 L 19.7 19.7 L 19 22 L 18.3 19.7 L 16 19 L 18.3 18.3 Z"; }
+    if root.name == "wrench": IconPath { tint: root.tint; line-width: root.stroke-width; commands: "M 14.7 6.3 A 4.5 4.5 0 0 0 9.5 11.5 L 4.5 16.5 A 1.8 1.8 0 0 0 7 19 L 12 14 A 4.5 4.5 0 0 0 17.7 9.3 L 15 11 L 13 9 Z"; }
+    if root.name == "filter-x": IconPath { tint: root.tint; line-width: root.stroke-width; commands: "M 4 5 H 20 L 14 12 V 18 L 10 20 V 12 Z M 16 15 L 20 19 M 20 15 L 16 19"; }
+    if root.name == "terminal": IconPath { tint: root.tint; line-width: root.stroke-width; commands: "M 4 17 L 10 11 L 4 5 M 12 19 H 20"; }
+    if root.name == "external-link": IconPath { tint: root.tint; line-width: root.stroke-width; commands: "M 15 4 H 20 V 9 M 10 14 L 20 4 M 18 13 V 18 A 2 2 0 0 1 16 20 H 6 A 2 2 0 0 1 4 18 V 8 A 2 2 0 0 1 6 6 H 11"; }
+    if root.name == "book": IconPath { tint: root.tint; line-width: root.stroke-width; commands: "M 4 5.5 A 2.5 2.5 0 0 1 6.5 3 H 20 V 19 H 6.5 A 2.5 2.5 0 0 0 4 21 Z M 4 19 A 2 2 0 0 1 6 17 H 20"; }
+    if root.name == "list": IconPath { tint: root.tint; line-width: root.stroke-width; commands: "M 8 6 H 20 M 8 12 H 20 M 8 18 H 20 M 4 6 H 4.2 M 4 12 H 4.2 M 4 18 H 4.2"; }
+    if root.name == "shield": IconPath { tint: root.tint; line-width: root.stroke-width; commands: "M 12 3 L 19 6 V 12 C 19 16.5 16 19.5 12 21 C 8 19.5 5 16.5 5 12 V 6 Z"; }
+    if root.name == "gamepad": IconPath { tint: root.tint; line-width: root.stroke-width; commands: "M 6 11 H 10 M 8 9 V 13 M 15 11 H 15.2 M 17.5 13 H 17.7 M 7 7 H 17 A 4 4 0 0 1 21 11 L 20.5 15 A 2.5 2.5 0 0 1 16.3 16.5 L 14.5 15 H 9.5 L 7.7 16.5 A 2.5 2.5 0 0 1 3.5 15 L 3 11 A 4 4 0 0 1 7 7 Z"; }
+    if root.name == "arrow-down-to-line": IconPath { tint: root.tint; line-width: root.stroke-width; commands: "M 12 4 V 16 M 7 11 L 12 16 L 17 11 M 5 20 H 19"; }
+}

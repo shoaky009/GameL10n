@@ -1,20 +1,29 @@
-import { Button, ComboBox, LineEdit, ListView } from "std-widgets.slint";
-import { App, Theme, Heading, Label, Caption, Divider } from "state.slint";
+import { ComboBox, LineEdit, ListView } from "std-widgets.slint";
+import { App, Theme, Card, Heading, Label, Caption, Divider, TabItem, IconButton, ActionButton } from "state.slint";
 import { TokenChart } from "token-chart.slint";
 
 export component ConsumptionMetrics inherits VerticalLayout {
     spacing: 12px;
     vertical-stretch: 1;
-    HorizontalLayout {
-        Heading { text: "消耗指标"; font-size: 26px; }
+    HorizontalLayout { spacing: 8px;
+        Heading { text: "消耗指标"; font-size: 24px; vertical-alignment: center; }
         Rectangle { horizontal-stretch: 1; }
-        Button { text: "重置筛选"; clicked => {
-            App.metrics-version-index = 0; App.metrics-model-index = 0; App.metrics-project-index = 0;
-            App.metrics-task-index = 0; App.metrics-mode-index = 0; App.metrics-status-index = 0;
-            App.metrics-date-range = 0; App.metrics-from = ""; App.metrics-through = "";
-            App.metrics-offset = 0; App.action("metrics", "refresh");
-        } }
-        Button { text: App.metrics-loading ? "刷新中…" : "刷新"; enabled: !App.metrics-loading; clicked => { App.action("metrics", "refresh"); } }
+        IconButton {
+            icon: "filter-x"; button-size: 30px; icon-size: 16px;
+            tooltip: "重置全部筛选条件";
+            clicked => {
+                App.metrics-version-index = 0; App.metrics-model-index = 0; App.metrics-project-index = 0;
+                App.metrics-task-index = 0; App.metrics-mode-index = 0; App.metrics-status-index = 0;
+                App.metrics-date-range = 0; App.metrics-from = ""; App.metrics-through = "";
+                App.metrics-offset = 0; App.action("metrics", "refresh");
+            }
+        }
+        IconButton {
+            icon: "refresh"; button-size: 30px; icon-size: 16px;
+            tooltip: App.metrics-loading ? "正在刷新…" : "刷新消耗指标";
+            enabled: !App.metrics-loading;
+            clicked => { App.action("metrics", "refresh"); }
+        }
     }
     HorizontalLayout { spacing: 8px;
         ComboBox { model: ["全部日期", "今天", "近 7 天", "近 30 天", "自定义日期"]; current-index <=> App.metrics-date-range; selected => { App.metrics-offset = 0; App.action("metrics", "refresh"); } }
@@ -27,7 +36,7 @@ export component ConsumptionMetrics inherits VerticalLayout {
         LineEdit { text <=> App.metrics-from; placeholder-text: "YYYY-MM-DD"; accepted => { App.metrics-offset = 0; App.action("metrics", "refresh"); } }
         Label { text: "结束日期"; vertical-alignment: center; }
         LineEdit { text <=> App.metrics-through; placeholder-text: "YYYY-MM-DD"; accepted => { App.metrics-offset = 0; App.action("metrics", "refresh"); } }
-        Button { text: "应用日期"; clicked => { App.metrics-offset = 0; App.action("metrics", "refresh"); } }
+        ActionButton { text: "应用日期"; icon: "check"; compact: true; clicked => { App.metrics-offset = 0; App.action("metrics", "refresh"); } }
     }
     HorizontalLayout { spacing: 8px;
         ComboBox { model: ["全部任务", "识别与适配", "智能适配", "修复适配", "扩展覆盖", "经验总结"]; current-index <=> App.metrics-task-index; selected => { App.metrics-offset = 0; App.action("metrics", "refresh"); } }
@@ -36,16 +45,20 @@ export component ConsumptionMetrics inherits VerticalLayout {
         Rectangle { horizontal-stretch: 1; }
     }
     if App.metrics-error != "": Label { text: App.metrics-error; color: Theme.error; }
-    if App.metrics-error == "": VerticalLayout { spacing: 6px;
-        Label { text: App.metrics-overview; font-weight: 600; }
-        Label { text: App.metrics-tokens; }
-        Label { text: App.metrics-timing; }
+    if App.metrics-error == "": Card {
+        VerticalLayout { padding: 12px; spacing: 5px;
+            Label { text: App.metrics-overview; font-weight: 600; color: Theme.title; }
+            Label { text: App.metrics-tokens; }
+            Caption { text: App.metrics-timing; color: Theme.secondary; }
+        }
     }
-    Divider {}
-    HorizontalLayout { spacing: 8px;
-        Button { text: "分组趋势"; checked: App.metrics-tab == 0; clicked => { App.metrics-tab = 0; App.metrics-offset = 0; App.action("metrics", "refresh"); } }
-        Button { text: "执行记录"; checked: App.metrics-tab == 1; clicked => { App.metrics-tab = 1; App.metrics-offset = 0; App.action("metrics", "refresh"); } }
-        Rectangle { horizontal-stretch: 1; }
+    VerticalLayout { spacing: 0px;
+        HorizontalLayout { spacing: 4px;
+            TabItem { text: "分组趋势"; icon: "chart"; selected: App.metrics-tab == 0; clicked => { App.metrics-tab = 0; App.metrics-offset = 0; App.action("metrics", "refresh"); } }
+            TabItem { text: "执行记录"; icon: "list"; selected: App.metrics-tab == 1; clicked => { App.metrics-tab = 1; App.metrics-offset = 0; App.action("metrics", "refresh"); } }
+            Rectangle { horizontal-stretch: 1; }
+        }
+        Divider {}
     }
     if App.metrics-tab == 0: HorizontalLayout { spacing: 8px;
         Label { text: "分组"; vertical-alignment: center; }
@@ -64,8 +77,8 @@ export component ConsumptionMetrics inherits VerticalLayout {
                         Label { text: group.label; font-weight: 600; wrap: no-wrap; overflow: elide; horizontal-stretch: 1; }
                         Label { text: group.value; color: Theme.accent; horizontal-stretch: 0; }
                     }
-                    Rectangle { height: 8px; background: Theme.line;
-                        Rectangle { x: 0px; y: 0px; width: parent.width * group.fraction; height: parent.height; background: Theme.accent; }
+                    Rectangle { height: 8px; border-radius: 4px; background: Theme.line; clip: true;
+                        Rectangle { x: 0px; y: 0px; width: parent.width * group.fraction; height: parent.height; border-radius: 4px; background: Theme.accent; }
                     }
                     Caption { text: group.detail; wrap: no-wrap; overflow: elide; }
                 }
@@ -82,11 +95,21 @@ export component ConsumptionMetrics inherits VerticalLayout {
             }
         }
     }
-    HorizontalLayout { spacing: 8px;
+    HorizontalLayout { spacing: 6px;
         Caption { text: App.metrics-total == 0 ? "" : (App.metrics-offset + 1) + "–" + min(App.metrics-offset + 20, App.metrics-total) + " / " + App.metrics-total; vertical-alignment: center; }
         Rectangle { horizontal-stretch: 1; }
-        Button { text: "上一页"; enabled: App.metrics-offset > 0; clicked => { App.metrics-offset = max(0, App.metrics-offset - 20); App.action("metrics", "refresh"); } }
-        Button { text: "下一页"; enabled: App.metrics-offset + 20 < App.metrics-total; clicked => { App.metrics-offset += 20; App.action("metrics", "refresh"); } }
+        IconButton {
+            icon: "chevron-left"; button-size: 28px; icon-size: 16px;
+            tooltip: "上一页";
+            enabled: App.metrics-offset > 0;
+            clicked => { App.metrics-offset = max(0, App.metrics-offset - 20); App.action("metrics", "refresh"); }
+        }
+        IconButton {
+            icon: "chevron-right"; button-size: 28px; icon-size: 16px;
+            tooltip: "下一页";
+            enabled: App.metrics-offset + 20 < App.metrics-total;
+            clicked => { App.metrics-offset += 20; App.action("metrics", "refresh"); }
+        }
     }
     Caption { text: App.metrics-coverage; }
     Caption { text: "缓存属于输入；≥ 表示仅统计已知用量。未缓存输入与命中率仅使用有效缓存计数。"; }
