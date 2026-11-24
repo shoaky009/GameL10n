@@ -443,16 +443,19 @@ async fn select_project(ctx: &Context, input: &UiInput) -> Result<(), CoreError>
         return Ok(());
     }
     let session = ctx.session.clone();
+    let generation = ctx.edit_generation.clone();
+    let revision = input.editor_revision;
     ctx.update(move |ui| {
-        if session
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .requested_project
-            != requested
-        {
+        let a = ui.global::<App>();
+        let mut session = session.lock().unwrap_or_else(|e| e.into_inner());
+        if session.requested_project != requested {
             return;
         }
-        let a = ui.global::<App>();
+        if generation.load(Ordering::SeqCst) != revision || a.get_editor_dirty() {
+            session.requested_project = a.get_project_id().into();
+            return;
+        }
+        drop(session);
         a.set_project_path("".into());
         a.set_project_files_path("".into());
         a.set_patch_path("".into());
@@ -503,12 +506,20 @@ async fn switch_project_tab(ctx: &Context, input: &UiInput) -> Result<(), CoreEr
     crate::workbench_ui::flush_editor(ctx, input).await?;
     let tab = input.argument.parse::<i32>().unwrap_or(0);
     let id = input.project_id.clone();
+    let editor_generation = ctx.edit_generation.clone();
+    let editor_revision = input.editor_revision;
+    let view_generation = ctx.generation.clone();
+    let view_revision = input.view_revision;
     ctx.update(move |ui| {
+        if editor_generation.load(Ordering::SeqCst) != editor_revision
+            || view_generation.load(Ordering::SeqCst) != view_revision
+        {
+            return;
+        }
         let a = ui.global::<App>();
         if a.get_project_id().as_str() == id {
             a.set_page(0);
             a.set_tab(tab);
-            a.set_editor_dirty(false);
             if tab == 1 {
                 a.invoke_action("texts".into(), "current".into());
             }
@@ -533,12 +544,20 @@ async fn navigate(ctx: &Context, input: &UiInput) -> Result<(), CoreError> {
         "metrics" => 5,
         _ => 3,
     };
+    let editor_generation = ctx.edit_generation.clone();
+    let editor_revision = input.editor_revision;
+    let view_generation = ctx.generation.clone();
+    let view_revision = input.view_revision;
     ctx.update(move |ui| {
+        if editor_generation.load(Ordering::SeqCst) != editor_revision
+            || view_generation.load(Ordering::SeqCst) != view_revision
+        {
+            return;
+        }
         let a = ui.global::<App>();
         a.set_page(page);
         a.set_activity("".into());
         a.set_error("".into());
-        a.set_editor_dirty(false);
         if page == 2 {
             a.invoke_action("catalog".into(), "0".into());
         }

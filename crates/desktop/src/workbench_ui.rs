@@ -252,11 +252,25 @@ fn refresh_selection(ctx: &Context, id: &str) {
     });
 }
 
+async fn edit_write(
+    ctx: &Context,
+    input: &UiInput,
+) -> Option<tokio::sync::MutexGuard<'static, ()>> {
+    let guard = EDIT_WRITES.lock().await;
+    (ctx.edit_generation.load(Ordering::SeqCst) == input.editor_revision).then_some(guard)
+}
+
 async fn save_editor(ctx: &Context, input: &UiInput, reviewed: bool) -> Result<(), CoreError> {
+    let Some(_guard) = edit_write(ctx, input).await else {
+        return Ok(());
+    };
+    save_locked(ctx, input, reviewed).await
+}
+
+async fn save_locked(ctx: &Context, input: &UiInput, reviewed: bool) -> Result<(), CoreError> {
     if input.project_id.is_empty() || input.editor_id.is_empty() {
         return Ok(());
     }
-    let _gate = EDIT_WRITES.lock().await;
     let app = ctx.app().await;
     app.save_translation_edit(
         &input.project_id,
@@ -692,45 +706,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                 }
             });
             tokio::time::sleep(Duration::from_millis(400)).await;
-            let _gate = EDIT_WRITES.lock().await;
-            if ctx.edit_generation.load(Ordering::SeqCst) != revision {
-                return Ok(true);
-            }
-            let app = ctx.app().await;
-            app.save_translation_edit(
-                &input.project_id,
-                &input.editor_id,
-                input.editor_text.clone(),
-                false,
-            )
-            .await?;
-            let row = app
-                .workbench_row(&input.project_id, &input.editor_id)
-                .await?;
-            let validation = validation_message(&row);
-            let has_issues = row.failure.is_some() || !row.issues.is_empty();
-            let origin = origin_code(&row);
-            let invalid = !row.issues.is_empty();
-            let id = input.project_id.clone();
-            let editor = input.editor_id.clone();
-            let text = input.editor_text.clone();
-            let generation = ctx.edit_generation.clone();
-            ctx.update(move |ui| {
-                let a = ui.global::<App>();
-                if a.get_project_id().as_str() == id
-                    && a.get_editor_id().as_str() == editor
-                    && a.get_editor_text().as_str() == text
-                    && generation.load(Ordering::SeqCst) == revision
-                {
-                    a.set_editor_dirty(false);
-                    a.set_editor_origin(origin);
-                    a.set_editor_invalid(invalid);
-                    a.set_editor_status("已保存".into());
-                    a.set_editor_validation(validation.into());
-                    a.set_editor_has_issues(has_issues);
-                }
-            });
-            drop(_gate);
+            save_editor(ctx, input, false).await?;
             ctx.refresh_texts(&input.project_id);
         }
         "editor-step" | "review-next" => {
@@ -764,7 +740,12 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
             texts(ctx, &page).await?;
         }
         "unreview" => {
-            flush_editor(ctx, input).await?;
+            let Some(_guard) = edit_write(ctx, input).await else {
+                return Ok(true);
+            };
+            if input.editor_dirty {
+                save_locked(ctx, input, false).await?;
+            }
             ctx.app()
                 .await
                 .mark_reviewed(
@@ -787,7 +768,12 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
             );
         }
         "bulk-review-confirm" => {
-            flush_editor(ctx, input).await?;
+            let Some(_guard) = edit_write(ctx, input).await else {
+                return Ok(true);
+            };
+            if input.editor_dirty {
+                save_locked(ctx, input, false).await?;
+            }
             let selection = ensure_selection(ctx, &input.project_id).await?;
             let count = ctx
                 .app()
@@ -831,7 +817,12 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
             }
         }
         "accept-candidate" | "discard-candidate" | "undo-edit" => {
-            flush_editor(ctx, input).await?;
+            let Some(_guard) = edit_write(ctx, input).await else {
+                return Ok(true);
+            };
+            if input.editor_dirty {
+                save_locked(ctx, input, false).await?;
+            }
             let app = ctx.app().await;
             match action {
                 "accept-candidate" => {
