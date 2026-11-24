@@ -275,8 +275,10 @@ impl ToolProcess {
                 return result;
             }
             terminate_process_tree(pid).await;
-            if child.try_wait()?.is_none() {
-                child.kill().await?;
+            if let Err(error) = child.kill().await
+                && !matches!(child.try_wait(), Ok(Some(_)))
+            {
+                eprintln!("无法确认工具进程 {pid} 已退出：{error}");
             }
         }
         result
