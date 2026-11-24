@@ -570,12 +570,6 @@ impl OpenAiProvider {
         cancellation: &CancellationToken,
         mode: CompletionMode<'_>,
     ) -> Result<Completion, ProviderError> {
-        validate_agent_messages(
-            messages,
-            self.settings.protocol,
-            &known,
-            maximum_output_tokens,
-        )?;
         self.complete_with_known_tools(
             messages,
             Some(tools),
@@ -596,6 +590,23 @@ impl OpenAiProvider {
         cancellation: &CancellationToken,
         mode: CompletionMode<'_>,
     ) -> Result<Completion, ProviderError> {
+        let chat;
+        let messages = if self.settings.protocol == ApiProtocol::ChatCompletions {
+            chat = chat_messages(messages);
+            &chat[..]
+        } else {
+            messages
+        };
+        if mode.streams()
+            && let Some(known) = known_tool_names
+        {
+            validate_agent_messages(
+                messages,
+                self.settings.protocol,
+                known,
+                maximum_output_tokens,
+            )?;
+        }
         let waiting = std::time::Instant::now();
         let permit = tokio::select! {
             biased;
@@ -659,7 +670,7 @@ impl OpenAiProvider {
     ) -> Result<Completion, ProviderError> {
         let mut body = match self.settings.protocol {
             ApiProtocol::ChatCompletions => {
-                json!({"model":self.settings.model,"messages":chat_messages(messages),"stream":false})
+                json!({"model":self.settings.model,"messages":messages,"stream":false})
             }
             ApiProtocol::Responses => {
                 json!({"model":self.settings.model,"input":responses_messages(messages),"store":false,"stream":false,"max_output_tokens":maximum_output_tokens})

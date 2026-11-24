@@ -381,6 +381,16 @@ impl<F: FnMut(TranslationProgress)> TranslationRun<'_, F> {
                 );
                 return Ok(outcome);
             }
+            if matches!(error.status_code, Some(400..=499) if !matches!(error.status_code, Some(408 | 409 | 425 | 429)))
+                || matches!(
+                    error.diagnostic.code.as_str(),
+                    "configuration" | "request-size-limit"
+                )
+            {
+                self.journal.pending.remove(key);
+                self.save_journal()?;
+                return Err(ExecutionError::Invalid(reason));
+            }
             if retries == MAX_RETRIES {
                 if !error.outcome_unknown {
                     self.journal.pending.remove(key);
