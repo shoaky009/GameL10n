@@ -415,8 +415,7 @@ impl EngineService {
             return Err(EngineError::Cancelled);
         }
         let manifest = PackageManifest::load(directory)?;
-        manifest.handle(directory)?;
-        self.tool_paths_checked(Some(directory), true, cancellation)
+        self.verify_package_handle(directory, &manifest, cancellation)
             .await?;
         let files: Vec<_> = manifest
             .package_files
@@ -434,6 +433,19 @@ impl EngineService {
             ],
             ..VerificationResult::default()
         })
+    }
+
+    /// Checks the published files and freshly hashes pinned dependencies before manual verification.
+    pub async fn verify_package_handle(
+        &self,
+        directory: &Path,
+        manifest: &PackageManifest,
+        cancellation: &CancellationToken,
+    ) -> Result<AdapterHandle, EngineError> {
+        let adapter = manifest.handle(directory)?;
+        self.tool_paths_checked(Some(directory), true, cancellation)
+            .await?;
+        Ok(adapter)
     }
 
     pub(crate) fn report(progress: ProgressCallback<'_>, stage: &str, message: impl Into<String>) {
@@ -575,11 +587,21 @@ impl EngineService {
         &self,
         cancellation: &CancellationToken,
     ) -> Result<Value, EngineError> {
+        self.siglus_checked(false, cancellation).await
+    }
+
+    async fn siglus_checked(
+        &self,
+        force_rehash: bool,
+        cancellation: &CancellationToken,
+    ) -> Result<Value, EngineError> {
         let pin = self.tools.root.join("engine-tools/siglus.json");
         if pin.is_file() {
             let reference: Value =
                 read_json(&pin).map_err(|error| EngineError::Protocol(error.to_string()))?;
-            let library = self.reference_library(&reference)?;
+            let library = self
+                .reference_library_checked(&reference, force_rehash)
+                .await?;
             return self.helper(&json!({"operation":"prepare_siglus_zip","library":library,"shared":self.shared_directory,"reference":reference}),cancellation).await;
         }
         self.helper(&json!({"operation":"prepare_siglus","assets":self.asset_root,"shared":self.shared_directory}), cancellation).await
@@ -651,10 +673,25 @@ impl EngineService {
     }
 
     pub(crate) fn reference_library(&self, reference: &Value) -> Result<PathBuf, EngineError> {
-        self.reference_library_checked(reference, false)
+        self.resolve_reference_library(reference, false)
     }
 
-    fn reference_library_checked(
+    async fn reference_library_checked(
+        &self,
+        reference: &Value,
+        force_rehash: bool,
+    ) -> Result<PathBuf, EngineError> {
+        if !force_rehash {
+            return self.reference_library(reference);
+        }
+        let service = self.clone();
+        let reference = reference.clone();
+        tokio::task::spawn_blocking(move || service.resolve_reference_library(&reference, true))
+            .await
+            .map_err(|error| EngineError::Protocol(error.to_string()))?
+    }
+
+    fn resolve_reference_library(
         &self,
         reference: &Value,
         force_rehash: bool,
@@ -757,7 +794,7 @@ impl EngineService {
                     .get("reference")
                     .ok_or_else(|| EngineError::Protocol("依赖缺少 reference。".into()))?;
                 let library = if reference.get("kind").and_then(Value::as_str) == Some("siglus") {
-                    let prepared = self.siglus(cancellation).await?;
+                    let prepared = self.siglus_checked(force_rehash, cancellation).await?;
                     if reference.get("revision") != prepared.get("revision") {
                         return Err(EngineError::Rejected(
                             "缺少此版本的 Siglus 工具，请恢复原工具文件。".into(),
@@ -769,7 +806,8 @@ impl EngineService {
                             .ok_or_else(|| EngineError::Protocol("Siglus 工具路径无效。".into()))?,
                     )
                 } else {
-                    self.reference_library_checked(reference, force_rehash)?
+                    self.reference_library_checked(reference, force_rehash)
+                        .await?
                 };
                 paths["engineLibrary"] = json!(library);
             }

@@ -2203,7 +2203,10 @@ impl Application {
                     "所选项目的原始资源属于另一个引擎，不能用于验证此发布包。".into(),
                 ));
             }
-            let adapter = manifest.handle(package)?;
+            let service = self.engine_service()?;
+            let adapter = service
+                .verify_package_handle(package, &manifest, &cancellation)
+                .await?;
             let baseline = self
                 .cached_analysis(id)
                 .await?
@@ -2213,7 +2216,6 @@ impl Application {
             let output = tempfile::Builder::new()
                 .prefix("package-")
                 .tempdir_in(root)?;
-            let service = self.engine_service()?;
             if let Some(probe) = &probe {
                 service
                     .verify_probed(
