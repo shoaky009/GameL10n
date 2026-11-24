@@ -943,6 +943,9 @@ impl Application {
             self.preview_translation_progress(id, message, progress)
                 .await;
         } else {
+            if let Some(progress) = progress {
+                self.set_task_translation_progress(id, progress).await;
+            }
             self.progress(id, operation, message).await;
         }
     }

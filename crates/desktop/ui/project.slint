@@ -90,6 +90,7 @@ export component WorkflowGateBanner inherits Rectangle {
 
 component RunningProgressBar inherits Rectangle {
     in property <float> progress: 0;
+    in property <bool> determinate: false;
     private property <float> clamped: clamp(root.progress, 0.0, 1.0);
     private property <float> phase: mod(animation-tick() / 1ms, 1600) / 1600;
     height: 3px;
@@ -97,7 +98,7 @@ component RunningProgressBar inherits Rectangle {
     background: Theme.line;
     clip: true;
 
-    if root.clamped <= 0: Rectangle {
+    if !root.determinate: Rectangle {
         y: 0px;
         height: parent.height;
         width: max(48px, parent.width * 0.28);
@@ -106,7 +107,7 @@ component RunningProgressBar inherits Rectangle {
         background: Theme.accent;
     }
 
-    if root.clamped > 0: Rectangle {
+    if root.determinate: Rectangle {
         y: 0px;
         height: parent.height;
         width: max(48px, parent.width * 0.24);
@@ -114,12 +115,12 @@ component RunningProgressBar inherits Rectangle {
         border-radius: 1.5px;
         background: @linear-gradient(90deg,
             Theme.accent.with-alpha(0.0) 0%,
-            Theme.accent.with-alpha(0.5) 25%,
-            Theme.accent.with-alpha(0.5) 75%,
+            Theme.accent.with-alpha(0.38) 25%,
+            Theme.accent.with-alpha(0.38) 75%,
             Theme.accent.with-alpha(0.0) 100%);
     }
 
-    if root.clamped > 0: Rectangle {
+    if root.determinate && root.clamped > 0: Rectangle {
         x: 0px;
         y: 0px;
         height: parent.height;
@@ -147,6 +148,7 @@ component RunningTask inherits VerticalLayout {
     in property <string> api;
     in property <TokenDisplay> usage;
     in property <float> progress;
+    in property <bool> determinate: false;
     in property <string> stop-label;
     in property <string> stop-icon: "stop";
     callback stop();
@@ -163,7 +165,7 @@ component RunningTask inherits VerticalLayout {
             clicked => { root.expanded = !root.expanded; }
         }
     }
-    RunningProgressBar { progress: root.progress; }
+    RunningProgressBar { progress: root.progress; determinate: root.determinate; }
     if root.expanded: VerticalLayout { spacing: 4px; padding-top: 2px;
         if root.api != "": Caption { text: "API：" + root.api; }
         if root.usage.text != "": TokenCaption { value: root.usage; }
@@ -175,6 +177,10 @@ component RunningTask inherits VerticalLayout {
 
 export component TaskFeedback inherits Rectangle {
     private property <bool> show-task: App.busy && App.project-id != "";
+    private property <bool> task-is-translation:
+        App.task-operation == "translate"
+        || App.task-operation == "retranslate"
+        || App.task-operation == "candidate";
     private property <bool> show-review: App.review-running && App.project-id != "";
     private property <bool> show-recognition-failure: !App.busy && App.error == "" && App.recognition-failure-message != "";
     height: feedback-content.preferred-height + 18px;
@@ -185,14 +191,16 @@ export component TaskFeedback inherits Rectangle {
     feedback-content := VerticalLayout { x: 12px; y: 9px; width: parent.width - 24px; height: self.preferred-height; spacing: 6px;
         if root.show-task: RunningTask {
             title: App.status; message: App.task-message; api: App.task-api; usage: App.task-usage; progress: App.progress;
-            stop-label: App.task-operation == "translate" || App.task-operation == "retranslate" || App.task-operation == "candidate" ? "暂停翻译" : "停止任务";
-            stop-icon: App.task-operation == "translate" || App.task-operation == "retranslate" || App.task-operation == "candidate" ? "pause" : "stop";
+            determinate: root.task-is-translation || App.progress > 0;
+            stop-label: root.task-is-translation ? "暂停翻译" : "停止任务";
+            stop-icon: root.task-is-translation ? "pause" : "stop";
             stop => { App.action("cancel", ""); }
         }
         if App.preview-translation-running && App.task-operation != "translate": RunningTask {
             title: "正在翻译"; message: App.preview-translation-message;
             api: App.task-api-for("translate", App.task-api-summary);
             usage: App.preview-translation-usage; progress: App.preview-translation-progress;
+            determinate: true;
             stop-label: "暂停翻译"; stop-icon: "pause"; stop => { App.action("cancel-preview-translation", ""); }
         }
         if root.show-task && root.show-review: Divider {}

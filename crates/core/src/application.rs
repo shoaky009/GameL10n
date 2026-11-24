@@ -246,6 +246,15 @@ pub struct PreviewTranslationStatus {
     pub usage: gamel10n_translation::TokenUsage,
 }
 
+#[derive(Clone, Debug)]
+pub struct LiveTranslationProgress {
+    pub completed: usize,
+    pub total: usize,
+    pub cache_hits: usize,
+    pub failed: usize,
+    pub usage: gamel10n_translation::TokenUsage,
+}
+
 #[derive(Clone)]
 pub(crate) enum TaskKind {
     Project(String),
@@ -322,6 +331,7 @@ struct TaskEntry {
     active: Option<Arc<()>>,
     preview: Option<Arc<CachedAnalysis>>,
     translation: Option<PreviewTranslation>,
+    translation_progress: Option<LiveTranslationProgress>,
     engine_progress: Option<serde_json::Value>,
     state: TaskState,
     writes_review_evidence: bool,
@@ -545,6 +555,7 @@ impl Application {
                 TaskEntry {
                     preview: None,
                     translation: None,
+                    translation_progress: None,
                     engine_progress: None,
                     state: saved.state.clone(),
                     writes_review_evidence: false,
@@ -796,6 +807,36 @@ impl Application {
             .get(id)
             .filter(|entry| entry.state.running)
             .and_then(|entry| entry.engine_progress.clone())
+    }
+
+    pub(crate) async fn set_task_translation_progress(
+        &self,
+        id: &str,
+        progress: &gamel10n_translation::execution::TranslationProgress,
+    ) {
+        let mut tasks = self.tasks.lock().await;
+        if let Some(entry) = tasks.get_mut(id)
+            && entry.state.running
+        {
+            entry.translation_progress = Some(LiveTranslationProgress {
+                completed: progress.completed,
+                total: progress.total,
+                cache_hits: progress.cache_hits,
+                failed: progress.failed,
+                usage: progress.usage.clone(),
+            });
+        }
+    }
+
+    pub(crate) async fn running_translation_progress(
+        &self,
+        id: &str,
+    ) -> Option<LiveTranslationProgress> {
+        let tasks = self.tasks.lock().await;
+        tasks
+            .get(id)
+            .filter(|entry| entry.state.running)
+            .and_then(|entry| entry.translation_progress.clone())
     }
 
     pub(crate) async fn begin_preview_translation(
@@ -1292,6 +1333,7 @@ impl Application {
                 active: Some(active),
                 preview: None,
                 translation,
+                translation_progress: None,
                 engine_progress: None,
                 state: state.clone(),
                 writes_review_evidence,
@@ -1361,6 +1403,7 @@ impl Application {
                 .ok_or_else(|| CoreError::InvalidData("自动流程任务不存在。".into()))?;
             // A custom failure branch may continue with the last committed extraction.
             entry.clear_preview(&self.events);
+            entry.translation_progress = None;
             entry.state.operation = "workflow".into();
             entry.state.message = format!(
                 "全自动汉化 · {}（{}）",
@@ -2120,5 +2163,59 @@ mod tests {
                 vec![ids[1].clone(), ids[2].clone(), ids[0].clone()],
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn project_snapshot_exposes_live_translation_progress_while_running() {
+        let temporary = tempfile::tempdir().unwrap();
+        let app = Application::open(temporary.path().join("data"), &ToolPaths::new("missing"))
+            .await
+            .unwrap();
+        let game = temporary.path().join("game");
+        fs::create_dir(&game).unwrap();
+        let project = app.add_project(&game).await.unwrap();
+        let _task = app
+            .begin(&project.id, "translate", "正在翻译")
+            .await
+            .unwrap();
+        let progress = gamel10n_translation::execution::TranslationProgress {
+            stage: "翻译".into(),
+            message: "已完成 12 / 50 条。".into(),
+            completed: 12,
+            total: 50,
+            cache_hits: 4,
+            failed: 1,
+            usage: gamel10n_translation::TokenUsage {
+                input_tokens: 1200,
+                output_tokens: 400,
+                cached_tokens: Some(300),
+                estimated: false,
+            },
+            updates: Default::default(),
+            failure_updates: Default::default(),
+        };
+        app.set_task_translation_progress(&project.id, &progress)
+            .await;
+
+        let running = app.project_snapshot(&project.id).await.unwrap();
+        let live = running.translation_progress.unwrap();
+        assert_eq!(
+            (
+                live.completed,
+                live.total,
+                live.cache_hits,
+                live.failed,
+                live.usage.input_tokens,
+                live.usage.output_tokens,
+                live.usage.cached_tokens,
+            ),
+            (12, 50, 4, 1, 1200, 400, Some(300))
+        );
+
+        app.finish(&project.id, "translate", Ok("done".into()))
+            .await
+            .unwrap();
+        let finished = app.project_snapshot(&project.id).await.unwrap();
+        assert!(finished.translation_progress.is_none());
     }
 }

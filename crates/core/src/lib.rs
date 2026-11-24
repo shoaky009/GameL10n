@@ -26,7 +26,8 @@ pub mod workflow;
 use thiserror::Error;
 
 pub use application::{
-    AppEvent, Application, PreviewTranslationStatus, StoredAnalysis, TaskState, TextPage,
+    AppEvent, Application, LiveTranslationProgress, PreviewTranslationStatus, StoredAnalysis,
+    TaskState, TextPage,
 };
 pub use engine_review::ReviewState;
 pub use gamel10n_engines::{CancellationToken, ToolPaths};

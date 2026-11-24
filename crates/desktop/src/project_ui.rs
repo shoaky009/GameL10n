@@ -1143,6 +1143,7 @@ pub async fn refresh_project(ctx: &Context, id: &str, opening: bool) -> Result<(
     let preview = snapshot.translation_preview;
     let preview_run = snapshot.preview_translation;
     let preview_resumable = snapshot.preview_translation_resumable;
+    let live_translation = snapshot.translation_progress;
 
     let project = snapshot.project;
     let state = snapshot.task;
@@ -1280,6 +1281,28 @@ pub async fn refresh_project(ctx: &Context, id: &str, opening: bool) -> Result<(
             }
             .into(),
         );
+        if state.as_ref().is_some_and(|task| task.running)
+            && let Some(live) = &live_translation
+        {
+            let fraction = if live.total == 0 {
+                0.0
+            } else {
+                live.completed as f32 / live.total as f32
+            };
+            a.set_progress(fraction);
+            a.set_counts(
+                format!(
+                    "完成 {} / {} · 复用 {} · 失败 {}",
+                    live.completed, live.total, live.cache_hits, live.failed
+                )
+                .into(),
+            );
+            a.set_task_usage(crate::token_ui::usage(
+                live.usage.input_tokens,
+                live.usage.output_tokens,
+                live.usage.cached_tokens.unwrap_or(0),
+            ));
+        }
         recognition.apply(&a);
         a.set_can_resume_adaptation(snapshot.can_resume_adaptation);
         if let Some(session) = &workflow_session {

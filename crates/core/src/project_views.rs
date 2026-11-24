@@ -10,6 +10,7 @@ use crate::{Application, CoreError, GameProject, TaskState};
 pub struct ProjectSnapshot {
     pub project: GameProject,
     pub task: Option<TaskState>,
+    pub translation_progress: Option<crate::LiveTranslationProgress>,
     pub translation_preview: bool,
     pub preview_translation: Option<crate::PreviewTranslationStatus>,
     pub preview_translation_resumable: bool,
@@ -78,6 +79,7 @@ impl Application {
     pub async fn project_snapshot(&self, id: &str) -> Result<ProjectSnapshot, CoreError> {
         let project = self.open_project(id).await?;
         let (task, translation_preview, preview_translation) = self.project_task_snapshot(id).await;
+        let translation_progress = self.running_translation_progress(id).await;
         let live_progress = self.running_engine_progress(id).await;
         let directory = self.project_directory(id)?;
         tokio::task::spawn_blocking(move || {
@@ -130,6 +132,7 @@ impl Application {
                     .or(task)
             };
             Ok(ProjectSnapshot {
+                translation_progress,
                 translation_preview,
                 preview_translation,
                 preview_translation_resumable,
