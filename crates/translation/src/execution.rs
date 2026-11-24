@@ -43,7 +43,7 @@ pub struct TranslationOptions {
 impl Default for TranslationOptions {
     fn default() -> Self {
         Self {
-            batch_size: 24,
+            batch_size: 50,
             unit_ids: None,
             candidate_only: false,
             retranslation_id: None,

@@ -255,7 +255,7 @@ pub async fn refresh(ctx: &Context, project_id: Option<&str>) -> Result<(), Core
         a.set_terminology(terminology.into());
         a.set_terminology_count(terminology_count);
         a.set_has_json_batch_api(has_json_batch_api);
-        a.set_batch_size(ps.get("batchSize").and_then(Value::as_i64).unwrap_or(24) as i32);
+        a.set_batch_size(ps.get("batchSize").and_then(Value::as_i64).unwrap_or(50) as i32);
     });
     Ok(())
 }
@@ -656,7 +656,7 @@ mod tests {
             budget: "1000000".into(),
             loaded_budget: "1000000".into(),
             language: "简体中文".into(),
-            batch_size: 24,
+            batch_size: 50,
             ..UiInput::default()
         }
     }
@@ -679,7 +679,7 @@ mod tests {
             updates,
             json!({
                 "targetLanguage": "简体中文", "style": "保留原文语气",
-                "terminology": "", "batchSize": 24
+                "terminology": "", "batchSize": 50
             })
         );
     }

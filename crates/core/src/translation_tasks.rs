@@ -711,7 +711,8 @@ impl Application {
                 .settings
                 .get("batchSize")
                 .and_then(Value::as_u64)
-                .unwrap_or(24) as usize;
+                .unwrap_or(TranslationOptions::default().batch_size as u64)
+                as usize;
         }
         let providers = self.translation_providers(id).await?;
         let policy = crate::workbench::validated_policy(&project.settings)?;
