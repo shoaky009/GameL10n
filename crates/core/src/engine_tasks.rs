@@ -2349,7 +2349,7 @@ pub(crate) fn source_inputs(
                 return Err(gamel10n_engines::EngineError::Cancelled.into());
             }
             let path = if reference {
-                installer.resolve_source_file(game, &relative, Some(&hashes[&key]))?
+                installer.resolve_source_file(game, &relative, Some(hashes[&key]))?
             } else {
                 crate::patching::safe_path(&source, &relative)?
             };
