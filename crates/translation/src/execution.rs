@@ -908,8 +908,8 @@ mod tests {
             .iter()
             .map(|request| {
                 serde_json::from_str::<Value>(request["messages"][1]["content"].as_str().unwrap())
-                    .unwrap()["units"]
-                    .as_array()
+                    .unwrap()["items"]
+                    .as_object()
                     .unwrap()
                     .len()
             })
@@ -992,7 +992,7 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        assert_eq!(first_batch["units"].as_array().unwrap().len(), 2);
+        assert_eq!(first_batch["items"].as_object().unwrap().len(), 2);
         let plain_sources: Vec<_> = second
             .1
             .try_iter()
@@ -1077,8 +1077,8 @@ mod tests {
         let request = retry.1.recv().unwrap();
         let data: Value =
             serde_json::from_str(request["messages"][1]["content"].as_str().unwrap()).unwrap();
-        assert_eq!(data["units"].as_array().unwrap().len(), 1);
-        assert_eq!(data["units"][0]["sourceText"], "Goodbye");
+        assert_eq!(data["items"].as_object().unwrap().len(), 1);
+        assert_eq!(data["items"]["0"], "Goodbye");
         retry.2.join().unwrap();
     }
 
@@ -1390,11 +1390,9 @@ mod tests {
         let request = second.1.recv().unwrap();
         let data: Value =
             serde_json::from_str(request["messages"][1]["content"].as_str().unwrap()).unwrap();
-        let sources: Vec<_> = data["units"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|row| row["sourceText"].as_str().unwrap())
+        let items = data["items"].as_object().unwrap();
+        let sources: Vec<_> = (0..items.len())
+            .map(|i| items[&i.to_string()].as_str().unwrap())
             .collect();
         assert_eq!(sources, ["Goodbye", "Blocked"]);
         assert_eq!(
