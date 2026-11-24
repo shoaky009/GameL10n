@@ -82,7 +82,12 @@ export component MainWindow inherits Window {
                                 Label { text: App.concise-text(project.name); height: self.preferred-height; color: Theme.title; font-weight: 600; overflow: elide; wrap: no-wrap; }
                                 HorizontalLayout { spacing: 6px; alignment: start;
                                     VerticalLayout { alignment: center; horizontal-stretch: 0;
-                                        StatusDot { size: 7px; tint: project.running || project.review-running ? Theme.accent : Theme.muted; }
+                                        StatusDot {
+                                            size: 7px;
+                                            tint: project.running || project.review-running
+                                                ? Theme.success
+                                                : project.failed ? Theme.error : Theme.muted;
+                                        }
                                     }
                                     Caption {
                                         text: project.review-running ? project.running ? project.status + " · 总结经验" : "正在总结经验" : App.concise-text(project.status);

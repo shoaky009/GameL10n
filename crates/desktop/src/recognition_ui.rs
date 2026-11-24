@@ -24,6 +24,27 @@ pub fn project_status(state: Option<&TaskState>, extra: &BTreeMap<String, Value>
     }
 }
 
+pub fn project_failed(state: Option<&TaskState>, extra: &BTreeMap<String, Value>) -> bool {
+    let saved = extra.get("taskSummary").unwrap_or(&Value::Null);
+    let failed_adaptation = matches!(
+        saved.get("adaptationStatus").and_then(Value::as_str),
+        Some("Failed" | "Unavailable" | "Unsupported")
+    );
+    if let Some(state) = state {
+        if state.running {
+            return false;
+        }
+        return state.succeeded == Some(false)
+            || (state.operation == "adapt"
+                && state.succeeded == Some(true)
+                && failed_adaptation);
+    }
+    saved.get("succeeded").and_then(Value::as_bool) == Some(false)
+        || (saved.get("operation").and_then(Value::as_str) == Some("adapt")
+            && saved.get("succeeded").and_then(Value::as_bool) == Some(true)
+            && failed_adaptation)
+}
+
 fn saved_project_status(state: Option<&TaskState>, extra: &BTreeMap<String, Value>) -> String {
     let saved = extra.get("taskSummary").unwrap_or(&Value::Null);
     let count = extra.get("analysis").and_then(|a| a["unitCount"].as_u64());
@@ -1074,5 +1095,51 @@ mod tests {
             let view = RecognitionView::new(&BTreeMap::new(), None, &Value::Null, &result);
             assert!(view.failure.message.is_empty(), "{status}");
         }
+    }
+
+    #[test]
+    fn project_failed_distinguishes_errors_from_running_and_paused_states() {
+        let failed_summary = BTreeMap::from([(
+            "taskSummary".into(),
+            json!({"operation":"translate", "succeeded":false}),
+        )]);
+        let paused_summary = BTreeMap::from([(
+            "taskSummary".into(),
+            json!({"operation":"translate", "succeeded":null}),
+        )]);
+        let failed_adapt = BTreeMap::from([(
+            "taskSummary".into(),
+            json!({"operation":"adapt", "succeeded":true, "adaptationStatus":"Failed"}),
+        )]);
+        let paused_adapt = BTreeMap::from([(
+            "taskSummary".into(),
+            json!({"operation":"adapt", "succeeded":true, "adaptationStatus":"Cancelled"}),
+        )]);
+        let running = TaskState {
+            project_id: "one".into(),
+            operation: "translate".into(),
+            running: true,
+            message: "正在翻译".into(),
+            succeeded: None,
+            workflow: None,
+        };
+        let failed = TaskState {
+            running: false,
+            succeeded: Some(false),
+            ..running.clone()
+        };
+        let paused = TaskState {
+            running: false,
+            succeeded: None,
+            ..running.clone()
+        };
+
+        assert!(!project_failed(Some(&running), &failed_summary));
+        assert!(project_failed(Some(&failed), &BTreeMap::new()));
+        assert!(!project_failed(Some(&paused), &failed_summary));
+        assert!(project_failed(None, &failed_summary));
+        assert!(!project_failed(None, &paused_summary));
+        assert!(project_failed(None, &failed_adapt));
+        assert!(!project_failed(None, &paused_adapt));
     }
 }

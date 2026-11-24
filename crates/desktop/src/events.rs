@@ -153,6 +153,7 @@ fn update_project_row(app: &App, state: &TaskState) -> bool {
     };
     let running_changed = row.running != state.running;
     row.running = state.running;
+    row.failed = !state.running && state.succeeded == Some(false);
     row.status = recognition_ui::task_state_status(state, None, false).into();
     projects.set_row_data(index, row);
     running_changed

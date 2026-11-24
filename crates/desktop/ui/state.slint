@@ -1,7 +1,7 @@
 import { Palette } from "std-widgets.slint";
 import { Icon } from "icons.slint";
 export { Icon }
-export struct ProjectRow { id: string, name: string, path: string, status: string, running: bool, review-running: bool, selected: bool }
+export struct ProjectRow { id: string, name: string, path: string, status: string, running: bool, review-running: bool, failed: bool, selected: bool }
 export struct TextRow { id: string, location: string, source: string, translation: string, metadata: string, selected: bool, origin: int, reviewed: bool, invalid: bool, failed: bool, candidate: bool }
 export struct NamedRow { id: string, name: string, detail: string, enabled: bool }
 export struct EngineRow { id: string, name: string, detail: string, enabled: bool, selected: bool }

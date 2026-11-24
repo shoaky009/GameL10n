@@ -778,12 +778,14 @@ pub async fn refresh_projects(ctx: &Context, query: &str) -> Result<(), CoreErro
     for p in app.list_projects(&query).await {
         let state = states.remove(&p.id);
         let status = recognition_ui::project_status(state.as_ref(), &p.extra);
+        let failed = recognition_ui::project_failed(state.as_ref(), &p.extra);
         rows.push(ProjectRow {
             id: p.id.clone().into(),
             name: p.name.into(),
             path: p.game_directory.display().to_string().into(),
             running: state.as_ref().is_some_and(|s| s.running),
             review_running: app.review_running(&p.id),
+            failed,
             status: status.into(),
             selected: false,
         });
