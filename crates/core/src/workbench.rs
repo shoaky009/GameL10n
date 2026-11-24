@@ -158,9 +158,9 @@ impl RowState {
             issues: self.issues.clone(),
             failure: self.failure().map(|failure| {
                 if self.text().is_some() && self.issues.is_empty() {
-                    format!("上次请求失败（当前已保存译文仍可使用）：{failure}")
+                    format!("上次翻译失败（当前已保存译文仍可使用）：{failure}")
                 } else {
-                    format!("上次请求失败：{failure}")
+                    format!("上次翻译失败：{failure}")
                 }
             }),
             previous_edit: self.previous_edit.clone(),
@@ -1336,11 +1336,11 @@ mod tests {
         assert_eq!(page.rows[0].text.as_deref(), Some("你好[name]"));
         assert_eq!(
             page.rows[0].failure.as_deref(),
-            Some("上次请求失败（当前已保存译文仍可使用）：请求超时")
+            Some("上次翻译失败（当前已保存译文仍可使用）：请求超时")
         );
         assert_eq!(
             page.rows[2].failure.as_deref(),
-            Some("上次请求失败：请求超时")
+            Some("上次翻译失败：请求超时")
         );
         assert_eq!(
             app.matching_text_ids(&id, &filter).await.unwrap(),

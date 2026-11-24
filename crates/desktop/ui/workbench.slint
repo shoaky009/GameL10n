@@ -189,7 +189,7 @@ export component Workbench inherits FocusScope {
                                     HorizontalLayout { spacing: 6px; height: 24px;
                                         Badge { text: row.translation == "" ? "未翻译" : row.origin == 1 ? "自动" : row.origin == 2 ? "人工" : "来源未知"; tone: row.translation == "" ? 0 : row.origin; }
                                         if row.invalid || row.translation != "": Badge { text: row.invalid ? "格式问题" : row.reviewed ? "已校对" : "待校对"; tone: row.invalid ? 5 : row.reviewed ? 3 : 4; }
-                                        if row.failed: Badge { text: "请求失败"; tone: 5; }
+                                        if row.failed: Badge { text: "翻译失败"; tone: 5; }
                                         if row.candidate: Badge { text: "有候选"; tone: 1; }
                                         Rectangle { horizontal-stretch: 1; }
                                     }

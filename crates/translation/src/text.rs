@@ -148,6 +148,19 @@ fn declared_spans(text: &str, tokens: Option<&[String]>) -> Vec<(usize, usize)> 
     result
 }
 
+fn merge_spans(mut spans: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
+    spans.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.cmp(&a.1)));
+    let mut result = Vec::new();
+    let mut end = 0;
+    for span in spans {
+        if span.0 >= end {
+            end = span.1;
+            result.push(span);
+        }
+    }
+    result
+}
+
 fn protected_spans(unit: &TranslationUnit) -> Vec<(usize, usize)> {
     let source = &unit.source_text;
     let mut spans = common_markers(source);
@@ -165,16 +178,7 @@ fn protected_spans(unit: &TranslationUnit) -> Vec<(usize, usize)> {
             spans.push((group.end() - width, group.end()));
         }
     }
-    spans.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.cmp(&a.1)));
-    let mut result = Vec::new();
-    let mut end = 0;
-    for span in spans {
-        if span.0 >= end {
-            end = span.1;
-            result.push(span);
-        }
-    }
-    result
+    merge_spans(spans)
 }
 
 pub struct ProtectedText {
@@ -262,10 +266,9 @@ pub fn validate(unit: &TranslationUnit, translated: &str) -> Vec<ValidationIssue
     let has_prose = groups.len() != protected.len();
     let count = |text: &str, is_source: bool| {
         let mut counts = BTreeMap::<String, usize>::new();
-        for (start, end) in common_markers(text)
-            .into_iter()
-            .chain(declared_spans(text, unit.protected_tokens.as_deref()))
-        {
+        let mut spans = common_markers(text);
+        spans.extend(declared_spans(text, unit.protected_tokens.as_deref()));
+        for (start, end) in merge_spans(spans) {
             *counts.entry(text[start..end].into()).or_default() += 1;
         }
         for group in GROUPS.find_iter(text) {
@@ -372,5 +375,19 @@ mod tests {
         }
         let source = unit("[wait]{player}<br>");
         assert_eq!(verification_text(&source, 0, false), source.source_text);
+    }
+    #[test]
+    fn validate_deduplicates_declared_tokens_overlapping_common_markers() {
+        let mut source = unit(r"前段\r中段\r后段");
+        source.protected_tokens = Some(vec![r"\r".into()]);
+        assert!(validate(&source, r"前\r中\r后").is_empty());
+        let issues = validate(&source, r"前\r中后");
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].code, "placeholder-mismatch");
+        assert!(
+            issues[0].message.contains("原文 2 次，译文 1 次"),
+            "unexpected message: {}",
+            issues[0].message
+        );
     }
 }
