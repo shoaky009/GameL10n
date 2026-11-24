@@ -52,7 +52,7 @@ export component Workbench inherits FocusScope {
     }
     VerticalLayout {
     spacing: 8px;
-    HorizontalLayout { spacing: 10px;
+    HorizontalLayout { spacing: 8px;
         ActionButton {
             text: App.preview-translation-resumable && !App.preview-translation-running ? "继续翻译…" : "全量翻译";
             icon: "languages";
@@ -60,27 +60,27 @@ export component Workbench inherits FocusScope {
             enabled: App.can-start-translation && (App.has-workbench-text || App.preview-translation-resumable);
             clicked => { App.action("translate", "all"); }
         }
-        Caption {
-            text: (App.translation-preview ? (App.task-operation == "workflow" ? "识别中 · 自动汉化将在确定试译文本后试译 · " : "识别中 · ") : "") + App.counts;
-            horizontal-stretch: 1; min-width: 0px; vertical-alignment: center; overflow: elide; wrap: no-wrap;
-        }
         ActionButton {
-            text: "提取术语"; icon: "sparkles"; compact: true;
-            enabled: !App.busy && App.has-workbench-text && App.has-json-batch-api && !App.terminology-extracting;
-            tooltip: App.has-json-batch-api ? "使用批量 JSON 翻译 API 自动提取角色名与术语" : "需在项目翻译链中配置批量 JSON 格式的 API";
-            clicked => { App.action("terminology-extract", ""); }
-        }
-        ActionButton {
-            text: "生成补丁"; icon: "package"; compact: true;
+            text: "生成补丁"; icon: "package";
             enabled: App.selected-texts > 0 && root.selection-enabled && !App.busy;
             tooltip: "使用所选文本生成补丁，缺少的译文会先自动翻译。";
             clicked => { App.action("translate", "trial"); }
         }
         ActionButton {
-            text: "安装补丁"; icon: "download"; compact: true;
+            text: "安装补丁"; icon: "download";
             enabled: App.can-install-patch;
             tooltip: "安装本项目最近生成的补丁。";
             clicked => { App.modal = "install"; }
+        }
+        ActionButton {
+            text: "提取术语"; icon: "sparkles";
+            enabled: !App.busy && App.has-workbench-text && App.has-json-batch-api && !App.terminology-extracting;
+            tooltip: App.has-json-batch-api ? "使用批量 JSON 翻译 API 自动提取角色名与术语" : "需在项目翻译链中配置批量 JSON 格式的 API";
+            clicked => { App.action("terminology-extract", ""); }
+        }
+        Caption {
+            text: (App.translation-preview ? (App.task-operation == "workflow" ? "识别中 · 自动汉化将在确定试译文本后试译 · " : "识别中 · ") : "") + App.counts;
+            horizontal-stretch: 1; min-width: 0px; vertical-alignment: center; overflow: elide; wrap: no-wrap;
         }
     }
     HorizontalLayout { spacing: 8px;
@@ -132,13 +132,13 @@ export component Workbench inherits FocusScope {
                 clicked => { App.action("bulk-review", ""); }
             }
             CheckBox { text: "仅显示已选"; checked <=> App.only-selected; enabled: App.selected-texts > 0 || App.only-selected; toggled => { App.action("texts", "0"); } }
-            Rectangle { horizontal-stretch: 1; }
-            if App.selected-texts > 0: IconButton {
-                icon: "close"; button-size: 28px; icon-size: 14px;
+            if App.selected-texts > 0: ActionButton {
+                text: "取消选择"; icon: "close"; subtle: true; compact: true;
                 tooltip: "取消全部选择";
                 enabled: root.selection-enabled;
                 clicked => { App.action("select-clear", ""); }
             }
+            Rectangle { horizontal-stretch: 1; }
         }
     }
     if App.terminology-affected-count > 0: Rectangle {
@@ -240,7 +240,7 @@ export component Workbench inherits FocusScope {
             }
             if App.text-total > 0: text-paging := HorizontalLayout { spacing: 6px;
                 private property <bool> multiple-pages: App.offset > 0 || App.shown < App.text-total;
-                Caption { text: text-paging.multiple-pages ? (App.offset + 1) + "–" + (App.offset + App.shown) + " / " + App.text-total : "共 " + App.text-total + " 条"; horizontal-stretch: 1; vertical-alignment: center; wrap: no-wrap; }
+                Caption { text: text-paging.multiple-pages ? (App.offset + 1) + "–" + (App.offset + App.shown) + " / " + App.text-total : "共 " + App.text-total + " 条"; horizontal-stretch: 0; vertical-alignment: center; wrap: no-wrap; }
                 if text-paging.multiple-pages: IconButton {
                     icon: "chevron-left"; button-size: 28px; icon-size: 16px;
                     tooltip: "上一页";
@@ -253,6 +253,7 @@ export component Workbench inherits FocusScope {
                     enabled: App.offset + App.shown < App.text-total && root.selection-enabled;
                     clicked => { App.action("texts", "next"); }
                 }
+                Rectangle { horizontal-stretch: 1; }
             }
         }
         if App.editor-id != "": Rectangle { preferred-width: 332px; min-width: 280px; max-width: 390px; horizontal-stretch: 1; background: Theme.card; border-color: Theme.line; border-width: 1px; border-radius: 6px;

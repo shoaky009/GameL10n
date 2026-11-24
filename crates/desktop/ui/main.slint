@@ -13,7 +13,7 @@ export component MainWindow inherits Window {
     title: "GameL10n"; preferred-width: 1420px; preferred-height: 900px; min-width: 1120px; min-height: 720px;
     icon: @image-url("../assets/GameL10n.png");
     default-font-family: "Microsoft YaHei UI"; default-font-size: 14px; background: Theme.background;
-    private property <bool> logs-expanded: false;
+    private property <bool> logs-expanded: true;
     clipboard := ClipboardBuffer {}
     HorizontalLayout { padding: 16px; spacing: 20px;
         VerticalLayout { width: 244px; spacing: 8px;

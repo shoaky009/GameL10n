@@ -293,7 +293,7 @@ component CompletedRecognition inherits ScrollView {
 
 export component Recognition inherits VerticalLayout {
     spacing: 12px;
-    HorizontalLayout { spacing: 16px;
+    HorizontalLayout { spacing: 12px;
         HorizontalLayout { spacing: 8px; horizontal-stretch: 0;
             if App.can-resume-adaptation: ActionButton {
                 text: "继续智能识别"; icon: "play"; primary: true;
@@ -318,7 +318,12 @@ export component Recognition inherits VerticalLayout {
         Rectangle { width: 1px;
             Rectangle { width: 1px; height: 20px; y: (parent.height - self.height) / 2; background: Theme.line; }
         }
-        HorizontalLayout { spacing: 10px; horizontal-stretch: 0;
+        HorizontalLayout { spacing: 8px; horizontal-stretch: 0;
+            ActionButton {
+                text: "手动执行适配器…"; icon: "wrench";
+                enabled: !App.busy && !App.review-running;
+                clicked => { App.action("project-adapter-dialog", ""); }
+            }
             ActionButton {
                 text: "总结经验"; icon: "book";
                 enabled: !App.review-running;
@@ -351,12 +356,7 @@ export component Recognition inherits VerticalLayout {
             Rectangle { horizontal-stretch: 1; }
             if App.recognition-running ? App.task-usage.text != "" : App.adaptation-usage.text != "": TokenCaption {
                 value: App.recognition-running ? App.task-usage : App.adaptation-usage; color: Theme.secondary;
-                max-width: root.width * 0.52; vertical-alignment: center;
-            }
-            if !App.recognition-running: ActionButton {
-                text: "手动执行适配器…"; icon: "wrench"; subtle: true; compact: true;
-                enabled: !App.busy && !App.review-running;
-                clicked => { App.action("project-adapter-dialog", ""); }
+                max-width: root.width * 0.6; vertical-alignment: center;
             }
         }
     }
