@@ -276,34 +276,18 @@ impl EngineService {
 }
 
 async fn public_response(mut current: reqwest::Url) -> Result<reqwest::Response, EngineError> {
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(180))
+        .build()
+        .map_err(|error| EngineError::Research(error.to_string()))?;
     for _ in 0..6 {
         validate_url(&current)?;
-        let host = current
-            .host_str()
-            .ok_or_else(|| EngineError::Protocol("资料地址缺少主机。".into()))?
-            .trim_matches(['[', ']']);
-        let port = current.port_or_known_default().unwrap_or(443);
-        let addresses: Vec<_> = tokio::net::lookup_host((host, port))
-            .await
-            .map_err(|error| EngineError::Research(format!("公开资料请求失败：{error}")))?
-            .collect();
-        if addresses.is_empty() || addresses.iter().any(|address| !public_ip(address.ip())) {
-            return Err(EngineError::Rejected(
-                "资料地址不能解析到本地、内网或特殊用途地址。".into(),
-            ));
-        }
         let accept = if github_git_repository(&current, "blobs").is_some() {
             "application/vnd.github.raw+json"
         } else {
             "application/json"
         };
-        let client = reqwest::Client::builder()
-            .no_proxy()
-            .resolve_to_addrs(host, &addresses)
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(Duration::from_secs(180))
-            .build()
-            .map_err(|error| EngineError::Research(error.to_string()))?;
         let response = client
             .get(current.clone())
             .header("User-Agent", "GameL10n/1.0")
