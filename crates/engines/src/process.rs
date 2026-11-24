@@ -1,12 +1,18 @@
 use std::{
-    ffi::OsString, io::BufReader, path::PathBuf, process::Stdio, sync::OnceLock, time::Duration,
+    ffi::OsString,
+    future::Future,
+    io::BufReader,
+    path::PathBuf,
+    process::Stdio,
+    sync::{Arc, Mutex, OnceLock},
+    time::{Duration, Instant},
 };
 
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     process::Command,
-    sync::Semaphore,
+    sync::{Notify, Semaphore},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -20,6 +26,123 @@ fn process_slots() -> &'static Semaphore {
             .unwrap_or(4);
         Semaphore::new(permits)
     })
+}
+
+tokio::task_local! {
+    static CURRENT_BUDGET: Arc<ProcessBudget>;
+}
+
+struct BudgetState {
+    limit: Duration,
+    active_elapsed: Duration,
+    active_started: Option<Instant>,
+    paused_waiters: usize,
+}
+
+/// Tracks active execution budget while excluding time spent queued for `process_slots()`.
+pub(crate) struct ProcessBudget {
+    state: Mutex<BudgetState>,
+    changed: Notify,
+}
+
+struct BudgetPauseGuard {
+    budget: Arc<ProcessBudget>,
+}
+
+impl Drop for BudgetPauseGuard {
+    fn drop(&mut self) {
+        self.budget.resume();
+    }
+}
+
+impl ProcessBudget {
+    pub(crate) fn new(limit: Duration) -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(BudgetState {
+                limit,
+                active_elapsed: Duration::ZERO,
+                active_started: Some(Instant::now()),
+                paused_waiters: 0,
+            }),
+            changed: Notify::new(),
+        })
+    }
+
+    pub(crate) async fn scope<F: Future>(budget: Arc<Self>, future: F) -> F::Output {
+        CURRENT_BUDGET.scope(budget, future).await
+    }
+
+    pub(crate) fn active_elapsed(&self) -> Duration {
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state.active_elapsed
+            + state
+                .active_started
+                .map_or(Duration::ZERO, |started| started.elapsed())
+    }
+
+    fn pause(self: &Arc<Self>) -> BudgetPauseGuard {
+        {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            if state.paused_waiters == 0
+                && let Some(started) = state.active_started.take()
+            {
+                state.active_elapsed += started.elapsed();
+            }
+            state.paused_waiters += 1;
+        }
+        self.changed.notify_waiters();
+        BudgetPauseGuard {
+            budget: Arc::clone(self),
+        }
+    }
+
+    fn resume(&self) {
+        {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            state.paused_waiters = state.paused_waiters.saturating_sub(1);
+            if state.paused_waiters == 0 && state.active_started.is_none() {
+                state.active_started = Some(Instant::now());
+            }
+        }
+        self.changed.notify_waiters();
+    }
+
+    pub(crate) async fn expired(&self) {
+        loop {
+            let notified = self.changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let remaining = {
+                let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                if state.paused_waiters > 0 {
+                    None
+                } else {
+                    let elapsed = state.active_elapsed
+                        + state
+                            .active_started
+                            .map_or(Duration::ZERO, |started| started.elapsed());
+                    match state.limit.checked_sub(elapsed) {
+                        Some(remaining) if !remaining.is_zero() => Some(remaining),
+                        _ => return,
+                    }
+                }
+            };
+            match remaining {
+                None => notified.await,
+                Some(remaining) => {
+                    tokio::select! {
+                        biased;
+                        () = notified => continue,
+                        () = tokio::time::sleep(remaining) => continue,
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn pause_current_budget() -> Option<BudgetPauseGuard> {
+    CURRENT_BUDGET.try_with(|budget| budget.pause()).ok()
 }
 
 /// JSON subprocess execution, optionally through the isolated native runner.
@@ -177,6 +300,7 @@ impl ToolProcess {
         command.creation_flags(0x08000000); // CREATE_NO_WINDOW: CLI helpers must not open consoles.
         #[cfg(unix)]
         command.process_group(0);
+        let budget_pause = pause_current_budget();
         let _permit = tokio::select! {
             biased;
             _ = cancellation.cancelled() => return Err(EngineError::Cancelled),
@@ -184,6 +308,7 @@ impl ToolProcess {
                 permit.map_err(|_| EngineError::Protocol("子进程调度器不可用。".into()))?
             }
         };
+        drop(budget_pause);
         let isolated = self.isolation.is_some();
         let mut child = command.spawn().map_err(|error| {
             if isolated {
@@ -517,5 +642,96 @@ mod tests {
             .execute::<_, Value>(&json!({"responseFile":path}), &CancellationToken::new())
             .await;
         assert!(matches!(result, Err(EngineError::Json(_))));
+    }
+
+    fn test_script_process(python_script: &str, sh_script: &str) -> Option<ToolProcess> {
+        if let Some(process) = python(python_script) {
+            return Some(process);
+        }
+        #[cfg(unix)]
+        {
+            let sh = PathBuf::from("/bin/sh");
+            if sh.is_file() {
+                return Some(ToolProcess::new(sh).with_arguments(["-c".into(), sh_script.into()]));
+            }
+        }
+        let _ = sh_script;
+        None
+    }
+
+    #[tokio::test]
+    async fn process_budget_excludes_slot_queue_wait_from_timeout_and_elapsed() {
+        let Some(process) = test_script_process(
+            "import json,sys; json.load(sys.stdin); print('{\"ok\":true}')",
+            "cat >/dev/null; printf '{\"ok\":true}'",
+        ) else {
+            return;
+        };
+        let total = std::thread::available_parallelism()
+            .map(|count| count.get().clamp(2, 6))
+            .unwrap_or(4);
+        let permits = process_slots()
+            .acquire_many(total as u32)
+            .await
+            .expect("saturate slots");
+        let budget = ProcessBudget::new(Duration::from_millis(250));
+        let cancellation = CancellationToken::new();
+        let deadline = cancellation.child_token();
+        let release = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(450)).await;
+            drop(permits);
+        });
+        let payload = json!({});
+        let operation = ProcessBudget::scope(
+            Arc::clone(&budget),
+            process.execute::<_, Value>(&payload, &deadline),
+        );
+        tokio::pin!(operation);
+        let response = tokio::select! {
+            result = &mut operation => result.expect("queued execution should not exhaust budget"),
+            () = budget.expired() => {
+                deadline.cancel();
+                let _ = operation.await;
+                panic!("slot queueing must not exhaust ProcessBudget");
+            }
+        };
+        release.await.expect("release task");
+        assert_eq!(response["ok"], true);
+        assert!(
+            budget.active_elapsed() < Duration::from_millis(250),
+            "active elapsed {:?} should exclude 450ms slot wait",
+            budget.active_elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn process_budget_still_times_out_active_execution_after_slot_acquired() {
+        let Some(process) = test_script_process(
+            "import time; time.sleep(2); print('{}')",
+            "sleep 2; printf '{}'",
+        ) else {
+            return;
+        };
+        let budget = ProcessBudget::new(Duration::from_millis(120));
+        let cancellation = CancellationToken::new();
+        let deadline = cancellation.child_token();
+        let payload = json!({});
+        let operation = ProcessBudget::scope(
+            Arc::clone(&budget),
+            process.execute::<_, Value>(&payload, &deadline),
+        );
+        tokio::pin!(operation);
+        let timed_out = tokio::select! {
+            _ = &mut operation => false,
+            () = budget.expired() => {
+                deadline.cancel();
+                let _ = operation.await;
+                true
+            }
+        };
+        assert!(
+            timed_out,
+            "hanging process must still hit ProcessBudget timeout"
+        );
     }
 }

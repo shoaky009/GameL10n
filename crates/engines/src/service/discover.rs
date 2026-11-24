@@ -296,19 +296,21 @@ impl Discovery<'_> {
             let attempt = async {
                 let handle = manifest.handle(&candidate.directory)?;
                 phase = "probe";
-                let started = Instant::now();
+                let budget = crate::process::ProcessBudget::new(
+                    PACKAGE_PROBE_BUDGET.saturating_sub(self.probe_elapsed),
+                );
                 let probe = self
                     .service
-                    .probe_bounded_with_limit(
+                    .probe_bounded_with_budget(
                         &handle,
                         self.source,
                         &candidate.resources,
                         &self.service.discovery_inputs,
                         self.cancellation,
-                        PACKAGE_PROBE_BUDGET.saturating_sub(self.probe_elapsed),
+                        &budget,
                     )
                     .await;
-                self.probe_elapsed += started.elapsed();
+                self.probe_elapsed += budget.active_elapsed();
                 let (probe, _) = probe?;
                 let Some(probe) = probe else { return Ok(None) };
                 recognized = true;

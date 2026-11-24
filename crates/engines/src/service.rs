@@ -1288,12 +1288,29 @@ impl EngineService {
         cancellation: &CancellationToken,
         limit: Duration,
     ) -> Result<(Option<ProbeResult>, Value), EngineError> {
+        let budget = crate::process::ProcessBudget::new(limit);
+        self.probe_bounded_with_budget(adapter, source, resources, inputs, cancellation, &budget)
+            .await
+    }
+
+    async fn probe_bounded_with_budget(
+        &self,
+        adapter: &AdapterHandle,
+        source: &Path,
+        resources: &[String],
+        inputs: &crate::adaptation::AdaptationInputs,
+        cancellation: &CancellationToken,
+        budget: &Arc<crate::process::ProcessBudget>,
+    ) -> Result<(Option<ProbeResult>, Value), EngineError> {
         let deadline = cancellation.child_token();
-        let operation = self.probe_bounded_inner(adapter, source, resources, inputs, &deadline);
+        let operation = crate::process::ProcessBudget::scope(
+            Arc::clone(budget),
+            self.probe_bounded_inner(adapter, source, resources, inputs, &deadline),
+        );
         tokio::pin!(operation);
         tokio::select! {
             result = &mut operation => result,
-            () = tokio::time::sleep(limit) => {
+            () = budget.expired() => {
                 deadline.cancel();
                 let _ = operation.await;
                 Err(EngineError::Timeout)
