@@ -11,7 +11,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fmt,
     sync::{
-        Arc, LazyLock, Mutex, Weak,
+        Arc, LazyLock, Mutex,
         atomic::{AtomicU64, Ordering},
     },
     time::Duration,
@@ -510,7 +510,7 @@ impl AccountLimiter {
     }
 }
 
-static ACCOUNT_SLOTS: LazyLock<Mutex<HashMap<String, Weak<AccountLimiter>>>> =
+static ACCOUNT_SLOTS: LazyLock<Mutex<HashMap<String, Arc<AccountLimiter>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static REFUSAL_PREFIX: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex::Regex::new(r"(?i)^(?:(?:抱歉|对不起)[，,。:：!！\s]*)?我(?:无法|不能|不可以)(?:(?:帮助|协助)(?:你|您)?)?(?:翻译|处理|提供|生成|协助|帮助|满足|完成)|^(?:(?:(?:I'm|I am)\s+sorry|Sorry)[,.:!\s]*)?(?:I\s+(?:cannot|can't|won't|am\s+unable\s+to)|I'm\s+unable\s+to)\s+(?:help|assist|translate|provide|fulfill|comply|process|complete)\b").expect("constant refusal regex")
@@ -596,14 +596,14 @@ impl OpenAiProvider {
             let mut slots = ACCOUNT_SLOTS
                 .lock()
                 .map_err(|_| ProviderError::new("scheduler", "API 请求调度器不可用。"))?;
-            slots.retain(|_, slot| slot.strong_count() > 0);
-            if let Some(limiter) = slots.get(&account_key).and_then(Weak::upgrade) {
-                limiter
-            } else {
-                let limiter = Arc::new(AccountLimiter::new());
-                slots.insert(account_key, Arc::downgrade(&limiter));
-                limiter
-            }
+            slots.retain(|_, limiter| {
+                Arc::strong_count(limiter) > 1 || limiter.remaining_cooldown().is_some()
+            });
+            Arc::clone(
+                slots
+                    .entry(account_key)
+                    .or_insert_with(|| Arc::new(AccountLimiter::new())),
+            )
         };
         let display_name = settings.model.clone();
         Ok(Self {
@@ -839,44 +839,34 @@ impl OpenAiProvider {
                     mode,
                 )
                 .await;
-            let will_retry = matches!(&result, Err(error) if tools.is_some() && retries < 2 && mode.retries(error));
-            let retry_delay = result.as_ref().err().map(|error| {
-                error
-                    .retry_after
-                    .unwrap_or(Duration::from_secs(retries + 1))
-                    .min(Duration::from_secs(30))
-            });
-            if let Err(error) = &result
-                && error.status_code == Some(429)
-            {
-                if let Some(delay) = error.retry_after {
-                    self.account_limiter.record_rate_limit(delay);
-                } else if will_retry && let Some(delay) = retry_delay {
-                    self.account_limiter.record_rate_limit(delay);
-                }
+            let error = match result {
+                Ok(completion) => return Ok(completion),
+                Err(error) => error,
+            };
+            let delay = error
+                .retry_after
+                .unwrap_or(Duration::from_secs(retries + 1));
+            if error.status_code == Some(429) {
+                self.account_limiter.record_rate_limit(delay);
             }
             drop(account_permit);
             // Translation batches have their own retries and journal in the executor.
-            if let Err(error) = &result
-                && will_retry
-            {
-                if let CompletionMode::Review(on_retry) = mode {
-                    on_retry(error, retries + 1);
-                }
-                let delay = retry_delay.unwrap_or(Duration::from_secs(retries + 1));
-                let waiting = std::time::Instant::now();
-                let cancelled = tokio::select! {biased;_=cancellation.cancelled()=>true,_=tokio::time::sleep(delay)=>false};
-                self.metrics
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .waiting_ms += milliseconds(waiting.elapsed());
-                if cancelled {
-                    return Err(ProviderError::new("cancelled", "任务已取消。"));
-                }
-                retries += 1;
-                continue;
+            if tools.is_none() || retries >= 2 || !mode.retries(&error) {
+                return Err(error);
             }
-            return result;
+            retries += 1;
+            if let CompletionMode::Review(on_retry) = mode {
+                on_retry(&error, retries);
+            }
+            let waiting = std::time::Instant::now();
+            let cancelled = tokio::select! {biased;_=cancellation.cancelled()=>true,_=tokio::time::sleep(delay)=>false};
+            self.metrics
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .waiting_ms += milliseconds(waiting.elapsed());
+            if cancelled {
+                return Err(ProviderError::new("cancelled", "任务已取消。"));
+            }
         }
     }
 
