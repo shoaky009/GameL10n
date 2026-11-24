@@ -423,7 +423,7 @@ pub struct OpenAiProvider {
     request_timeout: Duration,
     endpoint: reqwest::Url,
     identity: String,
-    account_slot: Arc<tokio::sync::Semaphore>,
+    account_limiter: Arc<AccountLimiter>,
     display_name: String,
     request_count: Arc<AtomicU64>,
     metrics: Arc<Mutex<RequestMetrics>>,
@@ -467,7 +467,50 @@ fn shared_http_client() -> Result<reqwest::Client, ProviderError> {
         .map_err(|_| ProviderError::new("http-client", "无法初始化 HTTP 客户端。"))
 }
 
-static ACCOUNT_SLOTS: LazyLock<Mutex<HashMap<String, Weak<tokio::sync::Semaphore>>>> =
+struct AccountLimiter {
+    slot: Arc<tokio::sync::Semaphore>,
+    cooldown_until: Mutex<Option<std::time::Instant>>,
+}
+
+impl AccountLimiter {
+    fn new() -> Self {
+        Self {
+            slot: Arc::new(tokio::sync::Semaphore::new(1)),
+            cooldown_until: Mutex::new(None),
+        }
+    }
+
+    fn remaining_cooldown(&self) -> Option<Duration> {
+        let mut guard = self
+            .cooldown_until
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let deadline = (*guard)?;
+        let now = std::time::Instant::now();
+        if deadline > now {
+            Some(deadline.duration_since(now))
+        } else {
+            *guard = None;
+            None
+        }
+    }
+
+    fn record_rate_limit(&self, delay: Duration) {
+        if delay.is_zero() {
+            return;
+        }
+        let deadline = std::time::Instant::now() + delay.min(Duration::from_secs(30));
+        let mut guard = self
+            .cooldown_until
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if guard.is_none_or(|existing| deadline > existing) {
+            *guard = Some(deadline);
+        }
+    }
+}
+
+static ACCOUNT_SLOTS: LazyLock<Mutex<HashMap<String, Weak<AccountLimiter>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static REFUSAL_PREFIX: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex::Regex::new(r"(?i)^(?:(?:抱歉|对不起)[，,。:：!！\s]*)?我(?:无法|不能|不可以)(?:(?:帮助|协助)(?:你|您)?)?(?:翻译|处理|提供|生成|协助|帮助|满足|完成)|^(?:(?:(?:I'm|I am)\s+sorry|Sorry)[,.:!\s]*)?(?:I\s+(?:cannot|can't|won't|am\s+unable\s+to)|I'm\s+unable\s+to)\s+(?:help|assist|translate|provide|fulfill|comply|process|complete)\b").expect("constant refusal regex")
@@ -549,17 +592,17 @@ impl OpenAiProvider {
             endpoint.origin().ascii_serialization(),
             settings.api_key
         ));
-        let account_slot = {
+        let account_limiter = {
             let mut slots = ACCOUNT_SLOTS
                 .lock()
                 .map_err(|_| ProviderError::new("scheduler", "API 请求调度器不可用。"))?;
             slots.retain(|_, slot| slot.strong_count() > 0);
-            if let Some(slot) = slots.get(&account_key).and_then(Weak::upgrade) {
-                slot
+            if let Some(limiter) = slots.get(&account_key).and_then(Weak::upgrade) {
+                limiter
             } else {
-                let slot = Arc::new(tokio::sync::Semaphore::new(1));
-                slots.insert(account_key, Arc::downgrade(&slot));
-                slot
+                let limiter = Arc::new(AccountLimiter::new());
+                slots.insert(account_key, Arc::downgrade(&limiter));
+                limiter
             }
         };
         let display_name = settings.model.clone();
@@ -569,7 +612,7 @@ impl OpenAiProvider {
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             endpoint,
             identity,
-            account_slot,
+            account_limiter,
             display_name,
             request_count: Arc::new(AtomicU64::new(0)),
             metrics: Arc::new(Mutex::new(RequestMetrics::default())),
@@ -753,17 +796,39 @@ impl OpenAiProvider {
         }
         let mut retries = 0;
         loop {
-            let waiting = std::time::Instant::now();
-            let permit = tokio::select! {
-                biased;
-                _=cancellation.cancelled()=>Err(ProviderError::new("cancelled","任务已取消。")),
-                permit=self.account_slot.acquire()=>permit.map_err(|_|ProviderError::new("scheduler","API 请求调度器不可用。")),
+            let account_permit = loop {
+                if let Some(delay) = self.account_limiter.remaining_cooldown() {
+                    let waiting = std::time::Instant::now();
+                    let cancelled = tokio::select! {
+                        biased;
+                        _ = cancellation.cancelled() => true,
+                        _ = tokio::time::sleep(delay) => false,
+                    };
+                    self.metrics
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .waiting_ms += milliseconds(waiting.elapsed());
+                    if cancelled {
+                        return Err(ProviderError::new("cancelled", "任务已取消。"));
+                    }
+                }
+                let waiting = std::time::Instant::now();
+                let permit = tokio::select! {
+                    biased;
+                    _=cancellation.cancelled()=>Err(ProviderError::new("cancelled","任务已取消。")),
+                    permit=self.account_limiter.slot.acquire()=>permit.map_err(|_|ProviderError::new("scheduler","API 请求调度器不可用。")),
+                };
+                self.metrics
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .waiting_ms += milliseconds(waiting.elapsed());
+                let permit = permit?;
+                if self.account_limiter.remaining_cooldown().is_some() {
+                    drop(permit);
+                    continue;
+                }
+                break permit;
             };
-            self.metrics
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .waiting_ms += milliseconds(waiting.elapsed());
-            let account_permit = permit?;
             let result = self
                 .complete_once(
                     messages,
@@ -774,20 +839,31 @@ impl OpenAiProvider {
                     mode,
                 )
                 .await;
+            let will_retry = matches!(&result, Err(error) if tools.is_some() && retries < 2 && mode.retries(error));
+            let retry_delay = result.as_ref().err().map(|error| {
+                error
+                    .retry_after
+                    .unwrap_or(Duration::from_secs(retries + 1))
+                    .min(Duration::from_secs(30))
+            });
+            if let Err(error) = &result
+                && error.status_code == Some(429)
+            {
+                if let Some(delay) = error.retry_after {
+                    self.account_limiter.record_rate_limit(delay);
+                } else if will_retry && let Some(delay) = retry_delay {
+                    self.account_limiter.record_rate_limit(delay);
+                }
+            }
             drop(account_permit);
             // Translation batches have their own retries and journal in the executor.
             if let Err(error) = &result
-                && tools.is_some()
-                && retries < 2
-                && mode.retries(error)
+                && will_retry
             {
                 if let CompletionMode::Review(on_retry) = mode {
                     on_retry(error, retries + 1);
                 }
-                let delay = error
-                    .retry_after
-                    .unwrap_or(Duration::from_secs(retries + 1))
-                    .min(Duration::from_secs(30));
+                let delay = retry_delay.unwrap_or(Duration::from_secs(retries + 1));
                 let waiting = std::time::Instant::now();
                 let cancelled = tokio::select! {biased;_=cancellation.cancelled()=>true,_=tokio::time::sleep(delay)=>false};
                 self.metrics
@@ -2394,7 +2470,13 @@ mod tests {
         );
         let mut provider = local_agent(endpoint, ApiProtocol::ChatCompletions);
         provider.analysis_first_response_timeout = Duration::from_millis(500);
-        let permit = provider.account_slot.clone().acquire_owned().await.unwrap();
+        let permit = provider
+            .account_limiter
+            .slot
+            .clone()
+            .acquire_owned()
+            .await
+            .unwrap();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(800)).await;
             drop(permit);
@@ -2442,7 +2524,7 @@ mod tests {
             server.join().unwrap();
         }
         let provider = local_agent("http://127.0.0.1:1/v1".into(), ApiProtocol::ChatCompletions);
-        let _permit = provider.account_slot.acquire().await.unwrap();
+        let _permit = provider.account_limiter.slot.acquire().await.unwrap();
         let cancellation = CancellationToken::new();
         cancellation.cancel();
         assert!(
@@ -3214,6 +3296,119 @@ mod tests {
                     category: "地名/组织".into(),
                 },
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn shared_account_rate_limit_cooldown_blocks_peers_while_server_error_releases_slot() {
+        use std::io::Write;
+        use std::net::TcpListener;
+
+        fn spawn_timed_mock(
+            responses: Vec<(u16, Option<&'static str>, Value)>,
+        ) -> (String, std::thread::JoinHandle<Vec<std::time::Instant>>) {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let handle = std::thread::spawn(move || {
+                let mut arrivals = Vec::new();
+                for (status, retry_after_header, body) in responses {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    arrivals.push(std::time::Instant::now());
+                    let request = read_mock_request(&mut stream);
+                    let streaming = request["stream"] == true && status == 200;
+                    let (content_type, body) = if streaming {
+                        (
+                            "text/event-stream",
+                            stream_fixture(body, ApiProtocol::ChatCompletions),
+                        )
+                    } else {
+                        ("application/json", body.to_string())
+                    };
+                    let extra = retry_after_header
+                        .map(|value| format!("Retry-After: {value}\r\n"))
+                        .unwrap_or_default();
+                    let response = format!(
+                        "HTTP/1.1 {status} Test\r\nContent-Type: {content_type}\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    stream.write_all(response.as_bytes()).unwrap();
+                }
+                arrivals
+            });
+            (format!("http://{address}/v1"), handle)
+        }
+
+        let ok_chat = json!({
+            "choices": [{
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "read", "arguments": "{}"}
+                    }]
+                }
+            }]
+        });
+
+        let messages = agent_messages();
+        let tools = agent_tools();
+        let cancellation = CancellationToken::new();
+
+        // 1. Account-wide 429 Retry-After must hold back peer B on the same key.
+        let (endpoint_429, server_429) = spawn_timed_mock(vec![
+            (429, Some("1"), json!({})),
+            (200, None, ok_chat.clone()),
+            (200, None, ok_chat.clone()),
+        ]);
+        let provider_a = local_agent(endpoint_429.clone(), ApiProtocol::ChatCompletions);
+        let provider_b = local_agent(endpoint_429, ApiProtocol::ChatCompletions);
+        let (res_a, res_b) = tokio::join!(
+            provider_a.complete_agent(&messages, &tools, &[], 128, &cancellation),
+            async {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                provider_b
+                    .complete_agent(&messages, &tools, &[], 128, &cancellation)
+                    .await
+            }
+        );
+        res_a.unwrap();
+        res_b.unwrap();
+        let arrivals_429 = server_429.join().unwrap();
+        assert_eq!(arrivals_429.len(), 3);
+        let gap_after_429 = arrivals_429[1].duration_since(arrivals_429[0]);
+        assert!(
+            gap_after_429 >= Duration::from_millis(850),
+            "peer request fired too early during 429 cooldown: {gap_after_429:?}"
+        );
+
+        // 2. Non-429 server error (503) retry sleep must still release the slot for peer B.
+        let (endpoint_503, server_503) = spawn_timed_mock(vec![
+            (503, None, json!({})),
+            (200, None, ok_chat.clone()),
+            (200, None, ok_chat),
+        ]);
+        let provider_c = local_agent(endpoint_503.clone(), ApiProtocol::ChatCompletions);
+        let provider_d = local_agent(endpoint_503, ApiProtocol::ChatCompletions);
+        let (res_c, res_d) = tokio::join!(
+            provider_c.complete_agent(&messages, &tools, &[], 128, &cancellation),
+            async {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                provider_d
+                    .complete_agent(&messages, &tools, &[], 128, &cancellation)
+                    .await
+            }
+        );
+        res_c.unwrap();
+        res_d.unwrap();
+        let arrivals_503 = server_503.join().unwrap();
+        assert_eq!(arrivals_503.len(), 3);
+        let gap_after_503 = arrivals_503[1].duration_since(arrivals_503[0]);
+        assert!(
+            gap_after_503 < Duration::from_millis(600),
+            "peer request should not wait for 503 retry backoff: {gap_after_503:?}"
         );
     }
 }
