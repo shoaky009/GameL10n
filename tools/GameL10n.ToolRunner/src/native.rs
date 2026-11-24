@@ -26,12 +26,10 @@ use windows::{
                 EXPLICIT_ACCESS_W, GRANT_ACCESS, GetNamedSecurityInfoW, REVOKE_ACCESS,
                 SE_FILE_OBJECT, SetEntriesInAclW, SetNamedSecurityInfoW, TRUSTEE_IS_SID, TRUSTEE_W,
             },
-            CONTAINER_INHERIT_ACE, CreateWellKnownSid, DACL_SECURITY_INFORMATION, FreeSid,
-            GetTokenInformation,
+            CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, FreeSid, GetTokenInformation,
             Isolation::{CreateAppContainerProfile, DeleteAppContainerProfile},
-            OBJECT_INHERIT_ACE, PSECURITY_DESCRIPTOR, PSID, SECURITY_CAPABILITIES,
-            SECURITY_MAX_SID_SIZE, SID_AND_ATTRIBUTES, TOKEN_QUERY, TokenIsAppContainer,
-            WinCapabilityInternetClientServerSid, WinCapabilityPrivateNetworkClientServerSid,
+            OBJECT_INHERIT_ACE, PSECURITY_DESCRIPTOR, PSID, SECURITY_CAPABILITIES, TOKEN_QUERY,
+            TokenIsAppContainer,
         },
         Storage::FileSystem::{
             DELETE, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
@@ -43,7 +41,6 @@ use windows::{
                 JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
                 SetInformationJobObject, TerminateJobObject,
             },
-            SystemServices::SE_GROUP_ENABLED,
             Threading::{
                 CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateMutexW,
                 CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
@@ -117,27 +114,10 @@ impl Drop for AclLock {
 struct Container {
     name: String,
     sid: PSID,
-    _network_sids: Box<[[u32; SECURITY_MAX_SID_SIZE as usize / 4]; 2]>,
-    capabilities: Vec<SID_AND_ATTRIBUTES>,
     grants: Vec<PathBuf>,
 }
 impl Container {
     fn create() -> Result<Self> {
-        // Keep SID storage aligned and at a stable address until the process exits.
-        let mut network_sids = Box::new([[0u32; SECURITY_MAX_SID_SIZE as usize / 4]; 2]);
-        let mut capabilities = Vec::new();
-        for (storage, kind) in network_sids.iter_mut().zip([
-            WinCapabilityInternetClientServerSid,
-            WinCapabilityPrivateNetworkClientServerSid,
-        ]) {
-            let sid = PSID(storage.as_mut_ptr().cast());
-            let mut bytes = SECURITY_MAX_SID_SIZE;
-            unsafe { CreateWellKnownSid(kind, None, Some(sid), &mut bytes)? };
-            capabilities.push(SID_AND_ATTRIBUTES {
-                Sid: sid,
-                Attributes: SE_GROUP_ENABLED as u32,
-            });
-        }
         let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
         let name = format!("GameL10n.Run.{}.{nonce}", std::process::id());
         let profile_name = wide(OsStr::new(&name));
@@ -146,14 +126,12 @@ impl Container {
                 PCWSTR(profile_name.as_ptr()),
                 PCWSTR(profile_name.as_ptr()),
                 PCWSTR(profile_name.as_ptr()),
-                Some(&capabilities),
+                None,
             )?
         };
         Ok(Self {
             name,
             sid,
-            _network_sids: network_sids,
-            capabilities,
             grants: Vec::new(),
         })
     }
@@ -439,8 +417,6 @@ fn execute(
     handles.extend(inputs.handles.iter().map(|handle| handle.0));
     let capabilities = SECURITY_CAPABILITIES {
         AppContainerSid: container.sid,
-        Capabilities: container.capabilities.as_ptr().cast_mut(),
-        CapabilityCount: container.capabilities.len() as u32,
         ..Default::default()
     };
     let attributes = Attributes::new()?;

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     fs,
     io::Write,
-    net::{IpAddr, ToSocketAddrs},
+    net::IpAddr,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -276,26 +276,17 @@ impl EngineService {
 }
 
 async fn public_response(mut current: reqwest::Url) -> Result<reqwest::Response, EngineError> {
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(180))
-        .build()
-        .map_err(|error| EngineError::Research(error.to_string()))?;
     for _ in 0..6 {
         validate_url(&current)?;
         let host = current
             .host_str()
             .ok_or_else(|| EngineError::Protocol("资料地址缺少主机。".into()))?
-            .to_owned();
+            .trim_matches(['[', ']']);
         let port = current.port_or_known_default().unwrap_or(443);
-        let addresses = tokio::task::spawn_blocking(move || {
-            (host.as_str(), port)
-                .to_socket_addrs()
-                .map(|values| values.collect::<Vec<_>>())
-        })
-        .await
-        .map_err(|error| EngineError::Protocol(error.to_string()))?
-        .map_err(|error| EngineError::Research(format!("公开资料请求失败：{error}")))?;
+        let addresses: Vec<_> = tokio::net::lookup_host((host, port))
+            .await
+            .map_err(|error| EngineError::Research(format!("公开资料请求失败：{error}")))?
+            .collect();
         if addresses.is_empty() || addresses.iter().any(|address| !public_ip(address.ip())) {
             return Err(EngineError::Rejected(
                 "资料地址不能解析到本地、内网或特殊用途地址。".into(),
@@ -306,6 +297,13 @@ async fn public_response(mut current: reqwest::Url) -> Result<reqwest::Response,
         } else {
             "application/json"
         };
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .resolve_to_addrs(host, &addresses)
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(180))
+            .build()
+            .map_err(|error| EngineError::Research(error.to_string()))?;
         let response = client
             .get(current.clone())
             .header("User-Agent", "GameL10n/1.0")
@@ -417,7 +415,10 @@ fn public_ip(ip: IpAddr) -> bool {
                 && !ip.is_multicast()
                 && ip.octets()[0] != 0
                 && ip.octets()[0] < 224
-                && ip.octets()[..2] != [100, 64]
+                && (ip.octets()[0] != 100 || !(64..128).contains(&ip.octets()[1]))
+                && !ip.is_documentation()
+                && ip.octets()[..3] != [192, 0, 0]
+                && ip.octets()[..3] != [192, 88, 99]
                 && ip.octets()[..2] != [198, 18]
                 && ip.octets()[..2] != [198, 19]
         }
@@ -425,11 +426,11 @@ fn public_ip(ip: IpAddr) -> bool {
             .to_ipv4_mapped()
             .map(|value| public_ip(IpAddr::V4(value)))
             .unwrap_or_else(|| {
-                !ip.is_loopback()
-                    && !ip.is_unspecified()
-                    && !ip.is_multicast()
-                    && (ip.segments()[0] & 0xfe00) != 0xfc00
-                    && (ip.segments()[0] & 0xffc0) != 0xfe80
+                let [prefix, subnet, ..] = ip.segments();
+                prefix & 0xe000 == 0x2000
+                    && prefix != 0x2002
+                    && !(prefix == 0x2001 && (subnet < 0x0200 || subnet == 0x0db8))
+                    && !(prefix == 0x3fff && subnet < 0x1000)
             }),
     }
 }

@@ -226,30 +226,7 @@ impl ToolProcess {
                     )));
                 }
                 if preserve_failure_response {
-                    let file = response_file.clone();
-                    let diagnostic = tokio::task::spawn_blocking(move || {
-                        let Some(path) = file else {
-                            return Ok(None);
-                        };
-                        match std::fs::symlink_metadata(&path) {
-                            Ok(metadata) if metadata.is_symlink() || !metadata.is_file() => {
-                                Err(EngineError::Protocol("适配器响应必须为普通文件。".into()))
-                            }
-                            Ok(_) => {
-                                let value: serde_json::Value = serde_json::from_reader(
-                                    BufReader::new(std::fs::File::open(path)?),
-                                )?;
-                                Ok(Some(value))
-                            }
-                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-                            Err(error) => Err(error.into()),
-                        }
-                    })
-                    .await
-                    .map_err(|error| {
-                        EngineError::Protocol(format!("响应读取任务失败：{error}"))
-                    })??;
-                    if let Some(value) = diagnostic
+                    if let Some(value) = read_response::<serde_json::Value>(response_file).await?
                         && value.get("success").and_then(serde_json::Value::as_bool) == Some(false)
                     {
                         return Ok(serde_json::from_value(value)?);
@@ -274,24 +251,8 @@ impl ToolProcess {
                 }));
             }
             written?;
-            if let Some(path) = response_file {
-                match std::fs::symlink_metadata(&path) {
-                    Ok(metadata) if metadata.is_symlink() || !metadata.is_file() => {
-                        return Err(EngineError::Protocol("适配器响应必须为普通文件。".into()));
-                    }
-                    Ok(_) => {
-                        return tokio::task::spawn_blocking(move || {
-                            let file = std::fs::File::open(path)?;
-                            Ok::<Res, EngineError>(serde_json::from_reader(BufReader::new(file))?)
-                        })
-                        .await
-                        .map_err(|error| {
-                            EngineError::Protocol(format!("响应读取任务失败：{error}"))
-                        })?;
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(error.into()),
-                }
+            if let Some(response) = read_response(response_file).await? {
+                return Ok(response);
             }
             Ok(serde_json::from_slice::<Res>(&stdout)?)
         };
@@ -313,6 +274,38 @@ impl ToolProcess {
         }
         result
     }
+}
+
+async fn read_response<T: DeserializeOwned + Send + 'static>(
+    path: Option<PathBuf>,
+) -> Result<Option<T>, EngineError> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    tokio::task::spawn_blocking(move || {
+        use std::io::Read;
+        const LIMIT: u64 = 256 * 1024 * 1024;
+        let metadata = match path.symlink_metadata() {
+            Ok(metadata) => metadata,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        if !metadata.is_file() || crate::discovery::is_link(&metadata) {
+            return Err(EngineError::Protocol("适配器响应必须为普通文件。".into()));
+        }
+        let file = std::fs::File::open(path)?;
+        if file.metadata()?.len() > LIMIT {
+            return Err(EngineError::Protocol("适配器文件响应超过 256 MiB。".into()));
+        }
+        let mut reader = BufReader::new(file).take(LIMIT + 1);
+        let response = serde_json::from_reader(&mut reader)?;
+        if reader.limit() == 0 {
+            return Err(EngineError::Protocol("适配器文件响应超过 256 MiB。".into()));
+        }
+        Ok(Some(response))
+    })
+    .await
+    .map_err(|error| EngineError::Protocol(format!("响应读取任务失败：{error}")))?
 }
 
 async fn terminate_process_tree(process_id: u32) {

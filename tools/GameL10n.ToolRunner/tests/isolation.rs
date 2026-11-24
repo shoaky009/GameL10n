@@ -126,7 +126,7 @@ fn child_processes_inherit_file_restrictions() {
 }
 
 #[test]
-fn internet_and_private_network_capabilities_are_enabled() {
+fn internet_and_private_network_capabilities_are_disabled() {
     let directory = fixture();
     let output = launch(&request(directory.path(), json!({"action":"network"})))
         .wait_with_output()
@@ -138,7 +138,7 @@ fn internet_and_private_network_capabilities_are_enabled() {
     );
     assert_eq!(
         serde_json::from_slice::<Value>(&output.stdout).unwrap(),
-        json!([true, true])
+        json!([false, false])
     );
 }
 

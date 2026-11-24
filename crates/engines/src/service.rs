@@ -31,6 +31,32 @@ use crate::{
     vntextpatch::VnTextPatch,
 };
 
+fn canonical_output(path: &Path) -> Result<PathBuf, EngineError> {
+    let path = std::path::absolute(path)?;
+    for ancestor in path.ancestors() {
+        match ancestor.canonicalize() {
+            Ok(root) => {
+                let remaining = path.strip_prefix(ancestor).expect("ancestor of output");
+                if remaining
+                    .components()
+                    .any(|c| !matches!(c, std::path::Component::Normal(_)))
+                {
+                    return Err(EngineError::Protocol("输出路径包含目录穿越。".into()));
+                }
+                return Ok(root.join(remaining));
+            }
+            Err(e)
+                if e.kind() == std::io::ErrorKind::NotFound
+                    && ancestor.symlink_metadata().is_err() =>
+            {
+                continue;
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Err(EngineError::Protocol("无法解析输出路径。".into()))
+}
+
 pub type ProgressCallback<'a> = Option<&'a (dyn Fn(EngineProgress) + Send + Sync)>;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -702,11 +728,7 @@ impl EngineService {
         let mut request = request.clone();
         if let Some(output) = &request.output_directory {
             let source = request.source_directory.canonicalize()?;
-            let output = if output.exists() {
-                output.canonicalize()?
-            } else {
-                output.to_path_buf()
-            };
+            let output = canonical_output(output)?;
             if output == source || output.starts_with(&source) || source.starts_with(&output) {
                 return Err(EngineError::Protocol(
                     "适配器输出目录必须与源目录分离。".into(),
@@ -1025,7 +1047,11 @@ impl EngineService {
                     "补丁启动程序必须是声明输出中的 EXE。".into(),
                 ));
             }
-            for file in Inventory::scan(output)?.files {
+            let inventory = Inventory::scan(output)?;
+            if !inventory.complete || crate::discovery::is_link(&output.symlink_metadata()?) {
+                return Err(EngineError::Protocol("无法完整核对补丁输出目录。".into()));
+            }
+            for file in inventory.files {
                 if !declared.contains(&file.path.to_lowercase()) {
                     return Err(EngineError::Protocol(format!(
                         "补丁包含未声明输出：{}",

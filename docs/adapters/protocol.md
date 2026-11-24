@@ -1,6 +1,6 @@
 # 适配器 CLI 协议 v1
 
-Python 适配器入口为 `src/adapter.py`。从标准输入读取一份 UTF-8 JSON 请求，将结果写到 `responseFile`。旧式请求可用标准输出返回 JSON，诊断写到标准错误。字段使用 camelCase。[请求与响应类型](../../crates/engines/src/protocol.rs)
+Python 适配器入口为 `src/adapter.py`。从标准输入读取一份 UTF-8 JSON 请求，将结果写到 `responseFile`。文件响应上限为 256 MiB。旧式请求可用标准输出返回 JSON，诊断写到标准错误。字段使用 camelCase。[请求与响应类型](../../crates/engines/src/protocol.rs)
 
 ## 请求与结果
 
