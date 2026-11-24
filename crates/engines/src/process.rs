@@ -225,12 +225,11 @@ impl ToolProcess {
                         code as u32
                     )));
                 }
-                if preserve_failure_response {
-                    if let Some(value) = read_response::<serde_json::Value>(response_file).await?
-                        && value.get("success").and_then(serde_json::Value::as_bool) == Some(false)
-                    {
-                        return Ok(serde_json::from_value(value)?);
-                    }
+                if preserve_failure_response
+                    && let Some(value) = read_response::<serde_json::Value>(response_file).await?
+                    && value.get("success").and_then(serde_json::Value::as_bool) == Some(false)
+                {
+                    return Ok(serde_json::from_value(value)?);
                 }
                 let parsed = serde_json::from_slice::<serde_json::Value>(&stdout).ok();
                 let message = parsed
