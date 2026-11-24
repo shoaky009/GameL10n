@@ -1607,10 +1607,22 @@ impl Application {
         }
         let mut snapshot = json!(&progress);
         snapshot["operation"] = json!(operation);
-        write_json(
-            &self.project_directory(id)?.join("adaptation-progress.json"),
-            &snapshot,
-        )?;
+        let progress_path = self.project_directory(id)?.join("adaptation-progress.json");
+        tokio::task::spawn_blocking(move || -> Result<(), CoreError> {
+            if let Some(parent) = progress_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let bytes = serde_json::to_vec(&snapshot)
+                .map_err(|error| CoreError::InvalidData(error.to_string()))?;
+            let mut temp = tempfile::NamedTempFile::new_in(
+                progress_path.parent().unwrap_or_else(|| Path::new(".")),
+            )?;
+            use std::io::Write;
+            temp.write_all(&bytes)?;
+            temp.persist(&progress_path).map_err(|error| error.error)?;
+            Ok(())
+        })
+        .await??;
         let _ = self.events.send(crate::AppEvent::EngineProgress {
             project_id: id.into(),
             progress,

@@ -180,7 +180,7 @@ impl Application {
             for path in paths {
                 // Only log deletion excludes log readers/writers; resource and response deletion must not block other projects' logs.
                 let _log_guard = if path == root.join("logs") {
-                    Some(self.log_gate.lock().await)
+                    Some(self.lock_log(id).await)
                 } else {
                     None
                 };

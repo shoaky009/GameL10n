@@ -88,6 +88,21 @@ impl Application {
             .await
     }
 
+    pub(crate) async fn lock_log(&self, id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let mutex = {
+            let mut gates = self.log_gates.lock().await;
+            gates.retain(|_, lock| lock.strong_count() > 0);
+            if let Some(lock) = gates.get(id).and_then(std::sync::Weak::upgrade) {
+                lock
+            } else {
+                let lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+                gates.insert(id.to_owned(), std::sync::Arc::downgrade(&lock));
+                lock
+            }
+        };
+        mutex.lock_owned().await
+    }
+
     pub(crate) async fn log_from(
         &self,
         id: &str,
@@ -107,7 +122,7 @@ impl Application {
         let line = format!("[{}] {}", now.format("%H:%M:%S"), message);
         let path = directory.join(format!("{}.log", now.format("%Y%m%d")));
         let saved = line.clone();
-        let _guard = self.log_gate.lock().await;
+        let _guard = self.lock_log(id).await;
         tokio::task::spawn_blocking(move || -> Result<(), CoreError> {
             fs::create_dir_all(directory)?;
             let mut file = OpenOptions::new().create(true).append(true).open(path)?;
@@ -128,7 +143,7 @@ impl Application {
         } else {
             self.project_directory(id)?.join("logs")
         };
-        let _guard = self.log_gate.lock().await;
+        let _guard = self.lock_log(id).await;
         tokio::task::spawn_blocking(move || -> Result<String, CoreError> {
             if !directory.is_dir() {
                 return Ok(String::new());

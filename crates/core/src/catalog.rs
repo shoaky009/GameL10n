@@ -340,7 +340,7 @@ impl LibraryIndex {
 
 struct CachedIndex {
     index: LibraryIndex,
-    routing: std::sync::OnceLock<routing::PackageRoutes>,
+    routing: std::sync::OnceLock<Arc<routing::PackageRoutes>>,
     /// Search strings are built once per refresh, without opening package files.
     search: BTreeMap<String, String>,
     order: Vec<String>,
@@ -409,10 +409,14 @@ impl EngineCatalog {
         inventory: &gamel10n_engines::discovery::Inventory,
         resolve: impl Fn(&str) -> Option<PathBuf>,
     ) -> Result<MatchingVersions, CoreError> {
-        let cached = self.lock()?;
-        let routes = cached
-            .routing
-            .get_or_init(|| routing::PackageRoutes::new(&cached.index));
+        let routes = {
+            let cached = self.lock()?;
+            Arc::clone(
+                cached
+                    .routing
+                    .get_or_init(|| Arc::new(routing::PackageRoutes::new(&cached.index))),
+            )
+        };
         Ok(routes.select(inventory, resolve))
     }
 
