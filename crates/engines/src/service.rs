@@ -274,11 +274,51 @@ fn cacheable_verification() -> bool {
     true
 }
 
+/// Reusable non-isolated helper script directory owned by an application or service instance,
+/// automatically cleaned up when the last owner drops on normal exit.
+#[derive(Clone, Debug, Default)]
+pub struct SharedHelperDir(Arc<Mutex<Option<tempfile::TempDir>>>);
+
+impl SharedHelperDir {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn ensure_scripts(
+        &self,
+        source: &str,
+        readonly_inputs: &str,
+    ) -> Result<(PathBuf, PathBuf), EngineError> {
+        let mut guard = self
+            .0
+            .lock()
+            .map_err(|_| EngineError::Protocol("辅助脚本缓存不可用。".into()))?;
+        let needs_init = guard.as_ref().is_none_or(|dir| {
+            !dir.path().join("rust-host-v1.py").is_file()
+                || !dir.path().join("readonly_inputs.py").is_file()
+        });
+        if needs_init {
+            let directory = tempfile::tempdir()?;
+            fs::write(directory.path().join("rust-host-v1.py"), source)?;
+            fs::write(directory.path().join("readonly_inputs.py"), readonly_inputs)?;
+            *guard = Some(directory);
+        }
+        let dir_path = guard
+            .as_ref()
+            .expect("shared helper initialized")
+            .path()
+            .to_path_buf();
+        let helper = dir_path.join("rust-host-v1.py");
+        Ok((dir_path, helper))
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct EngineService {
     pub asset_root: PathBuf,
     pub tools: ToolPaths,
     pub shared_directory: PathBuf,
+    shared_helper_dir: SharedHelperDir,
     pub(crate) disabled_families: BTreeSet<String>,
     excluded_adapters: BTreeSet<(String, String)>,
     preferred_adapter: Option<String>,
@@ -301,6 +341,7 @@ impl EngineService {
             asset_root: asset_root.into(),
             tools,
             shared_directory,
+            shared_helper_dir: SharedHelperDir::new(),
             disabled_families: BTreeSet::new(),
             excluded_adapters: BTreeSet::new(),
             preferred_adapter: None,
@@ -313,6 +354,11 @@ impl EngineService {
 
     pub fn with_shared_directory(mut self, directory: impl Into<PathBuf>) -> Self {
         self.shared_directory = directory.into();
+        self
+    }
+
+    pub fn with_shared_helper_dir(mut self, directory: SharedHelperDir) -> Self {
+        self.shared_helper_dir = directory;
         self
     }
 
@@ -418,27 +464,9 @@ impl EngineService {
             let dir_path = directory.path().to_path_buf();
             (Some(directory), dir_path, helper)
         } else {
-            static SHARED_HELPER: OnceLock<Mutex<Option<tempfile::TempDir>>> = OnceLock::new();
-            let slot = SHARED_HELPER.get_or_init(|| Mutex::new(None));
-            let mut guard = slot
-                .lock()
-                .map_err(|_| EngineError::Protocol("辅助脚本缓存不可用。".into()))?;
-            let needs_init = guard.as_ref().is_none_or(|dir| {
-                !dir.path().join("rust-host-v1.py").is_file()
-                    || !dir.path().join("readonly_inputs.py").is_file()
-            });
-            if needs_init {
-                let directory = tempfile::tempdir()?;
-                fs::write(directory.path().join("rust-host-v1.py"), SOURCE)?;
-                fs::write(directory.path().join("readonly_inputs.py"), READONLY_INPUTS)?;
-                *guard = Some(directory);
-            }
-            let dir_path = guard
-                .as_ref()
-                .expect("shared helper initialized")
-                .path()
-                .to_path_buf();
-            let helper = dir_path.join("rust-host-v1.py");
+            let (dir_path, helper) = self
+                .shared_helper_dir
+                .ensure_scripts(SOURCE, READONLY_INPUTS)?;
             (None, dir_path, helper)
         };
         let mut process = ToolProcess::new(self.tools.python())
@@ -2769,6 +2797,25 @@ with open(r['responseFile'],'w',encoding='utf-8') as output:
         assert!(
             matches!(lib_error, EngineError::Rejected(ref message) if message.contains("共享引擎工具库内容已变化")),
             "unexpected library error: {lib_error}"
+        );
+    }
+
+    #[test]
+    fn shared_helper_dir_reuses_directory_and_cleans_up_on_drop() {
+        let dir_path = {
+            let shared = SharedHelperDir::new();
+            let cloned = shared.clone();
+            let (first_dir, first_helper) = shared.ensure_scripts("a", "b").expect("init");
+            let (second_dir, second_helper) = cloned.ensure_scripts("a", "b").expect("reuse");
+            assert_eq!(first_dir, second_dir);
+            assert_eq!(first_helper, second_helper);
+            assert!(first_helper.is_file());
+            assert!(first_dir.join("readonly_inputs.py").is_file());
+            first_dir
+        };
+        assert!(
+            !dir_path.exists(),
+            "shared helper temp directory should be deleted when its last owner drops"
         );
     }
 }

@@ -28,7 +28,8 @@ pub use discovery::{AdapterHandle, PackageManifest};
 pub use process::ToolProcess;
 pub use service::{
     BuiltinAdapterProbeObservation, DiscoveryResult, EngineProgress, EngineService,
-    GeneratedAdapterReuseFailure, ProgressCallback, VerificationResult, VerifiedExtraction,
+    GeneratedAdapterReuseFailure, ProgressCallback, SharedHelperDir, VerificationResult,
+    VerifiedExtraction,
 };
 pub use source::ReadOnlySource;
 pub use tokio_util::sync::CancellationToken;

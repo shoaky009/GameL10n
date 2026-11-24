@@ -367,6 +367,7 @@ pub struct Application {
     pub(crate) metrics: Arc<Mutex<crate::metrics::MetricsState>>,
     pub(crate) session_keys: Arc<Mutex<HashMap<String, String>>>,
     pub(crate) tools: ToolPaths,
+    pub(crate) shared_helper_dir: gamel10n_engines::SharedHelperDir,
     pub(crate) workbenches: Arc<Mutex<HashMap<String, Arc<Mutex<crate::workbench::Workbench>>>>>,
     pub(crate) paged_workbench:
         Arc<std::sync::Mutex<Option<crate::workbench::paged::CachedProject>>>,
@@ -394,6 +395,7 @@ impl Application {
             metrics: Arc::new(Mutex::new(crate::metrics::MetricsState::default())),
             session_keys: Arc::new(Mutex::new(HashMap::new())),
             tools: tools.clone(),
+            shared_helper_dir: Default::default(),
             workbenches: Arc::new(Mutex::new(HashMap::new())),
             workbench_revision: Default::default(),
             paged_workbench: Default::default(),

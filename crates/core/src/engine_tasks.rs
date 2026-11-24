@@ -292,6 +292,7 @@ impl Application {
     pub fn engine_service(&self) -> Result<EngineService, CoreError> {
         Ok(
             EngineService::new(self.tools.asset_root(), self.tools.clone())
+                .with_shared_helper_dir(self.shared_helper_dir.clone())
                 .with_execution_isolation(self.read_settings()?.isolate_llm_execution)
                 .with_build_identity(
                     crate::metrics::SOFTWARE_VERSION,
