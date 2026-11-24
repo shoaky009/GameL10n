@@ -284,6 +284,7 @@ impl TaskEntry {
 #[derive(Clone)]
 pub struct Application {
     pub(crate) store: Arc<ProjectStore>,
+    write_ready: Arc<tokio::sync::OnceCell<()>>,
     pub(crate) discovery_catalog: Arc<std::sync::Mutex<crate::catalog::DiscoveryCatalogCache>>,
     parser: VnTextPatch,
     analysis: Arc<Mutex<AnalysisCache>>,
@@ -310,6 +311,7 @@ impl Application {
         let (events, _) = broadcast::channel(256);
         Ok(Self {
             store: Arc::new(ProjectStore::open(data_directory).await?),
+            write_ready: Default::default(),
             discovery_catalog: Default::default(),
             parser: VnTextPatch::new(tools),
             analysis: Arc::new(Mutex::new(AnalysisCache::default())),
@@ -339,7 +341,28 @@ impl Application {
     }
 
     pub async fn ensure_writable(&self) -> Result<(), CoreError> {
-        self.store.ensure_writable().await
+        self.write_ready
+            .get_or_try_init(|| async {
+                self.store.ensure_writable().await?;
+                let root = self.data_directory().to_owned();
+                let pages = self.paged_workbench.clone();
+                tokio::task::spawn_blocking(move || {
+                    pages.lock().unwrap_or_else(|e| e.into_inner()).take();
+                    gamel10n_translation::edits::EditStore::invalidate_under(&root)
+                })
+                .await??;
+                let mut analysis = self.analysis.lock().await;
+                *analysis = AnalysisCache::default();
+                let mut workbenches = self.workbenches.lock().await;
+                self.workbench_revision.fetch_add(1, Ordering::Relaxed);
+                drop(analysis);
+                workbenches.clear();
+                drop(workbenches);
+                self.tasks.lock().await.clear();
+                Ok::<(), CoreError>(())
+            })
+            .await?;
+        Ok(())
     }
 
     pub fn project_directory(&self, id: &str) -> Result<PathBuf, CoreError> {
@@ -378,6 +401,7 @@ impl Application {
         let id = crate::projects::project_id(game_directory)?;
         let _project = self.lock_project(&id).await?;
         let _lifecycle = self.project_lifecycle.lock().await;
+        self.ensure_writable().await?;
         let project = self.store.add(game_directory).await?;
         let _ = self.events.send(AppEvent::ProjectsChanged);
         Ok(project)
@@ -416,7 +440,7 @@ impl Application {
             }
             if saved.state.running {
                 // A second read-only host must not replace the current writer's task record.
-                if let Err(error) = self.store.ensure_writable().await {
+                if let Err(error) = self.ensure_writable().await {
                     self.report_task_warning(id, &format!("任务恢复状态暂未保存：{error}"));
                     return Ok(project);
                 }
@@ -577,6 +601,7 @@ impl Application {
         &self,
         id: &str,
     ) -> Result<Option<Arc<CachedAnalysis>>, CoreError> {
+        let revision = self.workbench_revision.load(Ordering::Relaxed);
         if let Some(cached) = self.analysis.lock().await.get(id) {
             return Ok(Some(cached));
         }
@@ -594,7 +619,9 @@ impl Application {
         if let Some(current) = cache.get(id) {
             return Ok(Some(current));
         }
-        cache.insert(id, Arc::clone(&stored));
+        if self.workbench_revision.load(Ordering::Relaxed) == revision {
+            cache.insert(id, Arc::clone(&stored));
+        }
         Ok(Some(stored))
     }
 
@@ -662,7 +689,7 @@ impl Application {
     ) -> Result<Option<(CancellationToken, Option<Arc<CachedAnalysis>>)>, CoreError> {
         let _project = self.lock_project(id).await?;
         if resuming {
-            self.store.ensure_writable().await?;
+            self.ensure_writable().await?;
             if self.store.get(id).await?.is_removed {
                 return Err(CoreError::ProjectMissing(id.into()));
             }
@@ -1098,7 +1125,7 @@ impl Application {
         if self.store.get(id).await?.is_removed {
             return Err(CoreError::ProjectMissing(id.into()));
         }
-        self.store.ensure_writable().await?;
+        self.ensure_writable().await?;
         if self.tasks.lock().await.get(id).is_some_and(|entry| {
             entry.state.running
                 || (entry.translation.is_some() && !matches!(operation, "adapt" | "recognize"))

@@ -915,6 +915,7 @@ impl Application {
         id: &str,
         collect_translations: bool,
     ) -> Result<TranslationRunResult, CoreError> {
+        self.ensure_writable().await?;
         let scope = self
             .translation_scope(id)
             .await?

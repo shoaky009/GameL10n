@@ -8,10 +8,14 @@ use std::{
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, Weak},
+    sync::{
+        Arc, Mutex, MutexGuard, Weak,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
-static STORES: Mutex<BTreeMap<PathBuf, Weak<EditStore>>> = Mutex::new(BTreeMap::new());
+type StoreSlot = Mutex<Weak<EditStore>>;
+static STORES: Mutex<BTreeMap<PathBuf, Weak<StoreSlot>>> = Mutex::new(BTreeMap::new());
 
 #[derive(Default, Deserialize, Serialize)]
 pub struct EditChanges {
@@ -62,6 +66,8 @@ struct State {
     bytes: u64,
 }
 pub struct EditStore {
+    _slot: Arc<StoreSlot>,
+    needs_reload: AtomicBool,
     directory: PathBuf,
     state: Mutex<State>,
 }
@@ -94,34 +100,71 @@ pub(crate) fn load_edits(directory: &Path) -> Result<(TranslationEdits, u64), St
 impl EditStore {
     pub fn open(directory: &Path) -> Result<Arc<Self>, StorageError> {
         let directory = fs::canonicalize(directory)?;
-        let mut stores = STORES
+        let slot = {
+            let mut stores = STORES
+                .lock()
+                .map_err(|_| StorageError::Invalid("校对存储不可用".into()))?;
+            stores.retain(|_, slot| slot.strong_count() > 0);
+            let entry = stores.entry(directory.clone()).or_default();
+            entry.upgrade().unwrap_or_else(|| {
+                let slot = Arc::new(StoreSlot::default());
+                *entry = Arc::downgrade(&slot);
+                slot
+            })
+        };
+        let mut current = slot
             .lock()
             .map_err(|_| StorageError::Invalid("校对存储不可用".into()))?;
-        stores.retain(|_, value| value.strong_count() > 0);
-        if let Some(store) = stores.get(&directory).and_then(Weak::upgrade) {
+        if let Some(store) = current.upgrade() {
             return Ok(store);
         }
-        drop(stores);
-        let loaded = load_edits(&directory);
-        let mut stores = STORES
-            .lock()
-            .map_err(|_| StorageError::Invalid("校对存储不可用".into()))?;
-        if let Some(store) = stores.get(&directory).and_then(Weak::upgrade) {
-            return Ok(store);
-        }
-        let (edits, bytes) = loaded?;
+        let (edits, bytes) = load_edits(&directory)?;
         let store = Arc::new(Self {
-            directory: directory.clone(),
+            _slot: Arc::clone(&slot),
+            needs_reload: AtomicBool::new(false),
+            directory,
             state: Mutex::new(State { edits, bytes }),
         });
-        stores.insert(directory, Arc::downgrade(&store));
+        *current = Arc::downgrade(&store);
         Ok(store)
     }
-    pub fn read<T>(&self, read: impl FnOnce(&TranslationEdits) -> T) -> Result<T, StorageError> {
-        let state = self
+    /// Starts a fresh generation of edit stores when a reader acquires the data directory's write lease.
+    pub fn invalidate_under(root: &Path) -> Result<(), StorageError> {
+        let root = root.canonicalize()?;
+        let slots: Vec<_> = STORES
+            .lock()
+            .map_err(|_| StorageError::Invalid("校对存储不可用".into()))?
+            .iter()
+            .filter(|(path, _)| path.starts_with(&root))
+            .filter_map(|(_, slot)| slot.upgrade())
+            .collect();
+        for slot in slots {
+            if let Some(store) = slot
+                .lock()
+                .map_err(|_| StorageError::Invalid("校对存储不可用".into()))?
+                .upgrade()
+            {
+                store.needs_reload.store(true, Ordering::Release);
+            }
+        }
+        Ok(())
+    }
+
+    fn current(&self) -> Result<MutexGuard<'_, State>, StorageError> {
+        let mut state = self
             .state
             .lock()
             .map_err(|_| StorageError::Invalid("校对存储不可用".into()))?;
+        if self.needs_reload.load(Ordering::Acquire) {
+            let (edits, bytes) = load_edits(&self.directory)?;
+            *state = State { edits, bytes };
+            self.needs_reload.store(false, Ordering::Release);
+        }
+        Ok(state)
+    }
+
+    pub fn read<T>(&self, read: impl FnOnce(&TranslationEdits) -> T) -> Result<T, StorageError> {
+        let state = self.current()?;
         Ok(read(&state.edits))
     }
     /// Builds a delta against the latest state; memory changes only after durable commit.
@@ -129,10 +172,7 @@ impl EditStore {
         &self,
         update: impl FnOnce(&TranslationEdits) -> Result<(T, EditChanges), E>,
     ) -> Result<T, E> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| E::from(StorageError::Invalid("校对存储不可用".into())))?;
+        let mut state = self.current()?;
         let (result, changes) = update(&state.edits)?;
         if changes.is_empty() {
             return Ok(result);
@@ -172,10 +212,7 @@ impl EditStore {
         Ok(())
     }
     pub fn compact(&self) -> Result<(), StorageError> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| StorageError::Invalid("校对存储不可用".into()))?;
+        let mut state = self.current()?;
         if state.bytes > 0 {
             self.compact_locked(&mut state)?;
         }

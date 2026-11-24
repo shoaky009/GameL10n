@@ -881,7 +881,7 @@ impl Application {
         selection: &[String],
     ) -> Result<(), CoreError> {
         let _project = self.lock_project(id).await?;
-        self.store.ensure_writable().await?;
+        self.ensure_writable().await?;
         if self
             .disk_selection(id, selection.to_vec(), true)
             .await?
@@ -918,7 +918,7 @@ impl Application {
         }) {
             return Err(CoreError::ProjectBusy);
         }
-        self.store.ensure_writable().await
+        self.ensure_writable().await
     }
     pub async fn save_translation_edit(
         &self,

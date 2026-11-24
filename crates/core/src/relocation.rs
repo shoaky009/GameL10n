@@ -65,11 +65,11 @@ impl Application {
             }
         }
         if migrate {
-            self.store.ensure_writable().await?;
+            self.ensure_writable().await?;
         }
         // Own the target's writer lease before copying; the returned host retains it.
         let next = Application::open(destination.clone(), tools).await?;
-        next.store.ensure_writable().await?;
+        next.ensure_writable().await?;
         if migrate {
             let old = source.clone();
             let new = destination.clone();

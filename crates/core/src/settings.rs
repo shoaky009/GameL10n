@@ -226,7 +226,7 @@ impl Application {
         &self,
         change: impl FnOnce(&mut GlobalSettings) -> Result<(), CoreError>,
     ) -> Result<GlobalSettings, CoreError> {
-        self.store.ensure_writable().await?;
+        self.ensure_writable().await?;
         let _guard = self.settings_gate.lock().await;
         let mut settings = self.read_settings()?;
         change(&mut settings)?;
@@ -434,6 +434,7 @@ impl Application {
         // Keep the metadata read/modify/write atomic with task-summary recovery and removal.
         let _project = self.lock_project(id).await?;
         let _lifecycle = self.project_lifecycle.lock().await;
+        self.ensure_writable().await?;
         let mut project = self.store.get(id).await?;
         let previous_settings = project.settings.clone();
         if !project.settings.is_object() {
@@ -510,6 +511,7 @@ impl Application {
             })
             .await?;
         }
+        self.ensure_writable().await?;
         for id in ids {
             self.store.remove(id, delete_data).await?;
             self.invalidate_project_cache(id).await;
