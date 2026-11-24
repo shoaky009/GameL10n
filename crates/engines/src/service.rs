@@ -7,13 +7,13 @@ mod verification;
 pub(crate) const VERIFIER_REVISION: u32 = 20;
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     ffi::OsString,
     fs::{self, File},
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
-    sync::Arc,
-    time::{Duration, Instant},
+    sync::{Arc, Mutex, OnceLock},
+    time::{Duration, Instant, SystemTime},
 };
 
 use gamel10n_translation::{
@@ -615,9 +615,7 @@ impl EngineService {
         ] {
             let path = resolve_relative(root, &relative)?;
             if path.is_file() {
-                if hash_file(&path).map_err(|error| EngineError::Protocol(error.to_string()))?
-                    != expected
-                {
+                if cached_file_hash(&path)? != expected {
                     return Err(EngineError::Rejected(
                         "共享引擎工具库内容已变化，请恢复固定版本。".into(),
                     ));
@@ -663,17 +661,26 @@ impl EngineService {
                     ));
                 }
                 if let Some(files) = runtime.get("files").and_then(Value::as_object) {
-                    for (relative, expected) in files {
-                        let path = resolve_relative(&self.tools.root.join("python"), relative)?;
-                        if hash_file(&path)
-                            .map_err(|error| EngineError::Protocol(error.to_string()))?
-                            != expected.as_str().unwrap_or("")
-                        {
-                            return Err(EngineError::Rejected(format!(
-                                "共享 Python 文件已变化：{relative}"
-                            )));
+                    let python_root = self.tools.root.join("python");
+                    let checks: Vec<(String, String)> = files
+                        .iter()
+                        .map(|(relative, expected)| {
+                            (relative.clone(), expected.as_str().unwrap_or("").to_owned())
+                        })
+                        .collect();
+                    tokio::task::spawn_blocking(move || {
+                        for (relative, expected) in checks {
+                            let path = resolve_relative(&python_root, &relative)?;
+                            if cached_file_hash(&path)? != expected {
+                                return Err(EngineError::Rejected(format!(
+                                    "共享 Python 文件已变化：{relative}"
+                                )));
+                            }
                         }
-                    }
+                        Ok::<_, EngineError>(())
+                    })
+                    .await
+                    .map_err(|error| EngineError::Protocol(error.to_string()))??;
                 }
                 let reference = pin
                     .get("reference")
@@ -772,26 +779,35 @@ impl EngineService {
             AdapterHandle::Python { .. } | AdapterHandle::BuiltinKirikiriSmil
         ) && request.operation != "probe"
         {
-            request
-                .resource_files
-                .as_ref()
-                .map(|files| match expected_source_hashes {
-                    Some(expected) => selected_hashes(expected, files),
-                    None => hashes(&request.source_directory, files),
-                })
-                .transpose()?
+            match request.resource_files.as_ref() {
+                Some(files) => Some(match expected_source_hashes {
+                    Some(expected) => selected_hashes(expected, files)?,
+                    None => {
+                        let source_dir = request.source_directory.clone();
+                        let files = files.clone();
+                        tokio::task::spawn_blocking(move || hashes(&source_dir, &files))
+                            .await
+                            .map_err(|error| EngineError::Protocol(error.to_string()))??
+                    }
+                }),
+                None => None,
+            }
         } else {
             None
         };
         let patch_hashes = if matches!(request.operation.as_str(), "validate" | "extract") {
-            request
-                .output_directory
-                .as_ref()
-                .map(|output| match expected_patch_hashes {
-                    Some(expected) => Ok(expected.clone()),
-                    None => directory_hashes(output),
-                })
-                .transpose()?
+            match request.output_directory.as_ref() {
+                Some(output) => Some(match expected_patch_hashes {
+                    Some(expected) => expected.clone(),
+                    None => {
+                        let output = output.clone();
+                        tokio::task::spawn_blocking(move || directory_hashes(&output))
+                            .await
+                            .map_err(|error| EngineError::Protocol(error.to_string()))??
+                    }
+                }),
+                None => None,
+            }
         } else {
             None
         };
@@ -878,22 +894,28 @@ impl EngineService {
                         .is_some_and(|validation| validation.passed && validation.issues.is_empty())
                 })
         });
-        if let Some(expected) = validated_sources.or(source_hashes.as_ref())
-            && hashes(
-                &request.source_directory,
-                &expected.keys().cloned().collect::<Vec<_>>(),
-            )? != *expected
-        {
-            return Err(EngineError::Rejected(
-                "适配器修改了只读源资源；操作未被接受。".into(),
-            ));
+        if let Some(expected) = validated_sources.or(source_hashes.as_ref()) {
+            let source_dir = request.source_directory.clone();
+            let files: Vec<_> = expected.keys().cloned().collect();
+            let actual = tokio::task::spawn_blocking(move || hashes(&source_dir, &files))
+                .await
+                .map_err(|error| EngineError::Protocol(error.to_string()))??;
+            if actual != *expected {
+                return Err(EngineError::Rejected(
+                    "适配器修改了只读源资源；操作未被接受。".into(),
+                ));
+            }
         }
-        if let (Some(expected), Some(output)) = (patch_hashes, &request.output_directory)
-            && directory_hashes(output)? != expected
-        {
-            return Err(EngineError::Rejected(
-                "适配器在读取或校验期间修改了补丁输出。".into(),
-            ));
+        if let (Some(expected), Some(output)) = (patch_hashes, &request.output_directory) {
+            let output = output.clone();
+            let actual = tokio::task::spawn_blocking(move || directory_hashes(&output))
+                .await
+                .map_err(|error| EngineError::Protocol(error.to_string()))??;
+            if actual != expected {
+                return Err(EngineError::Rejected(
+                    "适配器在读取或校验期间修改了补丁输出。".into(),
+                ));
+            }
         }
         let mut response = response?;
         // A script may report its implementation version; project pins use the immutable package version.
@@ -1458,6 +1480,55 @@ fn directory_hashes(root: &Path) -> Result<BTreeMap<String, String>, EngineError
             .map(|file| file.path)
             .collect::<Vec<_>>(),
     )
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct FileStamp {
+    len: u64,
+    modified: Option<SystemTime>,
+    #[cfg(unix)]
+    ino: u64,
+    #[cfg(unix)]
+    ctime: i64,
+    #[cfg(unix)]
+    ctime_nsec: i64,
+}
+
+fn file_stamp(path: &Path) -> Result<FileStamp, EngineError> {
+    let meta = fs::metadata(path)?;
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
+    Ok(FileStamp {
+        len: meta.len(),
+        modified: meta.modified().ok(),
+        #[cfg(unix)]
+        ino: meta.ino(),
+        #[cfg(unix)]
+        ctime: meta.ctime(),
+        #[cfg(unix)]
+        ctime_nsec: meta.ctime_nsec(),
+    })
+}
+
+/// Caches SHA-256 digests of immutable runtime/library files keyed by file metadata.
+fn cached_file_hash(path: &Path) -> Result<String, EngineError> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, (FileStamp, String)>>> = OnceLock::new();
+    let stamp = file_stamp(path)?;
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(guard) = cache.lock()
+        && let Some((cached_stamp, digest)) = guard.get(path)
+        && *cached_stamp == stamp
+    {
+        return Ok(digest.clone());
+    }
+    let digest = hash_file(path).map_err(|error| EngineError::Protocol(error.to_string()))?;
+    if let Ok(mut guard) = cache.lock() {
+        if guard.len() >= 512 {
+            guard.clear();
+        }
+        guard.insert(path.to_path_buf(), (stamp, digest.clone()));
+    }
+    Ok(digest)
 }
 
 pub(crate) fn hashes(

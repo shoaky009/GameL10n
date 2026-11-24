@@ -234,17 +234,27 @@ fn sample_hashes(
         .collect()
 }
 
+async fn sample_hashes_async(
+    root: &Path,
+    lengths: &BTreeMap<String, u64>,
+    token: &CancellationToken,
+) -> Result<BTreeMap<String, String>, EngineError> {
+    let root = root.to_path_buf();
+    let lengths = lengths.clone();
+    let token = token.clone();
+    tokio::task::spawn_blocking(move || sample_hashes(&root, &lengths, &token))
+        .await
+        .map_err(|error| EngineError::Protocol(error.to_string()))?
+}
+
 fn stage(
     game: &Path,
     _workspace: &Path,
     state: &mut Session,
-    lengths: &BTreeMap<String, u64>,
+    _lengths: &BTreeMap<String, u64>,
     expected: &BTreeMap<String, String>,
     token: &CancellationToken,
 ) -> Result<(), EngineError> {
-    if sample_hashes(game, lengths, token)? != *expected {
-        return Err(reject("自动试用期间原始资源发生变化。"));
-    }
     for (relative, hash) in expected {
         cancelled(token)?;
         let path = resolve_relative(game, relative)?;
@@ -1524,7 +1534,7 @@ pub(super) async fn run_trials(
             }
             attempted+=1;EngineService::report(progress,"自动试用内置解析器",format!("正在用 {} 个原始资源检查 {format} 的提取与原文回填。",lengths.len()));
             let candidate_budget=Budget::new(token,Duration::from_secs(20));let token=&candidate_budget.token;
-            let hashes=sample_hashes(&request.game_directory,&lengths,token)?;
+            let hashes=sample_hashes_async(&request.game_directory,&lengths,token).await?;
             let conflict=lengths.iter().find(|(file,length)|{
                 resolve_relative(&workspace.join("resources"),file).is_ok_and(|copy|copy.exists()&&!checked_hash(&copy,**length,token).is_ok_and(|hash|hash==hashes[*file]))
             });
@@ -1533,7 +1543,7 @@ pub(super) async fn run_trials(
             let files:Vec<_>=lengths.keys().cloned().collect();
             let result=try_cached_sample(service,workspace,state,format,"resources",&files,token).await?;
             reused+=u32::from(result["cached"]==true);
-            let after=sample_hashes(&request.game_directory,&lengths,token)?;
+            let after=sample_hashes_async(&request.game_directory,&lengths,token).await?;
             if hashes!=after||result["sourceHashes"].as_object().into_iter().flatten().any(|(file,hash)|hashes.get(file).is_none_or(|expected|hash.as_str()!=Some(expected))){return Err(reject("自动试用期间原始资源或样本发生变化，结果未缓存，请重新确认资源。"));}
             save_session(path,state).await?;
         }Ok::<_,EngineError>(())
@@ -1879,7 +1889,7 @@ pub(super) async fn run_template(
         }
         if selected_bytes>TEMPLATE_BYTES{return Err(reject("松散脚本合计超过自动组合的 256 MiB 脚本预算。"));}
         if resource_bytes>input_budget||lengths.values().any(|length|*length>input_budget){return Err(reject(format!("完整资源超过自动组合的 {} MiB 输入预算，未缩小为少量样本发布。",input_budget/(1024*1024))));}
-        let hashes=sample_hashes(&request.game_directory,&lengths,token)?;report["stage"]=json!("stage");record(state,path,"automaticTemplate",report.clone()).await?;
+        let hashes=sample_hashes_async(&request.game_directory,&lengths,token).await?;report["stage"]=json!("stage");record(state,path,"automaticTemplate",report.clone()).await?;
         stage(&request.game_directory,workspace,state,&lengths,&hashes,token)?;
         if !archives.is_empty(){
             report["stage"]=json!("archive-inspection");report["archiveReadBytes"]=json!(0);record(state,path,"automaticTemplate",report.clone()).await?;

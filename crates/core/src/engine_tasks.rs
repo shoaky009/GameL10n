@@ -1008,7 +1008,7 @@ impl Application {
             self.progress(id, &operation, "正在提取并校验文本身份。")
                 .await;
             let mut extraction = service
-                .execute(&adapter, &request, cancellation)
+                .execute_with_hashes(&adapter, &request, Some(&hashes), None, cancellation)
                 .await?
                 .extraction
                 .ok_or_else(|| gamel10n_engines::EngineError::Incompatible {
@@ -1030,7 +1030,7 @@ impl Application {
             request.operation = "build".into();
             request.output_directory = Some(roundtrip.path().to_path_buf());
             let built = service
-                .execute(&adapter, &request, cancellation)
+                .execute_with_hashes(&adapter, &request, Some(&hashes), None, cancellation)
                 .await?
                 .build
                 .ok_or_else(|| gamel10n_engines::EngineError::Incompatible {
@@ -1042,7 +1042,7 @@ impl Application {
                     built.extraction_request(source.directory(), roundtrip.path(), &files);
                 readback.set_probe_context(&probe);
                 let actual = service
-                    .execute(&adapter, &readback, cancellation)
+                    .execute_with_hashes(&adapter, &readback, Some(&hashes), None, cancellation)
                     .await?
                     .extraction
                     .ok_or_else(|| gamel10n_engines::EngineError::Incompatible {
@@ -1070,7 +1070,7 @@ impl Application {
                 request.operation = "validate".into();
                 built.set_output_context(&mut request);
                 let validation = service
-                    .execute(&adapter, &request, cancellation)
+                    .execute_with_hashes(&adapter, &request, Some(&hashes), None, cancellation)
                     .await?
                     .validation
                     .ok_or_else(|| gamel10n_engines::EngineError::Incompatible {
@@ -1085,22 +1085,29 @@ impl Application {
                     .into());
                 }
             }
-            for (file, expected) in &hashes {
-                let rebuilt = resolve_relative(roundtrip.path(), file)?;
-                // Adapters may omit untouched files; every emitted source must round-trip exactly.
-                if rebuilt.is_file() && hash_file(&rebuilt)? != *expected {
-                    return Err(gamel10n_engines::EngineError::Incompatible {
-                        stage: "original-roundtrip",
-                        message: format!("原文回填改变资源：{file}"),
+            let roundtrip_dir = roundtrip.path().to_path_buf();
+            let source_dir = source.directory().to_path_buf();
+            let expected_hashes = hashes.clone();
+            tokio::task::spawn_blocking(move || {
+                for (file, expected) in &expected_hashes {
+                    let rebuilt = resolve_relative(&roundtrip_dir, file)?;
+                    // Adapters may omit untouched files; every emitted source must round-trip exactly.
+                    if rebuilt.is_file() && hash_file(&rebuilt)? != *expected {
+                        return Err(gamel10n_engines::EngineError::Incompatible {
+                            stage: "original-roundtrip",
+                            message: format!("原文回填改变资源：{file}"),
+                        }
+                        .into());
                     }
-                    .into());
+                    if hash_file(&resolve_relative(&source_dir, file)?)? != *expected {
+                        return Err(CoreError::InvalidData(format!(
+                            "适配器修改了原始资源：{file}"
+                        )));
+                    }
                 }
-                if hash_file(&resolve_relative(source.directory(), file)?)? != *expected {
-                    return Err(CoreError::InvalidData(format!(
-                        "适配器修改了原始资源：{file}"
-                    )));
-                }
-            }
+                Ok::<_, CoreError>(())
+            })
+            .await??;
             extraction
         };
         for warning in &probe.warnings {
