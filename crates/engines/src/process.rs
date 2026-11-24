@@ -264,12 +264,19 @@ impl ToolProcess {
         };
         drop(work);
         drop(control);
-        if !process_finished {
-            if isolated {
-                // EOF stops the job. Leave the runner alive to finish revoking its ACLs.
-                let _ = tokio::time::timeout(Duration::from_secs(30), child.wait()).await;
-            } else if let Some(pid) = process_id {
-                terminate_process_tree(pid).await;
+        if !process_finished && let Some(pid) = process_id {
+            // EOF lets the runner stop its job and revoke its ACLs before forced termination.
+            if isolated
+                && matches!(
+                    tokio::time::timeout(Duration::from_secs(30), child.wait()).await,
+                    Ok(Ok(_))
+                )
+            {
+                return result;
+            }
+            terminate_process_tree(pid).await;
+            if child.try_wait()?.is_none() {
+                child.kill().await?;
             }
         }
         result

@@ -537,7 +537,11 @@ fn execute(
             WAIT_OBJECT_0 => break,
             WAIT_TIMEOUT if cancelled.load(Ordering::Acquire) => {
                 unsafe { TerminateJobObject(job.0, 1)? };
-                return Ok(1);
+                return match unsafe { WaitForSingleObject(process.0, 5_000) } {
+                    WAIT_OBJECT_0 => Ok(1),
+                    WAIT_TIMEOUT => Err("等待隔离子进程终止超时。".into()),
+                    _ => Err(windows::core::Error::from_thread().into()),
+                };
             }
             WAIT_TIMEOUT => continue,
             _ => return Err(windows::core::Error::from_thread().into()),
