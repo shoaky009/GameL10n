@@ -1520,7 +1520,8 @@ mod tests {
         assert_eq!(result.translations["dialogue-id"], "抱歉，我无法帮助你。");
         let request = server.1.recv().unwrap();
         assert_eq!(request["messages"][1]["content"], "I cannot help you.");
-        assert_eq!(request["max_tokens"], 4096);
+        assert!(request.get("max_tokens").is_none());
+        assert!(request.get("max_completion_tokens").is_none());
         assert!(request.get("reasoning_effort").is_none());
         server.2.join().unwrap();
     }
@@ -1562,7 +1563,7 @@ mod tests {
         );
         let request = server.1.recv().unwrap();
         assert_eq!(request["store"], false);
-        assert_eq!(request["max_output_tokens"], 4096);
+        assert!(request.get("max_output_tokens").is_none());
         assert!(request.get("messages").is_none());
         server.2.join().unwrap();
     }

@@ -702,7 +702,7 @@ impl OpenAiProvider {
             messages,
             tools,
             known.as_ref(),
-            maximum_output_tokens,
+            Some(maximum_output_tokens),
             cancellation,
             CompletionMode::Standard,
         )
@@ -763,7 +763,7 @@ impl OpenAiProvider {
             messages,
             Some(tools),
             Some(&known),
-            maximum_output_tokens,
+            Some(maximum_output_tokens),
             cancellation,
             mode,
         )
@@ -775,7 +775,7 @@ impl OpenAiProvider {
         messages: &[Value],
         tools: Option<&[Value]>,
         known_tool_names: Option<&HashSet<String>>,
-        maximum_output_tokens: u32,
+        maximum_output_tokens: Option<u32>,
         cancellation: &CancellationToken,
         mode: CompletionMode<'_>,
     ) -> Result<Completion, ProviderError> {
@@ -793,7 +793,7 @@ impl OpenAiProvider {
                 messages,
                 self.settings.protocol,
                 known,
-                maximum_output_tokens,
+                maximum_output_tokens.unwrap_or(0),
             )?;
         }
         let mut retries = 0;
@@ -877,7 +877,7 @@ impl OpenAiProvider {
         messages: &[Value],
         tools: Option<&[Value]>,
         known_tool_names: Option<&HashSet<String>>,
-        maximum_output_tokens: u32,
+        maximum_output_tokens: Option<u32>,
         cancellation: &CancellationToken,
         mode: CompletionMode<'_>,
     ) -> Result<Completion, ProviderError> {
@@ -886,7 +886,10 @@ impl OpenAiProvider {
                 json!({"model":self.settings.model,"messages":messages,"stream":false})
             }
             ApiProtocol::Responses => {
-                let mut body = json!({"model":self.settings.model,"store":false,"stream":false,"max_output_tokens":maximum_output_tokens});
+                let mut body = json!({"model":self.settings.model,"store":false,"stream":false});
+                if let Some(limit) = maximum_output_tokens {
+                    body["max_output_tokens"] = json!(limit);
+                }
                 if tools.is_some() {
                     let (instructions, history): (Vec<_>, Vec<_>) = messages
                         .iter()
@@ -910,14 +913,16 @@ impl OpenAiProvider {
             }
         };
         if self.settings.protocol == ApiProtocol::ChatCompletions {
-            let field = if self.settings.translation_format == TranslationFormat::PlainText
-                && tools.is_none()
-            {
-                "max_tokens"
-            } else {
-                "max_completion_tokens"
-            };
-            body[field] = json!(maximum_output_tokens);
+            if let Some(limit) = maximum_output_tokens {
+                let field = if self.settings.translation_format == TranslationFormat::PlainText
+                    && tools.is_none()
+                {
+                    "max_tokens"
+                } else {
+                    "max_completion_tokens"
+                };
+                body[field] = json!(limit);
+            }
             if self.settings.translation_format == TranslationFormat::PlainText && tools.is_none() {
                 body["temperature"] = json!(0.2);
             }
@@ -1171,7 +1176,7 @@ impl OpenAiProvider {
         feedback: &BTreeMap<String, Vec<String>>,
         cancellation: &CancellationToken,
     ) -> Result<TranslationResponse, ProviderError> {
-        self.translate_with_limit(units, policy, feedback, cancellation, 4096)
+        self.translate_with_limit(units, policy, feedback, cancellation, None)
             .await
     }
 
@@ -1181,7 +1186,7 @@ impl OpenAiProvider {
         policy: &TranslationPolicy,
         feedback: &BTreeMap<String, Vec<String>>,
         cancellation: &CancellationToken,
-        maximum_output_tokens: u32,
+        maximum_output_tokens: Option<u32>,
     ) -> Result<TranslationResponse, ProviderError> {
         if units.is_empty() || units.len() > self.maximum_batch_size() {
             return Err(ProviderError::new("configuration", "翻译批次大小无效。"));
@@ -1222,14 +1227,16 @@ impl OpenAiProvider {
             (system, data)
         };
         let completion = self
-            .complete(
+            .complete_with_known_tools(
                 &[
                     json!({"role":"system","content":system}),
                     json!({"role":"user","content":data}),
                 ],
                 None,
+                None,
                 maximum_output_tokens,
                 cancellation,
+                CompletionMode::Standard,
             )
             .await?;
         let mut translations = BTreeMap::new();
@@ -1312,7 +1319,6 @@ impl OpenAiProvider {
         samples: &[String],
         cancellation: &CancellationToken,
     ) -> Result<TerminologyExtractionResult, ProviderError> {
-        const TERMINOLOGY_MAX_OUTPUT_TOKENS: u32 = 16_384;
         if self.settings.translation_format == TranslationFormat::PlainText {
             return Err(ProviderError::new(
                 "configuration",
@@ -1333,14 +1339,16 @@ impl OpenAiProvider {
             })
             .to_string();
             match self
-                .complete(
+                .complete_with_known_tools(
                     &[
                         json!({"role": "system", "content": system}),
                         json!({"role": "user", "content": payload}),
                     ],
                     None,
-                    TERMINOLOGY_MAX_OUTPUT_TOKENS,
+                    None,
+                    None,
                     cancellation,
+                    CompletionMode::Standard,
                 )
                 .await
             {
@@ -1417,7 +1425,7 @@ impl OpenAiProvider {
                     &TranslationPolicy::default(),
                     &BTreeMap::new(),
                     cancellation,
-                    512,
+                    Some(512),
                 )
                 .await?;
             if !response.refused_ids.is_empty() {
@@ -1435,7 +1443,7 @@ impl OpenAiProvider {
         let known = agent_tool_names(&tools, &[])?;
         let completion = self.complete_with_known_tools(
             &[json!({"role":"user","content":"Call connection_check exactly once with value set to ok. Do not answer with text."})],
-            Some(&tools), Some(&known), 1024, cancellation, CompletionMode::ConnectionTest,
+            Some(&tools), Some(&known), Some(1024), cancellation, CompletionMode::ConnectionTest,
         ).await?;
         if completion.tool_calls.len() != 1
             || completion.tool_calls[0].name != "connection_check"
@@ -3337,7 +3345,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn extract_terminology_uses_16k_output_limit_and_retries_with_fewer_samples_on_truncation()
+    async fn extract_terminology_omits_output_limit_and_retries_with_fewer_samples_on_truncation()
      {
         use std::io::Write;
         use std::net::TcpListener;
@@ -3405,8 +3413,8 @@ mod tests {
 
         let requests = handle.join().unwrap();
         assert_eq!(requests.len(), 2);
-        assert_eq!(requests[0]["max_output_tokens"], 16_384);
-        assert_eq!(requests[1]["max_output_tokens"], 16_384);
+        assert!(requests[0].get("max_output_tokens").is_none());
+        assert!(requests[1].get("max_output_tokens").is_none());
         let first_payload: Value =
             serde_json::from_str(requests[0]["input"][1]["content"].as_str().unwrap()).unwrap();
         let second_payload: Value =
