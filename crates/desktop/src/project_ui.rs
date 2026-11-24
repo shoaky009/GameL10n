@@ -279,7 +279,9 @@ async fn handle_project_action(
             "使用已保存的有效译文。未包含的文本保留原文，不调用翻译 API。".into(),
         ),
         "generate-patch" => {
-            crate::workbench_ui::flush_editor(ctx, input).await?;
+            if !crate::workbench_ui::flush_editor(ctx, input).await? {
+                return Ok(true);
+            }
             let ids = if input.patch_scope == 1 {
                 Some(
                     crate::workbench_ui::ensure_selection(ctx, &input.project_id)
@@ -429,7 +431,7 @@ async fn browse_game(ctx: &Context) -> Result<(), CoreError> {
 
 async fn select_project(ctx: &Context, input: &UiInput) -> Result<(), CoreError> {
     crate::workbench_ui::capture_view(ctx, input);
-    crate::workbench_ui::flush_editor(ctx, input).await?;
+    let current = crate::workbench_ui::flush_editor(ctx, input).await?;
     let id = input.argument.clone();
     let workbench_view = crate::workbench_ui::saved_view(ctx, &id);
     let requested = id.clone();
@@ -488,6 +490,9 @@ async fn select_project(ctx: &Context, input: &UiInput) -> Result<(), CoreError>
         a.set_selected_texts(0);
         a.set_activity("正在读取保存的项目状态…".into());
     });
+    if !current {
+        return Ok(());
+    }
     refresh_project(ctx, &id, true).await?;
     if ctx
         .session
@@ -503,7 +508,9 @@ async fn select_project(ctx: &Context, input: &UiInput) -> Result<(), CoreError>
 }
 
 async fn switch_project_tab(ctx: &Context, input: &UiInput) -> Result<(), CoreError> {
-    crate::workbench_ui::flush_editor(ctx, input).await?;
+    if !crate::workbench_ui::flush_editor(ctx, input).await? {
+        return Ok(());
+    }
     let tab = input.argument.parse::<i32>().unwrap_or(0);
     let id = input.project_id.clone();
     let editor_generation = ctx.edit_generation.clone();
@@ -536,7 +543,9 @@ async fn switch_project_tab(ctx: &Context, input: &UiInput) -> Result<(), CoreEr
 }
 
 async fn navigate(ctx: &Context, input: &UiInput) -> Result<(), CoreError> {
-    crate::workbench_ui::flush_editor(ctx, input).await?;
+    if !crate::workbench_ui::flush_editor(ctx, input).await? {
+        return Ok(());
+    }
     let page = match input.argument.as_str() {
         "apis" => 1,
         "catalog" => 2,
@@ -607,8 +616,11 @@ async fn remove_projects(ctx: &Context, input: &UiInput) -> Result<(), CoreError
     if ids.is_empty() && !input.project_id.is_empty() {
         ids.push(input.project_id.clone());
     }
-    if !input.delete_files && ids.contains(&input.project_id) {
-        crate::workbench_ui::flush_editor(ctx, input).await?;
+    if !input.delete_files
+        && ids.contains(&input.project_id)
+        && !crate::workbench_ui::flush_editor(ctx, input).await?
+    {
+        return Ok(());
     }
     ctx.app()
         .await
@@ -736,7 +748,9 @@ async fn review_engine(ctx: &Context, input: &UiInput) -> Result<(), CoreError> 
 }
 
 async fn preview_cleanup(ctx: &Context, input: &UiInput) -> Result<(), CoreError> {
-    crate::workbench_ui::flush_editor(ctx, input).await?;
+    if !crate::workbench_ui::flush_editor(ctx, input).await? {
+        return Ok(());
+    }
     let id = input.project_id.clone();
     ctx.update(move |ui| {
         let a = ui.global::<App>();
@@ -1000,7 +1014,9 @@ async fn open_project_target(ctx: &Context, input: &UiInput) -> Result<(), CoreE
     let host = ctx.app().await;
     if matches!(input.argument.as_str(), "knowledge" | "adapter") && !input.project_id.is_empty() {
         crate::workbench_ui::capture_view(ctx, input);
-        crate::workbench_ui::flush_editor(ctx, input).await?;
+        if !crate::workbench_ui::flush_editor(ctx, input).await? {
+            return Ok(());
+        }
         let snapshot = host.project_snapshot(&input.project_id).await?;
         let project = snapshot.project;
         if ctx.generation.load(Ordering::SeqCst) != input.view_revision {

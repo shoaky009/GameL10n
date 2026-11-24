@@ -509,10 +509,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let ctx = ctx.clone();
             ctx.runtime.clone().spawn(async move {
                 let app = ctx.app().await;
-                if let Err(error) = workbench_ui::flush_editor(&ctx, &input).await {
+                let flushed = workbench_ui::flush_editor(&ctx, &input).await;
+                if !matches!(flushed, Ok(true)) {
                     ctx.switching.store(false, Ordering::Release);
-                    ctx.update(|ui| ui.global::<App>().set_ready(true));
-                    ctx.show_error(&input.project_id, error.to_string());
+                    ctx.update(|ui| {
+                        let app = ui.global::<App>();
+                        app.set_ready(true);
+                        app.set_activity("".into());
+                    });
+                    if let Err(error) = flushed {
+                        ctx.show_error(&input.project_id, error.to_string());
+                    }
                     return;
                 }
                 let stopped = tokio::time::timeout(std::time::Duration::from_secs(60), async {

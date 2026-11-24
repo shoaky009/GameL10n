@@ -195,7 +195,9 @@ impl CheckInput {
 
 pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool, CoreError> {
     if action == "game-check-dialog" {
-        crate::workbench_ui::flush_editor(ctx, input).await?;
+        if !crate::workbench_ui::flush_editor(ctx, input).await? {
+            return Ok(true);
+        }
         crate::launch_ui::refresh(ctx, &input.project_id, false).await?;
         refresh(ctx, &input.project_id).await?;
         let id = input.project_id.clone();

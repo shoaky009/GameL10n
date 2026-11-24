@@ -260,11 +260,12 @@ async fn edit_write(
     (ctx.edit_generation.load(Ordering::SeqCst) == input.editor_revision).then_some(guard)
 }
 
-async fn save_editor(ctx: &Context, input: &UiInput, reviewed: bool) -> Result<(), CoreError> {
+async fn save_editor(ctx: &Context, input: &UiInput, reviewed: bool) -> Result<bool, CoreError> {
     let Some(_guard) = edit_write(ctx, input).await else {
-        return Ok(());
+        return Ok(false);
     };
-    save_locked(ctx, input, reviewed).await
+    save_locked(ctx, input, reviewed).await?;
+    Ok(ctx.edit_generation.load(Ordering::SeqCst) == input.editor_revision)
 }
 
 async fn save_locked(ctx: &Context, input: &UiInput, reviewed: bool) -> Result<(), CoreError> {
@@ -310,11 +311,12 @@ async fn save_locked(ctx: &Context, input: &UiInput, reviewed: bool) -> Result<(
     Ok(())
 }
 
-pub async fn flush_editor(ctx: &Context, input: &UiInput) -> Result<(), CoreError> {
-    if input.editor_dirty && !input.editor_id.is_empty() {
-        save_editor(ctx, input, false).await?;
+/// A superseded editor snapshot must not trigger an action that relies on its contents.
+pub async fn flush_editor(ctx: &Context, input: &UiInput) -> Result<bool, CoreError> {
+    if input.editor_dirty && !input.editor_id.is_empty() && !input.project_id.is_empty() {
+        return save_editor(ctx, input, false).await;
     }
-    Ok(())
+    Ok(ctx.edit_generation.load(Ordering::SeqCst) == input.editor_revision)
 }
 
 fn origin_code(row: &WorkbenchRow) -> i32 {
@@ -461,6 +463,16 @@ async fn render_editor(ctx: &Context, input: &UiInput, editor_id: &str) -> Resul
     Ok(())
 }
 
+fn finish_loading(ctx: &Context, input: &UiInput) {
+    let generation = ctx.generation.clone();
+    let revision = input.view_revision;
+    ctx.update(move |ui| {
+        if generation.load(Ordering::SeqCst) == revision {
+            ui.global::<App>().set_loading(false);
+        }
+    });
+}
+
 async fn texts(ctx: &Context, input: &UiInput) -> Result<(), CoreError> {
     let revision = input.view_revision;
     let is_current = || {
@@ -476,7 +488,10 @@ async fn texts(ctx: &Context, input: &UiInput) -> Result<(), CoreError> {
     }
     let editor_revision = input.editor_revision;
     if matches!(input.argument.as_str(), "0" | "next" | "previous") {
-        flush_editor(ctx, input).await?;
+        if !flush_editor(ctx, input).await? {
+            finish_loading(ctx, input);
+            return Ok(());
+        }
         if !is_current() {
             return Ok(());
         }
@@ -683,12 +698,14 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
             result?;
         }
         "edit-text" => {
-            flush_editor(ctx, input).await?;
-            render_editor(ctx, input, &input.argument).await?;
+            if flush_editor(ctx, input).await? {
+                render_editor(ctx, input, &input.argument).await?;
+            }
         }
         "save-edit" => {
-            flush_editor(ctx, input).await?;
-            ctx.refresh_texts(&input.project_id);
+            if flush_editor(ctx, input).await? {
+                ctx.refresh_texts(&input.project_id);
+            }
         }
         "edit-changed" => {
             let revision = input.editor_revision;
@@ -706,14 +723,19 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                 }
             });
             tokio::time::sleep(Duration::from_millis(400)).await;
-            save_editor(ctx, input, false).await?;
-            ctx.refresh_texts(&input.project_id);
+            if save_editor(ctx, input, false).await? {
+                ctx.refresh_texts(&input.project_id);
+            }
         }
         "editor-step" | "review-next" => {
-            if action == "review-next" {
-                save_editor(ctx, input, true).await?;
+            let current = if action == "review-next" {
+                save_editor(ctx, input, true).await?
             } else {
-                flush_editor(ctx, input).await?;
+                flush_editor(ctx, input).await?
+            };
+            if !current {
+                finish_loading(ctx, input);
+                return Ok(true);
             }
             let direction = if action == "review-next" {
                 1
@@ -792,7 +814,9 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
             ctx.refresh_texts(&input.project_id);
         }
         "candidate" => {
-            flush_editor(ctx, input).await?;
+            if !flush_editor(ctx, input).await? {
+                return Ok(true);
+            }
             let app = ctx.app().await;
             let row = app
                 .workbench_row(&input.project_id, &input.editor_id)
@@ -850,7 +874,9 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
             ),
         ),
         "translate" => {
-            flush_editor(ctx, input).await?;
+            if !flush_editor(ctx, input).await? {
+                return Ok(true);
+            }
             let app = ctx.app().await;
             if input.argument == "all"
                 && let Some(scope) = app.translation_scope(&input.project_id).await?
