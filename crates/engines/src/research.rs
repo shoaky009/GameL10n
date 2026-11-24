@@ -275,12 +275,23 @@ impl EngineService {
     }
 }
 
+fn shared_public_client() -> Result<reqwest::Client, EngineError> {
+    static CLIENT: std::sync::OnceLock<Result<reqwest::Client, String>> =
+        std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .timeout(Duration::from_secs(180))
+                .build()
+                .map_err(|error| error.to_string())
+        })
+        .clone()
+        .map_err(EngineError::Research)
+}
+
 async fn public_response(mut current: reqwest::Url) -> Result<reqwest::Response, EngineError> {
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(180))
-        .build()
-        .map_err(|error| EngineError::Research(error.to_string()))?;
+    let client = shared_public_client()?;
     for _ in 0..6 {
         validate_url(&current)?;
         let accept = if github_git_repository(&current, "blobs").is_some() {

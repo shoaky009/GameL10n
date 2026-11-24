@@ -450,6 +450,23 @@ pub struct RequestMetrics {
 fn milliseconds(duration: Duration) -> u64 {
     duration.as_millis().min(u128::from(u64::MAX)) as u64
 }
+fn shared_http_client() -> Result<reqwest::Client, ProviderError> {
+    static CLIENT: std::sync::OnceLock<Result<reqwest::Client, String>> =
+        std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            let mut headers = HeaderMap::new();
+            headers.insert("originator", HeaderValue::from_static("gamel10n"));
+            reqwest::Client::builder()
+                .default_headers(headers)
+                .user_agent(concat!("GameL10n/", env!("CARGO_PKG_VERSION")))
+                .build()
+                .map_err(|error| error.to_string())
+        })
+        .clone()
+        .map_err(|_| ProviderError::new("http-client", "无法初始化 HTTP 客户端。"))
+}
+
 static ACCOUNT_SLOTS: LazyLock<Mutex<HashMap<String, Weak<tokio::sync::Semaphore>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static REFUSAL_PREFIX: LazyLock<regex::Regex> = LazyLock::new(|| {
@@ -526,13 +543,7 @@ impl OpenAiProvider {
                 }
             ))
         );
-        let mut headers = HeaderMap::new();
-        headers.insert("originator", HeaderValue::from_static("gamel10n"));
-        let client = reqwest::Client::builder()
-            .default_headers(headers)
-            .user_agent(concat!("GameL10n/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .map_err(|_| ProviderError::new("http-client", "无法初始化 HTTP 客户端。"))?;
+        let client = shared_http_client()?;
         let account_key = hash_text(&format!(
             "{}\n{}",
             endpoint.origin().ascii_serialization(),
@@ -740,19 +751,19 @@ impl OpenAiProvider {
                 maximum_output_tokens,
             )?;
         }
-        let waiting = std::time::Instant::now();
-        let permit = tokio::select! {
-            biased;
-            _=cancellation.cancelled()=>Err(ProviderError::new("cancelled","任务已取消。")),
-            permit=self.account_slot.acquire()=>permit.map_err(|_|ProviderError::new("scheduler","API 请求调度器不可用。")),
-        };
-        self.metrics
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .waiting_ms += milliseconds(waiting.elapsed());
-        let _account_permit = permit?;
         let mut retries = 0;
         loop {
+            let waiting = std::time::Instant::now();
+            let permit = tokio::select! {
+                biased;
+                _=cancellation.cancelled()=>Err(ProviderError::new("cancelled","任务已取消。")),
+                permit=self.account_slot.acquire()=>permit.map_err(|_|ProviderError::new("scheduler","API 请求调度器不可用。")),
+            };
+            self.metrics
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .waiting_ms += milliseconds(waiting.elapsed());
+            let account_permit = permit?;
             let result = self
                 .complete_once(
                     messages,
@@ -763,6 +774,7 @@ impl OpenAiProvider {
                     mode,
                 )
                 .await;
+            drop(account_permit);
             // Translation batches have their own retries and journal in the executor.
             if let Err(error) = &result
                 && tools.is_some()
