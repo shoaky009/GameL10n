@@ -1,4 +1,4 @@
-import { LineEdit, TextEdit, ScrollView, ProgressIndicator } from "std-widgets.slint";
+import { LineEdit, TextEdit, ScrollView } from "std-widgets.slint";
 import { Icon } from "icons.slint";
 import { App, Theme, Card, StatusDot, Label, Caption, TokenCaption, TokenDisplay, Heading, SectionHeading, Divider, ReportText, Link, IconButton, ActionButton } from "state.slint";
 
@@ -88,6 +88,59 @@ export component WorkflowGateBanner inherits Rectangle {
     }
 }
 
+component RunningProgressBar inherits Rectangle {
+    in property <float> progress: 0;
+    private property <float> clamped: clamp(root.progress, 0.0, 1.0);
+    private property <float> phase: mod(animation-tick() / 1ms, 1600) / 1600;
+    height: 3px;
+    border-radius: 1.5px;
+    background: Theme.line;
+    clip: true;
+
+    if root.clamped <= 0: Rectangle {
+        y: 0px;
+        height: parent.height;
+        width: max(48px, parent.width * 0.28);
+        x: (parent.width + self.width) * root.phase - self.width;
+        border-radius: 1.5px;
+        background: Theme.accent;
+    }
+
+    if root.clamped > 0: Rectangle {
+        y: 0px;
+        height: parent.height;
+        width: max(48px, parent.width * 0.24);
+        x: (parent.width + self.width) * root.phase - self.width;
+        border-radius: 1.5px;
+        background: @linear-gradient(90deg,
+            Theme.accent.with-alpha(0.0) 0%,
+            Theme.accent.with-alpha(0.5) 25%,
+            Theme.accent.with-alpha(0.5) 75%,
+            Theme.accent.with-alpha(0.0) 100%);
+    }
+
+    if root.clamped > 0: Rectangle {
+        x: 0px;
+        y: 0px;
+        height: parent.height;
+        width: parent.width * root.clamped;
+        border-radius: 1.5px;
+        background: Theme.accent;
+        clip: true;
+
+        Rectangle {
+            y: 0px;
+            height: parent.height;
+            width: max(48px, root.width * 0.24);
+            x: (root.width + self.width) * root.phase - self.width;
+            background: @linear-gradient(90deg,
+                #ffffff.with-alpha(0.0) 0%,
+                #ffffff.with-alpha(Theme.dark ? 0.6 : 0.45) 50%,
+                #ffffff.with-alpha(0.0) 100%);
+        }
+    }
+}
+
 component RunningTask inherits VerticalLayout {
     in property <string> title;
     in property <string> message;
@@ -110,7 +163,7 @@ component RunningTask inherits VerticalLayout {
             clicked => { root.expanded = !root.expanded; }
         }
     }
-    ProgressIndicator { height: 3px; progress: root.progress; indeterminate: root.progress == 0; }
+    RunningProgressBar { progress: root.progress; }
     if root.expanded: VerticalLayout { spacing: 4px; padding-top: 2px;
         if root.api != "": Caption { text: "API：" + root.api; }
         if root.usage.text != "": TokenCaption { value: root.usage; }
@@ -233,7 +286,7 @@ component RunningRecognition inherits ScrollView {
     changed project-key => { self.content-y = 0px; }
     VerticalLayout { padding: 10px; spacing: 8px; alignment: start;
         if App.task-api != "": ResultLine { title: "使用 API"; value: App.task-api; }
-        ProgressIndicator { height: 3px; indeterminate: true; }
+        RunningProgressBar { progress: 0; }
         ResultLine {
             title: "当前步骤";
             value: App.adaptation-progress != "" ? App.adaptation-progress : App.task-message;
