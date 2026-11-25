@@ -294,6 +294,10 @@ mod tests {
                 include_str!("../../../adapters/components/renpy_rpyc_adapter.py"),
             ),
             (
+                "renpy_font.py",
+                include_str!("../../../adapters/components/renpy_font.py"),
+            ),
+            (
                 "renpy_mixed_adapter.py",
                 include_str!("../../../adapters/components/renpy_mixed_adapter.py"),
             ),

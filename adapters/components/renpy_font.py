@@ -1,0 +1,368 @@
+"""Ren'Py Chinese font coverage check and non-invasive FontGroup fallback generator.
+
+Uses only the Python standard library. Reads SFNT/TTC cmap tables directly to detect
+whether a game's configured GUI fonts cover common Simplified Chinese characters.
+"""
+import ast
+import importlib
+from pathlib import Path, PurePosixPath
+import re
+import struct
+
+from python.engines import renpy_pickle as symbolic
+from python.engines import renpy_rpyc as rpyc
+from . import engine_archive as archive
+
+OVERLAY_FILENAME = "zz_gamel10n_font.rpy"
+MAX_FONT_BYTES = 64 << 20
+# High-frequency Simplified Chinese characters and punctuation for fast cmap coverage checks.
+CHINESE_PROBE = (
+    "的一是不了在人有我他这个们中来上大为和国地到以说时要就出会可也你对生能而子那得于着下自之年过发后作里"
+    "用道行所然家种事成方多经么去法学如都同现当没动面起看定天分还进好小部其些主样理心她本前开但因只从想实"
+    "日军者意无力它与长把机十民第公此已工使情明性知全三又关点正业外将两高间由问很最重并物手应战向头文体政"
+    "美相见被利什二等产或新己制身果加西斯月话合回特代内信表化老给世位次度门任常先海通教儿原东声提立及比员"
+    "解水名真论处走义各入几口认条平系气题活尔更别打女变四神总何电数安少报才结反受目太量再感建务做接必场件"
+    "计管期市直德资命山金指克许统区保至队形社便空决治展马科司五基眼书非则听白却界达光放强即像难且权思王象"
+    "，。！？、“”：；（）"
+)
+BUILTIN_NON_CJK_FONTS = {
+    "dejavusans.ttf",
+    "dejavusans-bold.ttf",
+    "dejavusans-oblique.ttf",
+    "dejavusans-boldoblique.ttf",
+    "dejavuserif.ttf",
+    "dejavusansmono.ttf",
+    "_opendyslexic3-regular.ttf",
+}
+GUI_FONT_DEFINE_RE = re.compile(
+    r'^[ \t]*define[ \t]+gui\.([a-zA-Z0-9_]*font)\s*=\s*["\']([^"\'\r\n]+)["\']',
+    re.M,
+)
+CJK_CHAR_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
+
+
+def has_cjk_text(texts):
+    return any(isinstance(text, str) and CJK_CHAR_RE.search(text) for text in texts)
+
+
+def _u16(data, offset):
+    return struct.unpack_from(">H", data, offset)[0]
+
+
+def _u32(data, offset):
+    return struct.unpack_from(">I", data, offset)[0]
+
+
+def _sfnt_offset(data, face_index=0):
+    if len(data) < 12:
+        raise ValueError("font file truncated")
+    tag = data[:4]
+    if tag == b"ttcf":
+        if len(data) < 16:
+            raise ValueError("TTC header truncated")
+        count = _u32(data, 8)
+        if not 0 <= face_index < count or 12 + count * 4 > len(data):
+            raise ValueError("invalid TTC face index")
+        offset = _u32(data, 12 + face_index * 4)
+        if offset + 12 > len(data):
+            raise ValueError("TTC face offset out of range")
+        return offset
+    if tag in (b"\x00\x01\x00\x00", b"OTTO", b"true", b"typ1"):
+        return 0
+    raise ValueError("unsupported font container")
+
+
+def _find_table(data, sfnt_offset, tag):
+    num_tables = _u16(data, sfnt_offset + 4)
+    table_dir = sfnt_offset + 12
+    if table_dir + num_tables * 16 > len(data):
+        raise ValueError("SFNT table directory truncated")
+    for index in range(num_tables):
+        entry = table_dir + index * 16
+        if data[entry:entry + 4] == tag:
+            offset, length = struct.unpack_from(">II", data, entry + 8)
+            if offset + length > len(data):
+                raise ValueError("SFNT table exceeds file size")
+            return data[offset:offset + length]
+    return None
+
+
+def _cmap_contains(cmap_data, codepoints):
+    if len(cmap_data) < 4:
+        return set()
+    num_subtables = _u16(cmap_data, 2)
+    if 4 + num_subtables * 8 > len(cmap_data):
+        return set()
+    covered = set()
+    seen = set()
+    targets = set(codepoints)
+    for index in range(num_subtables):
+        platform, _, offset = struct.unpack_from(">HHI", cmap_data, 4 + index * 8)
+        if platform not in (0, 3) or offset in seen or offset + 4 > len(cmap_data):
+            continue
+        seen.add(offset)
+        fmt = _u16(cmap_data, offset)
+        if fmt == 12 and offset + 16 <= len(cmap_data):
+            groups = _u32(cmap_data, offset + 12)
+            end_pos = offset + 16 + groups * 12
+            if end_pos > len(cmap_data):
+                continue
+            for group in range(groups):
+                start, end, first = struct.unpack_from(">III", cmap_data, offset + 16 + group * 12)
+                if start > end:
+                    continue
+                for cp in targets - covered:
+                    if start <= cp <= end and first + (cp - start) > 0:
+                        covered.add(cp)
+        elif fmt == 4 and offset + 14 <= len(cmap_data):
+            seg_count = _u16(cmap_data, offset + 6) // 2
+            ends = offset + 14
+            starts = ends + seg_count * 2 + 2
+            deltas = starts + seg_count * 2
+            ranges = deltas + seg_count * 2
+            if ranges + seg_count * 2 > len(cmap_data):
+                continue
+            for seg in range(seg_count):
+                start = _u16(cmap_data, starts + seg * 2)
+                end = _u16(cmap_data, ends + seg * 2)
+                delta = _u16(cmap_data, deltas + seg * 2)
+                range_pos = ranges + seg * 2
+                base = _u16(cmap_data, range_pos)
+                for cp in targets - covered:
+                    if not (start <= cp <= end and cp < 0xFFFF):
+                        continue
+                    if base:
+                        glyph_pos = range_pos + base + (cp - start) * 2
+                        if glyph_pos + 2 > len(cmap_data):
+                            continue
+                        glyph = _u16(cmap_data, glyph_pos)
+                        if glyph:
+                            glyph = (glyph + delta) & 0xFFFF
+                    else:
+                        glyph = (cp + delta) & 0xFFFF
+                    if glyph:
+                        covered.add(cp)
+        if len(covered) == len(targets):
+            break
+    return covered
+
+
+def inspect_font_bytes(data, face_index=0, probe=CHINESE_PROBE):
+    """Return coverage summary for Simplified Chinese probe characters."""
+    codepoints = sorted({ord(ch) for ch in probe})
+    try:
+        sfnt = _sfnt_offset(data, face_index)
+        cmap = _find_table(data, sfnt, b"cmap")
+        if cmap is None:
+            return dict(status="no-cmap", tested=len(codepoints), covered=0, missingCount=len(codepoints))
+        covered = _cmap_contains(cmap, codepoints)
+        missing = len(codepoints) - len(covered)
+        return dict(status="inspected", tested=len(codepoints), covered=len(covered), missingCount=missing)
+    except (ValueError, struct.error) as error:
+        return dict(status="unreadable", error=str(error), tested=len(codepoints), covered=0, missingCount=len(codepoints))
+
+
+def extract_gui_fonts_from_rpyc(path):
+    """Extract static string definitions for gui.*_font from a compiled RPYC2 script."""
+    found = {}
+    try:
+        script = rpyc.parse(archive.read_file(path, rpyc.MAX_FILE))
+    except Exception:
+        return found
+    for value in script.slots[1].objects:
+        if symbolic.class_name(value) != ("renpy.ast", "Define"):
+            continue
+        attrs = symbolic.attributes(value)
+        store = symbolic.scalar(attrs.get("store"))
+        varname = symbolic.scalar(attrs.get("varname"))
+        if store != "store.gui" or not isinstance(varname, str) or not varname.endswith("font"):
+            continue
+        try:
+            code = attrs["code"].value
+            if symbolic.class_name(code) != ("renpy.ast", "PyCode"):
+                continue
+            source = rpyc.expression(code.data["state"].value.data[1])
+            if len(source) > 4096:
+                continue
+            node = ast.parse(source, mode="eval").body
+            if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value.strip():
+                found[varname] = node.value.strip()
+        except Exception:
+            continue
+    return found
+
+
+def extract_gui_fonts_from_rpy(path):
+    """Extract static string definitions for gui.*_font from a .rpy source script."""
+    found = {}
+    try:
+        text = archive.read_file(path, archive.MAX_FILE).decode("utf-8-sig", errors="replace")
+    except Exception:
+        return found
+    for match in GUI_FONT_DEFINE_RE.finditer(text):
+        found[match.group(1)] = match.group(2).strip()
+    return found
+
+
+def _parse_font_spec(spec):
+    face_index = 0
+    name = spec.strip()
+    if "@" in name:
+        prefix, rest = name.split("@", 1)
+        if prefix.isdigit():
+            face_index, name = int(prefix), rest
+    return face_index, name.replace("\\", "/")
+
+
+def _load_font_bytes(source_root, archive_paths, base_dir, font_name):
+    candidates = [font_name]
+    if "/" not in font_name:
+        candidates.append("fonts/" + font_name)
+    # 1. Check loose files in the game's resource root.
+    base = Path(source_root) / base_dir if base_dir else Path(source_root)
+    for rel in candidates:
+        try:
+            candidate = archive.checked_path(base / archive.member_name(rel))
+        except ValueError:
+            continue
+        if candidate.is_file() and candidate.stat().st_size <= MAX_FONT_BYTES:
+            return archive.read_file(candidate, MAX_FONT_BYTES)
+    # 2. Check inside staged RPA archives.
+    wanted = {rel.casefold() for rel in candidates}
+    if archive_paths:
+        rpa = importlib.import_module("python.archives.rpa")
+        for rpa_path in archive_paths:
+            with archive.checked_path(rpa_path).open("rb") as stream:
+                index = archive.rpa_index(rpa, stream)
+                for entry in index.entries:
+                    if archive.member_name(entry.name).casefold() in wanted:
+                        if entry.length > MAX_FONT_BYTES:
+                            return None
+                        return rpa.read_entry(stream, entry)
+    return None
+
+
+def detect_missing_chinese_fonts(source_root, archive_paths, base_dir, script_paths):
+    """Return sorted list of configured GUI fonts lacking Simplified Chinese glyphs."""
+    configured = {}
+    for member, path in script_paths:
+        name = PurePosixPath(archive.member_name(member)).name.lower()
+        if name == "gui.rpyc":
+            configured.update(extract_gui_fonts_from_rpyc(path))
+        elif name == "gui.rpy":
+            configured.update(extract_gui_fonts_from_rpy(path))
+    if not configured:
+        return []
+    missing = []
+    checked = {}
+    for spec in sorted(set(configured.values())):
+        if spec.lower().endswith((".fnt", ".bmfont")):
+            continue
+        face_index, font_name = _parse_font_spec(spec)
+        basename = PurePosixPath(font_name).name.lower()
+        if basename in BUILTIN_NON_CJK_FONTS:
+            missing.append(spec)
+            continue
+        key = (face_index, font_name.casefold())
+        if key not in checked:
+            data = _load_font_bytes(source_root, archive_paths, base_dir, font_name)
+            if data is None:
+                # Unreadable or missing font file: don't guess.
+                checked[key] = True
+            else:
+                report = inspect_font_bytes(data, face_index=face_index)
+                # Require >= 95% of high-frequency Simplified Chinese probe characters.
+                checked[key] = (
+                    report["status"] == "inspected"
+                    and report["tested"] > 0
+                    and report["covered"] * 100 >= report["tested"] * 95
+                )
+        if not checked[key]:
+            missing.append(spec)
+    return missing
+
+
+def render_font_overlay_script(missing_fonts):
+    """Generate a defensive Ren'Py FontGroup fallback script preserving Latin glyphs."""
+    quoted = ", ".join(repr(font) for font in sorted(set(missing_fonts)))
+    return (
+        "# Generated by GameL10n: non-invasive Simplified Chinese FontGroup fallback.\n"
+        "# Preserves the game's original fonts for Latin/digits/UI symbols and routes\n"
+        "# CJK characters to a locally available Simplified Chinese system font.\n"
+        "init 999 python:\n"
+        "    import os as _gl10n_os\n"
+        "\n"
+        "    def _gl10n_find_cjk_font():\n"
+        "        _gl10n_candidates = (\n"
+        "            'msyh.ttc', 'msyh.ttf', 'simhei.ttf', 'simsun.ttc', 'deng.ttf',\n"
+        "            'NotoSansCJKsc-Regular.otf', 'NotoSansSC-Regular.ttf',\n"
+        "        )\n"
+        "        _gl10n_dirs = []\n"
+        "        _gl10n_win = _gl10n_os.environ.get('WINDIR') or 'C:\\\\Windows'\n"
+        "        _gl10n_dirs.append(_gl10n_os.path.join(_gl10n_win, 'Fonts'))\n"
+        "        _gl10n_local = _gl10n_os.environ.get('LOCALAPPDATA')\n"
+        "        if _gl10n_local:\n"
+        "            _gl10n_dirs.append(_gl10n_os.path.join(_gl10n_local, 'Microsoft', 'Windows', 'Fonts'))\n"
+        "        _gl10n_dirs.extend(('/usr/share/fonts', '/System/Library/Fonts', '/Library/Fonts'))\n"
+        "        for _gl10n_dir in _gl10n_dirs:\n"
+        "            if not _gl10n_os.path.isdir(_gl10n_dir):\n"
+        "                continue\n"
+        "            for _gl10n_name in _gl10n_candidates:\n"
+        "                _gl10n_full = _gl10n_os.path.join(_gl10n_dir, _gl10n_name)\n"
+        "                if _gl10n_os.path.isfile(_gl10n_full):\n"
+        "                    if _gl10n_dir not in config.searchpath:\n"
+        "                        config.searchpath.append(_gl10n_dir)\n"
+        "                    return _gl10n_name\n"
+        "        return None\n"
+        "\n"
+        "    def _gl10n_wrap_font(orig, cjk_font):\n"
+        "        if isinstance(orig, FontGroup) or not isinstance(orig, basestring if 'basestring' in globals() else str):\n"
+        "            return orig\n"
+        "        _gl10n_base = config.font_name_map.get(orig, orig)\n"
+        "        if isinstance(_gl10n_base, FontGroup) or not isinstance(_gl10n_base, basestring if 'basestring' in globals() else str):\n"
+        "            return orig\n"
+        "        if _gl10n_base.lower().endswith(('.fnt', '.bmfont')):\n"
+        "            return orig\n"
+        "        _gl10n_fg = FontGroup()\n"
+        "        _gl10n_fg.add(cjk_font, 0x2014, 0x2026)\n"
+        "        _gl10n_fg.add(cjk_font, 0x2E80, 0x9FFF)\n"
+        "        _gl10n_fg.add(cjk_font, 0xF900, 0xFAFF)\n"
+        "        _gl10n_fg.add(cjk_font, 0xFE30, 0xFE4F)\n"
+        "        _gl10n_fg.add(cjk_font, 0xFF00, 0xFFEF)\n"
+        "        _gl10n_fg.add(cjk_font, 0x20000, 0x2FA1F)\n"
+        "        _gl10n_fg.add(_gl10n_base, None, None)\n"
+        "        return _gl10n_fg\n"
+        "\n"
+        "    try:\n"
+        "        config.allow_sysfonts = True\n"
+        "        _gl10n_cjk = _gl10n_find_cjk_font()\n"
+        "        if _gl10n_cjk:\n"
+        f"            _gl10n_missing = {{{quoted}}}\n"
+        "            _gl10n_cache = {}\n"
+        "            def _gl10n_get(orig):\n"
+        "                if orig not in _gl10n_cache:\n"
+        "                    _gl10n_cache[orig] = _gl10n_wrap_font(orig, _gl10n_cjk)\n"
+        "                return _gl10n_cache[orig]\n"
+        "            for _gl10n_attr in (\n"
+        "                'text_font', 'name_text_font', 'interface_text_font',\n"
+        "                'button_text_font', 'choice_button_text_font', 'system_font',\n"
+        "            ):\n"
+        "                _gl10n_val = getattr(gui, _gl10n_attr, None)\n"
+        "                if isinstance(_gl10n_val, (str,)) or ('unicode' in dir(__builtins__) and isinstance(_gl10n_val, unicode)):\n"
+        "                    setattr(gui, _gl10n_attr, _gl10n_get(_gl10n_val))\n"
+        "            if hasattr(style, 'default'):\n"
+        "                _gl10n_df = getattr(style.default, 'font', None)\n"
+        "                if _gl10n_df:\n"
+        "                    style.default.font = _gl10n_get(_gl10n_df)\n"
+        "            for _gl10n_sname in dir(style):\n"
+        "                try:\n"
+        "                    _gl10n_st = getattr(style, _gl10n_sname)\n"
+        "                    _gl10n_sf = getattr(_gl10n_st, 'font', None)\n"
+        "                    if _gl10n_sf in _gl10n_missing:\n"
+        "                        _gl10n_st.font = _gl10n_get(_gl10n_sf)\n"
+        "                except Exception:\n"
+        "                    pass\n"
+        "            style.rebuild()\n"
+        "    except Exception:\n"
+        "        pass\n"
+    )

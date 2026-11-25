@@ -552,6 +552,7 @@ pub(crate) struct BundledTemplate {
 const SCRIPT_TEMPLATE_COMPONENTS: &[&str] = &["engine_archive.py"];
 const RENPY_COMPILED_COMPONENTS: &[&str] = &[
     "engine_archive.py",
+    "renpy_font.py",
     "renpy_rpyc_adapter.py",
     "renpy_mixed_adapter.py",
 ];

@@ -23,7 +23,8 @@
 ## 4. 中文字体检查与替换
 
 - 西文或日文 Ren’Py 游戏常用的 `gui.text_font`、`gui.name_text_font`、`gui.interface_text_font`（如 Philosopher、Cinzel、DejaVuSans 等）通常缺少简体中文汉字字形，直接写中文会显示方块字或错位。
-- 实机试译前应核对 `gui.rpy`、封包内字体及 `screens.rpy` 中的硬编码 `font`；缺字时无需修改 EXE 或注入 Hook，可在 `game/` 放置独立高优先级覆盖脚本（如 `init 999:` 覆写 `gui.*_font` / `style.default.font`）并随补丁提供开源中文字体。
+- `rpa3-renpy-rpyc` 与含封包的 `renpy-mixed` 模板在 `overlay` 模式写入中文译文时，会自动检查 `gui.rpyc`/`gui.rpy` 指定的字体（通过 SFNT/TTC `cmap` 及内置西文字体清单判断）；若检测到缺简体中文字形，会自动附带独立的 `zz_gamel10n_font.rpy`（利用 `init 999 python:` 与 `FontGroup` 保留原英文字体/符号，仅将 CJK 字符回退到本地可用简体中文字体，卸载补丁自动清理）。
+- 若游戏使用自定义字体配置或需要指定随包开源字体，可在 `tools/adapter-template.json` 关闭 `"fontFallback": false` 并自定义字体脚本；无需修改 EXE 或注入 Hook。
 
 ## 5. 界面与 Python 文本
 

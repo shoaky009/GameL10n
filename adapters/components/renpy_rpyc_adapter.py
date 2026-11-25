@@ -12,10 +12,11 @@ import tempfile
 
 from python.engines import renpy_rpyc as rpyc
 from . import engine_archive as archive
+from . import renpy_font
 from .gamel10n_host import validation_context
 
 WARNING = ("仅处理选中的 RPYC2 对白、菜单及 TranslateString.new；角色名只作上下文。"
-           "封包修改默认以同目录松散覆盖方式输出，若游戏启用 force_archives 导致未生效可切换 buildMode=replace 重建封包。"
+           "封包修改默认以同目录松散覆盖方式输出，缺中文字形时自动附带 FontGroup 字体回退脚本；若游戏启用 force_archives 未生效可切换 buildMode=replace 重建封包。"
            "Python／screen 内文字未覆盖；游戏启动、字体及中文显示尚未实机验证。")
 
 
@@ -41,21 +42,43 @@ def is_other_translation_script(member):
     return False
 
 
-def overlay_files_map(request, valid_targets):
+def overlay_files_map(request, valid_targets, optional_extras=()):
     output = request.get("outputDirectory")
     output_files = request.get("outputFiles")
     if not output or not isinstance(output_files, list):
         raise ValueError("overlay 模式缺少 outputDirectory 或 outputFiles。")
+    extras = {archive.member_name(item).casefold() for item in optional_extras}
     mapping = {}
     for item in output_files:
         relative = archive.member_name(item)
         key = relative.casefold()
         if key in mapping:
             raise ValueError("overlay 输出列表存在重复路径：" + relative)
-        if key not in valid_targets:
+        if key not in valid_targets and key not in extras:
             raise ValueError("overlay 输出包含未登记的脚本路径：" + relative)
         mapping[key] = resolve(output, relative)
     return mapping
+
+
+def common_archive_dir(archive_files):
+    parents = {PurePosixPath(archive.member_name(resource)).parent.as_posix() for resource in archive_files}
+    if len(parents) != 1:
+        return None
+    parent = next(iter(parents))
+    return "" if parent in ("", ".") else parent
+
+
+def planned_font_overlay(source, archive_resources, base_dir, script_paths, config):
+    if base_dir is None or not config.get("fontFallback", True):
+        return None
+    relative = renpy_font.OVERLAY_FILENAME if not base_dir else (PurePosixPath(base_dir) / renpy_font.OVERLAY_FILENAME).as_posix()
+    if resolve(source, relative).exists():
+        return None
+    archive_paths = [resolve(source, resource) for resource in archive_resources]
+    missing = renpy_font.detect_missing_chinese_fonts(source, archive_paths, base_dir, script_paths)
+    if not missing:
+        return None
+    return relative, renpy_font.render_font_overlay_script(missing).encode("utf-8")
 
 
 def disk_files(root):
@@ -188,11 +211,13 @@ def probe(source, files, packed, template):
                            description="Ren’Py RPYC2 固定适配流程", requiredFiles=files, warnings=[WARNING]))
 
 
-def extract(request, scripts, packed):
+def extract(request, files, scripts, packed):
     overrides = {}
     if packed and request.get("buildMode") == "overlay":
         valid = {overlay_path(resource, member).casefold() for resource, member, _ in scripts}
-        overrides = overlay_files_map(request, valid)
+        base_dir = common_archive_dir(files)
+        extras = [renpy_font.OVERLAY_FILENAME if not base_dir else (PurePosixPath(base_dir) / renpy_font.OVERLAY_FILENAME).as_posix()] if base_dir is not None else ()
+        overrides = overlay_files_map(request, valid, optional_extras=extras)
     result = []
     for resource, member, path in scripts:
         effective = overrides.get(overlay_path(resource, member).casefold(), path) if packed else path
@@ -221,17 +246,18 @@ def validate_script(before, after, member):
         raise ValueError("RPYC2 补丁改变了文本之外的内容：" + member)
 
 
-def build(request, source, files, packed, build_mode, scripts, reports, scratch, translations):
+def build(request, source, files, packed, build_mode, scripts, reports, scratch, translations, config):
     remaining = set(translations)
     output = archive.checked_path(request["outputDirectory"])
     archive.separate(archive.checked_path(source), output)
     if packed and build_mode == "overlay":
-        written, seen_targets = [], set()
+        written, seen_targets, changed_texts = [], set(), []
         for resource, member, path in scripts:
             patched, original, matched = build_script(resource, member, path, translations)
             remaining.difference_update(matched)
             if patched == original:
                 continue
+            changed_texts.extend(translations[unit_id] for unit_id in matched)
             relative = overlay_path(resource, member)
             key = relative.casefold()
             if key in seen_targets:
@@ -244,6 +270,22 @@ def build(request, source, files, packed, build_mode, scripts, reports, scratch,
             written.append(relative)
         if remaining:
             raise ValueError("部分译文无法对应当前 RPYC2 脚本，请重新提取：" + ", ".join(sorted(remaining)[:3]))
+        if written and renpy_font.has_cjk_text(changed_texts):
+            font_overlay = planned_font_overlay(
+                source,
+                files,
+                common_archive_dir(files),
+                [(member, path) for _, member, path in scripts],
+                config,
+            )
+            if font_overlay is not None:
+                font_rel, font_bytes = font_overlay
+                if font_rel.casefold() not in seen_targets:
+                    target = resolve(output, font_rel)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with target.open("xb") as stream:
+                        stream.write(font_bytes)
+                    written.append(font_rel)
         return dict(build=dict(mode="overlay", files=sorted(written), warnings=[WARNING]))
 
     replacements = {resource: {} for resource in files}
@@ -278,14 +320,30 @@ def build(request, source, files, packed, build_mode, scripts, reports, scratch,
     return dict(build=dict(mode="replace", files=files, warnings=[WARNING]))
 
 
-def validate(request, source, files, packed, scripts, scratch, include_tl=False):
+def validate(request, source, files, packed, scripts, scratch, config, include_tl=False):
     if packed and request.get("buildMode") == "overlay":
         by_overlay = {overlay_path(resource, member).casefold(): (member, path) for resource, member, path in scripts}
-        overrides = overlay_files_map(request, by_overlay)
+        base_dir = common_archive_dir(files)
+        font_rel = (
+            renpy_font.OVERLAY_FILENAME if not base_dir else (PurePosixPath(base_dir) / renpy_font.OVERLAY_FILENAME).as_posix()
+        ) if base_dir is not None else None
+        extras = [font_rel] if font_rel is not None else ()
+        overrides = overlay_files_map(request, by_overlay, optional_extras=extras)
         actual_disk = disk_files(request["outputDirectory"])
         if actual_disk != set(overrides):
             raise ValueError("overlay 输出目录文件列表与声明不一致。")
         for key, after in overrides.items():
+            if font_rel is not None and key == font_rel.casefold():
+                expected = planned_font_overlay(
+                    source,
+                    files,
+                    base_dir,
+                    [(member, path) for _, member, path in scripts],
+                    config,
+                )
+                if expected is None or archive.read_file(after, 1 << 20) != expected[1]:
+                    raise ValueError("字体回退脚本与预期内容不一致：" + font_rel)
+                continue
             member, before = by_overlay[key]
             validate_script(before, after, member)
         check_validation_context(request)
@@ -345,10 +403,10 @@ def execute(request):
         scratch = Path(directory)
         scripts, reports = load(source, files, packed, scratch / "original", verify=False, include_tl=include_tl)
         if operation == "extract":
-            return extract(request, scripts, packed)
+            return extract(request, files, scripts, packed)
         if operation == "build":
-            return build(request, source, files, packed, build_mode, scripts, reports, scratch, translations)
-        return validate(request, source, files, packed, scripts, scratch, include_tl=include_tl)
+            return build(request, source, files, packed, build_mode, scripts, reports, scratch, translations, config)
+        return validate(request, source, files, packed, scripts, scratch, config, include_tl=include_tl)
 
 
 def main():

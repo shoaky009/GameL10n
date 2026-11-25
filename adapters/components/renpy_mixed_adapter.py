@@ -8,11 +8,12 @@ import sys
 import tempfile
 
 from . import engine_archive as archive
+from . import renpy_font
 from . import renpy_rpyc_adapter as compiled
 from .gamel10n_host import parser, write_response
 
 WARNING = ("仅处理选中 Ren’Py 脚本的已支持文本字段；不推断同名覆盖和自定义加载规则。"
-           "含封包资源的修改默认以同目录松散覆盖方式输出，若游戏启用 force_archives 导致未生效可切换 buildMode=replace 重建封包。"
+           "含封包资源的修改默认以同目录松散覆盖方式输出，缺中文字形时自动附带 FontGroup 字体回退脚本；若游戏启用 force_archives 未生效可切换 buildMode=replace 重建封包。"
            "Python／screen 内文字、独立文字覆盖及游戏启动、字体和中文显示仍需另行验证。")
 
 
@@ -126,7 +127,7 @@ def source_units(request, container):
     return source_parser(request, "extract", container)["extraction"]["units"] if source_files(container) else []
 
 
-def extract(request, containers, scratch):
+def extract(request, files, containers, scratch):
     overrides = {}
     if request.get("buildMode") == "overlay":
         valid = {
@@ -134,7 +135,10 @@ def extract(request, containers, scratch):
             for container in containers
             for file in container.files
         }
-        overrides = compiled.overlay_files_map(request, valid)
+        packed = [file for file in files if file.lower().endswith(".rpa")]
+        base_dir = compiled.common_archive_dir(packed)
+        extras = [renpy_font.OVERLAY_FILENAME if not base_dir else (PurePosixPath(base_dir) / renpy_font.OVERLAY_FILENAME).as_posix()] if base_dir is not None else ()
+        overrides = compiled.overlay_files_map(request, valid, optional_extras=extras)
     result = []
     for index, container in enumerate(containers):
         effective = container
@@ -168,16 +172,16 @@ def extract(request, containers, scratch):
             for file in container.files
             if file.lower().endswith(".rpyc")
         ]
-        result.extend(compiled.extract(dict(request, buildMode="replace"), scripts, False)["extraction"]["units"])
+        result.extend(compiled.extract(dict(request, buildMode="replace"), [], scripts, False)["extraction"]["units"])
     return dict(extraction=dict(units=result, warnings=[WARNING]), validationContextVersion=1)
 
 
-def build(request, source, files, build_mode, containers, scratch, translations):
+def build(request, source, files, build_mode, containers, scratch, translations, config):
     remaining = set(translations)
     output = archive.checked_path(request["outputDirectory"])
     archive.separate(archive.checked_path(source), output)
     if build_mode == "overlay":
-        written, seen_targets = [], set()
+        written, seen_targets, changed_texts = [], set(), []
         for index, container in enumerate(containers):
             patched_rpy = scratch / ("overlay-rpy-" + str(index))
             rpy_units = source_units(request, container)
@@ -187,6 +191,7 @@ def build(request, source, files, build_mode, containers, scratch, translations)
                 if unit_id in translations:
                     if translations[unit_id] != unit["sourceText"]:
                         selected[unit["id"]] = translations[unit_id]
+                        changed_texts.append(translations[unit_id])
                     remaining.discard(unit_id)
             if selected:
                 source_parser(request, "build", container, patched_rpy, selected)
@@ -215,6 +220,7 @@ def build(request, source, files, build_mode, containers, scratch, translations)
                 remaining.difference_update(matched)
                 if data == original_bytes:
                     continue
+                changed_texts.extend(translations[unit_id] for unit_id in matched)
                 relative = container_overlay_path(container, file)
                 key = relative.casefold()
                 if key in seen_targets:
@@ -227,6 +233,28 @@ def build(request, source, files, build_mode, containers, scratch, translations)
                 written.append(relative)
         if remaining:
             raise ValueError("部分译文无法对应当前 Ren’Py 脚本，请重新提取：" + ", ".join(sorted(remaining)[:3]))
+        if written and renpy_font.has_cjk_text(changed_texts):
+            packed = [file for file in files if file.lower().endswith(".rpa")]
+            all_scripts = [
+                (file, compiled.resolve(container.directory, file))
+                for container in containers
+                for file in container.files
+            ]
+            font_overlay = compiled.planned_font_overlay(
+                source,
+                packed,
+                compiled.common_archive_dir(packed),
+                all_scripts,
+                config,
+            )
+            if font_overlay is not None:
+                font_rel, font_bytes = font_overlay
+                if font_rel.casefold() not in seen_targets:
+                    target = compiled.resolve(output, font_rel)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with target.open("xb") as stream:
+                        stream.write(font_bytes)
+                    written.append(font_rel)
         return dict(build=dict(mode="overlay", files=sorted(written), warnings=[WARNING]))
 
     for index, container in enumerate(containers):
@@ -273,18 +301,34 @@ def build(request, source, files, build_mode, containers, scratch, translations)
     return dict(build=dict(mode="replace", files=files, warnings=[WARNING]))
 
 
-def validate(request, source, files, before, scratch, include_tl=False):
+def validate(request, source, files, before, scratch, config, include_tl=False):
     if request.get("buildMode") == "overlay":
         by_overlay = {}
         for container in before:
             for file in container.files:
                 by_overlay[container_overlay_path(container, file).casefold()] = (container, file)
-        overrides = compiled.overlay_files_map(request, by_overlay)
+        packed = [file for file in files if file.lower().endswith(".rpa")]
+        base_dir = compiled.common_archive_dir(packed)
+        font_rel = (
+            renpy_font.OVERLAY_FILENAME if not base_dir else (PurePosixPath(base_dir) / renpy_font.OVERLAY_FILENAME).as_posix()
+        ) if base_dir is not None else None
+        extras = [font_rel] if font_rel is not None else ()
+        overrides = compiled.overlay_files_map(request, by_overlay, optional_extras=extras)
         actual_disk = compiled.disk_files(request["outputDirectory"])
         if actual_disk != set(overrides):
             raise ValueError("overlay 输出目录文件列表与声明不一致。")
         rpy_by_container = {}
         for key, after_path in overrides.items():
+            if font_rel is not None and key == font_rel.casefold():
+                all_scripts = [
+                    (file, compiled.resolve(container.directory, file))
+                    for container in before
+                    for file in container.files
+                ]
+                expected = compiled.planned_font_overlay(source, packed, base_dir, all_scripts, config)
+                if expected is None or archive.read_file(after_path, 1 << 20) != expected[1]:
+                    raise ValueError("字体回退脚本与预期内容不一致：" + font_rel)
+                continue
             container, file = by_overlay[key]
             if file.lower().endswith(".rpyc"):
                 compiled.validate_script(compiled.resolve(container.directory, file), after_path, file)
@@ -362,10 +406,10 @@ def execute(request):
         scratch = Path(directory)
         containers = load(source, files, scratch / "original", verify=False, include_tl=include_tl)
         if operation == "extract":
-            return extract(request, containers, scratch)
+            return extract(request, files, containers, scratch)
         if operation == "build":
-            return build(request, source, files, build_mode, containers, scratch, translations)
-        return validate(request, source, files, containers, scratch, include_tl=include_tl)
+            return build(request, source, files, build_mode, containers, scratch, translations, config)
+        return validate(request, source, files, containers, scratch, config, include_tl=include_tl)
 
 
 def main():
