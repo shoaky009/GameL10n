@@ -12,6 +12,7 @@ from . import renpy_rpyc_adapter as compiled
 from .gamel10n_host import parser, write_response
 
 WARNING = ("仅处理选中 Ren’Py 脚本的已支持文本字段；不推断同名覆盖和自定义加载规则。"
+           "含封包资源的修改默认以同目录松散覆盖方式输出，若游戏启用 force_archives 导致未生效可切换 buildMode=replace 重建封包。"
            "Python／screen 内文字、独立文字覆盖及游戏启动、字体和中文显示仍需另行验证。")
 
 
@@ -21,6 +22,10 @@ class Container:
     directory: Path
     files: list
     members: list
+
+
+def container_overlay_path(container, file):
+    return compiled.overlay_path(container.resource, file) if container.resource is not None else archive.member_name(file)
 
 
 def load(source, files, scratch, verify=False):
@@ -102,31 +107,109 @@ def source_units(request, container):
     return source_parser(request, "extract", container)["extraction"]["units"] if source_files(container) else []
 
 
-def extract(request, containers):
+def extract(request, containers, scratch):
+    overrides = {}
+    if request.get("buildMode") == "overlay":
+        valid = {
+            container_overlay_path(container, file).casefold()
+            for container in containers
+            for file in container.files
+        }
+        overrides = compiled.overlay_files_map(request, valid)
     result = []
-    for container in containers:
-        for unit in source_units(request, container):
+    for index, container in enumerate(containers):
+        effective = container
+        if overrides and any(container_overlay_path(container, file).casefold() in overrides for file in source_files(container)):
+            merged = scratch / ("overlay-src-" + str(index))
+            for file in source_files(container):
+                source_file = overrides.get(
+                    container_overlay_path(container, file).casefold(),
+                    compiled.resolve(container.directory, file),
+                )
+                target = compiled.resolve(merged, file)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source_file, target)
+            effective = Container(container.resource, merged, container.files, container.members)
+        for unit in source_units(request, effective):
             if container.resource is not None:
                 unit["id"] = external_id(container, unit["id"])
                 unit["locator"] = "member:" + json.dumps([unit["resourcePath"], unit["locator"]], ensure_ascii=True, separators=(",", ":"))
                 unit["resourcePath"] = container.resource
                 unit["context"] = container.resource + " → " + unit["context"]
             result.append(unit)
-        scripts = [(container.resource or file, file, compiled.resolve(container.directory, file))
-                   for file in container.files if file.lower().endswith(".rpyc")]
-        result.extend(compiled.extract(scripts)["extraction"]["units"])
-    return dict(extraction=dict(units=result, warnings=[WARNING]))
+        scripts = [
+            (
+                container.resource or file,
+                file,
+                overrides.get(
+                    container_overlay_path(container, file).casefold(),
+                    compiled.resolve(container.directory, file),
+                ),
+            )
+            for file in container.files
+            if file.lower().endswith(".rpyc")
+        ]
+        result.extend(compiled.extract(dict(request, buildMode="replace"), scripts, False)["extraction"]["units"])
+    return dict(extraction=dict(units=result, warnings=[WARNING]), validationContextVersion=1)
 
 
-def build(request, source, files, containers, scratch):
-    translations = request.get("translations") or {}
-    if request.get("translationsFile"):
-        translations = json.loads(archive.read_file(request["translationsFile"], 128 << 20))
-    if not isinstance(translations, dict) or any(not isinstance(text, str) for text in translations.values()):
-        raise ValueError("译文必须为 ID 到文本的映射。")
+def build(request, source, files, build_mode, containers, scratch, translations):
     remaining = set(translations)
     output = archive.checked_path(request["outputDirectory"])
     archive.separate(archive.checked_path(source), output)
+    if build_mode == "overlay":
+        written, seen_targets = [], set()
+        for index, container in enumerate(containers):
+            patched_rpy = scratch / ("overlay-rpy-" + str(index))
+            rpy_units = source_units(request, container)
+            selected = {}
+            for unit in rpy_units:
+                unit_id = external_id(container, unit["id"])
+                if unit_id in translations:
+                    if translations[unit_id] != unit["sourceText"]:
+                        selected[unit["id"]] = translations[unit_id]
+                    remaining.discard(unit_id)
+            if selected:
+                source_parser(request, "build", container, patched_rpy, selected)
+                for file in source_files(container):
+                    candidate = compiled.resolve(patched_rpy, file)
+                    original_path = compiled.resolve(container.directory, file)
+                    if candidate.is_file() and archive.read_file(candidate, archive.MAX_FILE) != archive.read_file(original_path, archive.MAX_FILE):
+                        relative = container_overlay_path(container, file)
+                        key = relative.casefold()
+                        if key in seen_targets:
+                            raise ValueError("多个资源映射到相同的覆盖输出路径：" + relative)
+                        seen_targets.add(key)
+                        target = compiled.resolve(output, relative)
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copyfile(candidate, target)
+                        written.append(relative)
+            for file in container.files:
+                if not file.lower().endswith(".rpyc"):
+                    continue
+                data, original_bytes, matched = compiled.build_script(
+                    container.resource or file,
+                    file,
+                    compiled.resolve(container.directory, file),
+                    translations,
+                )
+                remaining.difference_update(matched)
+                if data == original_bytes:
+                    continue
+                relative = container_overlay_path(container, file)
+                key = relative.casefold()
+                if key in seen_targets:
+                    raise ValueError("多个资源映射到相同的覆盖输出路径：" + relative)
+                seen_targets.add(key)
+                target = compiled.resolve(output, relative)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with target.open("xb") as stream:
+                    stream.write(data)
+                written.append(relative)
+        if remaining:
+            raise ValueError("部分译文无法对应当前 Ren’Py 脚本，请重新提取：" + ", ".join(sorted(remaining)[:3]))
+        return dict(build=dict(mode="overlay", files=sorted(written), warnings=[WARNING]))
+
     for index, container in enumerate(containers):
         patched = scratch / ("patched-" + str(index)) if container.resource is not None else output
         rpy_units = source_units(request, container)
@@ -165,26 +248,54 @@ def build(request, source, files, containers, scratch):
         else:
             target.parent.mkdir(parents=True, exist_ok=True)
             with compiled.resolve(source, container.resource).open("rb") as original, target.open("xb") as destination:
-                shutil.copyfileobj(original, destination, 1 << 20)
+                shutil.copyfileobj(original, destination, 8 << 20)
     if remaining:
         raise ValueError("部分译文无法对应当前 Ren’Py 脚本，请重新提取：" + ", ".join(sorted(remaining)[:3]))
-    return dict(build=dict(files=files, warnings=[WARNING]))
+    return dict(build=dict(mode="replace", files=files, warnings=[WARNING]))
 
 
-def validate(request, files, before, scratch):
-    after = load(request["outputDirectory"], files, scratch / "patched", verify=True)
+def validate(request, source, files, before, scratch):
+    if request.get("buildMode") == "overlay":
+        by_overlay = {}
+        for container in before:
+            for file in container.files:
+                by_overlay[container_overlay_path(container, file).casefold()] = (container, file)
+        overrides = compiled.overlay_files_map(request, by_overlay)
+        actual_disk = compiled.disk_files(request["outputDirectory"])
+        if actual_disk != set(overrides):
+            raise ValueError("overlay 输出目录文件列表与声明不一致。")
+        rpy_by_container = {}
+        for key, after_path in overrides.items():
+            container, file = by_overlay[key]
+            if file.lower().endswith(".rpyc"):
+                compiled.validate_script(compiled.resolve(container.directory, file), after_path, file)
+            else:
+                rpy_by_container.setdefault(id(container), (container, []))[1].append((file, after_path))
+        for index, (container, changed_rpy) in enumerate(rpy_by_container.values()):
+            patched_dir = scratch / ("overlay-validate-" + str(index))
+            for file, after_path in changed_rpy:
+                target = compiled.resolve(patched_dir, file)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(after_path, target)
+            subset = Container(container.resource, container.directory, [file for file, _ in changed_rpy], [])
+            checked = source_parser(request, "validate", subset, patched_dir)["validation"]
+            if not checked["passed"] or checked["issues"]:
+                raise ValueError("Ren’Py 源码验证失败：" + json.dumps(checked["issues"], ensure_ascii=False))
+        compiled.check_validation_context(request)
+        return dict(validation=dict(passed=True, issues=[], runtimeStatus="not-tested"))
+
+    after = load(request["outputDirectory"], files, scratch / "patched", verify=False)
     if len(before) != len(after):
         raise ValueError("补丁改变了资源列表。")
     for original, patched in zip(before, after):
         if original.resource != patched.resource or original.files != patched.files:
             raise ValueError("补丁改变了脚本资源列表。")
-        old = {entry["name"]: entry["sha256"] for entry in original.members}
-        new = {entry["name"]: entry["sha256"] for entry in patched.members}
-        if old.keys() != new.keys():
-            raise ValueError("补丁改变了封包成员列表：" + str(original.resource))
-        for member, digest in old.items():
-            if archive.member_name(member) not in original.files and digest != new[member]:
-                raise ValueError("补丁修改了未选择的封包成员：" + str(original.resource) + " → " + member)
+        if original.resource is not None:
+            archive.check_rpa_replacement(
+                compiled.resolve(source, original.resource),
+                compiled.resolve(request["outputDirectory"], original.resource),
+                {archive.member_name(file) for file in original.files},
+            )
         if source_files(original):
             checked = source_parser(request, "validate", original, patched.directory)["validation"]
             if not checked["passed"] or checked["issues"]:
@@ -192,6 +303,7 @@ def validate(request, files, before, scratch):
         for file in original.files:
             if file.lower().endswith(".rpyc"):
                 compiled.validate_script(compiled.resolve(original.directory, file), compiled.resolve(patched.directory, file), file)
+    compiled.check_validation_context(request)
     return dict(validation=dict(passed=True, issues=[], runtimeStatus="not-tested"))
 
 
@@ -208,6 +320,10 @@ def execute(request):
         raise ValueError("资源列表为空、过大或有重复路径。")
     if any(PurePosixPath(file).suffix.lower() not in (".rpy", ".rpyc", ".rpa") for file in files):
         raise ValueError("资源不属于配置选中的 Ren’Py 格式。")
+    has_packed = any(file.lower().endswith(".rpa") for file in files)
+    build_mode = config.get("buildMode") or ("overlay" if has_packed else "replace")
+    if build_mode not in ("overlay", "replace") or (build_mode == "overlay" and not has_packed):
+        raise ValueError("Ren’Py 混合模板 buildMode 配置无效。")
     source, operation = request["sourceDirectory"], request["operation"]
     if operation == "probe":
         for file in files:
@@ -217,14 +333,19 @@ def execute(request):
                                description="Ren’Py 无冲突混合资源", requiredFiles=files, warnings=[WARNING]))
     if operation not in ("extract", "build", "validate"):
         raise ValueError("不支持的适配操作。")
+    if operation == "build":
+        translations = compiled.load_translations(request)
+        if build_mode == "overlay" and not translations:
+            archive.separate(archive.checked_path(source), archive.checked_path(request["outputDirectory"]))
+            return dict(build=dict(mode="overlay", files=[], warnings=[WARNING]))
     with tempfile.TemporaryDirectory(prefix="renpy-", dir=Path.cwd()) as directory:
         scratch = Path(directory)
-        containers = load(source, files, scratch / "original", verify=operation == "validate")
+        containers = load(source, files, scratch / "original", verify=False)
         if operation == "extract":
-            return extract(request, containers)
+            return extract(request, containers, scratch)
         if operation == "build":
-            return build(request, source, files, containers, scratch)
-        return validate(request, files, containers, scratch)
+            return build(request, source, files, build_mode, containers, scratch, translations)
+        return validate(request, source, files, containers, scratch)
 
 
 def main():

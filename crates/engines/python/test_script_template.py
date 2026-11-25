@@ -234,6 +234,48 @@ class ScriptTemplateTest(unittest.TestCase):
             self.assertEqual(script_entry.offset, script_offset)
             self.assertEqual(rpa.read_entry(stream, script_entry), script_bytes)
 
+    def test_rpa_rebuild_and_replacement_check_detect_untouched_media_mutation(self):
+        pin = json.loads((ROOT / 'third_party/engine-tools/current.json').read_text(encoding='utf-8-sig'))
+        library = str(ROOT / 'third_party/engine-tools/references' / pin['revision'] / 'library.zip')
+        with tempfile.TemporaryDirectory() as directory, patch.object(sys, 'path', [library, *sys.path]):
+            root = Path(directory)
+            source = root / 'game.rpa'
+            media_bytes = bytes(range(256)) * 128
+            rpa_file(source, {'media.bin': media_bytes, 'script.rpy': b'label start:\n    "old"\n'})
+            replacement = root / 'script.rpy'
+            replacement.write_bytes(b'label start:\n    "updated chinese text"\n')
+
+            unchanged = root / 'unchanged.rpa'
+            report = TEMPLATE.archive.execute(dict(
+                protocolVersion=1,
+                component='archive.rpa3',
+                operation='rebuild',
+                archive=str(source),
+                outputFile=str(unchanged),
+                replacements={},
+            ))
+            self.assertTrue(report['byteIdentical'])
+            self.assertEqual(report['inputSha256'], report['outputSha256'])
+            self.assertEqual(unchanged.read_bytes(), source.read_bytes())
+
+            rebuilt = root / 'rebuilt.rpa'
+            changed = TEMPLATE.archive.execute(dict(
+                protocolVersion=1,
+                component='archive.rpa3',
+                operation='rebuild',
+                archive=str(source),
+                outputFile=str(rebuilt),
+                replacements={'script.rpy': str(replacement)},
+            ))
+            self.assertEqual(changed['changedCount'], 1)
+            self.assertFalse(changed['byteIdentical'])
+            TEMPLATE.archive.check_rpa_replacement(source, rebuilt, {'script.rpy'})
+
+            tampered = root / 'tampered.rpa'
+            rpa_file(tampered, {'media.bin': b'X' + media_bytes[1:], 'script.rpy': replacement.read_bytes()})
+            with self.assertRaisesRegex(ValueError, '未选择'):
+                TEMPLATE.archive.check_rpa_replacement(source, tampered, {'script.rpy'})
+
 
 if __name__ == '__main__':
     unittest.main()

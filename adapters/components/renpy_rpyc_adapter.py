@@ -5,15 +5,17 @@ only compiled scripts are extracted, and every untouched member is validated.
 """
 import hashlib
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import shutil
 import sys
 import tempfile
 
 from python.engines import renpy_rpyc as rpyc
 from . import engine_archive as archive
+from .gamel10n_host import validation_context
 
 WARNING = ("仅处理选中的 RPYC2 对白、菜单及 TranslateString.new；角色名只作上下文。"
+           "封包修改默认以同目录松散覆盖方式输出，若游戏启用 force_archives 导致未生效可切换 buildMode=replace 重建封包。"
            "Python／screen 内文字未覆盖；游戏启动、字体及中文显示尚未实机验证。")
 
 
@@ -23,6 +25,64 @@ def canonical(value):
 
 def resolve(root, relative):
     return archive.checked_path(Path(root) / archive.member_name(relative))
+
+
+def overlay_path(resource, member):
+    parent = PurePosixPath(archive.member_name(resource)).parent
+    name = archive.member_name(member)
+    return name if str(parent) in ("", ".") else (parent / name).as_posix()
+
+
+def overlay_files_map(request, valid_targets):
+    output = request.get("outputDirectory")
+    output_files = request.get("outputFiles")
+    if not output or not isinstance(output_files, list):
+        raise ValueError("overlay 模式缺少 outputDirectory 或 outputFiles。")
+    mapping = {}
+    for item in output_files:
+        relative = archive.member_name(item)
+        key = relative.casefold()
+        if key in mapping:
+            raise ValueError("overlay 输出列表存在重复路径：" + relative)
+        if key not in valid_targets:
+            raise ValueError("overlay 输出包含未登记的脚本路径：" + relative)
+        mapping[key] = resolve(output, relative)
+    return mapping
+
+
+def disk_files(root):
+    base = archive.checked_path(root)
+    if not base.exists():
+        return set()
+    return {
+        archive.member_name(path.relative_to(base).as_posix()).casefold()
+        for path in base.rglob("*")
+        if path.is_file()
+    }
+
+
+def check_validation_context(request):
+    context = validation_context(request)
+    if context is None:
+        return
+    original = context["originalUnits"]
+    after = {unit["id"]: unit for unit in context["outputUnits"]}
+    translations = context["translations"]
+    if len(after) != len(original):
+        raise ValueError("回填改变了文本数量。")
+    for unit in original:
+        candidate = after.get(unit["id"])
+        if not candidate or candidate["sourceText"] != translations.get(unit["id"], unit["sourceText"]):
+            raise ValueError("回填文本与预期不一致：" + unit["id"])
+
+
+def load_translations(request):
+    translations = request.get("translations") or {}
+    if request.get("translationsFile"):
+        translations = json.loads(archive.read_file(request["translationsFile"], 128 << 20))
+    if not isinstance(translations, dict) or any(not isinstance(text, str) for text in translations.values()):
+        raise ValueError("译文必须为 ID 到文本的映射。")
+    return translations
 
 
 def identity(resource, member, locator):
@@ -100,12 +160,17 @@ def probe(source, files, packed, template):
                            description="Ren’Py RPYC2 固定适配流程", requiredFiles=files, warnings=[WARNING]))
 
 
-def extract(scripts):
+def extract(request, scripts, packed):
+    overrides = {}
+    if packed and request.get("buildMode") == "overlay":
+        valid = {overlay_path(resource, member).casefold() for resource, member, _ in scripts}
+        overrides = overlay_files_map(request, valid)
     result = []
     for resource, member, path in scripts:
-        _, _, rows, manifest = read_script(path, member)
+        effective = overrides.get(overlay_path(resource, member).casefold(), path) if packed else path
+        _, _, rows, manifest = read_script(effective, member)
         result.extend(units(resource, member, rows, manifest))
-    return dict(extraction=dict(units=result, warnings=[WARNING]))
+    return dict(extraction=dict(units=result, warnings=[WARNING]), validationContextVersion=1)
 
 
 def build_script(resource, member, path, translations):
@@ -128,15 +193,32 @@ def validate_script(before, after, member):
         raise ValueError("RPYC2 补丁改变了文本之外的内容：" + member)
 
 
-def build(request, source, files, packed, scripts, reports, scratch):
-    translations = request.get("translations") or {}
-    if request.get("translationsFile"):
-        translations = json.loads(archive.read_file(request["translationsFile"], 128 << 20))
-    if not isinstance(translations, dict) or any(not isinstance(text, str) for text in translations.values()):
-        raise ValueError("译文必须为 ID 到文本的映射。")
-    remaining, replacements = set(translations), {resource: {} for resource in files}
+def build(request, source, files, packed, build_mode, scripts, reports, scratch, translations):
+    remaining = set(translations)
     output = archive.checked_path(request["outputDirectory"])
     archive.separate(archive.checked_path(source), output)
+    if packed and build_mode == "overlay":
+        written, seen_targets = [], set()
+        for resource, member, path in scripts:
+            patched, original, matched = build_script(resource, member, path, translations)
+            remaining.difference_update(matched)
+            if patched == original:
+                continue
+            relative = overlay_path(resource, member)
+            key = relative.casefold()
+            if key in seen_targets:
+                raise ValueError("多个封包映射到相同的覆盖输出路径：" + relative)
+            seen_targets.add(key)
+            target = resolve(output, relative)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with target.open("xb") as stream:
+                stream.write(patched)
+            written.append(relative)
+        if remaining:
+            raise ValueError("部分译文无法对应当前 RPYC2 脚本，请重新提取：" + ", ".join(sorted(remaining)[:3]))
+        return dict(build=dict(mode="overlay", files=sorted(written), warnings=[WARNING]))
+
+    replacements = {resource: {} for resource in files}
     for index, (resource, member, path) in enumerate(scripts):
         patched, original, matched = build_script(resource, member, path, translations)
         remaining.difference_update(matched)
@@ -164,25 +246,39 @@ def build(request, source, files, packed, scripts, reports, scratch):
             else:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with resolve(source, resource).open("rb") as original, target.open("xb") as destination:
-                    shutil.copyfileobj(original, destination, 1 << 20)
-    return dict(build=dict(files=files, warnings=[WARNING]))
+                    shutil.copyfileobj(original, destination, 8 << 20)
+    return dict(build=dict(mode="replace", files=files, warnings=[WARNING]))
 
 
-def validate(request, files, packed, scripts, reports, scratch):
-    after_scripts, after_reports = load(request["outputDirectory"], files, packed, scratch / "patched", verify=True)
+def validate(request, source, files, packed, scripts, scratch):
+    if packed and request.get("buildMode") == "overlay":
+        by_overlay = {overlay_path(resource, member).casefold(): (member, path) for resource, member, path in scripts}
+        overrides = overlay_files_map(request, by_overlay)
+        actual_disk = disk_files(request["outputDirectory"])
+        if actual_disk != set(overrides):
+            raise ValueError("overlay 输出目录文件列表与声明不一致。")
+        for key, after in overrides.items():
+            member, before = by_overlay[key]
+            validate_script(before, after, member)
+        check_validation_context(request)
+        return dict(validation=dict(passed=True, issues=[], runtimeStatus="not-tested"))
+
+    after_scripts, _ = load(request["outputDirectory"], files, packed, scratch / "patched", verify=False)
     if [(r, m) for r, m, _ in scripts] != [(r, m) for r, m, _ in after_scripts]:
         raise ValueError("补丁改变了 RPYC2 脚本列表。")
-    selected = {(r, m) for r, m, _ in scripts}
-    for resource, report in reports.items():
-        before = {entry["name"]: entry for entry in report["entries"]}
-        after = {entry["name"]: entry for entry in after_reports[resource]["entries"]}
-        if before.keys() != after.keys():
-            raise ValueError("补丁改变了封包成员列表：" + resource)
-        for member, entry in before.items():
-            if (resource, archive.member_name(member)) not in selected and entry["sha256"] != after[member]["sha256"]:
-                raise ValueError("补丁修改了未选择的封包成员：" + resource + " → " + member)
+    if packed:
+        selected_by_archive = {resource: set() for resource in files}
+        for resource, member, _ in scripts:
+            selected_by_archive[resource].add(archive.member_name(member))
+        for resource in files:
+            archive.check_rpa_replacement(
+                resolve(source, resource),
+                resolve(request["outputDirectory"], resource),
+                selected_by_archive[resource],
+            )
     for (_, member, before), (_, _, after) in zip(scripts, after_scripts):
         validate_script(before, after, member)
+    check_validation_context(request)
     return dict(validation=dict(passed=True, issues=[], runtimeStatus="not-tested"))
 
 
@@ -191,10 +287,13 @@ def execute(request):
         raise ValueError("不支持的适配协议。")
     config = json.loads(archive.read_file(resolve(request["adapterDirectory"], "tools/adapter-template.json"), 1 << 20))
     packed = config["templateId"] == "rpa3-renpy-rpyc"
+    build_mode = config.get("buildMode") or ("overlay" if packed else "replace")
     if (config.get("schemaVersion") != 1 or config.get("templateVersion") != 1 or config.get("format") != "Renpy"
             or config.get("templateId") not in ("loose-renpy-rpyc", "rpa3-renpy-rpyc")
             or config.get("scriptExtensions") != [".rpyc"]
-            or config.get("archiveComponent") != ("archive.rpa3" if packed else None)):
+            or config.get("archiveComponent") != ("archive.rpa3" if packed else None)
+            or build_mode not in ("overlay", "replace")
+            or (build_mode == "overlay" and not packed)):
         raise ValueError("RPYC2 模板配置不匹配。")
     files = sorted(request["resourceFiles"])
     if not files or len(files) > 1024 or len(set(file.casefold() for file in files)) != len(files):
@@ -208,14 +307,19 @@ def execute(request):
         return probe(source, files, packed, config["templateId"])
     if operation not in ("extract", "build", "validate"):
         raise ValueError("不支持的适配操作。")
+    if operation == "build":
+        translations = load_translations(request)
+        if packed and build_mode == "overlay" and not translations:
+            archive.separate(archive.checked_path(source), archive.checked_path(request["outputDirectory"]))
+            return dict(build=dict(mode="overlay", files=[], warnings=[WARNING]))
     with tempfile.TemporaryDirectory(prefix="rpyc-", dir=Path.cwd()) as directory:
         scratch = Path(directory)
-        scripts, reports = load(source, files, packed, scratch / "original", verify=operation == "validate")
+        scripts, reports = load(source, files, packed, scratch / "original", verify=False)
         if operation == "extract":
-            return extract(scripts)
+            return extract(request, scripts, packed)
         if operation == "build":
-            return build(request, source, files, packed, scripts, reports, scratch)
-        return validate(request, files, packed, scripts, reports, scratch)
+            return build(request, source, files, packed, build_mode, scripts, reports, scratch, translations)
+        return validate(request, source, files, packed, scripts, scratch)
 
 
 def main():

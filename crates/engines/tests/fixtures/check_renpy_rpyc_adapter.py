@@ -91,6 +91,43 @@ for name in packed["resourceFiles"]:
 reject(lambda: adapter.execute(packed), "相同 RPYC 路径")
 archive(source / "one.rpa", {"same.rpyc": original, "same.rpy": b"source overrides compiled"})
 reject(lambda: adapter.execute(dict(packed, resourceFiles=["one.rpa"])), "加载顺序")
+# rpa3-renpy-rpyc defaults to fast overlay output anchored at the archive directory.
+(source / "game").mkdir()
+archive(source / "game/archive.rpa", {"story.rpyc": original, "media.bin": b"media-bytes"})
+rpa_req = dict(packed, resourceFiles=["game/archive.rpa"])
+rpa_units = adapter.execute(rpa_req)["extraction"]["units"]
+assert len(rpa_units) == 4
+rpa_empty = Path("rpa-empty-overlay").absolute()
+rpa_empty_build = adapter.execute(dict(rpa_req, operation="build", outputDirectory=str(rpa_empty), translations={}))["build"]
+assert rpa_empty_build["mode"] == "overlay" and rpa_empty_build["files"] == []
+rpa_overlay = Path("rpa-overlay").absolute()
+rpa_text = "你好 [player] {b}覆盖补丁{/b}"
+rpa_built = adapter.execute(dict(rpa_req, operation="build", outputDirectory=str(rpa_overlay),
+                                 translations={rpa_units[0]["id"]: rpa_text}))["build"]
+assert rpa_built["mode"] == "overlay" and rpa_built["files"] == ["game/story.rpyc"]
+assert not (rpa_overlay / "game/archive.rpa").exists()
+rpa_reextracted = adapter.execute(dict(rpa_req, operation="extract", outputDirectory=str(rpa_overlay),
+                                       buildMode="overlay", outputFiles=rpa_built["files"]))["extraction"]["units"]
+assert rpa_reextracted[0]["sourceText"] == rpa_text
+assert rpa_reextracted[0]["resourcePath"] == "game/archive.rpa"
+assert rpa_reextracted[0]["context"] == rpa_units[0]["context"]
+assert adapter.execute(dict(rpa_req, operation="validate", outputDirectory=str(rpa_overlay),
+                            buildMode="overlay", outputFiles=rpa_built["files"]))["validation"]["passed"]
+(rpa_overlay / "game/extra.rpyc").write_bytes(original)
+reject(lambda: adapter.execute(dict(rpa_req, operation="validate", outputDirectory=str(rpa_overlay),
+                                    buildMode="overlay", outputFiles=rpa_built["files"])), "不一致")
+(rpa_overlay / "game/extra.rpyc").unlink()
+(rpa_overlay / "game/story.rpyc").write_bytes(sample(code="tampered"))
+reject(lambda: adapter.execute(dict(rpa_req, operation="validate", outputDirectory=str(rpa_overlay),
+                                    buildMode="overlay", outputFiles=rpa_built["files"])), "文本之外")
+config.update(buildMode="replace")
+config_path.write_text(json.dumps(config))
+rpa_replace = Path("rpa-replace").absolute()
+rpa_replaced = adapter.execute(dict(rpa_req, operation="build", outputDirectory=str(rpa_replace),
+                                    translations={rpa_units[0]["id"]: rpa_text}))["build"]
+assert rpa_replaced["mode"] == "replace" and rpa_replaced["files"] == ["game/archive.rpa"]
+assert adapter.execute(dict(rpa_req, operation="validate", outputDirectory=str(rpa_replace)))["validation"]["passed"]
+config.pop("buildMode", None)
 config.update(templateId="renpy-mixed", archiveComponent="archive.rpa3", scriptExtensions=[".rpy", ".rpyc"])
 config_path.write_text(json.dumps(config))
 script.write_bytes(original)
@@ -104,14 +141,37 @@ reject(lambda: mixed.execute(packed), "加载冲突")
 (source / "nested").mkdir()
 archive(source / "nested/one.rpa", {"other.rpyc": original})
 reject(lambda: mixed.execute(dict(packed, resourceFiles=["script.rpyc", "nested/one.rpa"])), "加载根目录")
-archive(source / "one.rpa", {"other.rpyc": original})
+archive(source / "one.rpa", {"other.rpyc": original, "media.bin": b"keep-media"})
 combined = dict(request("extract"), resourceFiles=["script.rpyc", "one.rpa"])
 units = mixed.execute(combined)["extraction"]["units"]
 assert len(units) == 8
+# Default packed mode uses fast overlay output without rewriting one.rpa.
+empty_overlay = Path("mixed-empty-overlay").absolute()
+built_empty = mixed.execute(dict(combined, operation="build", outputDirectory=str(empty_overlay), translations={}))["build"]
+assert built_empty["mode"] == "overlay" and built_empty["files"] == []
 output = Path("mixed-output").absolute()
-mixed.execute(dict(combined, operation="build", outputDirectory=str(output),
-                   translations={units[0]["id"]: "你好 [player] {b}混合资源{/b}"}))
-assert mixed.execute(dict(combined, operation="validate", outputDirectory=str(output)))["validation"]["passed"]
+packed_unit = next(unit for unit in units if unit["resourcePath"] == "one.rpa")
+changed_text = "你好 [player] {b}混合资源{/b}"
+built = mixed.execute(dict(combined, operation="build", outputDirectory=str(output),
+                           translations={packed_unit["id"]: changed_text}))["build"]
+assert built["mode"] == "overlay" and built["files"] == ["other.rpyc"]
+assert not (output / "one.rpa").exists()
+reextracted = mixed.execute(dict(combined, operation="extract", outputDirectory=str(output),
+                                 buildMode="overlay", outputFiles=built["files"]))["extraction"]["units"]
+reextracted_unit = next(unit for unit in reextracted if unit["id"] == packed_unit["id"])
+assert reextracted_unit["sourceText"] == changed_text
+assert reextracted_unit["resourcePath"] == "one.rpa"
+assert reextracted_unit["context"] == packed_unit["context"]
+assert mixed.execute(dict(combined, operation="validate", outputDirectory=str(output),
+                          buildMode="overlay", outputFiles=built["files"]))["validation"]["passed"]
+# Explicit buildMode=replace still rebuilds archives and verifies untouched media.
+config.update(buildMode="replace")
+config_path.write_text(json.dumps(config))
+replaced = Path("mixed-replace").absolute()
+built_replace = mixed.execute(dict(combined, operation="build", outputDirectory=str(replaced),
+                                   translations={packed_unit["id"]: changed_text}))["build"]
+assert built_replace["mode"] == "replace" and built_replace["files"] == ["one.rpa", "script.rpyc"]
+assert mixed.execute(dict(combined, operation="validate", outputDirectory=str(replaced)))["validation"]["passed"]
 assert not list(Path.cwd().glob("renpy-*")), "mixed temporary resources leaked"
 assert not list(Path.cwd().glob("rpyc-*")), "temporary resources leaked"
 print("rpyc-adapter-ok")

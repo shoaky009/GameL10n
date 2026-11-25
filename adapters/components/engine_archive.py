@@ -136,10 +136,10 @@ def select_entries(request, entries):
             and (extensions is None or Path(member_name(entry.name)).suffix.lower() in extensions)]
 
 
-def chunks(stream, offset, length):
+def chunks(stream, offset, length, chunk_size=8 << 20):
     stream.seek(offset)
     while length:
-        data = stream.read(min(length, 1 << 20))
+        data = stream.read(min(length, chunk_size))
         if not data:
             raise ValueError("truncated archive payload")
         length -= len(data)
@@ -153,9 +153,17 @@ def hash_range(stream, offset, length, prefix=b""):
     return result.hexdigest()
 
 
-def copy_range(stream, output, offset, length):
+def copy_range(stream, output, offset, length, *hashers):
     for data in chunks(stream, offset, length):
         output.write(data)
+        for hasher in hashers:
+            hasher.update(data)
+
+
+def hash_stream(stream, offset, length, *hashers):
+    for data in chunks(stream, offset, length):
+        for hasher in hashers:
+            hasher.update(data)
 
 
 def open_kif(stream, executables):
@@ -713,32 +721,40 @@ def rpa_rebuild(request, source, stream, module, index):
     output.parent.mkdir(parents=True, exist_ok=True)
     created = False
     try:
+        hashes = {}
+        input_hasher = hashlib.sha256()
         with output.open("xb") as target:
             created = True
             if not changed:
-                copy_range(stream, target, 0, index.size)
+                copy_range(stream, target, 0, index.size, input_hasher)
             else:
                 target.write(index.header)
+                input_hasher.update(index.header)
                 cursor, mapping = 34, {}
                 for entry in sorted(index.entries, key=lambda item: item.offset):
-                    copy_range(stream, target, cursor, entry.offset - cursor)
+                    copy_range(stream, target, cursor, entry.offset - cursor, input_hasher)
                     offset = target.tell()
+                    stored_len = entry.length - len(entry.prefix)
+                    member_hasher = hashlib.sha256(entry.prefix)
                     if entry.name in changed:
+                        hash_stream(stream, entry.offset, stored_len, input_hasher, member_hasher)
                         value = changed[entry.name]
                         prefix = value[:min(len(entry.prefix), len(value))]
                         target.write(value[len(prefix):])
                         length = len(value)
                     else:
                         prefix, length = entry.prefix, entry.length
-                        copy_range(stream, target, entry.offset, length - len(prefix))
+                        copy_range(stream, target, entry.offset, stored_len, input_hasher, member_hasher)
+                    hashes[entry.name] = member_hasher.hexdigest()
                     chunk = (offset ^ index.key, length ^ index.key)
                     if len(entry.chunk) == 3:
                         chunk += (prefix.decode("latin-1") if isinstance(entry.chunk[2], str) else prefix,)
                     mapping[entry.raw_name] = [chunk]
-                    cursor = entry.offset + entry.length - len(entry.prefix)
+                    cursor = entry.offset + stored_len
                     if target.tell() > RPA_MAX_ARCHIVE:
                         raise ValueError("rebuilt RPA size limit exceeded")
-                copy_range(stream, target, cursor, index.offset - cursor)
+                copy_range(stream, target, cursor, index.offset - cursor, input_hasher)
+                hash_stream(stream, index.offset, index.size - index.offset, input_hasher)
                 offset = target.tell()
                 # Serialize only data reconstructed from the shared safe reader.
                 ordered = {entry.raw_name: mapping[entry.raw_name] for entry in index.entries}
@@ -749,21 +765,36 @@ def rpa_rebuild(request, source, stream, module, index):
                 target.seek(8)
                 target.write(f"{offset:016x}".encode("ascii"))
 
-        hashes = {}
+        input_hash = input_hasher.hexdigest()
+        output_hasher = hashlib.sha256()
         with output.open("rb") as rebuilt:
             verified = rpa_index(module, rebuilt)
             after = {entry.name: entry for entry in verified.entries}
             if set(after) != set(by_name):
                 raise ValueError("rebuilt RPA changed member names")
-            for entry in index.entries:
-                original = hash_range(stream, entry.offset, entry.length - len(entry.prefix), entry.prefix)
-                hashes[entry.name] = original
-                expected = digest(changed[entry.name]) if entry.name in changed else original
-                actual = after[entry.name]
-                if hash_range(rebuilt, actual.offset, actual.length - len(actual.prefix), actual.prefix) != expected:
-                    raise ValueError("rebuilt RPA changed untouched members or lost replacements")
-            output_hash = hash_range(rebuilt, 0, verified.size)
-        input_hash = hash_range(stream, 0, index.size)
+            if not changed:
+                cursor = 0
+                for entry in sorted(verified.entries, key=lambda item: item.offset):
+                    hash_stream(rebuilt, cursor, entry.offset - cursor, output_hasher)
+                    stored_len = entry.length - len(entry.prefix)
+                    member_hasher = hashlib.sha256(entry.prefix)
+                    hash_stream(rebuilt, entry.offset, stored_len, output_hasher, member_hasher)
+                    hashes[entry.name] = member_hasher.hexdigest()
+                    cursor = entry.offset + stored_len
+                hash_stream(rebuilt, cursor, verified.size - cursor, output_hasher)
+            else:
+                cursor = 0
+                for entry in sorted(verified.entries, key=lambda item: item.offset):
+                    hash_stream(rebuilt, cursor, entry.offset - cursor, output_hasher)
+                    stored_len = entry.length - len(entry.prefix)
+                    member_hasher = hashlib.sha256(entry.prefix)
+                    hash_stream(rebuilt, entry.offset, stored_len, output_hasher, member_hasher)
+                    expected = digest(changed[entry.name]) if entry.name in changed else hashes[entry.name]
+                    if member_hasher.hexdigest() != expected:
+                        raise ValueError("rebuilt RPA changed untouched members or lost replacements")
+                    cursor = entry.offset + stored_len
+                hash_stream(rebuilt, cursor, verified.size - cursor, output_hasher)
+        output_hash = output_hasher.hexdigest()
         if not changed and input_hash != output_hash:
             raise ValueError("unchanged RPA build changed archive bytes")
         return hashes, dict(inputSha256=input_hash, outputSha256=output_hash,
@@ -772,6 +803,29 @@ def rpa_rebuild(request, source, stream, module, index):
         if created:
             output.unlink(missing_ok=True)
         raise
+
+
+def check_rpa_replacement(source, rebuilt, selected):
+    """Compare untouched RPA members sequentially without hashing media twice."""
+    module = importlib.import_module("python.archives.rpa")
+    source_path, rebuilt_path = checked_path(source), checked_path(rebuilt)
+    with source_path.open("rb") as original, rebuilt_path.open("rb") as modified:
+        before, after = rpa_index(module, original), rpa_index(module, modified)
+        before_by_name = {entry.name: entry for entry in before.entries}
+        after_by_name = {entry.name: entry for entry in after.entries}
+        if before_by_name.keys() != after_by_name.keys():
+            raise ValueError("补丁改变了封包成员列表：" + str(source_path.name))
+        for old in sorted(before.entries, key=lambda item: item.offset):
+            if member_name(old.name) in selected:
+                continue
+            new = after_by_name[old.name]
+            if old.length != new.length or old.prefix != new.prefix:
+                raise ValueError("补丁修改了未选择的封包成员：" + old.name)
+            stored_len = old.length - len(old.prefix)
+            for left, right in zip(chunks(original, old.offset, stored_len),
+                                   chunks(modified, new.offset, stored_len), strict=True):
+                if left != right:
+                    raise ValueError("补丁修改了未选择的封包成员：" + old.name)
 
 
 def execute_rpa(request, source):
