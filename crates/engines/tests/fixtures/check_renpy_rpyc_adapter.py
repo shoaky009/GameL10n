@@ -89,11 +89,26 @@ packed = dict(protocolVersion=1, adapterDirectory=str(package), operation="extra
 for name in packed["resourceFiles"]:
     archive(source / name, {"same.rpyc": original})
 reject(lambda: adapter.execute(packed), "相同 RPYC 路径")
-archive(source / "one.rpa", {"same.rpyc": original, "same.rpy": b"source overrides compiled"})
+# Paired archived .rpy alongside .rpyc is ignored by Ren'Py (dir is None),
+# while non-default tl/<lang>/ translation packs are skipped by default.
+archive(source / "one.rpa", {
+    "same.rpyc": original,
+    "same.rpy": b"ignored archived source",
+    "tl/russian/other.rpyc": original,
+    "tl/russian/other.rpy": b"ignored russian source",
+})
+paired_units = adapter.execute(dict(packed, resourceFiles=["one.rpa"]))["extraction"]["units"]
+assert len(paired_units) == 4
+archive(source / "one.rpa", {"same.rpyc": original, "orphan.rpy": b"no paired rpyc"})
 reject(lambda: adapter.execute(dict(packed, resourceFiles=["one.rpa"])), "加载顺序")
 # rpa3-renpy-rpyc defaults to fast overlay output anchored at the archive directory.
 (source / "game").mkdir()
-archive(source / "game/archive.rpa", {"story.rpyc": original, "media.bin": b"media-bytes"})
+archive(source / "game/archive.rpa", {
+    "story.rpyc": original,
+    "story.rpy": b"ignored archived source",
+    "tl/espanol/story.rpyc": original,
+    "media.bin": b"media-bytes",
+})
 rpa_req = dict(packed, resourceFiles=["game/archive.rpa"])
 rpa_units = adapter.execute(rpa_req)["extraction"]["units"]
 assert len(rpa_units) == 4

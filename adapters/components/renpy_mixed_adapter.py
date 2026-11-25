@@ -28,7 +28,7 @@ def container_overlay_path(container, file):
     return compiled.overlay_path(container.resource, file) if container.resource is not None else archive.member_name(file)
 
 
-def load(source, files, scratch, verify=False):
+def load(source, files, scratch, verify=False, include_tl=False):
     """Check the complete namespace from indices before reading script payloads."""
     packed = [file for file in files if file.lower().endswith(".rpa")]
     loose = [file for file in files if not file.lower().endswith(".rpa")]
@@ -40,6 +40,8 @@ def load(source, files, scratch, verify=False):
     root = next(iter(roots), ())
     seen = {}
     selected_bytes = entries = 0
+    selected_members = {}
+    inspected_entries = {}
 
     def register(virtual, origin, length):
         nonlocal selected_bytes
@@ -65,13 +67,27 @@ def load(source, files, scratch, verify=False):
         report = archive.execute(dict(protocolVersion=1, component="archive.rpa3", operation="inspect",
                                       archive=str(compiled.resolve(source, resource)), extensions=[".rpy", ".rpyc"]))
         entries += report["entryCount"]
+        inspected_entries[resource] = report["entries"]
+        compiled_names = {
+            archive.member_name(member["name"]).casefold()
+            for member in report["entries"]
+            if member["name"].lower().endswith(".rpyc")
+        }
+        chosen = []
         for member in report["entries"]:
             name = archive.member_name(member["name"])
+            if not include_tl and compiled.is_other_translation_script(name):
+                continue
             extension = PurePosixPath(name).suffix.lower()
+            # Ren'Py ignores archived .rpy when dir is None; prefer the paired .rpyc.
+            if extension == ".rpy" and (name + "c").casefold() in compiled_names:
+                continue
             if extension in (".rpy", ".rpyc"):
                 register(name, resource + " → " + name, member["length"])
+                chosen.append(member["name"])
             elif extension in (".rpym", ".rpymc", ".rpa", ".xp3", ".ks", ".soc", ".tjs", ".scn") or name.lower().endswith("_ren.py"):
                 raise ValueError("发现模板未覆盖的模块或封包：" + resource + " → " + name)
+        selected_members[resource] = chosen
     if entries > archive.MAX_ENTRIES:
         raise ValueError("Ren’Py 混合资源超过 10,000 封包成员预算。")
     if not seen:
@@ -80,9 +96,12 @@ def load(source, files, scratch, verify=False):
     containers = [Container(None, Path(source), loose, [])] if loose else []
     for index, resource in enumerate(packed):
         directory = scratch / str(index)
+        if not selected_members[resource]:
+            containers.append(Container(resource, directory, [], inspected_entries[resource]))
+            continue
         report = archive.execute(dict(protocolVersion=1, component="archive.rpa3", operation="extract",
                                       archive=str(compiled.resolve(source, resource)), outputDirectory=str(directory),
-                                      extensions=[".rpy", ".rpyc"], verifyContents=verify))
+                                      members=selected_members[resource], verifyContents=verify))
         containers.append(Container(resource, directory, sorted(report["extractedFiles"]), report["entries"]))
     return containers
 
@@ -254,7 +273,7 @@ def build(request, source, files, build_mode, containers, scratch, translations)
     return dict(build=dict(mode="replace", files=files, warnings=[WARNING]))
 
 
-def validate(request, source, files, before, scratch):
+def validate(request, source, files, before, scratch, include_tl=False):
     if request.get("buildMode") == "overlay":
         by_overlay = {}
         for container in before:
@@ -284,7 +303,7 @@ def validate(request, source, files, before, scratch):
         compiled.check_validation_context(request)
         return dict(validation=dict(passed=True, issues=[], runtimeStatus="not-tested"))
 
-    after = load(request["outputDirectory"], files, scratch / "patched", verify=False)
+    after = load(request["outputDirectory"], files, scratch / "patched", verify=False, include_tl=include_tl)
     if len(before) != len(after):
         raise ValueError("补丁改变了资源列表。")
     for original, patched in zip(before, after):
@@ -322,6 +341,7 @@ def execute(request):
         raise ValueError("资源不属于配置选中的 Ren’Py 格式。")
     has_packed = any(file.lower().endswith(".rpa") for file in files)
     build_mode = config.get("buildMode") or ("overlay" if has_packed else "replace")
+    include_tl = bool(config.get("includeTranslationLanguages", False))
     if build_mode not in ("overlay", "replace") or (build_mode == "overlay" and not has_packed):
         raise ValueError("Ren’Py 混合模板 buildMode 配置无效。")
     source, operation = request["sourceDirectory"], request["operation"]
@@ -340,12 +360,12 @@ def execute(request):
             return dict(build=dict(mode="overlay", files=[], warnings=[WARNING]))
     with tempfile.TemporaryDirectory(prefix="renpy-", dir=Path.cwd()) as directory:
         scratch = Path(directory)
-        containers = load(source, files, scratch / "original", verify=False)
+        containers = load(source, files, scratch / "original", verify=False, include_tl=include_tl)
         if operation == "extract":
             return extract(request, containers, scratch)
         if operation == "build":
             return build(request, source, files, build_mode, containers, scratch, translations)
-        return validate(request, source, files, containers, scratch)
+        return validate(request, source, files, containers, scratch, include_tl=include_tl)
 
 
 def main():

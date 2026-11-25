@@ -20,6 +20,7 @@ const KIRIKIRI_REFERENCE: &str = include_str!("../references/Kirikiri_text_encod
 const KAGUYA_REFERENCE: &str = include_str!("../references/Kaguya_MESSAGE_v4_0_runtime.md");
 const YURIS_REFERENCE: &str = include_str!("../references/Yuris_text_encoding.md");
 const ARTEMIS_REFERENCE: &str = include_str!("../references/Artemis_pfs_overlay.md");
+const RENPY_REFERENCE: &str = include_str!("../references/Renpy_runtime.md");
 const KAGUYA_WARNING: &str = "KaGuYa MESSAGE v4.0 内置适配器只提供 CP932 脚本提取和回填；可提取不代表已支持中文运行。CP932 无法表示的译文会报错，中文编码、字节遍历和字体绘制仍需验证。";
 const GRAPHICS_SHA256: &str = "E1292E3D47D1C65F4AE52A30B1159A476137422BD7A9272A5A2E0129F3CB0684";
 pub(crate) const ARTEMIS_PFS_TEMPLATE: &str = "artemis-pfs8-ast";
@@ -818,6 +819,7 @@ fn reference(format: &str) -> Option<(&'static str, &'static str)> {
         "KirikiriKs" | "KirikiriSoc" => {
             Some(("reference/Kirikiri_text_encoding.md", KIRIKIRI_REFERENCE))
         }
+        "Renpy" => Some(("reference/Renpy_runtime.md", RENPY_REFERENCE)),
         _ => None,
     }
 }
@@ -1306,5 +1308,8 @@ mod tests {
                 .unwrap()
                 .contains("archive.kif")
         );
+        let (path, content) = reference("Renpy").expect("renpy runtime reference");
+        assert_eq!(path, "reference/Renpy_runtime.md");
+        assert!(content.contains("force_archives"));
     }
 }

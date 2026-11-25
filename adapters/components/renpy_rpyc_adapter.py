@@ -33,6 +33,14 @@ def overlay_path(resource, member):
     return name if str(parent) in ("", ".") else (parent / name).as_posix()
 
 
+def is_other_translation_script(member):
+    parts = PurePosixPath(archive.member_name(member)).parts
+    for index in range(len(parts) - 2):
+        if parts[index].casefold() == "tl":
+            return parts[index + 1].casefold() != "none"
+    return False
+
+
 def overlay_files_map(request, valid_targets):
     output = request.get("outputDirectory")
     output_files = request.get("outputFiles")
@@ -114,7 +122,7 @@ def units(resource, member, rows, manifest):
                    protectedTokens=list(dict.fromkeys(rpyc.controls(row["message"]))))
 
 
-def load(source, files, packed, scratch, verify=False):
+def load(source, files, packed, scratch, verify=False, include_tl=False):
     scripts, reports, seen, selected_bytes, entries = [], {}, set(), 0, 0
     if packed and len(files) > 16:
         raise ValueError("RPYC2 流程最多处理 16 个封包。")
@@ -131,17 +139,37 @@ def load(source, files, packed, scratch, verify=False):
                                       archive=str(resolve(source, resource)), outputDirectory=str(directory),
                                       extensions=[".rpyc"], verifyContents=verify))
         reports[resource] = report
-        selected_bytes += report["selectedBytes"]
         entries += report["entryCount"]
-        if selected_bytes > archive.MAX_TOTAL or entries > archive.MAX_ENTRIES:
+        if entries > archive.MAX_ENTRIES:
             raise ValueError("RPYC2 封包合计超过 256 MiB 脚本／10,000 成员预算。")
-        unsupported = [entry["name"] for entry in report["entries"]
-                       if Path(entry["name"]).suffix.lower() in (".rpy", ".rpym", ".rpymc")
-                       or entry["name"].lower().endswith("_ren.py")]
+        compiled_names = {
+            archive.member_name(entry["name"]).casefold()
+            for entry in report["entries"]
+            if entry["name"].lower().endswith(".rpyc")
+        }
+        lengths = {archive.member_name(entry["name"]).casefold(): entry["length"] for entry in report["entries"]}
+        # Ren'Py skips archived .rpy/_ren.py/.rpym (dir is None) and only loads .rpyc.
+        # Ignore paired .rpy alongside .rpyc and non-default tl/<lang>/ translations.
+        unsupported = []
+        for entry in report["entries"]:
+            name = archive.member_name(entry["name"])
+            if not include_tl and is_other_translation_script(name):
+                continue
+            lower = name.lower()
+            suffix = Path(name).suffix.lower()
+            if suffix == ".rpy" and (name + "c").casefold() in compiled_names:
+                continue
+            if suffix in (".rpy", ".rpym", ".rpymc") or lower.endswith("_ren.py"):
+                unsupported.append(entry["name"])
         if unsupported:
             raise ValueError("RPYC2 流程不能确定源码或模块的加载顺序：" + resource + " → " + ", ".join(unsupported[:8]))
         for member in sorted(report["extractedFiles"]):
+            if not include_tl and is_other_translation_script(member):
+                continue
             key = member.casefold()
+            selected_bytes += lengths.get(key, 0)
+            if selected_bytes > archive.MAX_TOTAL:
+                raise ValueError("RPYC2 封包合计超过 256 MiB 脚本／10,000 成员预算。")
             if key in seen:
                 raise ValueError("多个封包提供相同 RPYC 路径，需先确认覆盖顺序：" + member)
             seen.add(key)
@@ -250,7 +278,7 @@ def build(request, source, files, packed, build_mode, scripts, reports, scratch,
     return dict(build=dict(mode="replace", files=files, warnings=[WARNING]))
 
 
-def validate(request, source, files, packed, scripts, scratch):
+def validate(request, source, files, packed, scripts, scratch, include_tl=False):
     if packed and request.get("buildMode") == "overlay":
         by_overlay = {overlay_path(resource, member).casefold(): (member, path) for resource, member, path in scripts}
         overrides = overlay_files_map(request, by_overlay)
@@ -263,7 +291,7 @@ def validate(request, source, files, packed, scripts, scratch):
         check_validation_context(request)
         return dict(validation=dict(passed=True, issues=[], runtimeStatus="not-tested"))
 
-    after_scripts, _ = load(request["outputDirectory"], files, packed, scratch / "patched", verify=False)
+    after_scripts, _ = load(request["outputDirectory"], files, packed, scratch / "patched", verify=False, include_tl=include_tl)
     if [(r, m) for r, m, _ in scripts] != [(r, m) for r, m, _ in after_scripts]:
         raise ValueError("补丁改变了 RPYC2 脚本列表。")
     if packed:
@@ -288,6 +316,7 @@ def execute(request):
     config = json.loads(archive.read_file(resolve(request["adapterDirectory"], "tools/adapter-template.json"), 1 << 20))
     packed = config["templateId"] == "rpa3-renpy-rpyc"
     build_mode = config.get("buildMode") or ("overlay" if packed else "replace")
+    include_tl = bool(config.get("includeTranslationLanguages", False))
     if (config.get("schemaVersion") != 1 or config.get("templateVersion") != 1 or config.get("format") != "Renpy"
             or config.get("templateId") not in ("loose-renpy-rpyc", "rpa3-renpy-rpyc")
             or config.get("scriptExtensions") != [".rpyc"]
@@ -314,12 +343,12 @@ def execute(request):
             return dict(build=dict(mode="overlay", files=[], warnings=[WARNING]))
     with tempfile.TemporaryDirectory(prefix="rpyc-", dir=Path.cwd()) as directory:
         scratch = Path(directory)
-        scripts, reports = load(source, files, packed, scratch / "original", verify=False)
+        scripts, reports = load(source, files, packed, scratch / "original", verify=False, include_tl=include_tl)
         if operation == "extract":
             return extract(request, scripts, packed)
         if operation == "build":
             return build(request, source, files, packed, build_mode, scripts, reports, scratch, translations)
-        return validate(request, source, files, packed, scripts, scratch)
+        return validate(request, source, files, packed, scripts, scratch, include_tl=include_tl)
 
 
 def main():

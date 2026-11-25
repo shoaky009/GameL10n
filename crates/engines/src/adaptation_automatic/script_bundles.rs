@@ -11,6 +11,16 @@ const MAX_ARCHIVE_ENTRIES: u64 = 10_000;
 const MAX_RPYC_SCRIPT_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_RPY_SCRIPT_BYTES: u64 = 64 * 1024 * 1024;
 
+fn is_other_translation_script(member: &str) -> bool {
+    let parts: Vec<_> = member.replace('\\', "/").split('/').map(str::to_owned).collect();
+    for index in 0..parts.len().saturating_sub(2) {
+        if parts[index].eq_ignore_ascii_case("tl") {
+            return !parts[index + 1].eq_ignore_ascii_case("none");
+        }
+    }
+    false
+}
+
 pub(super) struct BundlePlan {
     pub(super) template_id: &'static str,
     pub(super) archives: Vec<String>,
@@ -171,12 +181,22 @@ pub(super) async fn inspect_archives(
                 "全部封包合计超过自动组合的 10,000 成员／256 MiB 脚本预算。",
             ));
         }
+        let compiled_names: std::collections::BTreeSet<_> = members
+            .iter()
+            .filter_map(|member| member["name"].as_str())
+            .filter(|name| extension(name) == "rpyc")
+            .map(|name| name.replace('\\', "/").to_ascii_lowercase())
+            .collect();
         let mut names = Vec::new();
         for member in members {
             let name = text(member, "name")?;
             let length = member["length"]
                 .as_u64()
                 .ok_or_else(|| reject("封包清单成员长度无效。"))?;
+            if is_other_translation_script(name) {
+                continue;
+            }
+            let normalized = name.replace('\\', "/").to_ascii_lowercase();
             match extension(name).as_str() {
                 "rpyc" => {
                     if length > MAX_RPYC_SCRIPT_BYTES {
@@ -185,6 +205,10 @@ pub(super) async fn inspect_archives(
                     compiled += 1;
                 }
                 "rpy" => {
+                    // Ren'Py skips archived .rpy when dir is None; ignore .rpy paired with .rpyc.
+                    if compiled_names.contains(&format!("{normalized}c")) {
+                        continue;
+                    }
                     if length > MAX_RPY_SCRIPT_BYTES {
                         return Err(reject("单个 .rpy 脚本超过 64 MiB 读取预算。"));
                     }

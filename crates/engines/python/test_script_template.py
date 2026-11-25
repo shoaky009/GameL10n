@@ -276,6 +276,26 @@ class ScriptTemplateTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, '未选择'):
                 TEMPLATE.archive.check_rpa_replacement(source, tampered, {'script.rpy'})
 
+    def test_rpa3_renpy_rejects_archives_with_shadowing_rpyc(self):
+        pin = json.loads((ROOT / 'third_party/engine-tools/current.json').read_text(encoding='utf-8-sig'))
+        library = str(ROOT / 'third_party/engine-tools/references' / pin['revision'] / 'library.zip')
+        with tempfile.TemporaryDirectory() as directory, patch.object(sys, 'path', [library, *sys.path]):
+            root = Path(directory)
+            source, package = root / 'source', root / 'package'
+            source.mkdir()
+            (package / 'tools').mkdir(parents=True)
+            config = dict(schemaVersion=1, templateVersion=1, templateId='rpa3-renpy', format='Renpy',
+                          archiveComponent='archive.rpa3', scriptExtensions=['.rpy'], resourcePatterns=['**/*.rpa'])
+            (package / 'tools/adapter-template.json').write_text(json.dumps(config), encoding='utf-8')
+            rpa_file(source / 'archive.rpa', {
+                'script.rpy': 'label start:\n    "hello"\n'.encode('utf-8'),
+                'script.rpyc': b'RENPY RPC2dummy',
+            })
+            request = dict(protocolVersion=1, operation='extract', sourceDirectory=str(source),
+                           adapterDirectory=str(package), resourceFiles=['archive.rpa'])
+            with self.assertRaisesRegex(ValueError, '不会加载封包内的 .rpy'):
+                TEMPLATE.execute(request)
+
 
 if __name__ == '__main__':
     unittest.main()

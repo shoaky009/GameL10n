@@ -34,6 +34,16 @@ def containers(root, files, config, scratch):
                                           archive=str(source), outputDirectory=str(destination),
                                           filter=config.get('filter'), extensions=config['scriptExtensions']))
             scripts = report.get('extractedFiles', [])
+            if packed == 'archive.rpa3' and config.get('format') == 'Renpy':
+                compiled = {archive.member_name(entry['name']).casefold() for entry in report.get('entries', [])
+                            if entry['name'].lower().endswith('.rpyc')}
+                shadowed = [member for member in scripts
+                            if member.lower().endswith('.rpy') and (member + 'c').casefold() in compiled]
+                if shadowed:
+                    raise ValueError(
+                        'RPA 封包中存在同名 .rpyc 编译脚本；Ren’Py 不会加载封包内的 .rpy 源码，请改用 rpa3-renpy-rpyc 或 renpy-mixed 模板：'
+                        + ', '.join(shadowed[:8])
+                    )
             result.append((resource, destination, scripts))
         else:
             result.append((None, root, [resource]))
