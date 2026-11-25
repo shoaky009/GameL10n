@@ -47,4 +47,4 @@ Python 适配器入口为 `src/adapter.py`。从标准输入读取一份 UTF-8 J
 
 构建或校验需要登记的公开素材时，可以在写入产物之前返回 `success: false`、`errorKind: "dependency"` 和 `requiredAssets: {catalog, files}`。`catalog` 为宿主登记的素材来源 ID，`files` 为对应清单内的文件名。宿主校验共享缓存中的素材，缺失时按登记的地址和哈希获取，随后用同一请求重试一次。`toolPaths.assets` 提供素材名到只读文件路径的映射。
 
-当前执行 Manifest v4 Python 包。Python 与共享引擎库使用包声明的版本。VNTextPatch 使用宿主当前提供的原生工具，验收记录保留当时的工具哈希。正式包和补丁使用不同的发布目录与清单。[正式适配器](artifacts.md#正式适配器) · [协议字段参考](../../crates/engines/prompts/adapter-protocol.md)
+当前执行 Manifest v4 Python 包。Python 与共享引擎库使用包声明的版本。VNTextPatch 使用宿主当前提供的原生工具，验收记录保留当时的工具哈希。正式包和补丁使用不同的发布目录与清单。[正式适配器](artifacts.md#正式适配器) · [兼容性与破坏性变更](developing.md#4-宿主兼容性与破坏性变更) · [协议字段参考](../../crates/engines/prompts/adapter-protocol.md)

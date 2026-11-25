@@ -19,5 +19,6 @@
 
 - [开发环境、构建与发布](development.md)
 - [架构与模块边界](architecture.md)
+- [适配器开发与兼容性指南](adapters/developing.md)
 - [适配器协议](adapters/protocol.md) · [识别声明](adapters/recognition.md) · [适配与补丁产物](adapters/artifacts.md)
 - [执行隔离](adapters/execution-isolation.md) · [文本与运行组件](adapters/components.md) · [封包与模板](adapters/templates.md)

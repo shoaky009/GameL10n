@@ -37,5 +37,5 @@
 
 适配器身份按引擎或资源结构命名，游戏样本与验证记录放入兼容记录。仓库内置实现位于 `adapters/` 和 Engines，用户发布的版本保存在应用数据目录。[正式适配器](artifacts.md#正式适配器)
 
-- [识别与智能适配](automatic-adaptation.md) · [CLI 协议](protocol.md) · [包识别声明](recognition.md)
+- [开发与兼容性指南](developing.md) · [识别与智能适配](automatic-adaptation.md) · [CLI 协议](protocol.md) · [包识别声明](recognition.md)
 - [封包与模板](templates.md) · [文本与运行组件](components.md)

@@ -12,7 +12,7 @@
 | 字体诊断 | `inspect_font_coverage` 检查 SFNT/TTC 覆盖，`windows-font-metrics` 检查 GDI 和 GDI+ |
 | 字体和启动 | `gdiplus-font-bridge`、QLIE 字体与启动器、`system4-fnl-glyph` |
 
-每个组件的参数、示例和限制随注册条目维护。[组件注册表](../../crates/engines/prompts/adapter-components.json)
+上表仅列出常用分类，完整组件列表、参数、示例和限制随注册条目维护。[组件注册表](../../crates/engines/prompts/adapter-components.json) · [新增组件与开发指南](developing.md)
 
 查询和复制组件时使用完整 ID。只给出 ID 前缀时，工具会列出匹配的完整 ID，供下次调用选择。
 
