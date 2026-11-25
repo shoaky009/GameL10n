@@ -126,12 +126,13 @@ class RenpyFontTest(unittest.TestCase):
                 [],
             )
 
-    def test_rpyc_adapter_auto_emits_and_validates_font_fallback_in_overlay_mode(self):
+    def test_font_companion_follows_changed_dialogue_in_both_patch_modes(self):
         fixtures = ROOT / "crates/engines/tests/fixtures"
         with tempfile.TemporaryDirectory() as directory, patch.object(
             sys, "path", [str(ROOT), str(fixtures / "renpy-rpyc-reference-e9b8018.zip"), str(fixtures), *sys.path]
         ):
             renpy_rpyc_adapter = importlib.import_module("adapters.components.renpy_rpyc_adapter")
+            mixed = importlib.import_module("adapters.components.renpy_mixed_adapter")
             renpy_font = importlib.import_module("adapters.components.renpy_font")
             fixture_mod = importlib.import_module("renpy_rpyc_fixture")
 
@@ -185,46 +186,41 @@ class RenpyFontTest(unittest.TestCase):
                 self.assertEqual(identity_build["mode"], "overlay")
                 self.assertEqual(identity_build["files"], [])
 
-                out = root / "overlay"
-                built = renpy_rpyc_adapter.execute(dict(
-                    base_req,
-                    operation="build",
-                    outputDirectory=str(out),
-                    translations={target_unit["id"]: "中文译文 [player] {b}测试{/b}"},
-                ))["build"]
-                self.assertEqual(built["mode"], "overlay")
-                self.assertEqual(built["files"], ["game/story.rpyc", "game/zz_gamel10n_font.rpy"])
-                self.assertTrue((out / "game/zz_gamel10n_font.rpy").is_file())
-
-                reextracted = renpy_rpyc_adapter.execute(dict(
-                    base_req,
-                    operation="extract",
-                    outputDirectory=str(out),
-                    buildMode="overlay",
-                    outputFiles=built["files"],
-                ))["extraction"]["units"]
-                matched = next(u for u in reextracted if u["id"] == target_unit["id"])
-                self.assertEqual(matched["sourceText"], "中文译文 [player] {b}测试{/b}")
-
-                validated = renpy_rpyc_adapter.execute(dict(
-                    base_req,
-                    operation="validate",
-                    outputDirectory=str(out),
-                    buildMode="overlay",
-                    outputFiles=built["files"],
-                ))["validation"]
-                self.assertTrue(validated["passed"])
-
-                # Tampering with the generated font fallback must be rejected by validate.
-                (out / "game/zz_gamel10n_font.rpy").write_text("# tampered\n", encoding="utf-8")
-                with self.assertRaisesRegex(ValueError, "字体回退脚本"):
-                    renpy_rpyc_adapter.execute(dict(
-                        base_req,
-                        operation="validate",
-                        outputDirectory=str(out),
-                        buildMode="overlay",
-                        outputFiles=built["files"],
-                    ))
+                loose = "game/loose.rpyc"
+                (source / loose).write_bytes(original)
+                mixed_config = dict(config, templateId="renpy-mixed", scriptExtensions=[".rpy", ".rpyc"])
+                archive_file = "game/archive.rpa"
+                trials = [
+                    (renpy_rpyc_adapter, config, [archive_file], "overlay"),
+                    (renpy_rpyc_adapter, dict(config, buildMode="replace"), [archive_file], "replace"),
+                    (mixed, mixed_config, [archive_file], "overlay"),
+                    (mixed, mixed_config, [archive_file, loose], "replace"),
+                ]
+                font_file = "game/zz_gamel10n_font.rpy"
+                text = "中文译文 [player] {b}测试{/b}"
+                for adapter, settings, files, mode in trials:
+                    with self.subTest(template=settings["templateId"], mode=mode):
+                        out = root / (settings["templateId"] + "-" + mode)
+                        (package / "tools/adapter-template.json").write_text(json.dumps(settings), encoding="utf-8")
+                        req = dict(base_req, resourceFiles=files)
+                        built = adapter.execute(dict(req, operation="build", outputDirectory=str(out),
+                                                     translations={target_unit["id"]: text}))["build"]
+                        self.assertEqual(built["mode"], mode)
+                        scripts = ["game/story.rpyc"] if mode == "overlay" else files
+                        self.assertEqual(built["files"], sorted([*scripts, font_file]))
+                        output = dict(outputDirectory=str(out), buildMode=mode, outputFiles=built["files"])
+                        extract = dict(req, **output) if mode == "overlay" else dict(
+                            req, sourceDirectory=str(out), resourceFiles=built["files"])
+                        units = adapter.execute(dict(extract, operation="extract"))["extraction"]["units"]
+                        self.assertEqual(next(u["sourceText"] for u in units if u["id"] == target_unit["id"]), text)
+                        validate = dict(req, operation="validate", **output)
+                        self.assertTrue(adapter.execute(validate)["validation"]["passed"])
+                        (out / font_file).write_text("# incomplete\n", encoding="utf-8")
+                        with self.assertRaisesRegex(ValueError, "字体回退脚本"):
+                            adapter.execute(validate)
+                        (out / font_file).unlink()
+                        with self.assertRaisesRegex(ValueError, "字体回退脚本"):
+                            adapter.execute(dict(validate, outputFiles=scripts))
 
 
 if __name__ == "__main__":

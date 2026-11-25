@@ -8,13 +8,15 @@ import zlib
 
 from renpy_rpyc_fixture import Raw, encode, sample
 
-package = Path(sys.argv[1])
-sys.path.append(str(package))
+bundled = Path(sys.argv[1])
+sys.path.append(str(bundled))
 from tools import renpy_rpyc_adapter as adapter
 from tools import renpy_mixed_adapter as mixed
 
+package = Path("test-package").absolute()
+(package / "tools").mkdir(parents=True)
 config_path = package / "tools/adapter-template.json"
-config = json.loads(config_path.read_text())
+config = json.loads((bundled / "tools/adapter-template.json").read_text())
 config.update(templateId="loose-renpy-rpyc", archiveComponent=None, scriptExtensions=[".rpyc"])
 config_path.write_text(json.dumps(config))
 

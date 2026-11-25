@@ -11,7 +11,7 @@
 
 ## 2. 补丁输出模式（Overlay 与 Replace）
 
-- `rpa3-renpy-rpyc` 与含封包的 `renpy-mixed` 默认使用 `build.mode = "overlay"`：
+- `rpa3-renpy-rpyc` 与只选中封包的 `renpy-mixed` 默认使用 `build.mode = "overlay"`。从源码模板切换到 RPYC2 时沿用此默认值。松散脚本与封包混合时默认使用 `replace`，以便替换原路径上的脚本。纯封包的默认行为如下。
   - 原文无改动时返回空 `files: []`；
   - 有译文改动时仅将变更过的脚本输出到封包同级逻辑目录（例如 `game/script.rpyc`），避免重复复制或重建数 GB 媒体封包。
 - 若目标游戏在 `options.rpy` 或启动代码中显式设置了 `config.force_archives = True` 或自定义 `file_open_callback` 导致松散覆盖不生效，可在 `tools/adapter-template.json` 中设置 `"buildMode": "replace"` 切回流式整包重建。
@@ -23,7 +23,7 @@
 ## 4. 中文字体检查与替换
 
 - 西文或日文 Ren’Py 游戏常用的 `gui.text_font`、`gui.name_text_font`、`gui.interface_text_font`（如 Philosopher、Cinzel、DejaVuSans 等）通常缺少简体中文汉字字形，直接写中文会显示方块字或错位。
-- `rpa3-renpy-rpyc` 与含封包的 `renpy-mixed` 模板在 `overlay` 模式写入中文译文时，会自动检查 `gui.rpyc`/`gui.rpy` 指定的字体（通过 SFNT/TTC `cmap` 及内置西文字体清单判断）；若检测到缺简体中文字形，会自动附带独立的 `zz_gamel10n_font.rpy`（利用 `init 999 python:` 与 `FontGroup` 保留原英文字体/符号，仅将 CJK 字符回退到本地可用简体中文字体，卸载补丁自动清理）。
+- 同一目录的封包在 `overlay` 和 `replace` 模式下共用字体检查。写入中文译文且 GUI 字体缺少常用简体中文字形时，两种补丁都会在封包旁附带 `zz_gamel10n_font.rpy`。验收会核对脚本的清单、文件和内容。若游戏自定义加载器屏蔽松散脚本，需根据该加载器另行适配字体。
 - 若游戏使用自定义字体配置或需要指定随包开源字体，可在 `tools/adapter-template.json` 关闭 `"fontFallback": false` 并自定义字体脚本；无需修改 EXE 或注入 Hook。
 
 ## 5. 界面与 Python 文本
