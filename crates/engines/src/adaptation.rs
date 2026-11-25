@@ -1044,16 +1044,6 @@ impl EngineService {
             }
             "list_adapters" => self.adapter_list(request, state, args, cancellation),
             "inspect_builtin_adapter" => {
-                let format = text(args, "format")?;
-                if format.eq_ignore_ascii_case("Siglus") || format == "engine.siglus" {
-                    if let Some(path) = args.get("path").and_then(Value::as_str) {
-                        let prepared = self.siglus(cancellation).await?;
-                        return self
-                            .read_siglus_source(&prepared, path, args, cancellation)
-                            .await;
-                    }
-                    return Ok(crate::adaptation_assets::siglus_description());
-                }
                 crate::adaptation_assets::inspect_builtin(self, request, state, args, cancellation)
                     .await
             }
@@ -1381,27 +1371,6 @@ impl EngineService {
             }
         }
         self.current_reference()
-    }
-
-    async fn read_siglus_source(
-        &self,
-        prepared: &Value,
-        path: &str,
-        args: &Value,
-        cancellation: &CancellationToken,
-    ) -> Result<Value, EngineError> {
-        let library = Path::new(text(prepared, "library")?);
-        let mut params = args.clone();
-        params["path"] = json!(path);
-        if library.is_file() {
-            params["operation"] = json!("library");
-            params["library"] = json!(library);
-        } else {
-            params["operation"] = json!("read_file");
-            params["root"] = json!(library);
-            params["encoding"] = json!("utf8");
-        }
-        self.helper(&params, cancellation).await
     }
 
     fn adapter_list(
@@ -3566,16 +3535,14 @@ fn require_builtin_companions(
         }) {
             continue;
         }
-        let mut required = format == "Softpal";
-        if format == "Yuris" {
-            use std::io::Read;
-            let mut input = fs::File::open(resolve_relative(source, file)?)?;
-            let mut signature = [0_u8; 4];
-            required = input.read(&mut signature)? == 4 && signature == *b"YSTB";
-            if !required {
-                continue;
-            }
-        }
+        let required = match crate::adaptation_assets::companion_requirement(
+            format,
+            &resolve_relative(source, file)?,
+        )? {
+            crate::adaptation_assets::CompanionRequirement::Skip => continue,
+            crate::adaptation_assets::CompanionRequirement::Required => true,
+            crate::adaptation_assets::CompanionRequirement::Optional => false,
+        };
         for name in companions.iter().filter_map(Value::as_str) {
             let relative = Path::new(file)
                 .parent()

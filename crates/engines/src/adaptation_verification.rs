@@ -740,8 +740,11 @@ async fn replay_archive_member(
     let Some(unit_id) = issue.unit_id.as_deref() else {
         return Ok(false);
     };
+    let Some(retry_spec) = crate::adaptation_assets::archive_member_retry_spec(&retry.resource)
+    else {
+        return Ok(false);
+    };
     if !matches!(adapter, AdapterHandle::Python { .. })
-        || !retry.resource.to_ascii_lowercase().ends_with(".pfs")
         || retry.members.is_empty()
         || retry.members.len() > 3
         || retry.translations.is_empty()
@@ -760,7 +763,7 @@ async fn replay_archive_member(
     let reference = service.adaptation_reference(workspace, state)?;
     let library = service.reference_library(&reference)?;
     let sample = service.helper(
-        &json!({"operation":"archive_samples","format":"ArtemisAst","archive":archive,
+        &json!({"operation":"archive_samples","format":retry_spec.format,"archive":archive,
             "members":retry.members,"directory":scratch.path(),"library":library,"timeoutSeconds":10}),
         cancellation,
     ).await?;
@@ -772,7 +775,7 @@ async fn replay_archive_member(
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::rename(scratch.path().join("fixture.pfs"), target)?;
+    fs::rename(scratch.path().join(retry_spec.fixture_file), target)?;
     let resources = vec![retry.resource.clone()];
     let mut extract = AdapterRequest::new("extract", &source);
     extract.resource_files = Some(resources.clone());

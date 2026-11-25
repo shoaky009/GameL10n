@@ -46,6 +46,180 @@ pub(crate) enum ProbeReportKind {
     Ain,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CompanionRequirement {
+    Optional,
+    Required,
+    Skip,
+}
+
+struct CompanionPolicy {
+    format: &'static str,
+    required_magic: Option<&'static [u8]>,
+}
+
+const COMPANION_POLICIES: &[CompanionPolicy] = &[
+    CompanionPolicy {
+        format: "Softpal",
+        required_magic: None,
+    },
+    CompanionPolicy {
+        format: "Yuris",
+        required_magic: Some(b"YSTB"),
+    },
+];
+
+pub(crate) fn companion_requirement(
+    format: &str,
+    path: &Path,
+) -> Result<CompanionRequirement, EngineError> {
+    let Some(policy) = COMPANION_POLICIES
+        .iter()
+        .find(|policy| policy.format == format)
+    else {
+        return Ok(CompanionRequirement::Optional);
+    };
+    let Some(magic) = policy.required_magic else {
+        return Ok(CompanionRequirement::Required);
+    };
+    let mut header = vec![0_u8; magic.len()];
+    let matched = fs::File::open(path)?.read(&mut header)? == magic.len() && header == magic;
+    Ok(if matched {
+        CompanionRequirement::Required
+    } else {
+        CompanionRequirement::Skip
+    })
+}
+
+pub(crate) struct ArchiveMemberRetrySpec {
+    pub(crate) extension: &'static str,
+    pub(crate) format: &'static str,
+    pub(crate) fixture_file: &'static str,
+}
+
+const ARCHIVE_MEMBER_RETRY_SPECS: &[ArchiveMemberRetrySpec] = &[ArchiveMemberRetrySpec {
+    extension: ".pfs",
+    format: "ArtemisAst",
+    fixture_file: "fixture.pfs",
+}];
+
+pub(crate) fn archive_member_retry_spec(resource: &str) -> Option<&'static ArchiveMemberRetrySpec> {
+    let lower = resource.to_ascii_lowercase();
+    ARCHIVE_MEMBER_RETRY_SPECS
+        .iter()
+        .find(|spec| lower.ends_with(spec.extension))
+}
+
+pub(crate) struct ArchiveSampleSpec {
+    pub(crate) format: &'static str,
+    pub(crate) scan_sibling_executables: bool,
+    pub(crate) fallback_sample_name: &'static str,
+    pub(crate) sample_component: Option<&'static str>,
+    pub(crate) passed_version: Option<u64>,
+    pub(crate) passed_next_action: Option<&'static str>,
+}
+
+const DEFAULT_ARCHIVE_SAMPLE_SPEC: ArchiveSampleSpec = ArchiveSampleSpec {
+    format: "",
+    scan_sibling_executables: false,
+    fallback_sample_name: "sample.dat",
+    sample_component: None,
+    passed_version: None,
+    passed_next_action: None,
+};
+
+const ARCHIVE_SAMPLE_SPECS: &[ArchiveSampleSpec] = &[
+    ArchiveSampleSpec {
+        format: "ArtemisAst",
+        scan_sibling_executables: false,
+        fallback_sample_name: "sample.ast",
+        sample_component: None,
+        passed_version: None,
+        passed_next_action: None,
+    },
+    ArchiveSampleSpec {
+        format: "CatSystem",
+        scan_sibling_executables: true,
+        fallback_sample_name: "sample.dat",
+        sample_component: None,
+        passed_version: None,
+        passed_next_action: None,
+    },
+    ArchiveSampleSpec {
+        format: "eagls-script",
+        scan_sibling_executables: false,
+        fallback_sample_name: "sample.dat",
+        sample_component: Some("eagls-script"),
+        passed_version: None,
+        passed_next_action: None,
+    },
+    ArchiveSampleSpec {
+        format: "willplus-wsc",
+        scan_sibling_executables: false,
+        fallback_sample_name: "sample.dat",
+        sample_component: Some("willplus-wsc"),
+        passed_version: None,
+        passed_next_action: Some(
+            "复制 willplus-wsc 组件，复用对白、姓名、选项和跳转回填，以及 archive.will-v1 的封包读写。有回想标题等独立界面文本时，取含空格的标题与带控制符的对白试写，核对扩展汉字和字体后执行整卷验收。",
+        ),
+    },
+    ArchiveSampleSpec {
+        format: "Yuris",
+        scan_sibling_executables: false,
+        fallback_sample_name: "sample.dat",
+        sample_component: None,
+        passed_version: Some(474),
+        passed_next_action: Some(
+            "复制 yuris-ypf474 组件复用该布局的封包读写，脚本沿用内置 Yuris 解析器。用 includeYurisSources 在小样中核对对白、选项、菜单及内部路径和字体，再扩大到全包。",
+        ),
+    },
+    ArchiveSampleSpec {
+        format: "Ethornell",
+        scan_sibling_executables: false,
+        fallback_sample_name: "sample.dat",
+        sample_component: None,
+        passed_version: None,
+        passed_next_action: Some(
+            "沿用已通过原文往返的 Ethornell 解析。带头 V1 脚本可用 archive.bgi 的 rebuild 回填到可逐字节复现布局的原卷，保留其余成员。继续验收译文编码与游戏加载",
+        ),
+    },
+];
+
+pub(crate) fn archive_sample_spec(format: &str) -> &'static ArchiveSampleSpec {
+    ARCHIVE_SAMPLE_SPECS
+        .iter()
+        .find(|spec| spec.format == format)
+        .unwrap_or(&DEFAULT_ARCHIVE_SAMPLE_SPEC)
+}
+
+pub(crate) fn archive_sample_next_action(
+    format: &str,
+    report: &Value,
+    sample_passed: bool,
+) -> Option<String> {
+    let spec = archive_sample_spec(format);
+    let mut action = if sample_passed
+        && spec
+            .passed_version
+            .is_none_or(|version| report["version"].as_u64() == Some(version))
+    {
+        spec.passed_next_action.map(str::to_owned)
+    } else {
+        None
+    };
+    if let Some(executable) = report["keyExecutable"].as_str() {
+        let base = action
+            .as_deref()
+            .or_else(|| report["nextAction"].as_str())
+            .unwrap_or("用已验证或保留的 CST 小样继续检查脚本回填")
+            .trim_end_matches(['。', '.']);
+        action = Some(format!(
+            "已用 {executable} 验证加密 INT 的成员名。暂存对应 INT 和 EXE 后，用 archive.kif 的 keyExecutable 参数按成员提取。{base}"
+        ));
+    }
+    action
+}
+
 pub(crate) struct ComponentPathArg {
     pub(crate) arg: &'static str,
     pub(crate) allow_resources: bool,
@@ -674,6 +848,27 @@ fn page_source(
     )
 }
 
+async fn read_siglus_source(
+    service: &EngineService,
+    prepared: &Value,
+    path: &str,
+    args: &Value,
+    cancellation: &CancellationToken,
+) -> Result<Value, EngineError> {
+    let library = Path::new(text(prepared, "library")?);
+    let mut params = args.clone();
+    params["path"] = json!(path);
+    if library.is_file() {
+        params["operation"] = json!("library");
+        params["library"] = json!(library);
+    } else {
+        params["operation"] = json!("read_file");
+        params["root"] = json!(library);
+        params["encoding"] = json!("utf8");
+    }
+    service.helper(&params, cancellation).await
+}
+
 pub(crate) async fn inspect_builtin(
     service: &EngineService,
     request: &AdaptationRequest<'_>,
@@ -682,6 +877,13 @@ pub(crate) async fn inspect_builtin(
     cancellation: &CancellationToken,
 ) -> Result<Value, EngineError> {
     let key = text(args, "format")?;
+    if key.eq_ignore_ascii_case("Siglus") || key == "engine.siglus" {
+        if let Some(path) = args.get("path").and_then(Value::as_str) {
+            let prepared = service.siglus(cancellation).await?;
+            return read_siglus_source(service, &prepared, path, args, cancellation).await;
+        }
+        return Ok(siglus_description());
+    }
     if key.eq_ignore_ascii_case("NekoSDK") {
         return Ok(
             json!({"format":key,"status":"component","engine":"nekosdk","archiveComponent":"archive.nekopack4a","scriptComponent":"nekosdk-script","template":"nekopack4a-advscript2","usage":"先复用 automaticArchiveTrials 或对完整 ADVSCRIPT2 成员试用 nekosdk-script。组合模板按 CP932 提取、回填和复提；按游戏确认选项、界面和中文运行。"}),
@@ -1057,6 +1259,52 @@ mod tests {
                 .required_filter
                 .map(|(value, _)| value),
             Some("none")
+        );
+    }
+
+    #[test]
+    fn shared_format_and_sample_specs_preserve_engine_policies() {
+        let root = tempfile::tempdir().unwrap();
+        let ystb = root.path().join("scene.ybn");
+        let other = root.path().join("other.ybn");
+        fs::write(&ystb, b"YSTB\x00\x00").unwrap();
+        fs::write(&other, b"YSCM\x00\x00").unwrap();
+        assert_eq!(
+            companion_requirement("Softpal", &other).unwrap(),
+            CompanionRequirement::Required
+        );
+        assert_eq!(
+            companion_requirement("Yuris", &ystb).unwrap(),
+            CompanionRequirement::Required
+        );
+        assert_eq!(
+            companion_requirement("Yuris", &other).unwrap(),
+            CompanionRequirement::Skip
+        );
+        assert_eq!(
+            companion_requirement("Renpy", &other).unwrap(),
+            CompanionRequirement::Optional
+        );
+
+        let retry = archive_member_retry_spec("root.PFS").unwrap();
+        assert_eq!(retry.format, "ArtemisAst");
+        assert_eq!(retry.fixture_file, "fixture.pfs");
+        assert!(archive_member_retry_spec("archive.rpa").is_none());
+
+        assert!(archive_sample_spec("CatSystem").scan_sibling_executables);
+        assert_eq!(archive_sample_spec("ArtemisAst").fallback_sample_name, "sample.ast");
+        assert_eq!(archive_sample_spec("eagls-script").sample_component, Some("eagls-script"));
+        assert_eq!(archive_sample_spec("willplus-wsc").sample_component, Some("willplus-wsc"));
+        assert!(archive_sample_next_action("Yuris", &json!({"version": 482}), true).is_none());
+        assert!(
+            archive_sample_next_action("Yuris", &json!({"version": 474}), true)
+                .unwrap()
+                .contains("yuris-ypf474")
+        );
+        assert!(
+            archive_sample_next_action("CatSystem", &json!({"keyExecutable": "game.exe"}), false)
+                .unwrap()
+                .contains("archive.kif")
         );
     }
 }

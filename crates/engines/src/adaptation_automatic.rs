@@ -284,14 +284,11 @@ fn sample_group(
         return Err(reject(format!("候选样本不存在：{script}")));
     }
     let format = definition["format"].as_str().unwrap_or("");
-    let mut required = format == "Softpal";
-    if format == "Yuris" {
-        let mut signature = [0; 4];
-        required = fs::File::open(source)?.read(&mut signature)? == 4 && signature == *b"YSTB";
-        if !required {
-            return Ok(vec![script]);
-        }
-    }
+    let required = match crate::adaptation_assets::companion_requirement(format, &source)? {
+        crate::adaptation_assets::CompanionRequirement::Skip => return Ok(vec![script]),
+        crate::adaptation_assets::CompanionRequirement::Required => true,
+        crate::adaptation_assets::CompanionRequirement::Optional => false,
+    };
     let mut group = vec![script.clone()];
     for companion in definition["companions"]
         .as_array()
@@ -1283,12 +1280,13 @@ async fn inspect_archive_samples(
     let mut reports = Vec::new();
     for (format, archive, index) in archives {
         let format = format.as_str();
+        let sample_spec = crate::adaptation_assets::archive_sample_spec(format);
         let result = async {
             let paths = std::iter::once(("archive", archive.as_str()))
                 .chain(index.as_deref().map(|index| ("index", index)))
                 .map(|(role, path)| Ok((role.to_owned(), request.inputs.file(&request.game_directory, path)?)))
                 .collect::<Result<BTreeMap<_, _>, EngineError>>()?;
-            let mut executables = if format == "CatSystem" {
+            let mut executables = if sample_spec.scan_sibling_executables {
                 let parent = Path::new(&archive).parent();
                 inventory
                     .files
@@ -1341,7 +1339,7 @@ async fn inspect_archive_samples(
                         .collect::<Result<BTreeMap<_, _>, EngineError>>()?;
                     (files, paths)
                 } else {
-                    let name = if format == "ArtemisAst" { "sample.ast" } else { "sample.dat" }.to_owned();
+                    let name = sample_spec.fallback_sample_name.to_owned();
                     (vec![name.clone()], BTreeMap::from([(name, source)]))
                 };
                 let mut hashes = BTreeMap::new();
@@ -1377,11 +1375,9 @@ async fn inspect_archive_samples(
                     }
                 }
                 let relative = format!("{directory}/{}", files.first().ok_or_else(|| reject("封包未返回样本"))?);
-                let component = if matches!(format, "eagls-script" | "willplus-wsc") {
-                    Some(format)
-                } else {
-                    template.and_then(|template| template.sample_component)
-                };
+                let component = sample_spec
+                    .sample_component
+                    .or_else(|| template.and_then(|template| template.sample_component));
                 let outcome = if let Some(component) = component {
                     try_component_sample(service, workspace, state, component, &relative, (true, true), token).await?
                 } else {
@@ -1406,23 +1402,10 @@ async fn inspect_archive_samples(
             }
             report["trials"] = json!(trials);
             let sample_passed = crate::adaptation_context::archive_sample_passed(&report);
-            if format == "willplus-wsc" && sample_passed {
-                report["nextAction"] = json!("复制 willplus-wsc 组件，复用对白、姓名、选项和跳转回填，以及 archive.will-v1 的封包读写。有回想标题等独立界面文本时，取含空格的标题与带控制符的对白试写，核对扩展汉字和字体后执行整卷验收。");
-            }
-            if format == "Yuris" && report["version"] == 474 && sample_passed {
-                report["nextAction"] = json!("复制 yuris-ypf474 组件复用该布局的封包读写，脚本沿用内置 Yuris 解析器。用 includeYurisSources 在小样中核对对白、选项、菜单及内部路径和字体，再扩大到全包。");
-            }
-            if format == "Ethornell" && sample_passed {
-                report["nextAction"] = json!("沿用已通过原文往返的 Ethornell 解析。带头 V1 脚本可用 archive.bgi 的 rebuild 回填到可逐字节复现布局的原卷，保留其余成员。继续验收译文编码与游戏加载");
-            }
-            if let Some(executable) = report["keyExecutable"].as_str() {
-                let next = report["nextAction"]
-                    .as_str()
-                    .unwrap_or("用已验证或保留的 CST 小样继续检查脚本回填")
-                    .trim_end_matches(['。', '.']);
-                report["nextAction"] = json!(format!(
-                    "已用 {executable} 验证加密 INT 的成员名。暂存对应 INT 和 EXE 后，用 archive.kif 的 keyExecutable 参数按成员提取。{next}"
-                ));
+            if let Some(next_action) =
+                crate::adaptation_assets::archive_sample_next_action(format, &report, sample_passed)
+            {
+                report["nextAction"] = json!(next_action);
             }
             if let Some(template) = template
                 && sample_passed
