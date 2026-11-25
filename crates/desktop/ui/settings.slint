@@ -161,8 +161,10 @@ export component ProjectSettings inherits SettingsForm {
                 Rectangle { horizontal-stretch: 1; }
                 ActionButton {
                     text: "自动提取术语…"; icon: "sparkles"; compact: true;
-                    enabled: !App.busy && App.recognition != "" && App.has-json-batch-api && !App.terminology-extracting;
-                    tooltip: App.has-json-batch-api ? "使用批量 JSON 翻译 API 提取角色名与专有名词" : "当前项目未配置批量 JSON 格式的翻译 API，可手动添加术语";
+                    enabled: App.can-extract-terminology;
+                    tooltip: !App.has-json-batch-api ? "当前项目未配置批量 JSON 格式的翻译 API，可手动添加术语"
+                        : !App.has-workbench-text ? "提取出游戏文本后即可自动提取术语"
+                        : "使用批量 JSON 翻译 API 提取角色名与专有名词";
                     clicked => { App.action("terminology-extract", ""); }
                 }
             }

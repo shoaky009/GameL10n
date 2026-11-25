@@ -232,7 +232,7 @@ impl Application {
         cancellation: &CancellationToken,
     ) -> Result<TerminologyExtraction, CoreError> {
         let analysis = self
-            .cached_analysis(id)
+            .workbench_analysis(id)
             .await?
             .ok_or_else(|| CoreError::InvalidData("请先识别并提取游戏文本。".into()))?;
         let providers = self.translation_providers(id).await?;
@@ -602,5 +602,91 @@ mod tests {
             .unwrap();
         assert_eq!(saved.term_count, 2);
         assert_eq!(saved.affected_unit_ids, vec!["u0"]);
+    }
+
+    #[tokio::test]
+    async fn extraction_uses_live_translation_preview_during_adaptation() {
+        let root = tempfile::tempdir().unwrap();
+        let game = root.path().join("game");
+        std::fs::create_dir(&game).unwrap();
+        let app = Application::open(
+            root.path().join("data"),
+            &ToolPaths::new(root.path().join("tools")),
+        )
+        .await
+        .unwrap();
+        let id = app.add_project(&game).await.unwrap().id;
+        let body = json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "content": r#"{"terms":[{"source":"アリス","target":"爱丽丝","category":"character"}]}"#
+                }
+            }],
+            "usage": {"prompt_tokens": 80, "completion_tokens": 20}
+        })
+        .to_string();
+        let (endpoint, server) = mock_terminology_server(body).await;
+        app.save_api_profile(
+            ApiProfile {
+                id: "batch".into(),
+                name: "Batch API".into(),
+                endpoint,
+                model: "fast-model".into(),
+                protocol: "ChatCompletions".into(),
+                translation_format: "JsonBatch".into(),
+                ..Default::default()
+            },
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        app.save_project_settings(&id, json!({ "translationProfileIds": ["batch"] }))
+            .await
+            .unwrap();
+
+        let _task = app.begin(&id, "adapt", "正在智能识别。").await.unwrap();
+        // Before any extracted text is published, terminology extraction is rejected.
+        let error = app
+            .extract_project_terminology(&id, &CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("识别并提取游戏文本"));
+
+        // Once adaptation publishes a non-empty translation preview, extraction uses it.
+        app.publish_translation_preview(
+            &id,
+            std::sync::Arc::new(ExtractionResult {
+                units: vec![TranslationUnit {
+                    id: "preview-0".into(),
+                    source_text: "アリスは微笑んだ。".into(),
+                    resource_path: "script.rpy".into(),
+                    locator: "0".into(),
+                    context: String::new(),
+                    speaker: Some("アリス".into()),
+                    kind: "dialogue".into(),
+                    protected_tokens: None,
+                }],
+                warnings: vec![],
+            }),
+        )
+        .await;
+        let extracted = app
+            .extract_project_terminology(&id, &CancellationToken::new())
+            .await
+            .unwrap();
+        server.await.unwrap();
+        assert_eq!(extracted.candidates.len(), 1);
+        assert_eq!(extracted.candidates[0].source, "アリス");
+        assert_eq!(extracted.candidates[0].target, "爱丽丝");
+        assert_eq!(extracted.candidates[0].count, 1);
+
+        // Merging extracted terms during adaptation also succeeds without blocking.
+        let saved = app
+            .merge_project_terminology(&id, &[("アリス".into(), "爱丽丝".into())])
+            .await
+            .unwrap();
+        assert_eq!(saved.term_count, 1);
     }
 }

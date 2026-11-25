@@ -136,13 +136,15 @@ export global App {
     in-out property <bool> loading;
     in-out property <bool> busy;
     in-out property <bool> translation-preview;
-    out property <bool> has-workbench-text: translation-preview || recognition != "";
+    in-out property <bool> has-saved-text;
+    out property <bool> has-workbench-text: translation-preview || has-saved-text;
     in-out property <bool> preview-translation-running;
     in-out property <bool> preview-translation-resumable;
     in-out property <string> preview-translation-message;
     in-out property <float> preview-translation-progress;
     in-out property <TokenDisplay> preview-translation-usage;
     out property <bool> can-start-translation: !preview-translation-running && (!busy || ((task-operation == "adapt" || task-operation == "recognize") && (translation-preview || preview-translation-resumable)));
+    out property <bool> can-extract-terminology: has-workbench-text && has-json-batch-api && !terminology-extracting && (!busy || task-operation == "adapt" || task-operation == "recognize" || task-operation == "workflow");
     in-out property <int> workflow-finish: 2;
     in-out property <bool> workflow-use-existing-text;
     in-out property <bool> workflow-has-custom;

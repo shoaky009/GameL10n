@@ -284,6 +284,7 @@ fn progress_text(stage: &str, message: &str, tool: Option<&str>) -> String {
 pub struct RecognitionView {
     pub status: String,
     overview_details: String,
+    has_saved_text: bool,
     engine_reference: String,
     adapter_reference: String,
     ready: bool,
@@ -527,6 +528,7 @@ impl RecognitionView {
         Self {
             status,
             overview_details,
+            has_saved_text: count > 0,
             engine_reference,
             adapter_reference,
             ready,
@@ -558,6 +560,7 @@ impl RecognitionView {
     pub fn apply(self, app: &App) {
         app.set_status(self.status.into());
         app.set_recognition(self.overview_details.into());
+        app.set_has_saved_text(self.has_saved_text);
         app.set_recognition_engine(self.engine_reference.into());
         app.set_recognition_adapter(self.adapter_reference.into());
         app.set_recognition_ready(self.ready);

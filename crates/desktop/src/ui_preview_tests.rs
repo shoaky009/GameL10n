@@ -82,6 +82,7 @@ fn render_desktop_preview_fixtures() {
     ])));
     app.set_counts("12,840 条 · 已译 8,210 · 已校对 2,460 · 格式问题 3 · 翻译失败 2".into());
     app.set_recognition("已提取 12,840 条文本 · 186 个脚本 / 资源".into());
+    app.set_has_saved_text(true);
     app.set_recognition_ready(true);
     app.set_recognition_engine("KiriKiri".into());
     app.set_recognition_adapter("engine.kirikiri · 版本 1.2.0".into());

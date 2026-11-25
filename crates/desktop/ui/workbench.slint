@@ -74,8 +74,10 @@ export component Workbench inherits FocusScope {
         }
         ActionButton {
             text: "提取术语"; icon: "sparkles";
-            enabled: !App.busy && App.has-workbench-text && App.has-json-batch-api && !App.terminology-extracting;
-            tooltip: App.has-json-batch-api ? "使用批量 JSON 翻译 API 自动提取角色名与术语" : "需在项目翻译链中配置批量 JSON 格式的 API";
+            enabled: App.can-extract-terminology;
+            tooltip: !App.has-json-batch-api ? "需在项目翻译链中配置批量 JSON 格式的 API"
+                : !App.has-workbench-text ? "提取出游戏文本后即可自动提取术语"
+                : "使用批量 JSON 翻译 API 自动提取角色名与术语";
             clicked => { App.action("terminology-extract", ""); }
         }
         Caption {

@@ -1052,7 +1052,7 @@ impl Application {
         if terms.is_empty() {
             return Ok(Vec::new());
         }
-        let Some(analysis) = self.cached_analysis(id).await? else {
+        let Some(analysis) = self.workbench_analysis(id).await? else {
             return Ok(Vec::new());
         };
         let (analysis, workbench) = self.workbench_for(id, Some(analysis)).await?;

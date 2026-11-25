@@ -335,4 +335,73 @@ mod tests {
         assert!(app.get_has_workbench_text());
         assert!(!app.get_can_start_translation());
     }
+
+    #[test]
+    fn terminology_extraction_is_enabled_during_recognition_only_when_text_exists() {
+        use serde_json::json;
+        use std::collections::BTreeMap;
+
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = crate::view::MainWindow::new().unwrap();
+        let app = ui.global::<App>();
+        app.set_has_json_batch_api(true);
+
+        // Idle with no extracted text: disabled.
+        assert!(!app.get_has_workbench_text());
+        assert!(!app.get_can_extract_terminology());
+
+        // Analysis record with 0 units still counts as no extracted text.
+        let mut empty_analysis = BTreeMap::new();
+        empty_analysis.insert("analysis".into(), json!({"unitCount": 0, "resourceCount": 0}));
+        recognition_ui::RecognitionView::new(
+            &empty_analysis,
+            None,
+            &serde_json::Value::Null,
+            &serde_json::Value::Null,
+        )
+        .apply(&app);
+        assert!(!app.get_has_saved_text());
+        assert!(!app.get_has_workbench_text());
+        assert!(!app.get_can_extract_terminology());
+
+        // During adaptation without any preview/saved text: disabled.
+        app.set_busy(true);
+        app.set_task_operation("adapt".into());
+        assert!(!app.get_can_extract_terminology());
+
+        // Once preview text is extracted during adaptation/recognize/workflow: enabled.
+        app.set_translation_preview(true);
+        assert!(app.get_can_extract_terminology());
+        app.set_task_operation("recognize".into());
+        assert!(app.get_can_extract_terminology());
+        app.set_task_operation("workflow".into());
+        assert!(app.get_can_extract_terminology());
+
+        // Disabled during translation or while terminology extraction is already running, or without JsonBatch API.
+        app.set_task_operation("translate".into());
+        assert!(!app.get_can_extract_terminology());
+        app.set_task_operation("adapt".into());
+        app.set_terminology_extracting(true);
+        assert!(!app.get_can_extract_terminology());
+        app.set_terminology_extracting(false);
+        app.set_has_json_batch_api(false);
+        assert!(!app.get_can_extract_terminology());
+
+        // Saved text with unitCount > 0 enables extraction when idle or adapting.
+        app.set_translation_preview(false);
+        app.set_has_json_batch_api(true);
+        let mut saved_analysis = BTreeMap::new();
+        saved_analysis.insert("analysis".into(), json!({"unitCount": 12, "resourceCount": 2}));
+        recognition_ui::RecognitionView::new(
+            &saved_analysis,
+            None,
+            &serde_json::Value::Null,
+            &serde_json::Value::Null,
+        )
+        .apply(&app);
+        assert!(app.get_has_saved_text());
+        assert!(app.get_can_extract_terminology());
+        app.set_busy(false);
+        assert!(app.get_can_extract_terminology());
+    }
 }
