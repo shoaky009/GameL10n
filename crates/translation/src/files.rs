@@ -84,12 +84,27 @@ pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T, FileError> {
 
 /// Flushes a temporary file in the target directory, then atomically replaces the target.
 pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), FileError> {
+    write_json_with(path, value, true)
+}
+
+/// Flushes compact JSON to a temporary file in the target directory, then atomically replaces the target.
+/// Use for large data payloads (extractions, translation memory, edit snapshots) where indentation wastes space and I/O.
+pub fn write_json_compact<T: Serialize>(path: &Path, value: &T) -> Result<(), FileError> {
+    write_json_with(path, value, false)
+}
+
+fn write_json_with<T: Serialize>(path: &Path, value: &T, pretty: bool) -> Result<(), FileError> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent).map_err(|error| io_error(parent, error))?;
     let mut temp = NamedTempFile::new_in(parent).map_err(|error| io_error(parent, error))?;
     {
         let mut writer = BufWriter::new(temp.as_file_mut());
-        serde_json::to_writer_pretty(&mut writer, value).map_err(|source| FileError::Json {
+        let result = if pretty {
+            serde_json::to_writer_pretty(&mut writer, value)
+        } else {
+            serde_json::to_writer(&mut writer, value)
+        };
+        result.map_err(|source| FileError::Json {
             path: path.display().to_string(),
             source,
         })?;
@@ -243,10 +258,25 @@ fn hex_digest(bytes: &[u8]) -> String {
     output
 }
 
-#[cfg(all(test, windows))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn write_json_compact_omits_formatting_whitespace_and_roundtrips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("payload.json");
+        let payload = serde_json::json!({
+            "schemaVersion": 2,
+            "units": [{"id": "1", "sourceText": "hello\nworld"}]
+        });
+        write_json_compact(&path, &payload).unwrap();
+        let raw = fs::read_to_string(&path).unwrap();
+        assert!(!raw.contains('\n'));
+        assert_eq!(read_json::<serde_json::Value>(&path).unwrap(), payload);
+    }
+
+    #[cfg(windows)]
     #[test]
     fn write_json_retries_while_target_is_briefly_open_for_reading() {
         let dir = tempfile::tempdir().unwrap();

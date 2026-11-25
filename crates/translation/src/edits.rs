@@ -1,6 +1,6 @@
 //! Shared proofreading state with a bounded incremental file, independent of project/UI types.
 use crate::{
-    files::{JsonLines, append_json_line, write_json},
+    files::{JsonLines, append_json_line, write_json_compact},
     storage::{StorageError, TranslationEdit, TranslationEdits, valid_edit},
 };
 use serde::{Deserialize, Serialize};
@@ -200,7 +200,7 @@ impl EditStore {
         Ok(result)
     }
     fn compact_locked(&self, state: &mut State) -> Result<(), StorageError> {
-        write_json(&self.directory.join("translation-edits.json"), &state.edits)?;
+        write_json_compact(&self.directory.join("translation-edits.json"), &state.edits)?;
         let journal = self.directory.join("translation-edits.jsonl");
         if journal.try_exists()? {
             fs::OpenOptions::new()
@@ -276,7 +276,7 @@ mod tests {
         commit(&store, change("2", "next")).unwrap();
         // Crash after the new snapshot is committed but before the old journal is truncated.
         store
-            .read(|edits| write_json(&root.path().join("translation-edits.json"), edits))
+            .read(|edits| write_json_compact(&root.path().join("translation-edits.json"), edits))
             .unwrap()
             .unwrap();
         drop(store);

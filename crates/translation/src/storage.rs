@@ -3,7 +3,7 @@
 use crate::{
     TranslationUnit,
     compatibility::legacy_json,
-    files::{self, hash_text, read_json, write_json},
+    files::{self, hash_text, read_json, write_json, write_json_compact},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -326,7 +326,7 @@ impl TranslationMemory {
                 schema_version: 2,
                 entries: values,
             };
-            write_json(&self.directory.join(format!("{prefix}.json")), &shard)?;
+            write_json_compact(&self.directory.join(format!("{prefix}.json")), &shard)?;
             entry_count += shard.entries.len();
         }
         if importing {
@@ -460,7 +460,10 @@ impl TranslationEdits {
             .filter(|edit| edit.matches(unit, language))
     }
     pub fn save(&self, directory: &Path) -> Result<(), StorageError> {
-        Ok(write_json(&directory.join("translation-edits.json"), self)?)
+        Ok(write_json_compact(
+            &directory.join("translation-edits.json"),
+            self,
+        )?)
     }
 }
 

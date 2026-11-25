@@ -19,7 +19,7 @@ use gamel10n_engines::{
     service::GeneratedAdapterReuseFailure,
 };
 use gamel10n_translation::{
-    files::{hash_file, hash_text, read_json, write_json},
+    files::{hash_file, hash_text, read_json, write_json, write_json_compact},
     provider::{ApiProtocol, OpenAiProvider, ProviderSettings, TranslationFormat},
     validate_units,
 };
@@ -2007,7 +2007,7 @@ impl Application {
             ]),
         };
         // The selection is tied to this immutable patch, so later edits do not change its preview.
-        write_json(
+        write_json_compact(
             &root.join("patches").join(format!(
                 "{}.texts.json",
                 path.file_name().unwrap_or_default().to_string_lossy()

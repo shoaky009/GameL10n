@@ -131,8 +131,15 @@ fn transfer(source: &Path, target: &Path) -> Result<(), CoreError> {
         )?;
         if let Some(value) = relocated_metadata(&input, &relative, source, target)? {
             let mut writer = BufWriter::new(temporary.as_file_mut());
-            serde_json::to_writer_pretty(&mut writer, &value)
-                .map_err(|error| CoreError::InvalidData(error.to_string()))?;
+            let result = if relative
+                .replace('\\', "/")
+                .ends_with("/extraction/native.json")
+            {
+                serde_json::to_writer(&mut writer, &value)
+            } else {
+                serde_json::to_writer_pretty(&mut writer, &value)
+            };
+            result.map_err(|error| CoreError::InvalidData(error.to_string()))?;
             writer.flush()?;
         } else {
             io::copy(&mut fs::File::open(&input)?, temporary.as_file_mut())?;

@@ -2,7 +2,7 @@
 
 use crate::{Application, CancellationToken, CoreError, application::CachedAnalysis};
 use gamel10n_engines::protocol::ExtractionResult;
-use gamel10n_translation::files::{read_json, write_json};
+use gamel10n_translation::files::{read_json, write_json, write_json_compact};
 use gamel10n_translation::{
     execution::{TranslationEngine, TranslationOptions, TranslationRunResult},
     provider::{ApiProtocol, OpenAiProvider, ProviderSettings, TranslationFormat},
@@ -1005,9 +1005,9 @@ impl Application {
                 struct SelectedInput<'a> {
                     units: Vec<&'a crate::TranslationUnit>,
                 }
-                write_json(&input_path, &SelectedInput { units })?;
+                write_json_compact(&input_path, &SelectedInput { units })?;
             } else {
-                write_json(&input_path, source)?;
+                write_json_compact(&input_path, source)?;
             }
             scope.preview_slot = Some(slot);
             write_json(&scope_path, &scope)?;

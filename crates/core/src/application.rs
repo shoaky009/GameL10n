@@ -14,7 +14,7 @@ use gamel10n_engines::{
 };
 use gamel10n_translation::{
     TranslationUnit,
-    files::{hash_file, hash_text, read_json, write_json},
+    files::{hash_file, hash_text, read_json, write_json, write_json_compact},
     validate_units,
 };
 use serde::{Deserialize, Serialize};
@@ -1203,7 +1203,7 @@ impl Application {
         let path = self.project_directory(id)?.join("extraction/native.json");
         let (stored, project) = tokio::task::spawn_blocking(move || -> Result<_, CoreError> {
             crate::launch::discover(&mut project, stored.probe.as_ref())?;
-            write_json(&path, &stored)?;
+            write_json_compact(&path, &stored)?;
             Ok((stored, project))
         })
         .await??;
