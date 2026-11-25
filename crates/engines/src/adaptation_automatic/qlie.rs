@@ -61,11 +61,45 @@ fn probe_revision(components: &Path) -> Result<String, EngineError> {
     Ok(format!("{:x}", hash.finalize()))
 }
 
-pub(super) fn uninstall_companion(path: &str) -> bool {
+pub(super) struct AncillaryResources {
+    pub(super) remaining: Vec<String>,
+    pub(super) identical_copies: Vec<String>,
+    pub(super) uninstall_archive: Option<String>,
+}
+
+pub(super) fn partition_ancillary<'a>(
+    game: &Path,
+    candidates: impl IntoIterator<Item = &'a String>,
+    volumes: &[String],
+    paths: &BTreeMap<String, u64>,
+    cancellation: &CancellationToken,
+) -> Result<AncillaryResources, EngineError> {
+    let mut remaining = Vec::new();
+    let mut identical_copies = Vec::new();
+    let mut uninstall_archive = None;
+    for path in candidates {
+        if uninstall_companion(path) {
+            if extension(path) == "pack" {
+                uninstall_archive = Some(path.clone());
+            }
+        } else if identical_volume_copy(game, path, volumes, paths, cancellation)? {
+            identical_copies.push(path.clone());
+        } else {
+            remaining.push(path.clone());
+        }
+    }
+    Ok(AncillaryResources {
+        remaining,
+        identical_copies,
+        uninstall_archive,
+    })
+}
+
+fn uninstall_companion(path: &str) -> bool {
     path.eq_ignore_ascii_case("UnInstallData.pack") || path.eq_ignore_ascii_case("UnInstall.exe")
 }
 
-pub(super) fn identical_volume_copy(
+fn identical_volume_copy(
     game: &Path,
     relative: &str,
     volumes: &[String],

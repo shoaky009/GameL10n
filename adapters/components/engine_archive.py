@@ -23,7 +23,9 @@ MAX_ARCHIVE = 512 << 20
 MAX_FILE = 64 << 20
 MAX_TOTAL = 256 << 20
 MAX_ENTRIES = 10_000
-RPA_MAX_ARCHIVE = 2 << 30
+# RPA-3.0 offsets are 64-bit hex integers and reads/rebuilds stream media; keep
+# only index, entry-count, and selected/replacement script budgets bounded.
+RPA_MAX_ARCHIVE = (1 << 64) - 1
 MAX_INDEX = 8 << 20
 INDEXED_COMPONENTS = ("archive.bgi", "archive.kif", "archive.ypf474", "archive.ypf482",
                       "archive.will-v1", "archive.pfs8", "archive.nekopack4a")

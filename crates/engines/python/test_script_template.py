@@ -177,6 +177,63 @@ class ScriptTemplateTest(unittest.TestCase):
                         self.assertEqual((output / files[0]).read_bytes(), b'keep existing output')
                         self.assertEqual({file: (source / file).read_bytes() for file in files}, originals)
 
+    def test_rpa_index_handles_archives_over_2gib_while_keeping_script_budgets(self):
+        pin = json.loads((ROOT / 'third_party/engine-tools/current.json').read_text(encoding='utf-8-sig'))
+        library = str(ROOT / 'third_party/engine-tools/references' / pin['revision'] / 'library.zip')
+        media_size = (4 << 30) + (512 << 20)
+        script_bytes = b'label start:\n    "hello"\n'
+        script_offset = 34 + media_size
+        index_offset = script_offset + len(script_bytes)
+        entries = {
+            'images/big.webm': [(34, media_size)],
+            'script.rpy': [(script_offset, len(script_bytes))],
+        }
+        packed_index = zlib.compress(pickle.dumps(entries, protocol=3))
+        header = f'RPA-3.0 {index_offset:016x} 00000000\n'.encode('ascii')
+        total_size = index_offset + len(packed_index)
+
+        class SparseRpaStream:
+            def __init__(self):
+                self.pos = 0
+
+            def seek(self, offset, whence=0):
+                if whence == 0:
+                    self.pos = offset
+                elif whence == 1:
+                    self.pos += offset
+                elif whence == 2:
+                    self.pos = total_size + offset
+                return self.pos
+
+            def tell(self):
+                return self.pos
+
+            def read(self, size=-1):
+                if size < 0:
+                    size = total_size - self.pos
+                end = min(total_size, self.pos + size)
+                if self.pos < len(header) and end <= len(header):
+                    chunk = header[self.pos:end]
+                elif self.pos >= index_offset:
+                    chunk = packed_index[self.pos - index_offset:end - index_offset]
+                elif self.pos >= script_offset and end <= index_offset:
+                    chunk = script_bytes[self.pos - script_offset:end - script_offset]
+                else:
+                    raise AssertionError(f'unexpected read into media region: {self.pos}..{end}')
+                self.pos = end
+                return chunk
+
+        with patch.object(sys, 'path', [library, *sys.path]):
+            import importlib
+            rpa = importlib.import_module('python.archives.rpa')
+            stream = SparseRpaStream()
+            index = TEMPLATE.archive.rpa_index(rpa, stream)
+            self.assertEqual(index.size, total_size)
+            self.assertEqual(len(index.entries), 2)
+            script_entry = next(entry for entry in index.entries if entry.name == 'script.rpy')
+            self.assertEqual(script_entry.offset, script_offset)
+            self.assertEqual(rpa.read_entry(stream, script_entry), script_bytes)
+
 
 if __name__ == '__main__':
     unittest.main()

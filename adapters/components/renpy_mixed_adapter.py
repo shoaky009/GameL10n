@@ -34,7 +34,7 @@ def load(source, files, scratch, verify=False):
         raise ValueError("封包不在同一资源目录，需先确认加载根目录：" + ", ".join(packed[:8]))
     root = next(iter(roots), ())
     seen = {}
-    input_bytes = selected_bytes = entries = 0
+    selected_bytes = entries = 0
 
     def register(virtual, origin, length):
         nonlocal selected_bytes
@@ -52,7 +52,6 @@ def load(source, files, scratch, verify=False):
     for resource in loose:
         path = compiled.resolve(source, resource)
         length = path.stat().st_size
-        input_bytes += length
         parts = PurePosixPath(resource).parts
         if packed and tuple(part.casefold() for part in parts[:len(root)]) != tuple(part.casefold() for part in root):
             raise ValueError("松散脚本与封包不在同一可确定的加载根目录：" + resource)
@@ -60,7 +59,6 @@ def load(source, files, scratch, verify=False):
     for resource in packed:
         report = archive.execute(dict(protocolVersion=1, component="archive.rpa3", operation="inspect",
                                       archive=str(compiled.resolve(source, resource)), extensions=[".rpy", ".rpyc"]))
-        input_bytes += report["inputBytes"]
         entries += report["entryCount"]
         for member in report["entries"]:
             name = archive.member_name(member["name"])
@@ -69,8 +67,8 @@ def load(source, files, scratch, verify=False):
                 register(name, resource + " → " + name, member["length"])
             elif extension in (".rpym", ".rpymc", ".rpa", ".xp3", ".ks", ".soc", ".tjs", ".scn") or name.lower().endswith("_ren.py"):
                 raise ValueError("发现模板未覆盖的模块或封包：" + resource + " → " + name)
-    if input_bytes > archive.RPA_MAX_ARCHIVE or entries > archive.MAX_ENTRIES:
-        raise ValueError("Ren’Py 混合资源超过 2 GiB 输入／10,000 封包成员预算。")
+    if entries > archive.MAX_ENTRIES:
+        raise ValueError("Ren’Py 混合资源超过 10,000 封包成员预算。")
     if not seen:
         raise ValueError("选中资源中没有 .rpy 或 RPYC2 脚本。")
 

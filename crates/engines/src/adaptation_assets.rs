@@ -27,6 +27,8 @@ pub(crate) const QLIE_PACK_TEMPLATE: &str = "qlie-pack3-imos";
 pub(crate) const QLIE_PACK31_TEMPLATE: &str = "qlie-pack31-imos";
 pub(crate) const FLASH_POOL_TEMPLATE: &str = "flash-avm1-pool";
 pub(crate) const SYSTEM4_AIN_TEMPLATE: &str = "system4-ain-msg1";
+const DEFAULT_TEMPLATE_LIMITATIONS: &str = "只连接已声明的脚本与封包组件。RPYC2 保留非文本对象及源码摘要；其他脚本编码沿用解析器。不生成未经当前游戏验证的字体、转区或运行时补丁。";
+const DEFAULT_PREPARED_NEXT_ACTION: &str = "沿用宿主已验收的资源和源码，核对独立文字覆盖、卷加载顺序及游戏显示";
 const QLIE_TEMPLATE_SOURCES: &[&str] = &[
     "qlie_archive.py",
     "qlie_bitmap.py",
@@ -37,6 +39,136 @@ const QLIE_TEMPLATE_SOURCES: &[&str] = &[
     "qlie_sfnt.py",
 ];
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProbeReportKind {
+    Archive,
+    Movie,
+    Ain,
+}
+
+pub(crate) struct ComponentPathArg {
+    pub(crate) arg: &'static str,
+    pub(crate) allow_resources: bool,
+    pub(crate) allow_work: bool,
+    pub(crate) extension: Option<&'static str>,
+    pub(crate) scope_error: &'static str,
+    pub(crate) non_overlap_error: Option<&'static str>,
+    pub(crate) wrong_component_error: &'static str,
+}
+
+pub(crate) struct ArchiveComponentSpec {
+    pub(crate) id: &'static str,
+    pub(crate) max_input_bytes: Option<u64>,
+    pub(crate) required_filter: Option<(&'static str, &'static str)>,
+    pub(crate) extra_inputs: &'static [ComponentPathArg],
+    pub(crate) output_path_fields: &'static [(&'static str, &'static str)],
+}
+
+const KIF_EXTRA_INPUTS: &[ComponentPathArg] = &[ComponentPathArg {
+    arg: "keyExecutable",
+    allow_resources: true,
+    allow_work: true,
+    extension: Some("exe"),
+    scope_error: "keyExecutable 仅用于 archive.kif，须为 resources/ 或 work/ 下的 EXE",
+    non_overlap_error: None,
+    wrong_component_error: "keyExecutable 仅用于 archive.kif，须为 resources/ 或 work/ 下的 EXE",
+}];
+
+const WHALE_EXTRA_INPUTS: &[ComponentPathArg] = &[ComponentPathArg {
+    arg: "filenameManifest",
+    allow_resources: false,
+    allow_work: true,
+    extension: None,
+    scope_error: "文件名清单必须位于 work/。",
+    non_overlap_error: Some("文件名清单不能位于组件输出目录。"),
+    wrong_component_error: "filenameManifest 仅用于 Whale DAT。",
+}];
+
+const WHALE_OUTPUT_FIELDS: &[(&str, &str)] = &[("filenameManifest", "filenames.json")];
+
+pub(crate) const ARCHIVE_COMPONENT_SPECS: &[ArchiveComponentSpec] = &[
+    ArchiveComponentSpec {
+        id: "archive.rpa3",
+        max_input_bytes: None,
+        required_filter: None,
+        extra_inputs: &[],
+        output_path_fields: &[],
+    },
+    ArchiveComponentSpec {
+        id: "archive.xp3",
+        max_input_bytes: Some(512 << 20),
+        required_filter: Some(("none", "请先确认 XP3 未使用过滤器，再明确指定 filter=none。")),
+        extra_inputs: &[],
+        output_path_fields: &[],
+    },
+    ArchiveComponentSpec {
+        id: "archive.bgi",
+        max_input_bytes: None,
+        required_filter: None,
+        extra_inputs: &[],
+        output_path_fields: &[],
+    },
+    ArchiveComponentSpec {
+        id: "archive.kif",
+        max_input_bytes: None,
+        required_filter: None,
+        extra_inputs: KIF_EXTRA_INPUTS,
+        output_path_fields: &[],
+    },
+    ArchiveComponentSpec {
+        id: "archive.ypf474",
+        max_input_bytes: None,
+        required_filter: None,
+        extra_inputs: &[],
+        output_path_fields: &[],
+    },
+    ArchiveComponentSpec {
+        id: "archive.ypf482",
+        max_input_bytes: None,
+        required_filter: None,
+        extra_inputs: &[],
+        output_path_fields: &[],
+    },
+    ArchiveComponentSpec {
+        id: "archive.will-v1",
+        max_input_bytes: None,
+        required_filter: None,
+        extra_inputs: &[],
+        output_path_fields: &[],
+    },
+    ArchiveComponentSpec {
+        id: "archive.pfs8",
+        max_input_bytes: None,
+        required_filter: None,
+        extra_inputs: &[],
+        output_path_fields: &[],
+    },
+    ArchiveComponentSpec {
+        id: "archive.nekopack4a",
+        max_input_bytes: None,
+        required_filter: None,
+        extra_inputs: &[],
+        output_path_fields: &[],
+    },
+    ArchiveComponentSpec {
+        id: "archive.whale-dat",
+        max_input_bytes: None,
+        required_filter: None,
+        extra_inputs: WHALE_EXTRA_INPUTS,
+        output_path_fields: WHALE_OUTPUT_FIELDS,
+    },
+];
+
+pub(crate) fn archive_component_spec(id: &str) -> Option<&'static ArchiveComponentSpec> {
+    ARCHIVE_COMPONENT_SPECS.iter().find(|spec| spec.id == id)
+}
+
+pub(crate) fn declared_component_extra_args() -> impl Iterator<Item = &'static ComponentPathArg> {
+    ARCHIVE_COMPONENT_SPECS
+        .iter()
+        .flat_map(|spec| spec.extra_inputs.iter())
+}
+
 /// An archive-specific adapter can qualify its own input before common verification.
 pub(crate) struct ArchiveTemplate {
     pub(crate) id: &'static str,
@@ -46,11 +178,20 @@ pub(crate) struct ArchiveTemplate {
     pub(crate) patterns: &'static [&'static str],
     pub(crate) name: &'static str,
     pub(crate) module: &'static str,
+    pub(crate) pass_template_id_to_main: bool,
+    pub(crate) bind_vntextpatch_reference: bool,
     pub(crate) extra_sources: &'static [&'static str],
     pub(crate) optional_components: &'static [&'static str],
     pub(crate) discovery_key: Option<&'static str>,
     pub(crate) sample_component: Option<&'static str>,
     pub(crate) prepare_for_model: bool,
+    pub(crate) exclusive_format_candidate: bool,
+    pub(crate) candidate_limit: usize,
+    pub(crate) allow_uncovered_resources: bool,
+    pub(crate) filter_qlie_ancillary: bool,
+    pub(crate) probe_report_kind: ProbeReportKind,
+    pub(crate) extra_runtime_checks: &'static [&'static str],
+    pub(crate) prepared_next_action: &'static str,
     distinct_volume_names: bool,
     pub(crate) limitations: &'static str,
 }
@@ -64,11 +205,20 @@ pub(crate) const ARCHIVE_TEMPLATES: &[ArchiveTemplate] = &[
         patterns: &["**/*.ain"],
         name: "AliceSoft System4 AIN 对话",
         module: "system4_ain_adapter",
+        pass_template_id_to_main: false,
+        bind_vntextpatch_reference: false,
         extra_sources: &["system4_ain.py"],
         optional_components: &[],
         discovery_key: Some("ainScripts"),
         sample_component: None,
         prepare_for_model: true,
+        exclusive_format_candidate: false,
+        candidate_limit: 64,
+        allow_uncovered_resources: true,
+        filter_qlie_ancillary: false,
+        probe_report_kind: ProbeReportKind::Ain,
+        extra_runtime_checks: &["核对 MSG1 之外的 STR0、EX 字段，以及游戏实际使用的编码和字体。"],
+        prepared_next_action: "沿用已验收的 MSG1 读写，只调查其他文字覆盖、字库和显示路径",
         distinct_volume_names: false,
         limitations: "AI2 容器内带 VERS、CODE、FUNC 和 MAIN 边界的 MSG1 消息表，支持变长回填。按完整表验证原文编码。界面、EX、字库及实际显示单独确认",
     },
@@ -80,11 +230,20 @@ pub(crate) const ARCHIVE_TEMPLATES: &[ArchiveTemplate] = &[
         patterns: &["**/*.swf"],
         name: "Flash AVM1 常量池文本",
         module: "flash_avm1_adapter",
+        pass_template_id_to_main: false,
+        bind_vntextpatch_reference: false,
         extra_sources: &["flash_avm1.py"],
         optional_components: &[],
         discovery_key: Some("flashMovies"),
         sample_component: None,
         prepare_for_model: true,
+        exclusive_format_candidate: true,
+        candidate_limit: 1024,
+        allow_uncovered_resources: false,
+        filter_qlie_ancillary: false,
+        probe_report_kind: ProbeReportKind::Movie,
+        extra_runtime_checks: &["确认 AVM1 外层脚本以外的界面、嵌套影片和启动程序内文字覆盖。"],
+        prepared_next_action: DEFAULT_PREPARED_NEXT_ACTION,
         distinct_volume_names: false,
         limitations: "识别 FWS/CWS 顶层 AVM1 动作中的 UTF-8 常量池。嵌套影片、独立界面与中文运行显示需要另行确认",
     },
@@ -96,11 +255,20 @@ pub(crate) const ARCHIVE_TEMPLATES: &[ArchiveTemplate] = &[
         patterns: &["**/*.pfs", "**/*.pfs.*"],
         name: "Artemis PFS v8 + AST 2.0",
         module: "artemis_pfs_adapter",
+        pass_template_id_to_main: false,
+        bind_vntextpatch_reference: false,
         extra_sources: &[],
         optional_components: &[],
         discovery_key: Some("pfsArchives"),
         sample_component: None,
         prepare_for_model: false,
+        exclusive_format_candidate: false,
+        candidate_limit: 64,
+        allow_uncovered_resources: false,
+        filter_qlie_ancillary: false,
+        probe_report_kind: ProbeReportKind::Archive,
+        extra_runtime_checks: &[],
+        prepared_next_action: DEFAULT_PREPARED_NEXT_ACTION,
         distinct_volume_names: false,
         limitations: "UTF-8 AST 2.0 的日文显示字段，完整重建含脚本的 PFS v8 卷。存在重名脚本、未知布局或需覆盖其他脚本时继续调查。游戏内加载与显示需要试译确认",
     },
@@ -112,11 +280,20 @@ pub(crate) const ARCHIVE_TEMPLATES: &[ArchiveTemplate] = &[
         patterns: &["**/*.pak"],
         name: "NEKOPACK4A + NekoSDK ADVSCRIPT2",
         module: "nekosdk_adapter",
+        pass_template_id_to_main: false,
+        bind_vntextpatch_reference: false,
         extra_sources: &["nekosdk_script.py"],
         optional_components: &[],
         discovery_key: None,
         sample_component: Some("nekosdk-script"),
         prepare_for_model: true,
+        exclusive_format_candidate: false,
+        candidate_limit: 64,
+        allow_uncovered_resources: false,
+        filter_qlie_ancillary: false,
+        probe_report_kind: ProbeReportKind::Archive,
+        extra_runtime_checks: &[],
+        prepared_next_action: DEFAULT_PREPARED_NEXT_ACTION,
         distinct_volume_names: true,
         limitations: "NEKOPACK4A 内带长度的 ADVSCRIPT2 对白、人名和日志字段，按 CP932 回填并复提。选择项、界面资源和中文运行需按游戏验证",
     },
@@ -135,11 +312,20 @@ pub(crate) const ARCHIVE_TEMPLATES: &[ArchiveTemplate] = &[
         ],
         name: "QLIE PACK 3.0 + ImoScripter FormatType=1",
         module: "qlie_pack_adapter",
+        pass_template_id_to_main: true,
+        bind_vntextpatch_reference: true,
         extra_sources: QLIE_TEMPLATE_SOURCES,
         optional_components: &["qlie-japanese-font-launcher"],
         discovery_key: None,
         sample_component: None,
         prepare_for_model: true,
+        exclusive_format_candidate: false,
+        candidate_limit: 64,
+        allow_uncovered_resources: false,
+        filter_qlie_ancillary: false,
+        probe_report_kind: ProbeReportKind::Archive,
+        extra_runtime_checks: &[],
+        prepared_next_action: DEFAULT_PREPARED_NEXT_ACTION,
         distinct_volume_names: false,
         limitations: "需要同一启动目录的 EXE 图标密钥、外部与各卷内部密钥、HashVer1.3 和一致的脚本配置。匹配 ImoScripter 替换表、第 6 号外字槽和 OF 字库时将中文写入游戏位图，沿用原启动方式。其余系统字体布局可生成配套字体，游戏内显示需单独验收",
     },
@@ -157,15 +343,173 @@ pub(crate) const ARCHIVE_TEMPLATES: &[ArchiveTemplate] = &[
         ],
         name: "QLIE PACK 3.1 + ImoScripter FormatType=1",
         module: "qlie_pack_adapter",
+        pass_template_id_to_main: true,
+        bind_vntextpatch_reference: true,
         extra_sources: QLIE_TEMPLATE_SOURCES,
         optional_components: &["qlie-japanese-font-launcher"],
         discovery_key: None,
         sample_component: None,
         prepare_for_model: true,
+        exclusive_format_candidate: false,
+        candidate_limit: 64,
+        allow_uncovered_resources: false,
+        filter_qlie_ancillary: true,
+        probe_report_kind: ProbeReportKind::Archive,
+        extra_runtime_checks: &[],
+        prepared_next_action: DEFAULT_PREPARED_NEXT_ACTION,
         distinct_volume_names: false,
         limitations: "支持带首项卷内密钥的 FilePack 3.1 和 HashVer1.4。确认原生 Unicode 对白和启动字体表时使用 UTF-16 和微软雅黑。其他布局按替换表、外字槽及系统字体资源选择显示方案。系统文本、卷覆盖顺序和游戏显示需单独验收",
     },
 ];
+
+pub(crate) struct BundledTemplate {
+    pub(crate) id: &'static str,
+    pub(crate) format: &'static str,
+    pub(crate) archive_component: Option<&'static str>,
+    pub(crate) extensions: &'static [&'static str],
+    pub(crate) patterns: &'static [&'static str],
+    pub(crate) name: &'static str,
+    pub(crate) module: &'static str,
+    pub(crate) component_files: &'static [&'static str],
+    pub(crate) required_filter: Option<(&'static str, &'static str)>,
+}
+
+const SCRIPT_TEMPLATE_COMPONENTS: &[&str] = &["engine_archive.py"];
+const RENPY_COMPILED_COMPONENTS: &[&str] = &[
+    "engine_archive.py",
+    "renpy_rpyc_adapter.py",
+    "renpy_mixed_adapter.py",
+];
+
+const BUNDLED_TEMPLATES: &[BundledTemplate] = &[
+    BundledTemplate {
+        id: "loose-renpy",
+        format: "Renpy",
+        archive_component: None,
+        extensions: &[".rpy"],
+        patterns: &["**/*.rpy"],
+        name: "Ren’Py 源脚本",
+        module: "script_template",
+        component_files: SCRIPT_TEMPLATE_COMPONENTS,
+        required_filter: None,
+    },
+    BundledTemplate {
+        id: "loose-kirikiri-ks",
+        format: "KirikiriKs",
+        archive_component: None,
+        extensions: &[".ks"],
+        patterns: &["**/*.ks"],
+        name: "Kirikiri KS 源脚本",
+        module: "script_template",
+        component_files: SCRIPT_TEMPLATE_COMPONENTS,
+        required_filter: None,
+    },
+    BundledTemplate {
+        id: "rpa3-renpy",
+        format: "Renpy",
+        archive_component: Some("archive.rpa3"),
+        extensions: &[".rpy"],
+        patterns: &["**/*.rpa"],
+        name: "RPA3 + Ren’Py 源脚本",
+        module: "script_template",
+        component_files: SCRIPT_TEMPLATE_COMPONENTS,
+        required_filter: None,
+    },
+    BundledTemplate {
+        id: "loose-renpy-rpyc",
+        format: "Renpy",
+        archive_component: None,
+        extensions: &[".rpyc"],
+        patterns: &["**/*.rpyc"],
+        name: "Ren’Py RPYC2 编译脚本",
+        module: "renpy_rpyc_adapter",
+        component_files: RENPY_COMPILED_COMPONENTS,
+        required_filter: None,
+    },
+    BundledTemplate {
+        id: "rpa3-renpy-rpyc",
+        format: "Renpy",
+        archive_component: Some("archive.rpa3"),
+        extensions: &[".rpyc"],
+        patterns: &["**/*.rpa"],
+        name: "RPA3 + Ren’Py RPYC2 编译脚本",
+        module: "renpy_rpyc_adapter",
+        component_files: RENPY_COMPILED_COMPONENTS,
+        required_filter: None,
+    },
+    BundledTemplate {
+        id: "renpy-mixed",
+        format: "Renpy",
+        archive_component: Some("archive.rpa3"),
+        extensions: &[".rpy", ".rpyc"],
+        patterns: &["**/*.rpy", "**/*.rpyc", "**/*.rpa"],
+        name: "Ren’Py 无冲突混合资源",
+        module: "renpy_mixed_adapter",
+        component_files: RENPY_COMPILED_COMPONENTS,
+        required_filter: None,
+    },
+    BundledTemplate {
+        id: "xp3-kirikiri-ks",
+        format: "KirikiriKs",
+        archive_component: Some("archive.xp3"),
+        extensions: &[".ks"],
+        patterns: &["**/*.xp3"],
+        name: "无过滤器 XP3 + Kirikiri KS",
+        module: "script_template",
+        component_files: SCRIPT_TEMPLATE_COMPONENTS,
+        required_filter: Some(("none", "XP3 模板要求已独立确认 filter=none。")),
+    },
+];
+
+pub(crate) struct TemplateComposition {
+    pub(crate) module: &'static str,
+    pub(crate) pass_template_id_to_main: bool,
+    pub(crate) writes_template_config: bool,
+    pub(crate) embedded_script_template: bool,
+    pub(crate) bind_vntextpatch_reference: bool,
+    pub(crate) required_filter: Option<(&'static str, &'static str)>,
+    pub(crate) component_files: Vec<String>,
+    pub(crate) optional_components: &'static [&'static str],
+    pub(crate) limitations: &'static str,
+}
+
+pub(crate) fn template_composition(id: &str) -> Option<TemplateComposition> {
+    if let Some(template) = ARCHIVE_TEMPLATES.iter().find(|template| template.id == id) {
+        let mut component_files = Vec::new();
+        if template.archive_component.is_some() {
+            component_files.push("engine_archive.py".to_owned());
+        }
+        component_files.push(format!("{}.py", template.module));
+        component_files.extend(template.extra_sources.iter().map(|source| (*source).to_owned()));
+        return Some(TemplateComposition {
+            module: template.module,
+            pass_template_id_to_main: template.pass_template_id_to_main,
+            writes_template_config: false,
+            embedded_script_template: false,
+            bind_vntextpatch_reference: template.bind_vntextpatch_reference,
+            required_filter: None,
+            component_files,
+            optional_components: template.optional_components,
+            limitations: template.limitations,
+        });
+    }
+    let template = BUNDLED_TEMPLATES.iter().find(|template| template.id == id)?;
+    Some(TemplateComposition {
+        module: template.module,
+        pass_template_id_to_main: false,
+        writes_template_config: true,
+        embedded_script_template: template.module == "script_template",
+        bind_vntextpatch_reference: true,
+        required_filter: template.required_filter,
+        component_files: template
+            .component_files
+            .iter()
+            .map(|file| (*file).to_owned())
+            .collect(),
+        optional_components: &[],
+        limitations: DEFAULT_TEMPLATE_LIMITATIONS,
+    })
+}
 
 pub(crate) fn check_reused_archive_scope(
     adapter_id: &str,
@@ -200,64 +544,16 @@ pub(crate) fn check_reused_archive_scope(
 }
 
 pub(crate) fn template_catalog() -> Vec<Value> {
-    let bundled = [
+    let bundled = BUNDLED_TEMPLATES.iter().map(|template| {
         (
-            "loose-renpy",
-            "Renpy",
-            None,
-            vec![".rpy"],
-            vec!["**/*.rpy"],
-            "Ren’Py 源脚本",
-        ),
-        (
-            "loose-kirikiri-ks",
-            "KirikiriKs",
-            None,
-            vec![".ks"],
-            vec!["**/*.ks"],
-            "Kirikiri KS 源脚本",
-        ),
-        (
-            "rpa3-renpy",
-            "Renpy",
-            Some("archive.rpa3"),
-            vec![".rpy"],
-            vec!["**/*.rpa"],
-            "RPA3 + Ren’Py 源脚本",
-        ),
-        (
-            "loose-renpy-rpyc",
-            "Renpy",
-            None,
-            vec![".rpyc"],
-            vec!["**/*.rpyc"],
-            "Ren’Py RPYC2 编译脚本",
-        ),
-        (
-            "rpa3-renpy-rpyc",
-            "Renpy",
-            Some("archive.rpa3"),
-            vec![".rpyc"],
-            vec!["**/*.rpa"],
-            "RPA3 + Ren’Py RPYC2 编译脚本",
-        ),
-        (
-            "renpy-mixed",
-            "Renpy",
-            Some("archive.rpa3"),
-            vec![".rpy", ".rpyc"],
-            vec!["**/*.rpy", "**/*.rpyc", "**/*.rpa"],
-            "Ren’Py 无冲突混合资源",
-        ),
-        (
-            "xp3-kirikiri-ks",
-            "KirikiriKs",
-            Some("archive.xp3"),
-            vec![".ks"],
-            vec!["**/*.xp3"],
-            "无过滤器 XP3 + Kirikiri KS",
-        ),
-    ];
+            template.id,
+            template.format,
+            template.archive_component,
+            template.extensions.to_vec(),
+            template.patterns.to_vec(),
+            template.name,
+        )
+    });
     let archives = ARCHIVE_TEMPLATES.iter().map(|template| {
         (
             template.id,
@@ -691,6 +987,76 @@ mod tests {
         assert_eq!(
             fs::read(root.path().join("Graphics.dll")).unwrap(),
             b"unknown runtime"
+        );
+    }
+
+    #[test]
+    fn archive_component_specs_match_catalog_and_bound_only_in_memory_archives() {
+        let catalog_ids: BTreeSet<_> = engine_components()
+            .into_iter()
+            .map(|entry| entry["id"].as_str().unwrap().to_owned())
+            .collect();
+        let spec_ids: BTreeSet<_> = ARCHIVE_COMPONENT_SPECS
+            .iter()
+            .map(|spec| spec.id.to_owned())
+            .collect();
+        assert_eq!(catalog_ids, spec_ids);
+        let rpa = archive_component_spec("archive.rpa3").unwrap();
+        assert_eq!(rpa.max_input_bytes, None);
+        assert_eq!(rpa.required_filter, None);
+        let xp3 = archive_component_spec("archive.xp3").unwrap();
+        assert_eq!(xp3.max_input_bytes, Some(512 << 20));
+        assert_eq!(xp3.required_filter.map(|(value, _)| value), Some("none"));
+        let kif = archive_component_spec("archive.kif").unwrap();
+        assert_eq!(kif.extra_inputs.len(), 1);
+        assert_eq!(kif.extra_inputs[0].arg, "keyExecutable");
+        let whale = archive_component_spec("archive.whale-dat").unwrap();
+        assert_eq!(whale.extra_inputs.len(), 1);
+        assert_eq!(whale.extra_inputs[0].arg, "filenameManifest");
+    }
+
+    #[test]
+    fn template_composition_covers_catalog_and_preserves_entry_contracts() {
+        for template in template_catalog() {
+            let id = template["id"].as_str().unwrap();
+            let composition = template_composition(id).unwrap_or_else(|| panic!("missing spec for {id}"));
+            assert!(!composition.module.is_empty());
+        }
+        let check_entry = |id: &str, expected: &str| {
+            let composition = template_composition(id).unwrap();
+            let args = if composition.pass_template_id_to_main {
+                format!("{id:?}")
+            } else {
+                String::new()
+            };
+            let entry = format!(
+                "import sys\nfrom tools.{} import main\nsys.exit(main({args}))\n",
+                composition.module
+            );
+            assert_eq!(entry, expected, "entry mismatch for {id}");
+        };
+        check_entry(
+            "loose-renpy",
+            "import sys\nfrom tools.script_template import main\nsys.exit(main())\n",
+        );
+        check_entry(
+            "rpa3-renpy-rpyc",
+            "import sys\nfrom tools.renpy_rpyc_adapter import main\nsys.exit(main())\n",
+        );
+        check_entry(
+            "renpy-mixed",
+            "import sys\nfrom tools.renpy_mixed_adapter import main\nsys.exit(main())\n",
+        );
+        check_entry(
+            "qlie-pack31-imos",
+            "import sys\nfrom tools.qlie_pack_adapter import main\nsys.exit(main(\"qlie-pack31-imos\"))\n",
+        );
+        assert_eq!(
+            template_composition("xp3-kirikiri-ks")
+                .unwrap()
+                .required_filter
+                .map(|(value, _)| value),
+            Some("none")
         );
     }
 }

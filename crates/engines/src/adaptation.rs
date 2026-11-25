@@ -1886,10 +1886,12 @@ impl EngineService {
         {
             return Err(EngineError::Protocol("不支持的封包组件操作。".into()));
         }
-        if component == "archive.xp3" && args["filter"].as_str() != Some("none") {
-            return Err(EngineError::Rejected(
-                "请先确认 XP3 未使用过滤器，再明确指定 filter=none。".into(),
-            ));
+        let spec = crate::adaptation_assets::archive_component_spec(component)
+            .ok_or_else(|| EngineError::Protocol("未知封包组件。".into()))?;
+        if let Some((required, message)) = spec.required_filter
+            && args["filter"].as_str() != Some(required)
+        {
+            return Err(EngineError::Rejected(message.into()));
         }
         let archive = text(args, "archive")?.replace('\\', "/");
         if !archive.starts_with("resources/") && !archive.starts_with("work/") {
@@ -1897,12 +1899,9 @@ impl EngineService {
         }
         let archive_path = resources::file(workspace, state, &archive)?;
         let mut component_inputs = BTreeMap::from([(archive, archive_path.clone())]);
-        let maximum = match component {
-            "archive.rpa3" => 2_u64 << 30,
-            "archive.xp3" => 512 << 20,
-            _ => u64::MAX,
-        };
-        if archive_path.metadata()?.len() > maximum {
+        if let Some(maximum) = spec.max_input_bytes
+            && archive_path.metadata()?.len() > maximum
+        {
             return Err(EngineError::Rejected("封包超过组件输入大小限制。".into()));
         }
         let output_relative = text(args, "output")?.replace('\\', "/");
@@ -1934,39 +1933,38 @@ impl EngineService {
             )
         );
         payload["verifyContents"] = json!(boolean(args, "verifyContents", false)?);
-        if args.get("keyExecutable").is_some() {
-            let relative = text(args, "keyExecutable")?.replace('\\', "/");
-            if component != "archive.kif"
-                || !relative.starts_with("resources/") && !relative.starts_with("work/")
-                || Path::new(&relative)
+        let mut seen_extra_args = std::collections::BTreeSet::new();
+        for declared in crate::adaptation_assets::declared_component_extra_args() {
+            if !seen_extra_args.insert(declared.arg) || args.get(declared.arg).is_none() {
+                continue;
+            }
+            let Some(allowed) = spec
+                .extra_inputs
+                .iter()
+                .find(|entry| entry.arg == declared.arg)
+            else {
+                return Err(EngineError::Protocol(
+                    declared.wrong_component_error.into(),
+                ));
+            };
+            let relative = text(args, allowed.arg)?.replace('\\', "/");
+            let scope_ok = (allowed.allow_resources && relative.starts_with("resources/"))
+                || (allowed.allow_work && relative.starts_with("work/"));
+            let extension_ok = allowed.extension.is_none_or(|expected| {
+                Path::new(&relative)
                     .extension()
-                    .is_none_or(|ext| !ext.eq_ignore_ascii_case("exe"))
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case(expected))
+            });
+            if !scope_ok || !extension_ok {
+                return Err(EngineError::Protocol(allowed.scope_error.into()));
+            }
+            let path = resources::file(workspace, state, &relative)?;
+            if let Some(message) = allowed.non_overlap_error
+                && path.starts_with(&output)
             {
-                return Err(EngineError::Protocol(
-                    "keyExecutable 仅用于 archive.kif，须为 resources/ 或 work/ 下的 EXE".into(),
-                ));
+                return Err(EngineError::Protocol(message.into()));
             }
-            let path = resources::file(workspace, state, &relative)?;
-            payload["keyExecutable"] = json!(path);
-            component_inputs.insert(relative, path);
-        }
-        if args.get("filenameManifest").is_some() {
-            if component != "archive.whale-dat" {
-                return Err(EngineError::Protocol(
-                    "filenameManifest 仅用于 Whale DAT。".into(),
-                ));
-            }
-            let relative = text(args, "filenameManifest")?.replace('\\', "/");
-            if !relative.starts_with("work/") {
-                return Err(EngineError::Protocol("文件名清单必须位于 work/。".into()));
-            }
-            let path = resources::file(workspace, state, &relative)?;
-            if path.starts_with(&output) {
-                return Err(EngineError::Protocol(
-                    "文件名清单不能位于组件输出目录。".into(),
-                ));
-            }
-            payload["filenameManifest"] = json!(path);
+            payload[allowed.arg] = json!(path);
             component_inputs.insert(relative, path);
         }
         if let Some(replacements) = payload
@@ -2009,9 +2007,10 @@ impl EngineService {
         response["runtimeStatus"] = json!("not-tested");
         if response["success"] == true && operation == "extract" {
             response["extractedDirectory"] = json!(format!("{output_relative}/files"));
-            if component == "archive.whale-dat" && response["filenameManifest"] == "filenames.json"
-            {
-                response["filenameManifest"] = json!(format!("{output_relative}/filenames.json"));
+            for &(field, file_name) in spec.output_path_fields {
+                if response[field] == file_name {
+                    response[field] = json!(format!("{output_relative}/{file_name}"));
+                }
             }
         }
         if response["success"] == true && operation == "rebuild" {
@@ -2038,26 +2037,15 @@ impl EngineService {
             .into_iter()
             .find(|template| template["id"] == id)
             .ok_or_else(|| EngineError::Protocol("未知组合模板。".into()))?;
-        if template["archiveComponent"] == "archive.xp3"
-            && args.get("filter").and_then(Value::as_str) != Some("none")
+        let composition = crate::adaptation_assets::template_composition(id)
+            .ok_or_else(|| EngineError::Protocol("未知组合模板。".into()))?;
+        if let Some((required, message)) = composition.required_filter
+            && args.get("filter").and_then(Value::as_str) != Some(required)
         {
-            return Err(EngineError::Rejected(
-                "XP3 模板要求已独立确认 filter=none。".into(),
-            ));
+            return Err(EngineError::Rejected(message.into()));
         }
-        let archive_template = crate::adaptation_assets::ARCHIVE_TEMPLATES
-            .iter()
-            .find(|template| template.id == id);
-        let module = if let Some(template) = archive_template {
-            template.module
-        } else if id == "renpy-mixed" {
-            "renpy_mixed_adapter"
-        } else if id.contains("rpyc") {
-            "renpy_rpyc_adapter"
-        } else {
-            "script_template"
-        };
-        let main_args = if module == "qlie_pack_adapter" {
+        let module = composition.module;
+        let main_args = if composition.pass_template_id_to_main {
             format!("{id:?}")
         } else {
             String::new()
@@ -2082,14 +2070,14 @@ impl EngineService {
             workspace,
             state,
             None,
-            archive_template.is_none_or(|template| template.module == "qlie_pack_adapter"),
+            composition.bind_vntextpatch_reference,
             cancellation,
         )?;
         let patterns = args
             .get("resourcePatterns")
             .cloned()
             .unwrap_or_else(|| template["resourcePatterns"].clone());
-        if archive_template.is_none() {
+        if composition.writes_template_config {
             let config = json!({"schemaVersion":1,"templateId":id,"templateVersion":1,"format":template["format"],"archiveComponent":template["archiveComponent"],"filter":args.get("filter"),"scriptExtensions":template["scriptExtensions"],"resourcePatterns":patterns});
             write_json(&workspace.join("src/tools/adapter-template.json"), &config)
                 .map_err(file_error)?;
@@ -2102,25 +2090,7 @@ impl EngineService {
                 },
             )?;
         }
-        let mut components = Vec::new();
-        if archive_template.is_none_or(|template| template.archive_component.is_some()) {
-            components.push("engine_archive.py".to_owned());
-        }
-        if let Some(template) = archive_template {
-            components.push(format!("{module}.py"));
-            components.extend(
-                template
-                    .extra_sources
-                    .iter()
-                    .map(|source| (*source).to_owned()),
-            );
-        } else if module != "script_template" {
-            components.extend([
-                "renpy_rpyc_adapter.py".into(),
-                "renpy_mixed_adapter.py".into(),
-            ]);
-        }
-        for file in components {
+        for file in composition.component_files {
             let source = self.asset_root.join("adapters/components").join(&file);
             let target = workspace.join("src/tools").join(&file);
             if refresh && target.is_file() && fs::read(&source)? != fs::read(&target)? {
@@ -2143,10 +2113,10 @@ impl EngineService {
                 },
             )?;
         }
-        if let Some(template) = archive_template {
-            components::copy_available(self, workspace, state, template.optional_components)?;
+        if !composition.optional_components.is_empty() {
+            components::copy_available(self, workspace, state, composition.optional_components)?;
         }
-        if module == "script_template" {
+        if composition.embedded_script_template {
             write_unmodified(
                 &workspace.join("src/tools/script_template.py"),
                 include_str!("../python/script_template.py"),
@@ -2166,10 +2136,7 @@ impl EngineService {
         if !refresh || state.recognition.is_none() {
             state.recognition = serde_json::from_value(template["recognition"].clone())?;
         }
-        let limitations = archive_template.map_or(
-            "只连接已声明的脚本与封包组件。RPYC2 保留非文本对象及源码摘要；其他脚本编码沿用解析器。不生成未经当前游戏验证的字体、转区或运行时补丁。",
-            |template| template.limitations,
-        );
+        let limitations = composition.limitations;
         let files = components::visible_release_files(&state.release_files);
         Ok(json!({
             "success":true,"template":template,
@@ -2935,7 +2902,7 @@ fn describe_engine_components(args: &Value) -> Result<Value, EngineError> {
     Ok(json!({
         "components":components,
         "dependencies":["Shared Python 3.14.10","Hash-pinned shared GalTransl library; standard library only, no pip or runtime downloads."],
-        "limits":{"rpaArchiveMiB":2048,"xp3ArchiveMiB":512,"indexedArchiveIndexMiB":8,"selectedMemberMiB":64,"selectedTotalMiB":256,"entries":10000,"memberNamesMiB":2},
+        "limits":{"xp3ArchiveMiB":512,"indexedArchiveIndexMiB":8,"selectedMemberMiB":64,"selectedTotalMiB":256,"entries":10000,"memberNamesMiB":2},
         "input":"run_engine_component: id, operation, archive (resources/ or work/), output (new work/ directory). Optional members or lowercase extensions select extraction. Rebuild replacements map exact member names to work/ files. XP3 requires filter=none. Encrypted KIF uses a staged keyExecutable. Whale DAT v2 accepts gameTitle for scripts and filenameManifest under work/ for assets.",
         "output":"Bounded summary plus work/<output>/manifest.json with resolved member names and lengths. Inspection reads the index, plus a few member prefixes when verifying an encrypted KIF filename key. Unread member SHA256 is null. verifyContents=true hashes members within the component's limits. readBytes records actual source reads. Extract writes files/. Supported rebuilds write rebuilt/<original filename> and verify member contents.",
         "usage":"Stage a real archive, then call the component directly; no Python wrapper or model-generated parser is needed. Use try_builtin_adapter on extracted scripts. Component success is structural evidence, not runtime or adapter acceptance."
@@ -4337,7 +4304,8 @@ mod tests {
                     .as_str()
                     .is_some_and(|text| text.contains("zero flags")))
         );
-        assert_eq!(description["limits"]["rpaArchiveMiB"], 2048);
+        assert!(description["limits"].get("rpaArchiveMiB").is_none());
+        assert_eq!(description["limits"]["xp3ArchiveMiB"], 512);
         assert!(describe_engine_components(&json!({"id":"unknown"})).is_err());
     }
 
