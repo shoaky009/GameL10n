@@ -2,10 +2,10 @@
 
 ## 封包脚本模板
 
-两个模板复用 ImoScripter `FormatType=1`、`ReturnCode=[n]` 的脚本处理，按同一启动目录下 `GameData` 的封包版本选择索引、密钥和回包实现。
+两个模板支持 ImoScripter（`FormatType=1`、`ReturnCode=[n]`）及早期 `Library/Avg`（`library/avg/setting.txt` 含 `DefaultFormat=Multi`、`scenario/*.s` 行式剧情脚本）两种已确认脚本配置，按同一启动目录下 `GameData` 的封包版本选择索引、密钥和回包实现。
 
-- `qlie-pack3-imos` 适用于 `FilePackVer3.0` 与 `HashVer1.3`。模板用 EXE 的 `IconKeyImage` 和 `DLL/key.fkey` 读取每卷的内部密钥，按原字节保留匹配的 EXE 和转区配置。
-- `qlie-pack31-imos` 适用于 `FilePackVer3.1`、`HashVer1.4` 和首项内置密钥布局。按成员识别脚本编码，UTF-16 保留字节序和 BOM，CP932 脚本可使用下述字形映射。`[rb,正文,注音]` 作为完整标签保护。
+- `qlie-pack3-imos` 适用于 `FilePackVer3.0` 与 `HashVer1.3`。模板用 EXE 的 `IconKeyImage` 和 `DLL/key.fkey` 读取每卷的内部密钥，按原字节保留匹配的 EXE 和转区配置。`Library/Avg` 方言保留 `【原身份＠译名】` 与 `[f,N]` 等非换行控制标签，并同步替换系统脚本中的 `\fn2` 字体名及默认配置字体。
+- `qlie-pack31-imos` 适用于 `FilePackVer3.1`、`HashVer1.4`（含 `PACKHASH` 头部与 `PACKKEY` 链式签名校验）和首项内置密钥布局。按成员识别脚本编码，UTF-16 保留字节序和 BOM，CP932 脚本可使用下述字形映射。`[rb,正文,注音]` 作为完整标签保护。
 
 模板核对各卷的脚本配置，从索引中选出脚本和配置所需的卷。按原封包及成员路径区分同名脚本，提取对白、人名、选项及已识别的显示字段。回包保留成员顺序及查找表，验收会回读改写成员并校验其他成员的原字节。卷的覆盖顺序、系统文本、中文显示及排版需单独确认。
 
@@ -15,7 +15,7 @@
 
 ## 系统字体布局
 
-3.0 模板检查外置 `GameData/System/config.txt` 和卷内唯一的 `system/font/fontdata.dat`。支持 0 到 7 号单层字体布局，使用 MS Gothic 或 MS Mincho 的 `system`、`system_fix` 字体，可保留独立的 6 号外字位图槽。其他布局仍可使用严格 CP932 的提取和回填。
+3.0 模板检查外置 `GameData/System/config.txt` 和卷内唯一的 `system/font/fontdata.dat`。支持 0 到 7 号单层字体布局，使用 MS Gothic 或 MS Mincho 的 `system`、`system_fix` 字体，可按 `fontdata.dat` 规则保留封包内已存在的 `.of` 位图外字槽（如第 6 号 `外字` 或第 5 号 `外字登録`）。若卷内存在 `script/config/default.txt` 的默认字体或系统脚本中的 `\fn2` 字体设置，补丁会同步更新。其他布局仍可使用严格 CP932 的提取和回填。
 
 3.1 模板按根目录中成对出现的游戏 EXE 和同名 `.exe.le.config` 确定日语转区入口。双层布局使用卷内 `system/font/fontdata.txt`，0 号槽包含 `system`、`system_ext`，其余七个槽继承 `base`。
 
@@ -31,7 +31,7 @@
 
 匹配的游戏可在首轮模型请求前完成原文逐字节验收、少量中文试写和全量中文回填验收。生成 Noto SC 衍生字体时，宿主从固定上游获取字体和许可，校验 SHA-256 后存入共享下载缓存。首次缺缓存时需要联网。此类补丁随附生成的字体及许可。系统文本、实际游戏显示及排版仍需确认。[智能适配流程](../automatic-adaptation.md) · [字体来源和哈希](../../../third_party/qlie-fonts/sources.json)
 
-部分和全量试译都会用宿主内置的 ImoScripter 读取器核对改写的字段。脚本使用 CP932 私用码位承载中文时，宿主会沿卷内字体表、外置配置和配套启动器核对游戏选择的字体，并检查替代码位与目标汉字在字体中指向同一字形。缺少显示所需的资源时，验收会指出失败的字符或字体，阻止激活。已有 FilePack 适配器首次复用时会补做本地验收，同一适配器、资源内容和验收版本可复用通过结果。
+部分和全量试译都会用宿主内置的 QLIE 读取器（支持 ImoScripter 与 `Library/Avg` 方言）核对改写的字段。脚本使用 CP932 私用码位承载中文时，宿主会沿卷内字体表、外置配置、默认配置、脚本 `\fn2` 指令和配套启动器核对游戏选择的字体，并检查替代码位与目标汉字在字体中指向同一字形。对于未登记脚本方言却包含私用字形或启动资源的补丁，宿主回读会明确拒绝而非跳过核验。已有 FilePack 适配器首次复用时会补做本地验收，同一适配器、资源内容和验收版本可复用通过结果。
 
 ## 字体组件接口
 

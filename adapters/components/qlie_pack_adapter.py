@@ -150,6 +150,7 @@ class Installation:
     glyphs: dict[int, int]
     font_resources: font.Resources | None
     bitmap_font: bitmap.BitmapFont | None = None
+    dialect: str = "imos"
 
     def read(self, path, entry, limit):
         return self.layout.read(*self.archives[path], entry, self.internal_keys[path], self.game_key, limit)
@@ -159,16 +160,21 @@ def system_font(root, request, files, indices):
     config = next((path for path in files if path.casefold() == font.CONFIG), None)
     if config is None:
         return None, "缺少外置的 QLIE 系统字体配置"
-    members = {name: [] for name in (font.TABLE, font.TEXT_TABLE, font.FONT_LIST_FILE, font.SETTINGS_FILE)}
+    members = {name: [] for name in (font.TABLE, font.TEXT_TABLE, font.FONT_LIST_FILE,
+                                     font.SETTINGS_FILE, font.DEFAULT_CONFIG_FILE)}
+    bitmap_names = set()
     for path, (_, index) in indices.items():
         for entry in index.entries:
             name = entry.name.replace("\\", "/").casefold()
             if name in members:
                 members[name].append((path, entry))
+            if name.startswith("system/font/") and name.endswith(".of"):
+                bitmap_names.add(Path(name).stem)
     tables = members[font.TABLE] + members[font.TEXT_TABLE]
     if len(tables) != 1:
         return None, "需要唯一的 QLIE 系统字体表"
-    documents = [*tables, *members[font.FONT_LIST_FILE], *members[font.SETTINGS_FILE]]
+    documents = [*tables, *members[font.FONT_LIST_FILE], *members[font.SETTINGS_FILE],
+                 *members[font.DEFAULT_CONFIG_FILE]]
     if (len(documents) > 16 or any(max(e.size, e.unpacked_size) > font.CONFIG_BYTES for _, e in documents)
             or any(info["path"] == config and info["length"] > font.CONFIG_BYTES
                    for info in request.get("probeFiles", []))):
@@ -180,7 +186,7 @@ def system_font(root, request, files, indices):
             key = index.entries[0]
             if max(key.size, key.unpacked_size) > pack.KEY_BYTES:
                 raise ValueError("QLIE 字体表所在卷的密钥超出读取范围")
-        return (font.Document.read(config, None, raw), documents), ""
+        return (font.Document.read(config, None, raw), documents, frozenset(bitmap_names)), ""
     except ValueError as error:
         return None, str(error)
 
@@ -294,7 +300,7 @@ def locate(root, request, files, stack):
     font_layout = None
     font_resources = None
     if font_source:
-        config, entries = font_source
+        config, entries, bitmap_names = font_source
         try:
             docs = []
             for path, entry in entries:
@@ -304,7 +310,7 @@ def locate(root, request, files, stack):
                     local_keys[path] = layout.key(*volume, external_key, game_key)
                 raw = layout.read(*volume, entry, local_keys[path], game_key, font.CONFIG_BYTES)
                 docs.append(font.Document.read(path, entry.name, raw))
-            font_resources = font.Resources(config, docs[0], docs[1:])
+            font_resources = font.Resources(config, docs[0], docs[1:], bitmap_names=bitmap_names)
             font_layout = font.Layout.read(font_resources, glyphs)
             selected.update((path, indices[path]) for path in font_entries)
             companions.append(config.path)
@@ -323,7 +329,7 @@ def locate(root, request, files, stack):
     index_bytes = sum(index.file_size - index.index_offset for _, index in indices.values())
     install = Installation(required, exe, layout, selected, game_key, external_key, local_keys,
                            fingerprints, index_bytes, font_layout, font_diagnostic, glyphs, font_resources)
-    support.script_profile(selected, install.read, layout)
+    install.dialect = support.dialect(support.script_profile(selected, install.read, layout))
     if not views:
         install.bitmap_font = bitmap.BitmapFont.find(install)
     return install
@@ -375,7 +381,12 @@ def patch_copies(install, samples):
     return additions
 
 
-def text_units(relative, member, row_number, record, row, *, unicode_scripts):
+def is_text_script(install, member):
+    return (install.dialect != script_format.AVG_SCENARIO
+            or member.replace("\\", "/").casefold().startswith("scenario/"))
+
+
+def text_units(relative, member, row_number, record, row, *, unicode_scripts, dialect="imos"):
     raw_name = record.speaker.raw if record.speaker else ""
     speaker = raw_name.split("＠", 1)[0] or None
     kinds = {"choice": "choice", "save-title": "ui"}
@@ -387,6 +398,8 @@ def text_units(relative, member, row_number, record, row, *, unicode_scripts):
         tokens = ["\n"] if field == "message" and len(record.parts) > 1 else []
         if unicode_scripts:
             tokens.extend(dict.fromkeys(tag[0] for tag in script_format.RUBY.finditer(text)))
+        elif dialect == script_format.AVG_SCENARIO:
+            tokens.extend(dict.fromkeys(tag[0] for tag in script_format.SCENARIO_TAG.finditer(text)))
         yield field, dict(id=unit_id,
                           resourcePath=relative, locator=locator, context=member, sourceText=text,
                           speaker=None if kind == "name" else speaker, kind=kind,
@@ -415,35 +428,39 @@ def scripts(install, sources, translations=None, mapping=None, faces=None, *, na
     if bitmap_chars:
         reverse.update({ord(c): bitmap.token(c) for c in bitmap_chars})
     native_font = install.bitmap_font
-    options = dict(unicode_scripts=install.layout.unicode_scripts)
+    options = dict(unicode_scripts=install.layout.unicode_scripts, dialect=install.dialect)
     for path, member, script, encoding, bom in sources:
         try:
             cp932 = encoding == 'cp932'
-            rows, modified = [], False
-            for number, record in enumerate(script_format.scan(script, **options)):
-                row = record.row()
-                decoded = {field: value.translate(install.glyphs) for field, value in row.items()} if cp932 and install.glyphs else row
-                if cp932 and native_font and native_font.rules:
-                    decoded = {field: native_font.decode(value) for field, value in decoded.items()}
-                for field, unit in text_units(path, member, number, record, decoded, **options):
-                    if translations is None:
-                        units.append(unit)
-                    elif unit["id"] in translations:
-                        used.add(unit["id"])
-                        replacement = translations[unit["id"]]
-                        if replacement != decoded[field]:
-                            encoded = replacement.translate(reverse) if cp932 else replacement
-                            if cp932 and native_font and (bitmap_chars or native_font.rules) and bitmap.TOKEN.search(replacement):
-                                raise ValueError("译文含与 QLIE 外字标签冲突的字串")
-                            if bitmap_chars and record.parts[0].kind == "save-title" and bitmap.TOKEN.search(encoded):
-                                raise ValueError("QLIE 存档标题尚未确认外字替换入口")
-                            if cp932 and not bitmap_chars and encoded.translate(mapping) != replacement:
-                                raise ValueError("译文与 QLIE 字形码位冲突")
-                            row[field] = encoded
-                            modified = True
-                            text_changed = True
-                rows.append(row)
-            patched = script_format.patch(script, rows, **options) if modified else script
+            modified = False
+            if is_text_script(install, member):
+                rows = []
+                for number, record in enumerate(script_format.scan(script, **options)):
+                    row = record.row()
+                    decoded = {field: value.translate(install.glyphs) for field, value in row.items()} if cp932 and install.glyphs else row
+                    if cp932 and native_font and native_font.rules:
+                        decoded = {field: native_font.decode(value) for field, value in decoded.items()}
+                    for field, unit in text_units(path, member, number, record, decoded, **options):
+                        if translations is None:
+                            units.append(unit)
+                        elif unit["id"] in translations:
+                            used.add(unit["id"])
+                            replacement = translations[unit["id"]]
+                            if replacement != decoded[field]:
+                                encoded = replacement.translate(reverse) if cp932 else replacement
+                                if cp932 and native_font and (bitmap_chars or native_font.rules) and bitmap.TOKEN.search(replacement):
+                                    raise ValueError("译文含与 QLIE 外字标签冲突的字串")
+                                if bitmap_chars and record.parts[0].kind == "save-title" and bitmap.TOKEN.search(encoded):
+                                    raise ValueError("QLIE 存档标题尚未确认外字替换入口")
+                                if cp932 and not bitmap_chars and encoded.translate(mapping) != replacement:
+                                    raise ValueError("译文与 QLIE 字形码位冲突")
+                                row[field] = encoded
+                                modified = True
+                                text_changed = True
+                    rows.append(row)
+                patched = script_format.patch(script, rows, **options) if modified else script
+            else:
+                patched = script
             if faces:
                 patched = install.font_layout.script_faces(patched, faces)
                 if member.replace("\\", "/").casefold() == font.SETUP_MEMBER:
@@ -501,13 +518,16 @@ def execute(request):
             duplicates = len(entries) - len(distinct_names)
             if duplicates:
                 warnings.append(f"各卷中存在 {duplicates} 份同路径脚本，需确认运行时的卷加载顺序")
+            description = ("QLIE 封包内的 Library/Avg 多行剧情脚本"
+                           if install.dialect == script_format.AVG_SCENARIO
+                           else "QLIE 封包内的 ImoScripter FormatType=1 脚本")
             return dict(indexFingerprints=install.fingerprints, indexBytes=install.index_bytes,
                         mediaOnlyArchives=len(install.fingerprints) - len(install.archives),
                         scriptCount=len(entries), duplicateScripts=duplicates,
                         scriptBytes=sum(entry.unpacked_size for entry in entries),
                         systemFont=dict(matched=install.font_layout is not None, diagnostic=install.font_diagnostic),
                         probe=dict(engineId="qlie", adapterId=f"template.{install.layout.template}", adapterVersion="1",
-                                   description="QLIE 封包内的 ImoScripter FormatType=1 脚本",
+                                   description=description,
                                    requiredFiles=install.files,
                                    originalExecutable=install.executable if install.executable in install.files else None,
                                    warnings=warnings))

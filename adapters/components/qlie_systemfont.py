@@ -15,6 +15,7 @@ TABLE = "system/font/fontdata.dat"
 TEXT_TABLE = "system/font/fontdata.txt"
 FONT_LIST_FILE = "avg/imoscripter_fontlist.txt"
 SETTINGS_FILE = "avg/setting.txt"
+DEFAULT_CONFIG_FILE = "script/config/default.txt"
 MAPPING = "qlie-l10n/glyphs.json"
 LAUNCH = "qlie-l10n/launch.xml"
 LAUNCHER = "QlieLauncher.exe"
@@ -30,7 +31,10 @@ PRIVATE_CHARS = re.compile(r"[\ue000-\ue757]")
 FONT_LIST = re.compile(r"^Font\[(\d+)\]\.List\[(\d+)\]=([^\r\n]*)", re.I | re.M)
 EXTERNAL_FONT = re.compile(r"^ExtFont\[\d+\]=([^\r\n]*)", re.I | re.M)
 FONT_NAME = re.compile(r"^Font\[(\d+)\]\.Name=([^\r\n]*)", re.I | re.M)
+DEFAULT_FONT_NAME = re.compile(r"^FontName=([^\r\n]*)", re.I | re.M)
 FONT_COMMAND = re.compile(r'^[ \t]*(?:\\scp,[^\s,]+[ \t]+)?\\fn2,[^,\r\n]+,"([^"\r\n]*)"', re.I | re.M)
+SYSTEM_SELECTORS = frozenset({"system", "system_fix"})
+RESERVED_SELECTORS = frozenset({"system", "system_fix", "system_pro", "system_ext", "base"})
 SETUP_MEMBER = "misc/misc.s"
 SETUP_ROUTINE = re.compile(r"^@@!Misc_FontSetup[ \t]*\r?\n(.*?)(?=^[ \t]*\\ret\b|^@@|\Z)", re.I | re.M | re.S)
 TABLE_LOAD = re.compile(
@@ -179,6 +183,15 @@ class Resources:
     config: Document
     table: Document
     overrides: list[Document]
+    bitmap_names: frozenset[str] = frozenset({"外字"})
+
+    def is_bitmap_slot(self, slot, selector):
+        return ((slot, selector) == (6, "外字")
+                or (bool(selector) and selector.casefold() not in RESERVED_SELECTORS
+                    and selector.casefold() in self.bitmap_names))
+
+    def is_ignored_face(self, face):
+        return face in INHERITED or face.casefold() in self.bitmap_names
 
     def slots(self):
         entries = FONT_LIST.findall(self.table.text)
@@ -194,11 +207,11 @@ class Resources:
         if len(names) != len(entries):
             raise ValueError("QLIE 外置配置含重复字体槽")
         if not extra and set(names) == set(primary):
-            if any(value not in {"system", "system_fix"} for slot, value in primary.items()
-                   if (slot, value) != (6, "外字")):
+            if any(value not in SYSTEM_SELECTORS for slot, value in primary.items()
+                   if not self.is_bitmap_slot(slot, value)):
                 raise ValueError("QLIE 单层字体表含未知选择方式")
             return {slot: (selector, names[slot]) for slot, selector in primary.items()
-                    if (slot, selector) != (6, "外字")}
+                    if not self.is_bitmap_slot(slot, selector)}
         if (extra != {(0, 1): "system_ext"} or primary[0] != "system"
                 or any(primary[i] != "base" for i in range(1, 8)) or set(names) != set(range(16))):
             raise ValueError("QLIE 多层字体需要 system/system_ext、继承 base 的七个槽及启动字体列表")
@@ -214,7 +227,11 @@ class Resources:
         return {slot: ("system", name) for slot, name in names.items()}
 
     def selected_faces(self):
-        return {name for doc in self.overrides for _, name in FONT_NAME.findall(doc.text)} - INHERITED
+        faces = {name for doc in self.overrides for _, name in FONT_NAME.findall(doc.text)}
+        for doc in self.overrides:
+            if doc.member and doc.member.replace("\\", "/").casefold() == DEFAULT_CONFIG_FILE:
+                faces.update(DEFAULT_FONT_NAME.findall(doc.text))
+        return {face for face in faces if not self.is_ignored_face(face)}
 
 
 def table_selection(script):
@@ -270,6 +287,8 @@ class Layout:
         for doc in docs:
             matches = (m for m in FONT_NAME.finditer(doc.text) if doc.member or int(m[1]) in self.slots)
             text = replace_value(doc.text, matches, 2, lambda m: faces.get(m[2]))
+            if doc.member and doc.member.replace("\\", "/").casefold() == DEFAULT_CONFIG_FILE:
+                text = replace_value(text, DEFAULT_FONT_NAME.finditer(text), 1, lambda m: faces.get(m[1]))
             if text != doc.text:
                 yield doc, doc.encode(text)
         doc = self.resources.table
@@ -281,7 +300,7 @@ class Layout:
     def script_faces(self, script, faces):
         def face(match):
             original = match[1]
-            if original in INHERITED:
+            if self.resources.is_ignored_face(original):
                 return None
             if original not in faces:
                 raise ValueError(f"QLIE 脚本使用了未识别的字体 {original[:80]}")

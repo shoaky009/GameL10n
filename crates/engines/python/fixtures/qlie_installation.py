@@ -119,9 +119,8 @@ def make_pack31(members, key_data):
         index += pack.MEMBER.pack(entry.offset, entry.size, entry.unpacked_size, 0, encryption,
                                   pack.checksum(stored))
         payload += stored
-    lookup = b'fixture lookup table'
     count = len(originals)
-    tail = pack.TAIL_SIGNATURE + struct.pack('<IIII', 256, count, count * 4, len(lookup)) + lookup + key_area
+    tail = pack.build_tail([name.encode('utf-16-le') for name, _ in originals], key_area)
     return payload + index + tail + pack.FOOTER.pack(b'FilePackVer3.1\0\0', count, len(payload))
 
 

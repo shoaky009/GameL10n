@@ -9,9 +9,14 @@ from . import engine_archive as archive
 
 VERSION = "3.1"
 TAIL_SIGNATURE = b"HashVer1.4\0\0\0\0\0\0"
+PACKKEY_SIGNATURE = b"8hr48uky,8ugi8ewra4g8d5vbf5hb5s6"
 FOOTER = struct.Struct("<16sIQ")
 MEMBER = struct.Struct("<QIIIII")
+PACKHASH = struct.Struct("<16s7I24s")
+PACKKEY_PREFIX = struct.Struct("<32sI")
 KEY_AREA_BYTES = 1024
+HASH_BUCKETS = 256
+HASH_CRYPT_KEY = 0x0428
 MAX_INDEX = 2 << 20
 MAX_TAIL = 4 << 20
 MAX_ENTRIES = 16_000
@@ -88,22 +93,88 @@ def read_index(stream):
     return qlie.Index(tuple(entries), seed, size, start, stream.tell())
 
 
+def chain_crypt(key, data, *, encrypt=False):
+    """Reversible 8-byte chained XOR used by FilePack 3.1 key and hash blocks."""
+    output = bytearray(data)
+    state_word = (key + len(output)) ^ 0xFEC9753E
+    state = (state_word & MASK32) | ((state_word & MASK32) << 32)
+    accumulator = 0xA73C5F9D | (0xA73C5F9D << 32)
+    increment = 0xCE24F523 | (0xCE24F523 << 32)
+    for offset in range(0, len(output) - 7, 8):
+        original, = struct.unpack_from("<Q", output, offset)
+        accumulator = add_lanes(accumulator, increment, 32) ^ state
+        changed = original ^ accumulator
+        struct.pack_into("<Q", output, offset, changed)
+        state = original if encrypt else changed
+    return bytes(output)
+
+
+def filename_hash(raw_name):
+    result = 0
+    for index, (code_unit,) in enumerate(struct.iter_unpack("<H", raw_name), 1):
+        result = ((code_unit << (index & 7)) + result) & 0x3fffffff
+    return result
+
+
+def hash_bucket(name_hash):
+    return ((name_hash & 0xffff) + (name_hash >> 8) + (name_hash >> 16)) % HASH_BUCKETS
+
+
+def build_hash_data(raw_names):
+    """Build a HashVer1.4 256-bucket filename lookup table for UTF-16LE member names."""
+    buckets = [[] for _ in range(HASH_BUCKETS)]
+    for ordinal, raw_name in enumerate(raw_names):
+        name_hash = filename_hash(raw_name)
+        buckets[hash_bucket(name_hash)].append((ordinal, raw_name, name_hash))
+    buffer = bytearray()
+    for items in buckets:
+        buffer.extend(struct.pack("<I", len(items)))
+        for ordinal, raw_name, name_hash in items:
+            buffer.extend(struct.pack("<H", len(raw_name) // 2))
+            buffer.extend(raw_name)
+            buffer.extend(struct.pack("<QI", ordinal * 4, name_hash))
+    buffer.extend(struct.pack(f"<{len(raw_names)}I", *range(len(raw_names))))
+    return bytes(buffer)
+
+
+def build_tail(raw_names, key_area):
+    """Build a HashVer1.4 lookup block and PACKKEY block matching the given 1024-byte key area."""
+    if len(key_area) != KEY_AREA_BYTES:
+        raise ValueError("FilePack 3.1 密钥区需要 1024 字节")
+    archive_key = checksum(key_area[:256]) & 0x0fffffff
+    hash_data = chain_crypt(HASH_CRYPT_KEY, build_hash_data(raw_names), encrypt=True)
+    pack_hash = PACKHASH.pack(
+        TAIL_SIGNATURE, HASH_BUCKETS, len(raw_names), 4 * len(raw_names),
+        len(hash_data), 0, 4, 0, bytes(24),
+    )
+    key_signature = chain_crypt(archive_key, PACKKEY_SIGNATURE, encrypt=True)
+    pack_key = PACKKEY_PREFIX.pack(key_signature, len(pack_hash) + len(hash_data)) + key_area
+    return pack_hash + hash_data + pack_key
+
+
 def writer_tail(stream, index):
     length = index.file_size - index.index_end - FOOTER.size
-    if not KEY_AREA_BYTES + 32 <= length <= MAX_TAIL:
+    min_tail = PACKHASH.size + PACKKEY_PREFIX.size + KEY_AREA_BYTES
+    if not min_tail <= length <= MAX_TAIL:
         raise ValueError("FilePack 3.1 查找表超出读取范围")
     tail = read_at(stream, index.index_end, length)
-    key_size, count, ordinals, packed_size = struct.unpack_from("<IIII", tail, 16)
-    if (tail[:16] != TAIL_SIGNATURE or key_size != 256 or count != len(index.entries)
-            or ordinals != 4 * count or not 0 < packed_size <= length - KEY_AREA_BYTES - 32):
-        raise ValueError("FilePack 3.1 回包需要已确认的 HashVer1.4 查找表")
+    (signature, table_size, count, ordinals, data_size, is_compressed,
+     safety_data_size, hash_version, _reserved) = PACKHASH.unpack_from(tail, 0)
+    key_offset = length - KEY_AREA_BYTES - PACKKEY_PREFIX.size
+    key_signature, hash_size = PACKKEY_PREFIX.unpack_from(tail, key_offset)
+    if (signature != TAIL_SIGNATURE or table_size != HASH_BUCKETS or count != len(index.entries)
+            or ordinals != 4 * count or data_size == 0 or is_compressed not in (0, 1)
+            or safety_data_size not in (0, 4) or hash_version != 0
+            or hash_size != key_offset or key_offset != PACKHASH.size + data_size
+            or chain_crypt(index.arc_key, key_signature, encrypt=False) != PACKKEY_SIGNATURE):
+        raise ValueError("FilePack 3.1 回包需要已确认的 HashVer1.4 查找表与密钥块")
     return tail
 
 
 def member_seed(entry, size, archive_seed):
     if entry.encryption == 1:
         first, second, constant, factor, multiplier = 0x85F532, 0x33F641, 0x8F32DC, 9, 0x8DF21431
-        length_term = (size & 0xffffff) * 8
+        length_term = size + (size & 0xffffff) * 7
     else:
         first, second, constant, factor, multiplier = 0x86F7E2, 0x4437F1, 0x56E213, 13, 0x8A77F473
         length_term = size + (size & 0xffffff) * 13

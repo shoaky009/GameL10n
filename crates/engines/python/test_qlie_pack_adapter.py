@@ -11,8 +11,24 @@ TOOLS = REPO / "third_party/engine-tools"
 PIN = json.loads((TOOLS / "current.json").read_text(encoding="utf-8"))
 sys.path[:0] = [str(REPO), str(TOOLS / "references" / PIN["revision"] / "library.zip")]
 
-from adapters.components import qlie_bitmap, qlie_pack_adapter, qlie_samples
-from crates.engines.python.fixtures.qlie_installation import make_installation, make_installation31
+from adapters.components import (
+    qlie_bitmap,
+    qlie_display,
+    qlie_pack31,
+    qlie_pack_adapter,
+    qlie_samples,
+    qlie_script,
+    qlie_systemfont,
+)
+from crates.engines.python.fixtures.qlie_installation import (
+    EXTERNAL_KEY,
+    GAME_KEY,
+    key_resource_exe,
+    make_installation,
+    make_installation31,
+    make_pack,
+    make_pack31,
+)
 
 
 class QlieBitmapTest(unittest.TestCase):
@@ -126,3 +142,274 @@ class QliePack31Test(unittest.TestCase):
         self.assertEqual(qlie_samples.inspect_uninstall_archive(self.root, files)["reason"], "unexpected-member-types")
         (self.root / "UnInstall.exe").write_bytes(b"MZ missing archive reference")
         self.assertEqual(qlie_samples.inspect_uninstall_archive(self.root, files)["reason"], "missing-archive-reference")
+
+    def test_writer_tail_verifies_packkey_signature_and_mode1_large_size_seed(self):
+        path = self.root / "GameData/story.pack"
+        with path.open("rb") as stream:
+            index = qlie_pack31.read_index(stream)
+            tail = qlie_pack31.writer_tail(stream, index)
+        self.assertGreaterEqual(len(tail), qlie_pack31.PACKHASH.size + qlie_pack31.PACKKEY_PREFIX.size + qlie_pack31.KEY_AREA_BYTES)
+
+        corrupted = bytearray(path.read_bytes())
+        sig_offset = len(corrupted) - qlie_pack31.FOOTER.size - qlie_pack31.KEY_AREA_BYTES - qlie_pack31.PACKKEY_PREFIX.size
+        corrupted[sig_offset] ^= 1
+        bad = self.root / "GameData/bad_sig.pack"
+        bad.write_bytes(corrupted)
+        with bad.open("rb") as stream:
+            bad_index = qlie_pack31.read_index(stream)
+            with self.assertRaisesRegex(ValueError, "HashVer1.4"):
+                qlie_pack31.writer_tail(stream, bad_index)
+
+        # Corrupted PACKKEY hash_size must also be rejected.
+        corrupted_size = bytearray(path.read_bytes())
+        hsize_offset = len(corrupted_size) - qlie_pack31.FOOTER.size - qlie_pack31.KEY_AREA_BYTES - 4
+        corrupted_size[hsize_offset] ^= 1
+        bad_size = self.root / "GameData/bad_size.pack"
+        bad_size.write_bytes(corrupted_size)
+        with bad_size.open("rb") as stream:
+            bad_size_index = qlie_pack31.read_index(stream)
+            with self.assertRaisesRegex(ValueError, "HashVer1.4"):
+                qlie_pack31.writer_tail(stream, bad_size_index)
+
+        # chain_crypt must roundtrip arbitrary 8-byte aligned payloads.
+        plain = b"8hr48uky,8ugi8ewra4g8d5vbf5hb5s6"
+        cipher = qlie_pack31.chain_crypt(0x123456, plain, encrypt=True)
+        self.assertNotEqual(cipher, plain)
+        self.assertEqual(qlie_pack31.chain_crypt(0x123456, cipher, encrypt=False), plain)
+
+
+def _avg_scenario_installation(root):
+    (root / "GameData/System").mkdir(parents=True)
+    (root / "DLL").mkdir()
+    (root / "game.exe").write_bytes(key_resource_exe())
+    (root / "DLL/key.fkey").write_bytes(EXTERNAL_KEY)
+    (root / "GameData/System/config.txt").write_bytes((
+        "\r\n".join([
+            *[f"Font[{i}].Name=ＭＳ ゴシック" for i in range(5)],
+            "Font[5].Name=外字登録",
+            "Font[6].Name=ＭＳ ゴシック",
+            "Font[7].Name=ＭＳ 明朝",
+        ]) + "\r\n"
+    ).encode("cp932"))
+    fontdata = "\r\n".join(
+        f"Font[{i}].List[0]={'外字登録' if i == 5 else 'system_fix'}" for i in range(8)
+    ) + "\r\n"
+    scenario = (
+        "@@@Library\\Avg\\header.s\r\n"
+        "@@Main\r\n"
+        "【キリエ】\r\n"
+        "％v001％\r\n"
+        "「きゃっ[f,5]¶[f,0]　こんにちは」\r\n"
+        "\r\n"
+        "【蓮華＠？？？】\r\n"
+        "さようなら\r\n"
+        "^select,進む,戻る\r\n"
+    )
+    (root / "GameData/data0.pack").write_bytes(make_pack([
+        ("startup.s", "\\sub,@@!ConfigValueInit,\"Script\\Config\\Value.s\"\r\n".encode("cp932")),
+        ("scenario/ks_01/story.s", scenario.encode("cp932")),
+        ("system/font/fontdata.dat", fontdata.encode("cp932")),
+        ("system/font/外字登録.of", b"\rOriginalFont1\x00\x00"),
+    ], bytes([113]) * 256))
+    value_s = (
+        "@@!ConfigValueInit\r\n"
+        "\t\\scp,cfg\r\n"
+        "\t\t\\fn2,1,\"ＭＳ ゴシック\"\r\n"
+        "\t\t\\fn2,6,\"ＭＳ ゴシック\"\r\n"
+        "\t\t\\fn2,7,\"ＭＳ 明朝\"\r\n"
+        "\\ret\r\n"
+    )
+    (root / "GameData/data7.pack").write_bytes(make_pack([
+        ("library/avg/setting.txt", b"DefaultFormat=Multi\r\n"),
+        ("library/avg/avgsystem.s", "\\gvar,str,Avg_MessageFormat\r\n".encode("cp932")),
+        ("script/config/value.s", value_s.encode("cp932")),
+        ("script/config/default.txt", "FontName=ＭＳ ゴシック\r\n".encode("cp932")),
+    ], bytes([157]) * 256))
+
+
+class QlieAvgScenarioTest(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name) / "game"
+        self.root.mkdir()
+        _avg_scenario_installation(self.root)
+        self.output = Path(directory.name) / "patch"
+        self.files = [path.relative_to(self.root).as_posix() for path in self.root.rglob("*") if path.is_file()]
+
+    def test_avg_scenario_probe_extract_roundtrip_and_font_slot_sync(self):
+        probe = qlie_pack_adapter.execute(dict(
+            operation="probe", sourceDirectory=str(self.root), resourceFiles=self.files,
+            templateId="qlie-pack3-imos",
+        ))
+        self.assertTrue(probe["systemFont"]["matched"], probe)
+        required = probe["probe"]["requiredFiles"]
+        self.assertIn("GameData/System/config.txt", required)
+        self.assertIn("GameData/data0.pack", required)
+        self.assertIn("GameData/data7.pack", required)
+
+        units = qlie_pack_adapter.execute(dict(
+            operation="extract", sourceDirectory=str(self.root), resourceFiles=required,
+            templateId="qlie-pack3-imos",
+        ))["extraction"]["units"]
+        self.assertEqual([u["sourceText"] for u in units], [
+            "キリエ", "「きゃっ[f,5]¶[f,0]　こんにちは」", "？？？", "さようなら", "進む", "戻る",
+        ])
+        tagged = next(u for u in units if "[f,5]" in u["sourceText"])
+        self.assertEqual(tagged["protectedTokens"], ["[f,5]", "[f,0]"])
+
+        # Original roundtrip stays byte-identical.
+        originals = {u["id"]: u["sourceText"] for u in units}
+        qlie_pack_adapter.execute(dict(
+            operation="build", sourceDirectory=str(self.root), outputDirectory=str(self.output),
+            resourceFiles=required, translations=originals, templateId="qlie-pack3-imos",
+        ))
+        for path in required:
+            self.assertEqual((self.output / path).read_bytes(), (self.root / path).read_bytes())
+
+        # Name alias preserves identity before ＠ and tags remain protected.
+        name_unit = next(u for u in units if u["sourceText"] == "？？？")
+        kiri_unit = next(u for u in units if u["sourceText"] == "キリエ")
+        edits = {
+            kiri_unit["id"]: "霧枝",
+            name_unit["id"]: "謎",
+            tagged["id"]: "「[f,5]¶[f,0]　更新済み」",
+        }
+        out2 = self.output.parent / "patch2"
+        build = qlie_pack_adapter.execute(dict(
+            operation="build", sourceDirectory=str(self.root), outputDirectory=str(out2),
+            resourceFiles=required, translations=edits, templateId="qlie-pack3-imos",
+        ))["build"]
+        self.assertTrue(qlie_pack_adapter.execute(dict(
+            operation="validate", sourceDirectory=str(self.root), outputDirectory=str(out2),
+            resourceFiles=required, outputFiles=build["files"], translations=edits, templateId="qlie-pack3-imos",
+        ))["validation"]["passed"])
+        reextracted = qlie_pack_adapter.execute(dict(
+            operation="extract", sourceDirectory=str(out2), resourceFiles=required,
+            templateId="qlie-pack3-imos",
+        ))["extraction"]["units"]
+        self.assertEqual(reextracted, [dict(u, sourceText=edits.get(u["id"], u["sourceText"])) for u in units])
+
+        # Verify raw script preserved identity aliases before ＠.
+        from contextlib import ExitStack
+        with ExitStack() as stack:
+            install = qlie_pack_adapter.locate(out2, {}, required, stack)
+            _, idx = install.archives["GameData/data0.pack"]
+            entry = next(e for e in idx.entries if e.name == "scenario/ks_01/story.s")
+            raw_script = install.read("GameData/data0.pack", entry, 1 << 20).decode("cp932")
+            self.assertIn("【キリエ＠霧枝】", raw_script)
+            self.assertIn("【蓮華＠謎】", raw_script)
+
+    def test_sample_probe_accepts_avg_scenario_layout(self):
+        archives = ["GameData/data0.pack", "GameData/data7.pack"]
+        files = {path: self.root / path for path in [*archives, "game.exe", "DLL/key.fkey"]}
+        report = qlie_samples.probe(dict(
+            files=files, archives=archives, executables=["game.exe"], keyFile="DLL/key.fkey",
+        ))
+        self.assertEqual(report["status"], "sampled", report)
+        self.assertEqual(report["templateId"], "qlie-pack3-imos")
+        self.assertEqual(report["profile"]["DefaultFormat"]["value"], "Multi")
+
+    def test_display_verify_catches_unpatched_startup_fn2_and_unknown_dialect_pua(self):
+        # Directly simulate a rebuilt patch where a PUA glyph is written into scenario/ks_01/story.s,
+        # config.txt & default.txt are patched, but script/config/value.s still selects ＭＳ ゴシック.
+        from contextlib import ExitStack
+        out = self.output
+        out.mkdir()
+        required = ["DLL/key.fkey", "GameData/System/config.txt", "GameData/data0.pack", "GameData/data7.pack", "game.exe"]
+        for path in required:
+            target = out / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes((self.root / path).read_bytes())
+
+        mapping = {0xE000: ord("汉")}
+        sans = qlie_systemfont.family("Sans", mapping) + " Regular"
+        serif = qlie_systemfont.family("Serif", mapping) + " Regular"
+        (out / "GameData/System/config.txt").write_bytes((
+            "\r\n".join([
+                *[f"Font[{i}].Name={sans}" for i in range(5)],
+                "Font[5].Name=外字登録",
+                f"Font[6].Name={sans}",
+                f"Font[7].Name={serif}",
+            ]) + "\r\n"
+        ).encode("cp932"))
+        (out / "qlie-l10n").mkdir()
+        (out / "QlieLauncher.exe").write_bytes(b"stub")
+        (out / "qlie-l10n/Sans.ttf").write_bytes(b"stub")
+        (out / "qlie-l10n/Serif.ttf").write_bytes(b"stub")
+        (out / "qlie-l10n/launch.xml").write_bytes((
+            '<?xml version="1.0" encoding="utf-8"?>'
+            f'<launch executable="game.exe">'
+            f'<font file="qlie-l10n/Sans.ttf" face="{sans}" />'
+            f'<font file="qlie-l10n/Serif.ttf" face="{serif}" />'
+            '</launch>'
+        ).encode("utf-8"))
+        # Rewrite data0.pack with PUA char \uE000 in scenario/ks_01/story.s and system fontdata.dat.
+        with ExitStack() as stack:
+            install = qlie_pack_adapter.locate(self.root, {}, required, stack)
+            units, _ = qlie_pack_adapter.scripts(install, qlie_pack_adapter.read_scripts(install))
+            target_unit = next(u for u in units if u["sourceText"] == "さようなら")
+            _, idx0 = install.archives["GameData/data0.pack"]
+            story_e = next(e for e in idx0.entries if e.name == "scenario/ks_01/story.s")
+            story_raw = install.read("GameData/data0.pack", story_e, 1 << 20).decode("cp932")
+            patched_story = story_raw.replace("さようなら", "さような\ue000").encode("cp932")
+            fontdata_e = next(e for e in idx0.entries if e.name == "system/font/fontdata.dat")
+            patched_fd = install.read("GameData/data0.pack", fontdata_e, 1 << 20).decode("cp932").replace("system_fix", "system").encode("cp932")
+            src0, _ = install.archives["GameData/data0.pack"]
+            with (out / "GameData/data0.pack").open("w+b") as dst0:
+                install.layout.rebuild(src0, dst0, idx0, install.internal_keys["GameData/data0.pack"],
+                                       install.external_key, install.game_key,
+                                       {"scenario/ks_01/story.s": patched_story, "system/font/fontdata.dat": patched_fd})
+            # Patch default.txt in data7.pack, deliberately leaving script/config/value.s unpatched!
+            _, idx7 = install.archives["GameData/data7.pack"]
+            src7, _ = install.archives["GameData/data7.pack"]
+            with (out / "GameData/data7.pack").open("w+b") as dst7:
+                install.layout.rebuild(src7, dst7, idx7, install.internal_keys["GameData/data7.pack"],
+                                       install.external_key, install.game_key,
+                                       {"script/config/default.txt": f"FontName={sans}\r\n".encode("cp932")})
+
+        samples_file = out / "samples.json"
+        samples_file.write_text(json.dumps([dict(
+            resourcePath=target_unit["resourcePath"], locator=target_unit["locator"],
+            original=target_unit["sourceText"], expected="さような汉",
+        )], ensure_ascii=False), encoding="utf-8")
+        built_files = [*required, "QlieLauncher.exe", "qlie-l10n/launch.xml", "qlie-l10n/Sans.ttf", "qlie-l10n/Serif.ttf"]
+        req = dict(output=str(out), source=str(self.root), resources=required, mode="replace",
+                   files=built_files, samplesFile=str(samples_file), launcher="QlieLauncher.exe",
+                   template=True, toolPaths={})
+        with self.assertRaisesRegex(ValueError, "启动器没有加载游戏选用的字体.*ＭＳ ゴシック"):
+            qlie_display.verify(req)
+
+        # Now also patch script/config/value.s -> qlie_display.verify must pass and return both fonts + alias.
+        with ExitStack() as stack:
+            install = qlie_pack_adapter.locate(self.root, {}, required, stack)
+            _, idx7 = install.archives["GameData/data7.pack"]
+            src7, _ = install.archives["GameData/data7.pack"]
+            val_e = next(e for e in idx7.entries if e.name == "script/config/value.s")
+            val_txt = install.read("GameData/data7.pack", val_e, 1 << 20).decode("cp932")
+            val_patched = val_txt.replace("ＭＳ ゴシック", sans).replace("ＭＳ 明朝", serif).encode("cp932")
+            with (out / "GameData/data7.pack").open("w+b") as dst7:
+                install.layout.rebuild(src7, dst7, idx7, install.internal_keys["GameData/data7.pack"],
+                                       install.external_key, install.game_key,
+                                       {"script/config/default.txt": f"FontName={sans}\r\n".encode("cp932"),
+                                        "script/config/value.s": val_patched})
+        evidence = qlie_display.verify(req)
+        self.assertEqual(evidence["aliases"], {"\ue000": "汉"})
+        self.assertEqual({f["face"] for f in evidence["fonts"]}, {sans, serif})
+
+        # Unknown QLIE dialect with PUA launcher artifacts must not silently bypass display verification.
+        unknown_root = self.output.parent / "unknown_game"
+        unknown_root.mkdir()
+        (unknown_root / "GameData").mkdir()
+        (unknown_root / "DLL").mkdir()
+        (unknown_root / "game.exe").write_bytes(key_resource_exe())
+        (unknown_root / "DLL/key.fkey").write_bytes(EXTERNAL_KEY)
+        (unknown_root / "GameData/data0.pack").write_bytes(make_pack([("story.s", b"hello\r\n")], bytes([113]) * 256))
+        with self.assertRaisesRegex(ValueError, "宿主独立显示回读器"):
+            qlie_display.verify(dict(
+                output=str(out), source=str(unknown_root),
+                resources=["DLL/key.fkey", "GameData/data0.pack", "game.exe"],
+                mode="replace", files=[*built_files, qlie_systemfont.MAPPING],
+                samplesFile=str(samples_file), launcher="QlieLauncher.exe",
+                template=False, toolPaths={},
+            ))

@@ -15,6 +15,9 @@ PROFILE = {
     'avg/projectsetting.txt': ('FormatType', '1'),
     'avg/setting.txt': ('ReturnCode', '[n]'),
 }
+AVG_PROFILE = {
+    'library/avg/setting.txt': ('DefaultFormat', 'Multi'),
+}
 SAMPLE_BYTES = 128 << 10
 SAMPLE_ARCHIVE_BYTES = 32 << 20
 MAX_EXE = 64 << 20
@@ -56,6 +59,10 @@ def inspect_uninstall_archive(root, files):
     return dict(report, status='confirmed', reason='uninstaller-reference-and-index')
 
 
+def dialect(profile):
+    return script_format.AVG_SCENARIO if 'DefaultFormat' in profile else 'imos'
+
+
 def profile_members(index, layout):
     for entry in index.entries:
         name = entry.name.replace('\\', '/').casefold()
@@ -63,13 +70,16 @@ def profile_members(index, layout):
             name = 'avg/' + name[len('avg2/'):]
         if name in PROFILE:
             yield entry, PROFILE[name]
+        elif name in AVG_PROFILE:
+            yield entry, AVG_PROFILE[name]
 
 
 def script_profile(archives, read, layout):
-    sources = {}
+    imos_sources, avg_sources = {}, {}
     checked = 0
-    for path, archive in archives.items():
-        for entry, (field, expected) in profile_members(archive[1], layout):
+    saw_imos = False
+    for path, volume in archives.items():
+        for entry, (field, expected) in profile_members(volume[1], layout):
             checked += 1
             if checked > 8:
                 raise ValueError('ImoScripter 配置副本超出读取范围')
@@ -82,17 +92,32 @@ def script_profile(archives, read, layout):
                     values.add(value.strip())
             if values != {expected}:
                 raise ValueError(f'{entry.name} 未确认 {field}={expected}')
-            sources.setdefault(field, dict(archive=path, member=entry.name, value=expected))
-    if len(sources) != len(PROFILE):
-        raise ValueError('缺少 ImoScripter FormatType 与 ReturnCode 配置证据')
-    return sources
+            target = avg_sources if field == 'DefaultFormat' else imos_sources
+            if field != 'DefaultFormat':
+                saw_imos = True
+            target.setdefault(field, dict(archive=path, member=entry.name, value=expected))
+    if saw_imos:
+        if len(imos_sources) != len(PROFILE):
+            raise ValueError('缺少 ImoScripter FormatType 与 ReturnCode 配置证据')
+        return imos_sources
+    if len(avg_sources) == len(AVG_PROFILE):
+        has_scenario = any(
+            entry.name.replace('\\', '/').casefold().startswith('scenario/')
+            and entry.name.lower().endswith('.s')
+            for _, index in archives.values()
+            for entry in index.entries
+        )
+        if not has_scenario:
+            raise ValueError('Library/Avg 配置缺少 scenario 目录下的剧情脚本')
+        return avg_sources
+    raise ValueError('缺少 ImoScripter FormatType/ReturnCode 或 Library/Avg DefaultFormat=Multi 配置证据')
 
 
-def _script_trial(entry, raw, layout):
+def _script_trial(entry, raw, layout, *, script_dialect='imos'):
     script, encoding, bom = script_format.decode(raw, unicode_scripts=layout.unicode_scripts)
-    options = dict(unicode_scripts=layout.unicode_scripts)
+    options = dict(unicode_scripts=layout.unicode_scripts, dialect=script_dialect)
     original = [record.row() for record in script_format.scan(script, **options)]
-    row = next((i for i, value in enumerate(original) if value['message']), None)
+    row = next((i for i, value in enumerate(original) if value.get('message')), None)
     if row is None:
         raise ValueError('脚本小样没有可回填文本')
     if bom + script_format.patch(script, original, **options).encode(encoding) != raw:
@@ -113,7 +138,7 @@ def _script_trial(entry, raw, layout):
         encoded = bom + script_format.patch(script, translated, **options).encode(encoding)
     else:
         trial['translationStatus'] = 'passed'
-    decoded, _, _ = script_format.decode(encoded, **options)
+    decoded, _, _ = script_format.decode(encoded, unicode_scripts=layout.unicode_scripts)
     if [record.row() for record in script_format.scan(decoded, **options)] != translated:
         raise ValueError('编码后的脚本回读与请求译文不符')
     return trial, encoded
@@ -204,10 +229,13 @@ def trial_volumes(request, report, layout, volumes):
 
     report['stage'] = 'script-profile'
     profile = script_profile(volumes, read_config, layout)
+    script_dialect = dialect(profile)
     report['profile'] = profile
     eligible = [(path, entry) for path, (_, index) in volumes.items() for entry in index.entries
                 if entry.name.lower().endswith('.s') and 0 < entry.size <= SAMPLE_BYTES
                 and 0 < entry.unpacked_size <= SAMPLE_BYTES
+                and (script_dialect != script_format.AVG_SCENARIO
+                     or entry.name.replace('\\', '/').casefold().startswith('scenario/'))
                 and (not layout.unicode_scripts or index.file_size <= SAMPLE_ARCHIVE_BYTES)]
     eligible.sort(key=lambda item: (not item[1].name.replace('\\', '/').casefold().startswith('scenario/'),
                                     not (item[1].packed and item[1].encryption),
@@ -225,12 +253,12 @@ def trial_volumes(request, report, layout, volumes):
             if previous.get('sampleHash') == archive.hash_range(stream, 0, index.file_size):
                 return dict(previous, reused=True)
 
-    report.update(stage='script', error='封包中没有预算内的 ImoScripter 脚本小样')
+    report.update(stage='script', error='封包中没有预算内的 QLIE 脚本小样')
     for path, entry in eligible[:6]:
         stream, index = volumes[path]
         try:
             raw = read(path, entry, SAMPLE_BYTES)
-            trial, replacement = _script_trial(entry, raw, layout)
+            trial, replacement = _script_trial(entry, raw, layout, script_dialect=script_dialect)
         except ValueError as error:
             if 'trials' not in report:
                 report.update(error=str(error)[:240])

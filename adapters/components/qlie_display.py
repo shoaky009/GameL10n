@@ -1,4 +1,4 @@
-"""Read ImoScripter trial fields and the system fonts selected by the rebuilt game."""
+"""Read QLIE trial fields and the system fonts selected by the rebuilt game."""
 from contextlib import ExitStack
 import json
 from pathlib import Path
@@ -30,7 +30,7 @@ def trial_fields(install, samples, overlay):
             raise ValueError(f"QLIE 试译脚本成员缺失：{volume}/{member}")
         raw = install.read(volume, entry, pack.MAX_SCRIPT)
         script, encoding, _ = qlie_script.decode(raw, unicode_scripts=install.layout.unicode_scripts)
-        records = qlie_script.scan(script, unicode_scripts=install.layout.unicode_scripts)
+        records = qlie_script.scan(script, unicode_scripts=install.layout.unicode_scripts, dialect=install.dialect)
         faces = set(font.FONT_COMMAND.findall(script))
         for row, field, expected in fields:
             if type(row) is not int or not 0 <= row < len(records) or field not in records[row].row():
@@ -39,7 +39,7 @@ def trial_fields(install, samples, overlay):
 
 
 def locate_samples(source, samples):
-    # Other adapters can use their own IDs and locators. Bind them to original ImoScripter fields.
+    # Other adapters can use their own IDs and locators. Bind them to original QLIE fields.
     units, _ = pack.scripts(source, pack.read_scripts(source))
     by_text, by_locator = {}, {}
     for unit in units:
@@ -56,6 +56,21 @@ def locate_samples(source, samples):
                 raise ValueError(f"QLIE 原文在 {path} 中有多个同文位置，试译需要可核对的卷、成员和字段位置")
             matched.append(dict(sample, locator=candidates[0]))
     return matched
+
+
+def all_script_faces(install):
+    """Collect explicit \\fn2 font names across all scripts, including startup/config helpers."""
+    selected = set()
+    decoded = 0
+    for volume, (_, index) in install.archives.items():
+        for entry in pack.script_members(index):
+            if decoded >= pack.MAX_TOTAL:
+                break
+            raw = install.read(volume, entry, min(pack.MAX_SCRIPT, pack.MAX_TOTAL - decoded))
+            decoded += len(raw)
+            script, _, _ = qlie_script.decode(raw, unicode_scripts=install.layout.unicode_scripts)
+            selected.update(font.FONT_COMMAND.findall(script))
+    return selected
 
 
 def inherited_faces(install):
@@ -96,20 +111,31 @@ def verify(request):
         if not request["template"]:
             try:
                 source = pack.locate(original, {}, request["resources"], stack)
-            except ValueError:
+            except ValueError as error:
+                if any(path in files for path in (font.MAPPING, font.LAUNCH, font.LAUNCHER)):
+                    raise ValueError(
+                        f"宿主独立显示回读器（非工作区适配器源码）不支持当前 QLIE 脚本方言：{error}。"
+                        "补丁含私用字形或字体启动资源，不能跳过独立核验，需在宿主补充该方言的显示回读支持"
+                    ) from error
                 return dict(fonts=[], aliases={})  # FilePack also carries other script formats.
             samples = locate_samples(source, samples)
             if not samples:
                 return dict(fonts=[], aliases={})
         effective_files = [*request["resources"], *files] if overlay else files
-        install = pack.locate(root, {}, [p for p in effective_files if p != font.MAPPING], stack)
+        try:
+            install = pack.locate(root, {}, [p for p in effective_files if p != font.MAPPING], stack)
+        except ValueError as error:
+            raise ValueError(
+                f"宿主独立显示回读器（非工作区适配器源码）检查回填结果失败：{error}。"
+                "请核对回填产物与宿主支持的 QLIE 脚本/字体布局，修改工作区适配器无法绕过此宿主门禁"
+            ) from error
         base = pack.unicode_dialogue(root, install, patched=True) if samples and request["template"] else set()
         if base and base | install.font_resources.selected_faces() != {font.UNICODE_FACE}:
             raise ValueError("QLIE 启动字体表与对白基础字体没有统一使用微软雅黑")
         aliases, script_faces, bitmap_chars = {}, set(), set()
         for raw, expected, faces, encoding in trial_fields(install, samples, overlay):
             if base and (not encoding.startswith("utf-16") or raw != expected
-                         or faces - font.INHERITED - {font.UNICODE_FACE}):
+                         or {f for f in faces if not install.font_resources.is_ignored_face(f)} - {font.UNICODE_FACE}):
                 raise ValueError("QLIE 译文字段需要直接写入 UTF-16 剧本并使用统一的对白字体")
             if raw == expected:
                 continue
@@ -151,7 +177,12 @@ def verify(request):
             raise ValueError(f"{evidence}，字体启动配置未指向当前游戏 EXE")
         slots = install.font_resources.slots().values()
         fixed = {face for selector, face in slots if selector == "system_fix"}
-        selected = {face for _, face in slots} | install.font_resources.selected_faces() | (script_faces - font.INHERITED)
+        all_faces = script_faces | all_script_faces(install)
+        selected = (
+            {face for _, face in slots}
+            | install.font_resources.selected_faces()
+            | {face for face in all_faces if not install.font_resources.is_ignored_face(face)}
+        )
         selected.update(inherited_faces(install))
         registered = {}
         for node in launch.findall("font"):
