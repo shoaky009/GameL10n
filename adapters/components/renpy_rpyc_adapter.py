@@ -228,12 +228,16 @@ def extract(request, files, scripts, packed):
 
 def build_script(resource, member, path, translations):
     script, names, rows, manifest = read_script(path, member)
-    matched = set()
+    matched, changed = set(), False
     for row, record in zip(rows, manifest["records"]):
         unit_id, _ = identity(resource, member, record["locator"])
         if unit_id in translations:
-            row["message"] = translations[unit_id]
             matched.add(unit_id)
+            if translations[unit_id] != row["message"]:
+                row["message"] = translations[unit_id]
+                changed = True
+    if not changed:
+        return script.raw, script.raw, matched
     return rpyc.patch(script, rows, manifest, filename=member, names=names), script.raw, matched
 
 

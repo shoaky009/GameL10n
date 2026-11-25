@@ -175,6 +175,16 @@ class RenpyFontTest(unittest.TestCase):
                 ))["build"]
                 self.assertEqual(empty_build["files"], [])
 
+                # Identity translations (all values equal to sourceText) must skip rpyc.patch.
+                identity_out = root / "identity"
+                identity_map = {u["id"]: u["sourceText"] for u in units}
+                with patch.object(renpy_rpyc_adapter.rpyc, "patch", side_effect=AssertionError("should skip patch")):
+                    identity_build = renpy_rpyc_adapter.execute(dict(
+                        base_req, operation="build", outputDirectory=str(identity_out), translations=identity_map
+                    ))["build"]
+                self.assertEqual(identity_build["mode"], "overlay")
+                self.assertEqual(identity_build["files"], [])
+
                 out = root / "overlay"
                 built = renpy_rpyc_adapter.execute(dict(
                     base_req,

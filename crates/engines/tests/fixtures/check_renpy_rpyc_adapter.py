@@ -157,31 +157,32 @@ reject(lambda: mixed.execute(packed), "加载冲突")
 archive(source / "nested/one.rpa", {"other.rpyc": original})
 reject(lambda: mixed.execute(dict(packed, resourceFiles=["script.rpyc", "nested/one.rpa"])), "加载根目录")
 archive(source / "one.rpa", {"other.rpyc": original, "media.bin": b"keep-media"})
+# Packed-only renpy-mixed uses fast overlay output without rewriting one.rpa.
+packed_only = dict(request("extract"), resourceFiles=["one.rpa"])
+packed_units = mixed.execute(packed_only)["extraction"]["units"]
+assert len(packed_units) == 4
+empty_overlay = Path("mixed-empty-overlay").absolute()
+built_empty = mixed.execute(dict(packed_only, operation="build", outputDirectory=str(empty_overlay), translations={}))["build"]
+assert built_empty["mode"] == "overlay" and built_empty["files"] == []
+output = Path("mixed-output").absolute()
+changed_text = "你好 [player] {b}混合资源{/b}"
+built = mixed.execute(dict(packed_only, operation="build", outputDirectory=str(output),
+                           translations={packed_units[0]["id"]: changed_text}))["build"]
+assert built["mode"] == "overlay" and built["files"] == ["other.rpyc"]
+assert not (output / "one.rpa").exists()
+reextracted = mixed.execute(dict(packed_only, operation="extract", outputDirectory=str(output),
+                                 buildMode="overlay", outputFiles=built["files"]))["extraction"]["units"]
+reextracted_unit = next(unit for unit in reextracted if unit["id"] == packed_units[0]["id"])
+assert reextracted_unit["sourceText"] == changed_text
+assert reextracted_unit["resourcePath"] == "one.rpa"
+assert reextracted_unit["context"] == packed_units[0]["context"]
+assert mixed.execute(dict(packed_only, operation="validate", outputDirectory=str(output),
+                          buildMode="overlay", outputFiles=built["files"]))["validation"]["passed"]
+# Loose + packed renpy-mixed defaults to replace so existing loose resources can be updated.
 combined = dict(request("extract"), resourceFiles=["script.rpyc", "one.rpa"])
 units = mixed.execute(combined)["extraction"]["units"]
 assert len(units) == 8
-# Default packed mode uses fast overlay output without rewriting one.rpa.
-empty_overlay = Path("mixed-empty-overlay").absolute()
-built_empty = mixed.execute(dict(combined, operation="build", outputDirectory=str(empty_overlay), translations={}))["build"]
-assert built_empty["mode"] == "overlay" and built_empty["files"] == []
-output = Path("mixed-output").absolute()
 packed_unit = next(unit for unit in units if unit["resourcePath"] == "one.rpa")
-changed_text = "你好 [player] {b}混合资源{/b}"
-built = mixed.execute(dict(combined, operation="build", outputDirectory=str(output),
-                           translations={packed_unit["id"]: changed_text}))["build"]
-assert built["mode"] == "overlay" and built["files"] == ["other.rpyc"]
-assert not (output / "one.rpa").exists()
-reextracted = mixed.execute(dict(combined, operation="extract", outputDirectory=str(output),
-                                 buildMode="overlay", outputFiles=built["files"]))["extraction"]["units"]
-reextracted_unit = next(unit for unit in reextracted if unit["id"] == packed_unit["id"])
-assert reextracted_unit["sourceText"] == changed_text
-assert reextracted_unit["resourcePath"] == "one.rpa"
-assert reextracted_unit["context"] == packed_unit["context"]
-assert mixed.execute(dict(combined, operation="validate", outputDirectory=str(output),
-                          buildMode="overlay", outputFiles=built["files"]))["validation"]["passed"]
-# Explicit buildMode=replace still rebuilds archives and verifies untouched media.
-config.update(buildMode="replace")
-config_path.write_text(json.dumps(config))
 replaced = Path("mixed-replace").absolute()
 built_replace = mixed.execute(dict(combined, operation="build", outputDirectory=str(replaced),
                                    translations={packed_unit["id"]: changed_text}))["build"]

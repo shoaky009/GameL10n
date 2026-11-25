@@ -384,9 +384,11 @@ def execute(request):
     if any(PurePosixPath(file).suffix.lower() not in (".rpy", ".rpyc", ".rpa") for file in files):
         raise ValueError("资源不属于配置选中的 Ren’Py 格式。")
     has_packed = any(file.lower().endswith(".rpa") for file in files)
-    build_mode = config.get("buildMode") or ("overlay" if has_packed else "replace")
+    has_loose = any(not file.lower().endswith(".rpa") for file in files)
+    # Overlay mode may only emit new paths and cannot overwrite existing loose resourceFiles.
+    build_mode = config.get("buildMode") or ("overlay" if has_packed and not has_loose else "replace")
     include_tl = bool(config.get("includeTranslationLanguages", False))
-    if build_mode not in ("overlay", "replace") or (build_mode == "overlay" and not has_packed):
+    if build_mode not in ("overlay", "replace") or (build_mode == "overlay" and (not has_packed or has_loose)):
         raise ValueError("Ren’Py 混合模板 buildMode 配置无效。")
     source, operation = request["sourceDirectory"], request["operation"]
     if operation == "probe":
