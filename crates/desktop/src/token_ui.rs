@@ -14,7 +14,7 @@ pub(crate) fn compact(value: u64) -> String {
     format!("{}.{:02}{suffix}", hundredths / 100, hundredths % 100)
 }
 
-fn exact(value: u64) -> String {
+pub(crate) fn exact(value: u64) -> String {
     let digits = value.to_string();
     let mut result = String::with_capacity(digits.len() + digits.len() / 3);
     for (index, digit) in digits.chars().enumerate() {

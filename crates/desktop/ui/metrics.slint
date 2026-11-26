@@ -1,20 +1,54 @@
 import { ComboBox, LineEdit, ListView } from "std-widgets.slint";
-import { App, Theme, Card, Heading, Label, Caption, Divider, TabItem, IconButton, ActionButton } from "state.slint";
+import { App, Theme, Card, Badge, Heading, Label, Caption, Divider, TabItem, IconButton, ActionButton } from "state.slint";
 import { TokenChart } from "token-chart.slint";
+
+component MetricStatCell inherits Rectangle {
+    in property <string> title;
+    in property <string> value;
+    in property <string> sub;
+    in property <string> exact;
+    in property <color> value-color: Theme.title;
+    horizontal-stretch: 1;
+    min-width: 0px;
+    if root.exact != "": Tooltip { text: @markdown("\{root.exact}"); }
+    VerticalLayout { spacing: 4px; alignment: start;
+        Caption { text: root.title; wrap: no-wrap; overflow: elide; }
+        Text {
+            text: root.value;
+            color: root.value-color;
+            font-size: 20px;
+            font-weight: 700;
+            wrap: no-wrap;
+            overflow: elide;
+        }
+        Caption { text: root.sub; color: Theme.secondary; wrap: no-wrap; overflow: elide; }
+    }
+}
+
+component LegendDot inherits HorizontalLayout {
+    in property <string> text;
+    in property <color> tint;
+    spacing: 5px;
+    horizontal-stretch: 0;
+    VerticalLayout { alignment: center; horizontal-stretch: 0;
+        Rectangle { width: 8px; height: 8px; border-radius: 2px; background: root.tint; }
+    }
+    Caption { text: root.text; vertical-alignment: center; wrap: no-wrap; }
+}
 
 export component ConsumptionMetrics inherits VerticalLayout {
     spacing: 12px;
     vertical-stretch: 1;
+
     HorizontalLayout { spacing: 8px;
         Heading { text: "消耗指标"; font-size: 24px; vertical-alignment: center; }
         Rectangle { horizontal-stretch: 1; }
         IconButton {
             icon: "filter-x"; button-size: 30px; icon-size: 16px;
-            tooltip: "重置全部筛选条件";
+            tooltip: "重置筛选条件";
             clicked => {
-                App.metrics-version-index = 0; App.metrics-model-index = 0; App.metrics-project-index = 0;
-                App.metrics-task-index = 0; App.metrics-mode-index = 0; App.metrics-status-index = 0;
                 App.metrics-date-range = 0; App.metrics-from = ""; App.metrics-through = "";
+                App.metrics-project-index = 0; App.metrics-model-index = 0; App.metrics-task-index = 0;
                 App.metrics-offset = 0; App.action("metrics", "refresh");
             }
         }
@@ -25,12 +59,34 @@ export component ConsumptionMetrics inherits VerticalLayout {
             clicked => { App.action("metrics", "refresh"); }
         }
     }
+
     HorizontalLayout { spacing: 8px;
-        ComboBox { model: ["全部日期", "今天", "近 7 天", "近 30 天", "自定义日期"]; current-index <=> App.metrics-date-range; selected => { App.metrics-offset = 0; App.action("metrics", "refresh"); } }
-        ComboBox { model: App.metrics-versions; current-index <=> App.metrics-version-index; selected => { App.metrics-offset = 0; App.action("metrics", "refresh"); } }
-        ComboBox { model: App.metrics-models; min-width: 0px; current-index <=> App.metrics-model-index; selected => { App.metrics-offset = 0; App.action("metrics", "refresh"); } Tooltip { text: @markdown("\{App.metrics-models[App.metrics-model-index]}"); } }
-        ComboBox { model: App.metrics-projects; current-index <=> App.metrics-project-index; selected => { App.metrics-offset = 0; App.action("metrics", "refresh"); } }
+        ComboBox {
+            model: ["全部日期", "今天", "近 7 天", "近 30 天", "自定义日期"];
+            current-index <=> App.metrics-date-range;
+            selected => { App.metrics-offset = 0; App.action("metrics", "refresh"); }
+        }
+        ComboBox {
+            model: App.metrics-projects;
+            min-width: 0px;
+            current-index <=> App.metrics-project-index;
+            selected => { App.metrics-offset = 0; App.action("metrics", "refresh"); }
+            Tooltip { text: @markdown("\{App.metrics-projects[App.metrics-project-index]}"); }
+        }
+        ComboBox {
+            model: App.metrics-models;
+            min-width: 0px;
+            current-index <=> App.metrics-model-index;
+            selected => { App.metrics-offset = 0; App.action("metrics", "refresh"); }
+            Tooltip { text: @markdown("\{App.metrics-models[App.metrics-model-index]}"); }
+        }
+        ComboBox {
+            model: ["全部任务", "文本翻译", "识别与适配", "术语提取", "经验总结"];
+            current-index <=> App.metrics-task-index;
+            selected => { App.metrics-offset = 0; App.action("metrics", "refresh"); }
+        }
     }
+
     if App.metrics-date-range == 4: HorizontalLayout { spacing: 8px;
         Label { text: "开始日期"; vertical-alignment: center; }
         LineEdit { text <=> App.metrics-from; placeholder-text: "YYYY-MM-DD"; accepted => { App.metrics-offset = 0; App.action("metrics", "refresh"); } }
@@ -38,80 +94,269 @@ export component ConsumptionMetrics inherits VerticalLayout {
         LineEdit { text <=> App.metrics-through; placeholder-text: "YYYY-MM-DD"; accepted => { App.metrics-offset = 0; App.action("metrics", "refresh"); } }
         ActionButton { text: "应用日期"; icon: "check"; compact: true; clicked => { App.metrics-offset = 0; App.action("metrics", "refresh"); } }
     }
-    HorizontalLayout { spacing: 8px;
-        ComboBox { model: ["全部任务", "识别与适配", "智能适配", "修复适配", "扩展覆盖", "经验总结"]; current-index <=> App.metrics-task-index; selected => { App.metrics-offset = 0; App.action("metrics", "refresh"); } }
-        ComboBox { model: ["全部执行方式", "新运行", "续接", "复用结果"]; current-index <=> App.metrics-mode-index; selected => { App.metrics-offset = 0; App.action("metrics", "refresh"); } }
-        ComboBox { model: ["全部状态", "运行中", "完成", "失败", "取消", "等待继续", "中断", "不支持"]; current-index <=> App.metrics-status-index; selected => { App.metrics-offset = 0; App.action("metrics", "refresh"); } }
-        Rectangle { horizontal-stretch: 1; }
-    }
+
     if App.metrics-error != "": Label { text: App.metrics-error; color: Theme.error; }
+
     if App.metrics-error == "": Card {
-        VerticalLayout { padding: 12px; spacing: 5px;
-            Label { text: App.metrics-overview; font-weight: 600; color: Theme.title; }
-            Label { text: App.metrics-tokens; }
-            Caption { text: App.metrics-timing; color: Theme.secondary; }
+        HorizontalLayout { padding: 14px; spacing: 14px;
+            MetricStatCell {
+                title: "总消耗 Token";
+                value: App.metrics-total-value;
+                sub: App.metrics-total-sub;
+                exact: App.metrics-total-exact;
+            }
+            Rectangle { width: 1px; background: Theme.line; horizontal-stretch: 0; }
+            MetricStatCell {
+                title: "未缓存输入";
+                value: App.metrics-uncached-value;
+                sub: App.metrics-uncached-sub;
+                exact: App.metrics-uncached-exact;
+                value-color: Theme.token-input;
+            }
+            Rectangle { width: 1px; background: Theme.line; horizontal-stretch: 0; }
+            MetricStatCell {
+                title: "缓存输入";
+                value: App.metrics-cached-value;
+                sub: App.metrics-cached-sub;
+                exact: App.metrics-cached-exact;
+                value-color: Theme.token-cached;
+            }
+            Rectangle { width: 1px; background: Theme.line; horizontal-stretch: 0; }
+            MetricStatCell {
+                title: "输出 Token";
+                value: App.metrics-output-value;
+                sub: App.metrics-output-sub;
+                exact: App.metrics-output-exact;
+                value-color: Theme.token-output;
+            }
         }
     }
+
     VerticalLayout { spacing: 0px;
         HorizontalLayout { spacing: 4px;
-            TabItem { text: "分组趋势"; icon: "chart"; selected: App.metrics-tab == 0; clicked => { App.metrics-tab = 0; App.metrics-offset = 0; App.action("metrics", "refresh"); } }
-            TabItem { text: "执行记录"; icon: "list"; selected: App.metrics-tab == 1; clicked => { App.metrics-tab = 1; App.metrics-offset = 0; App.action("metrics", "refresh"); } }
+            TabItem {
+                text: "消耗分布"; icon: "list";
+                selected: App.metrics-tab == 0;
+                clicked => { App.metrics-tab = 0; App.metrics-offset = 0; App.action("metrics", "refresh"); }
+            }
+            TabItem {
+                text: "每日趋势"; icon: "chart";
+                selected: App.metrics-tab == 1;
+                clicked => { App.metrics-tab = 1; App.metrics-offset = 0; App.action("metrics", "refresh"); }
+            }
+            TabItem {
+                text: "执行记录"; icon: "list-checks";
+                selected: App.metrics-tab == 2;
+                clicked => { App.metrics-tab = 2; App.metrics-offset = 0; App.action("metrics", "refresh"); }
+            }
             Rectangle { horizontal-stretch: 1; }
         }
         Divider {}
     }
+
     if App.metrics-tab == 0: HorizontalLayout { spacing: 8px;
-        Label { text: "分组"; vertical-alignment: center; }
-        ComboBox { model: ["日期", "软件版本", "模型配置", "任务类型", "游戏项目", "执行方式", "状态"]; current-index <=> App.metrics-dimension; selected => { App.metrics-offset = 0; App.action("metrics", "refresh"); } }
-        ComboBox { model: ["Token 用量", "未缓存输入 Token", "缓存命中率", "总耗时", "API 耗时", "等待耗时", "本地及其他耗时", "API 请求次数", "失败请求次数"]; current-index <=> App.metrics-measure; selected => { App.action("metrics", "refresh"); } }
-        ComboBox { model: ["合计", "单次运行平均"]; current-index <=> App.metrics-aggregation; enabled: App.metrics-measure != 2; selected => { App.action("metrics", "refresh"); } }
+        ComboBox {
+            model: ["按游戏项目", "按模型配置", "按任务类型"];
+            current-index <=> App.metrics-dimension;
+            selected => { App.metrics-offset = 0; App.action("metrics", "refresh"); }
+        }
+        ComboBox {
+            model: ["按总 Token 排序", "按未缓存输入排序", "按输出 Token 排序", "按缓存命中率排序", "按耗时排序"];
+            current-index <=> App.metrics-measure;
+            selected => { App.metrics-offset = 0; App.action("metrics", "refresh"); }
+        }
+        Rectangle { horizontal-stretch: 1; }
+        if App.metrics-measure == 0 && App.metrics-total > 0: HorizontalLayout { spacing: 14px; horizontal-stretch: 0;
+            LegendDot { text: "未缓存输入"; tint: Theme.token-input; }
+            LegendDot { text: "缓存输入"; tint: Theme.token-cached; }
+            LegendDot { text: "输出"; tint: Theme.token-output; }
+        }
     }
-    if App.metrics-tab == 0 && App.metrics-total > 0: Caption { text: App.metrics-chart-title; }
-    Rectangle { vertical-stretch: 1; min-height: App.metrics-tab == 0 && App.metrics-measure == 0 ? 162px : 130px;
-        if App.metrics-total == 0 && App.metrics-error == "": Label { text: App.metrics-loading ? "正在读取指标…" : App.metrics-empty; x: 12px; y: 20px; width: parent.width - 24px; }
-        if App.metrics-tab == 0 && App.metrics-total > 0 && App.metrics-measure == 0: TokenChart { points: App.token-points; segments: App.token-segments; ticks: App.token-ticks; known: App.token-chart-known; }
-        if App.metrics-tab == 0 && App.metrics-total > 0 && App.metrics-measure != 0: ListView {
+
+    if App.metrics-tab == 1: HorizontalLayout { spacing: 8px;
+        ComboBox {
+            model: ["输入与缓存趋势", "总 Token 趋势", "输出 Token 趋势"];
+            current-index <=> App.token-chart-mode;
+            selected => { App.action("metrics", "refresh"); }
+        }
+        Rectangle { horizontal-stretch: 1; }
+    }
+
+    Rectangle { vertical-stretch: 1; min-height: App.metrics-tab == 1 ? 180px : 140px;
+        if App.metrics-total == 0 && App.metrics-error == "": Label {
+            text: App.metrics-loading ? "正在读取指标…" : App.metrics-empty;
+            color: Theme.secondary;
+            x: 12px; y: 20px; width: parent.width - 24px;
+        }
+
+        if App.metrics-tab == 0 && App.metrics-total > 0: ListView {
             for group in App.metric-groups: Rectangle { height: 82px;
-                VerticalLayout { padding-top: 6px; padding-bottom: 10px; padding-right: 12px; spacing: 5px;
-                    HorizontalLayout { spacing: 12px;
-                        Label { text: group.label; font-weight: 600; wrap: no-wrap; overflow: elide; horizontal-stretch: 1; }
-                        Label { text: group.value; color: Theme.accent; horizontal-stretch: 0; }
+                if group.exact != "": Tooltip { text: @markdown("\{group.exact}"); }
+                VerticalLayout { padding-top: 6px; padding-bottom: 10px; padding-right: 12px; spacing: 6px;
+                    HorizontalLayout { spacing: 8px;
+                        Label {
+                            text: group.label;
+                            font-weight: 600;
+                            color: Theme.title;
+                            wrap: no-wrap;
+                            overflow: elide;
+                            horizontal-stretch: 1;
+                            vertical-alignment: center;
+                        }
+                        Label {
+                            text: group.value;
+                            font-weight: 600;
+                            color: App.metrics-measure == 2 ? Theme.token-output : App.metrics-measure == 3 ? Theme.token-cached : Theme.accent;
+                            horizontal-stretch: 0;
+                            vertical-alignment: center;
+                        }
+                        if group.share != "": Caption {
+                            text: group.share;
+                            horizontal-stretch: 0;
+                            vertical-alignment: center;
+                        }
+                        if group.can-open: IconButton {
+                            icon: "external-link"; button-size: 24px; icon-size: 13px;
+                            tooltip: "打开项目";
+                            clicked => { App.action("project", group.project-id); }
+                        }
                     }
                     Rectangle { height: 8px; border-radius: 4px; background: Theme.line; clip: true;
-                        Rectangle { x: 0px; y: 0px; width: parent.width * group.fraction; height: parent.height; border-radius: 4px; background: Theme.accent; }
+                        if App.metrics-measure == 0: Rectangle {
+                            x: 0px; y: 0px;
+                            width: parent.width * group.fraction;
+                            height: parent.height;
+                            border-radius: 4px;
+                            clip: true;
+                            Rectangle {
+                                x: 0px; y: 0px;
+                                width: parent.width * group.uncached-fraction;
+                                height: parent.height;
+                                background: Theme.token-input;
+                            }
+                            Rectangle {
+                                x: parent.width * group.uncached-fraction; y: 0px;
+                                width: parent.width * group.cached-fraction;
+                                height: parent.height;
+                                background: Theme.token-cached;
+                            }
+                            Rectangle {
+                                x: parent.width * (group.uncached-fraction + group.cached-fraction); y: 0px;
+                                width: max(0px, parent.width - self.x);
+                                height: parent.height;
+                                background: Theme.token-output;
+                            }
+                        }
+                        if App.metrics-measure != 0: Rectangle {
+                            x: 0px; y: 0px;
+                            width: parent.width * group.fraction;
+                            height: parent.height;
+                            border-radius: 4px;
+                            background: App.metrics-measure == 1 ? Theme.token-input
+                                : App.metrics-measure == 2 ? Theme.token-output
+                                : App.metrics-measure == 3 ? Theme.token-cached
+                                : Theme.accent;
+                        }
                     }
-                    Caption { text: group.detail; wrap: no-wrap; overflow: elide; }
+                    Caption { text: group.detail; color: Theme.secondary; wrap: no-wrap; overflow: elide; }
                 }
             }
         }
-        if App.metrics-tab == 1 && App.metrics-total > 0: ListView {
-            for record in App.consumption-rows: Rectangle { height: root.width < 1000px ? 128px : 110px; clip: true;
-                VerticalLayout { padding-top: 8px; padding-bottom: 10px; padding-right: 12px; spacing: 5px; alignment: start;
-                    Label { text: record.identity; font-weight: 600; wrap: no-wrap; overflow: elide; }
-                    Caption { text: record.configuration; wrap: no-wrap; overflow: elide; Tooltip { text: @markdown("\{record.configuration}"); } }
-                    Caption { text: record.counters; }
+
+        if App.metrics-tab == 1 && App.metrics-total > 0: TokenChart {
+            points: App.token-points;
+            segments: App.token-segments;
+            ticks: App.token-ticks;
+            known: App.token-chart-known;
+            mode: App.token-chart-mode;
+        }
+
+        if App.metrics-tab == 2 && App.metrics-total > 0: ListView {
+            for record in App.consumption-rows: Rectangle { height: 100px; clip: true;
+                VerticalLayout { padding-top: 8px; padding-bottom: 8px; padding-right: 12px; spacing: 5px; alignment: start;
+                    HorizontalLayout { spacing: 8px;
+                        Badge { text: record.task-label; tone: record.task-tone; }
+                        Label {
+                            text: record.project-name;
+                            font-weight: 600;
+                            color: Theme.title;
+                            wrap: no-wrap;
+                            overflow: elide;
+                            horizontal-stretch: 1;
+                            vertical-alignment: center;
+                        }
+                        if record.status-label != "": Badge { text: record.status-label; tone: record.status-tone; }
+                        Caption {
+                            text: record.timestamp;
+                            horizontal-stretch: 0;
+                            vertical-alignment: center;
+                        }
+                        Label {
+                            text: record.tokens-summary;
+                            font-weight: 600;
+                            color: Theme.accent;
+                            horizontal-stretch: 0;
+                            vertical-alignment: center;
+                            Tooltip { text: @markdown("\{record.tokens-exact}"); }
+                        }
+                        if record.can-open: IconButton {
+                            icon: "external-link"; button-size: 24px; icon-size: 13px;
+                            tooltip: "打开项目";
+                            clicked => { App.action("project", record.project-id); }
+                        }
+                    }
+                    Caption { text: record.tokens-detail; color: Theme.ink; wrap: no-wrap; overflow: elide; }
+                    Caption {
+                        text: record.configuration;
+                        wrap: no-wrap;
+                        overflow: elide;
+                        Tooltip { text: @markdown("\{record.configuration}"); }
+                    }
                     Divider {}
                 }
             }
         }
     }
-    HorizontalLayout { spacing: 6px;
-        Caption { text: App.metrics-total == 0 ? "" : (App.metrics-offset + 1) + "–" + min(App.metrics-offset + 20, App.metrics-total) + " / " + App.metrics-total; vertical-alignment: center; }
-        Rectangle { horizontal-stretch: 1; }
-        IconButton {
-            icon: "chevron-left"; button-size: 28px; icon-size: 16px;
-            tooltip: "上一页";
-            enabled: App.metrics-offset > 0;
-            clicked => { App.metrics-offset = max(0, App.metrics-offset - 20); App.action("metrics", "refresh"); }
+
+    if App.metrics-total > 0: HorizontalLayout { spacing: 6px;
+        Caption {
+            text: App.metrics-tab == 1
+                ? "共 " + App.metrics-total + " 天"
+                : (App.metrics-offset + 1) + "–" + min(App.metrics-offset + App.metrics-page-size, App.metrics-total) + " / " + App.metrics-total;
+            vertical-alignment: center;
         }
-        IconButton {
-            icon: "chevron-right"; button-size: 28px; icon-size: 16px;
-            tooltip: "下一页";
-            enabled: App.metrics-offset + 20 < App.metrics-total;
-            clicked => { App.metrics-offset += 20; App.action("metrics", "refresh"); }
+        Rectangle { horizontal-stretch: 1; }
+        if App.metrics-tab != 1: HorizontalLayout { spacing: 6px; horizontal-stretch: 0;
+            IconButton {
+                icon: "chevron-left"; button-size: 28px; icon-size: 16px;
+                tooltip: "上一页";
+                enabled: App.metrics-offset > 0;
+                clicked => { App.metrics-offset = max(0, App.metrics-offset - App.metrics-page-size); App.action("metrics", "refresh"); }
+            }
+            IconButton {
+                icon: "chevron-right"; button-size: 28px; icon-size: 16px;
+                tooltip: "下一页";
+                enabled: App.metrics-offset + App.metrics-page-size < App.metrics-total;
+                clicked => { App.metrics-offset += App.metrics-page-size; App.action("metrics", "refresh"); }
+            }
+        }
+        if App.metrics-tab == 1 && App.metrics-total > App.metrics-page-size: HorizontalLayout { spacing: 6px; horizontal-stretch: 0;
+            IconButton {
+                icon: "chevron-left"; button-size: 28px; icon-size: 16px;
+                tooltip: "更早日期";
+                enabled: App.metrics-offset + App.metrics-page-size < App.metrics-total;
+                clicked => { App.metrics-offset += App.metrics-page-size; App.action("metrics", "refresh"); }
+            }
+            IconButton {
+                icon: "chevron-right"; button-size: 28px; icon-size: 16px;
+                tooltip: "更近日期";
+                enabled: App.metrics-offset > 0;
+                clicked => { App.metrics-offset = max(0, App.metrics-offset - App.metrics-page-size); App.action("metrics", "refresh"); }
+            }
         }
     }
-    Caption { text: App.metrics-coverage; }
-    Caption { text: "缓存属于输入；≥ 表示仅统计已知用量。未缓存输入与命中率仅使用有效缓存计数。"; }
+
+    if App.metrics-notice != "": Caption { text: App.metrics-notice; color: Theme.secondary; }
+
     refresh := Timer { interval: 30s; running: App.page == 5; triggered => { if !App.metrics-loading { App.action("metrics", "auto"); } } }
 }

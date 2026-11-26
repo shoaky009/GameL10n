@@ -11,7 +11,7 @@
 | 处理不识别、漏译、乱码或字体问题 | [识别与智能适配](adapters/automatic-adaptation.md) |
 | 查找支持的格式和管理适配器版本 | [引擎库与格式支持](adapters/README.md#引擎与格式能力表) |
 | 迁移数据、恢复原版或清理文件 | [数据目录与迁移](data-storage.md) |
-| 比较模型或版本的 Token 与耗时 | [消耗指标](consumption-metrics.md) |
+| 查看翻译、适配与各模型的 Token 消耗 | [消耗指标](consumption-metrics.md) |
 
 使用范围和版权联系见 [免责声明](../DISCLAIMER.md)。
 

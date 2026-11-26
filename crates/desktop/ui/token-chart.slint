@@ -28,6 +28,8 @@ export component TokenChart inherits Rectangle {
     in property <[TokenSegment]> segments;
     in property <[MetricTick]> ticks;
     in property <bool> known;
+    // 0: 输入与缓存（总输入 / 未缓存输入 / 缓存输入）, 1: 总 Token, 2: 输出 Token
+    in property <int> mode;
     private property <int> hovered: -1;
     private property <int> selected: -1;
     private property <int> active: max(0, min(points.length - 1, hovered >= 0 ? hovered : selected >= 0 ? selected : points.length - 1));
@@ -35,20 +37,45 @@ export component TokenChart inherits Rectangle {
     forward-focus: keyboard;
     border-width: keyboard.has-focus ? 1px : 0px;
     border-color: Theme.accent;
+
     pure function series-color(series: int) -> color {
-        return series == 0 ? Theme.token-input : series == 1 ? Theme.token-output : Theme.token-cached;
+        if root.mode == 2 {
+            return Theme.token-output;
+        }
+        if root.mode == 1 {
+            return Theme.token-input;
+        }
+        return series == 0 ? Theme.token-input : series == 1 ? Theme.manual : Theme.token-cached;
     }
+
     Caption { x: 0px; y: 0px; text: "Token"; font-size: 12px; }
     HorizontalLayout { x: 60px; y: 0px; width: parent.width - 80px; height: 20px; spacing: 24px;
-        for label[i] in ["输入", "输出", "缓存输入"]: HorizontalLayout { spacing: 6px; horizontal-stretch: 0;
-            Rectangle { width: 22px; height: 20px;
-                Rectangle { x: 0px; y: 9px; width: 22px; height: 2px; background: root.series-color(i); }
-                TokenMarker { x: 8px; y: 6px; series: i; tint: root.series-color(i); }
+        if root.mode == 0: HorizontalLayout { spacing: 24px; horizontal-stretch: 0;
+            for label[i] in ["总输入", "未缓存输入", "缓存输入"]: HorizontalLayout { spacing: 6px; horizontal-stretch: 0;
+                Rectangle { width: 22px; height: 20px;
+                    Rectangle { x: 0px; y: 9px; width: 22px; height: 2px; background: root.series-color(i); }
+                    TokenMarker { x: 8px; y: 6px; series: i; tint: root.series-color(i); }
+                }
+                Caption { text: label; color: root.series-color(i); vertical-alignment: center; }
             }
-            Caption { text: label; color: root.series-color(i); vertical-alignment: center; }
+        }
+        if root.mode == 1: HorizontalLayout { spacing: 6px; horizontal-stretch: 0;
+            Rectangle { width: 22px; height: 20px;
+                Rectangle { x: 0px; y: 9px; width: 22px; height: 2px; background: Theme.token-input; }
+                TokenMarker { x: 8px; y: 6px; series: 0; tint: Theme.token-input; }
+            }
+            Caption { text: "总消耗 Token（输入 + 输出）"; color: Theme.token-input; vertical-alignment: center; }
+        }
+        if root.mode == 2: HorizontalLayout { spacing: 6px; horizontal-stretch: 0;
+            Rectangle { width: 22px; height: 20px;
+                Rectangle { x: 0px; y: 9px; width: 22px; height: 2px; background: Theme.token-output; }
+                TokenMarker { x: 8px; y: 6px; series: 1; tint: Theme.token-output; }
+            }
+            Caption { text: "输出 Token（独立纵轴）"; color: Theme.token-output; vertical-alignment: center; }
         }
         Rectangle { horizontal-stretch: 1; }
     }
+
     plot := Rectangle {
         x: 60px; y: 32px; width: max(0px, root.width - 80px); height: max(40px, root.height - 122px);
         for tick in root.ticks: Rectangle { x: 0px; y: tick.fraction * plot.height; width: plot.width; height: 1px; background: Theme.line; }
@@ -57,15 +84,27 @@ export component TokenChart inherits Rectangle {
             x: 0px; y: 0px; width: plot.width; height: plot.height;
             fit: preserve;
             fill: transparent; stroke: root.series-color(segment.series);
-            stroke-width: segment.series == 0 ? 2.8px : 2px;
+            stroke-width: segment.series == 0 ? 2.6px : 2px;
             stroke-line-cap: round;
             MoveTo { x: segment.x1 * plot.width / 1px; y: segment.y1 * plot.height / 1px; }
             LineTo { x: segment.x2 * plot.width / 1px; y: segment.y2 * plot.height / 1px; }
         }
         for point[i] in root.points: Rectangle { x: point.x * plot.width; y: 0px; width: 0px; height: plot.height;
-            if point.input-known: TokenMarker { x: -self.width / 2; y: point.input-y * plot.height - self.height / 2; width: i == root.active ? 9px : 7px; height: self.width; series: 0; tint: Theme.token-input; partial: point.usage-partial; }
-            if point.output-known: TokenMarker { x: -self.width / 2; y: point.output-y * plot.height - self.height / 2; width: i == root.active ? 9px : 7px; height: self.width; series: 1; tint: Theme.token-output; partial: point.usage-partial; }
-            if point.cached-known: TokenMarker { x: -self.width / 2; y: point.cached-y * plot.height - self.height / 2; width: i == root.active ? 9px : 7px; height: self.width; series: 2; tint: Theme.token-cached; partial: point.cache-partial; }
+            if point.primary-known: TokenMarker {
+                x: -self.width / 2; y: point.primary-y * plot.height - self.height / 2;
+                width: i == root.active ? 9px : 7px; height: self.width;
+                series: root.mode == 2 ? 1 : 0; tint: root.series-color(0); partial: point.primary-partial;
+            }
+            if point.secondary-known: TokenMarker {
+                x: -self.width / 2; y: point.secondary-y * plot.height - self.height / 2;
+                width: i == root.active ? 9px : 7px; height: self.width;
+                series: 1; tint: root.series-color(1); partial: point.secondary-partial;
+            }
+            if point.tertiary-known: TokenMarker {
+                x: -self.width / 2; y: point.tertiary-y * plot.height - self.height / 2;
+                width: i == root.active ? 9px : 7px; height: self.width;
+                series: 2; tint: root.series-color(2); partial: point.tertiary-partial;
+            }
         }
         if !root.known: Caption { x: 0px; y: max(0px, (plot.height - 20px) / 2); width: plot.width; text: "此范围没有已记录的 Token 用量"; horizontal-alignment: center; }
         for point[i] in root.points: Rectangle {
@@ -74,7 +113,7 @@ export component TokenChart inherits Rectangle {
             width: min(plot.width, (point.x + half-step) * plot.width) - self.x;
             y: 0px; height: plot.height;
             accessible-role: button;
-            accessible-label: point.label + "，输入 " + point.input + "，输出 " + point.output + "，缓存输入 " + point.cached;
+            accessible-label: point.label + "，总计 " + point.total + "，未缓存输入 " + point.uncached + "，缓存输入 " + point.cached + "，输出 " + point.output;
             accessible-action-default => { root.selected = i; keyboard.focus(); }
             TouchArea {
                 mouse-cursor: pointer;
@@ -84,6 +123,7 @@ export component TokenChart inherits Rectangle {
             }
         }
     }
+
     for tick in root.ticks: Caption {
         visible: plot.height >= 80px || tick.fraction == 0 || tick.fraction == 0.5 || tick.fraction == 1;
         x: 0px; y: plot.y + tick.fraction * plot.height - 9px; width: 52px; height: 18px;
@@ -94,11 +134,20 @@ export component TokenChart inherits Rectangle {
         y: plot.y + plot.height + 9px; width: 100px; height: 18px;
         text: point.axis-label; horizontal-alignment: center; wrap: no-wrap; overflow: elide; font-size: 12px;
     }
+
     if root.points.length > 0: VerticalLayout {
         x: 0px; y: plot.y + plot.height + 36px; width: root.width; height: 52px; spacing: 4px; alignment: start;
-        Label { text: root.points[root.active].label; font-weight: 600; wrap: no-wrap; overflow: elide; Tooltip { text: @markdown("\{root.points[root.active].label}\n\{root.points[root.active].detail}"); } }
-        Caption { text: "输入 " + root.points[root.active].input + "    输出 " + root.points[root.active].output + "    缓存输入 " + root.points[root.active].cached; }
+        HorizontalLayout { spacing: 10px; alignment: start;
+            Label { text: root.points[root.active].label; font-weight: 600; color: Theme.title; wrap: no-wrap; horizontal-stretch: 0; }
+            Label { text: "总计 " + root.points[root.active].total; font-weight: 600; color: Theme.accent; wrap: no-wrap; horizontal-stretch: 0; }
+            Caption { text: root.points[root.active].detail; vertical-alignment: center; wrap: no-wrap; overflow: elide; horizontal-stretch: 1; }
+        }
+        Caption {
+            text: "未缓存输入 " + root.points[root.active].uncached + "    ·    缓存输入 " + root.points[root.active].cached + "    ·    输出 " + root.points[root.active].output;
+            color: Theme.secondary; wrap: no-wrap; overflow: elide;
+        }
     }
+
     keyboard := FocusScope {
         width: 0px; height: 0px;
         key-pressed(event) => {

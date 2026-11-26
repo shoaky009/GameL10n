@@ -1319,7 +1319,7 @@ impl Application {
         let task = match objective {
             AdaptationObjective::Repair => Some("repair"),
             AdaptationObjective::ExpandCoverage => Some("expand"),
-            AdaptationObjective::Develop => None,
+            AdaptationObjective::Develop => Some("adapt"),
         };
         let continuing = self
             .project_directory(id)?

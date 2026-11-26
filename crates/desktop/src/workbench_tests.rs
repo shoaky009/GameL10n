@@ -692,29 +692,61 @@ fn project_actions_keep_settings_selection_and_saved_edits_in_sync_across_tabs()
 
         let directory = host.data_directory().join("metrics");
         std::fs::create_dir_all(&directory).unwrap();
-        let records = [("Profile A", "high", 100, 80), ("Profile B", "low", 1000, 900)].into_iter().enumerate().map(|(index, (profile, reasoning, input, cached))| serde_json::json!({
-            "id": format!("metrics-{index}"), "projectId": project.id, "projectName": "Metrics fixture",
-            "softwareVersion": "0.1.0", "buildGitHash": format!("build-{index}"), "model": "shared-model", "profileName":profile, "reasoningEffort":reasoning,
-            "task": "adapt", "mode": "new", "status": "completed", "startedAt": "2026-11-12T04:00:00Z", "endedAt": "2026-11-12T04:01:00Z", "elapsedMs": 60000,
-            "api": {"requests":1,"usageRequests":1,"cacheRequests":1,"inputTokens":input,"outputTokens":20,"cachedTokens":cached,"cacheInputTokens":input,"apiMs":50000}
-        }).to_string()).collect::<Vec<_>>().join("\n");
+        let records = [
+            ("Profile A", "high", "adapt", 100, 80, "2026-11-11T04:00:00Z"),
+            ("Profile B", "low", "translate", 1000, 900, "2026-11-12T04:00:00Z"),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (profile, reasoning, task, input, cached, started))| {
+            serde_json::json!({
+                "id": format!("metrics-{index}"), "projectId": project.id, "projectName": "Metrics fixture",
+                "softwareVersion": "0.1.0", "buildGitHash": format!("build-{index}"), "model": "shared-model", "profileName": profile,
+                "reasoningEffort": if task == "translate" { serde_json::Value::Null } else { serde_json::json!(reasoning) },
+                "task": task, "mode": "new", "status": "completed", "startedAt": started, "endedAt": started, "elapsedMs": 60000,
+                "api": {"requests":1,"usageRequests":1,"cacheRequests":1,"inputTokens":input,"outputTokens":20,"cachedTokens":cached,"cacheInputTokens":input,"apiMs":50000}
+            })
+            .to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
         std::fs::write(directory.join("runs-202611.jsonl"), records).unwrap();
         invoke_action(&ui, &ctx, "navigate", "metrics").await;
         assert_eq!(app.get_page(), 5);
-        assert!(app.get_metrics_overview().contains("2 次运行"));
-        app.set_metrics_dimension(2);
+        assert_eq!(app.get_metrics_total_value().as_str(), "1.14K");
+        assert_eq!(app.get_metrics_uncached_value().as_str(), "120");
+        assert_eq!(app.get_metrics_cached_value().as_str(), "980");
+        assert_eq!(app.get_metrics_output_value().as_str(), "40");
+        assert!(app.get_metrics_notice().is_empty());
+        // Breakdown by model is sorted descending by total tokens.
+        app.set_metrics_dimension(1);
         app.set_metrics_measure(0);
         invoke_action(&ui, &ctx, "metrics", "refresh").await;
         assert_eq!(app.get_metric_groups().row_count(), 2);
+        assert_eq!(
+            app.get_metric_groups().row_data(0).unwrap().label.as_str(),
+            "Profile B / shared-model / 默认"
+        );
+        // Daily trend tab renders chronological points and supports dedicated output mode.
+        app.set_metrics_tab(1);
+        invoke_action(&ui, &ctx, "metrics", "refresh").await;
         assert_eq!(app.get_token_points().row_count(), 2);
         assert_eq!(app.get_token_segments().row_count(), 3);
-        let model_index = app.get_metrics_models().iter().position(|model| model == "Profile B / shared-model / low").unwrap();
+        app.set_token_chart_mode(2);
+        invoke_action(&ui, &ctx, "metrics", "refresh").await;
+        assert_eq!(app.get_token_segments().row_count(), 1);
+        // Model filter narrows summary & trend cleanly.
+        let model_index = app
+            .get_metrics_models()
+            .iter()
+            .position(|model| model == "Profile B / shared-model / 默认")
+            .unwrap();
         app.set_metrics_model_index(model_index as i32);
         invoke_action(&ui, &ctx, "metrics", "refresh").await;
-        assert_eq!(app.get_metric_groups().row_count(), 1);
         assert_eq!(app.get_token_points().row_count(), 1);
         assert_eq!(app.get_token_segments().row_count(), 0);
-        assert!(app.get_metrics_tokens().contains("1000"));
+        assert_eq!(app.get_metrics_total_value().as_str(), "1.02K");
+        // Custom date validation and filtering.
         app.set_metrics_date_range(4);
         app.set_metrics_from("invalid date".into());
         invoke_action(&ui, &ctx, "metrics", "refresh").await;
@@ -725,12 +757,17 @@ fn project_actions_keep_settings_selection_and_saved_edits_in_sync_across_tabs()
         invoke_action(&ui, &ctx, "metrics", "refresh").await;
         assert!(app.get_metrics_error().is_empty());
         assert_eq!(app.get_metrics_total(), 0);
+        // Execution records tab lists runs with task badges and open-project availability.
         app.set_metrics_date_range(0);
         app.set_metrics_model_index(0);
-        app.set_metrics_tab(1);
+        app.set_metrics_tab(2);
         invoke_action(&ui, &ctx, "metrics", "refresh").await;
         assert_eq!(app.get_consumption_rows().row_count(), 2);
-        assert!(app.get_consumption_rows().row_data(0).unwrap().configuration.contains("build-"));
+        assert_eq!(
+            app.get_consumption_rows().row_data(0).unwrap().task_label.as_str(),
+            "文本翻译"
+        );
+        assert!(app.get_consumption_rows().row_data(0).unwrap().can_open);
 
         let pending = crate::settings_ui::PendingApiTest::start(&ctx, &ui).unwrap();
         assert!(app.get_api_testing());

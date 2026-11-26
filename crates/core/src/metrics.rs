@@ -79,7 +79,12 @@ impl ConsumptionRecord {
 
 pub fn task_label(task: &str) -> &str {
     match task {
-        "recognize" => "识别与适配",
+        "translate" => "文本翻译",
+        "preview-translate" => "试译",
+        "retranslate" => "重新翻译",
+        "candidate" => "候选译文",
+        "terminology" => "术语提取",
+        "recognize" => "常规识别",
         "adapt" => "智能适配",
         "repair" => "修复适配",
         "expand" => "扩展覆盖",
@@ -130,10 +135,96 @@ impl ActiveRun {
     }
 }
 
+struct ActiveTranslationRun {
+    base_id: String,
+    project_id: String,
+    project_name: String,
+    task: String,
+    mode: String,
+    started_at: DateTime<Utc>,
+    started: Instant,
+    last_saved: Instant,
+    providers: Vec<OpenAiProvider>,
+}
+
+fn has_recorded_api_usage(api: &RequestMetrics) -> bool {
+    api.requests > 0 || api.input_tokens > 0 || api.output_tokens > 0
+}
+
+fn allocate_elapsed(total_ms: u64, weights: &[u64]) -> Vec<u64> {
+    if weights.is_empty() {
+        return Vec::new();
+    }
+    if weights.len() == 1 {
+        return vec![total_ms];
+    }
+    let total_weight: u128 = weights.iter().map(|&w| u128::from(w)).sum();
+    let mut shares: Vec<u64> = if total_weight == 0 {
+        let count = weights.len() as u64;
+        vec![total_ms / count; weights.len()]
+    } else {
+        weights
+            .iter()
+            .map(|&w| (u128::from(total_ms) * u128::from(w) / total_weight) as u64)
+            .collect()
+    };
+    let allocated: u64 = shares.iter().sum();
+    if let Some(first) = shares.first_mut() {
+        *first = first.saturating_add(total_ms.saturating_sub(allocated));
+    }
+    shares
+}
+
+impl ActiveTranslationRun {
+    fn snapshots(&self, ended_at: Option<DateTime<Utc>>, status: &str) -> Vec<ConsumptionRecord> {
+        let total_elapsed_ms = self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+        let active: Vec<(usize, &OpenAiProvider, RequestMetrics)> = self
+            .providers
+            .iter()
+            .enumerate()
+            .filter_map(|(index, provider)| {
+                let api = provider.request_metrics();
+                has_recorded_api_usage(&api).then_some((index, provider, api))
+            })
+            .collect();
+        if active.is_empty() {
+            return Vec::new();
+        }
+        let weights: Vec<u64> = active.iter().map(|(_, _, api)| api.api_ms).collect();
+        let elapsed_shares = allocate_elapsed(total_elapsed_ms, &weights);
+        active
+            .into_iter()
+            .zip(elapsed_shares)
+            .map(|((index, provider, api), elapsed_ms)| ConsumptionRecord {
+                id: if index == 0 {
+                    self.base_id.clone()
+                } else {
+                    format!("{}-{index}", self.base_id)
+                },
+                project_id: self.project_id.clone(),
+                project_name: self.project_name.clone(),
+                software_version: SOFTWARE_VERSION.into(),
+                build_git_hash: BUILD_GIT_HASH.into(),
+                model: Some(provider.model().into()),
+                profile_name: Some(provider.display_name().into()),
+                reasoning_effort: None,
+                task: self.task.clone(),
+                mode: self.mode.clone(),
+                status: status.into(),
+                started_at: self.started_at,
+                ended_at,
+                elapsed_ms,
+                api,
+            })
+            .collect()
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct MetricsState {
     active: HashMap<String, ActiveRun>,
     reviews: HashMap<String, ActiveRun>,
+    translations: HashMap<String, ActiveTranslationRun>,
 }
 
 impl MetricsState {
@@ -167,6 +258,22 @@ fn append(root: &Path, record: &ConsumptionRecord) -> Result<(), CoreError> {
         .open(path)?
         .write_all(&bytes)?;
     Ok(())
+}
+
+fn append_all(root: &Path, records: &[ConsumptionRecord]) -> Result<(), CoreError> {
+    for record in records {
+        append(root, record)?;
+    }
+    Ok(())
+}
+
+fn new_record_id(project_id: &str, task: &str, started_at: DateTime<Utc>) -> String {
+    hash_text(&format!(
+        "{project_id}:{task}:{}:{}",
+        started_at.to_rfc3339(),
+        std::process::id()
+    ))[..32]
+        .into()
 }
 
 fn read_history(root: &Path) -> Result<ConsumptionHistory, CoreError> {
@@ -221,12 +328,7 @@ impl Application {
         };
         let now = Utc::now();
         let record = ConsumptionRecord {
-            id: hash_text(&format!(
-                "{id}:{task}:{}:{}",
-                now.to_rfc3339(),
-                std::process::id()
-            ))[..32]
-                .into(),
+            id: new_record_id(id, task, now),
             project_id: id.into(),
             project_name: project.name,
             software_version: SOFTWARE_VERSION.into(),
@@ -289,16 +391,18 @@ impl Application {
     }
 
     pub(crate) async fn checkpoint_metrics(&self, id: &str, operation: &str) {
-        let mut metrics = self.metrics.lock().await;
-        let Some(run) = metrics.runs(operation).get_mut(id) else {
-            return;
+        let record = {
+            let mut metrics = self.metrics.lock().await;
+            let Some(run) = metrics.runs(operation).get_mut(id) else {
+                return;
+            };
+            // Save enough progress for crash recovery without writing on every task update.
+            if run.last_saved.elapsed().as_secs() < 60 {
+                return;
+            }
+            run.last_saved = Instant::now();
+            run.snapshot()
         };
-        // Save enough progress for crash recovery without writing on every task update.
-        if run.last_saved.elapsed().as_secs() < 60 {
-            return;
-        }
-        run.last_saved = Instant::now();
-        let record = run.snapshot();
         let root = self.data_directory().to_owned();
         if let Err(error) = tokio::task::spawn_blocking(move || append(&root, &record))
             .await
@@ -310,8 +414,8 @@ impl Application {
     }
 
     pub(crate) async fn finish_metrics(&self, id: &str, operation: &str, succeeded: Option<bool>) {
-        let mut metrics = self.metrics.lock().await;
-        let Some(run) = metrics.runs(operation).remove(id) else {
+        let run = self.metrics.lock().await.runs(operation).remove(id);
+        let Some(run) = run else {
             return;
         };
         let mut record = run.snapshot();
@@ -333,27 +437,169 @@ impl Application {
         }
     }
 
+    pub(crate) async fn start_translation_metrics(
+        &self,
+        id: &str,
+        task: &str,
+        mode: &str,
+        providers: &[OpenAiProvider],
+    ) {
+        if !matches!(
+            task,
+            "translate" | "preview-translate" | "retranslate" | "candidate"
+        ) {
+            return;
+        }
+        let Ok(project) = self.store.get(id).await else {
+            return;
+        };
+        let now = Utc::now();
+        let run = ActiveTranslationRun {
+            base_id: new_record_id(id, task, now),
+            project_id: id.into(),
+            project_name: project.name,
+            task: task.into(),
+            mode: mode.into(),
+            started_at: now,
+            started: Instant::now(),
+            last_saved: Instant::now(),
+            providers: providers.to_vec(),
+        };
+        self.metrics
+            .lock()
+            .await
+            .translations
+            .insert(id.into(), run);
+    }
+
+    pub(crate) async fn checkpoint_translation_metrics(&self, id: &str) {
+        let records = {
+            let mut metrics = self.metrics.lock().await;
+            let Some(run) = metrics.translations.get_mut(id) else {
+                return;
+            };
+            if run.last_saved.elapsed().as_secs() < 60 {
+                return;
+            }
+            let snapshots = run.snapshots(None, "running");
+            if snapshots.is_empty() {
+                return;
+            }
+            run.last_saved = Instant::now();
+            snapshots
+        };
+        let root = self.data_directory().to_owned();
+        if let Err(error) = tokio::task::spawn_blocking(move || append_all(&root, &records))
+            .await
+            .map_err(CoreError::from)
+            .and_then(|result| result)
+        {
+            self.report_task_warning(id, &format!("消耗指标暂未保存：{error}"));
+        }
+    }
+
+    pub(crate) async fn finish_translation_metrics(&self, id: &str, succeeded: Option<bool>) {
+        let run = self.metrics.lock().await.translations.remove(id);
+        let Some(run) = run else {
+            return;
+        };
+        let status = match succeeded {
+            None => "cancelled",
+            Some(false) => "failed",
+            Some(true) => "completed",
+        };
+        let records = run.snapshots(Some(Utc::now()), status);
+        if records.is_empty() {
+            return;
+        }
+        let root = self.data_directory().to_owned();
+        if let Err(error) = tokio::task::spawn_blocking(move || append_all(&root, &records))
+            .await
+            .map_err(CoreError::from)
+            .and_then(|result| result)
+        {
+            self.report_task_warning(id, &format!("消耗指标保存失败：{error}"));
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn record_single_provider_metrics(
+        &self,
+        id: &str,
+        task: &str,
+        provider: &OpenAiProvider,
+        include_reasoning: bool,
+        started_at: DateTime<Utc>,
+        elapsed: std::time::Duration,
+        status: &str,
+    ) {
+        let api = provider.request_metrics();
+        if !has_recorded_api_usage(&api) {
+            return;
+        }
+        let Ok(project) = self.store.get(id).await else {
+            return;
+        };
+        let record = ConsumptionRecord {
+            id: new_record_id(id, task, started_at),
+            project_id: id.into(),
+            project_name: project.name,
+            software_version: SOFTWARE_VERSION.into(),
+            build_git_hash: BUILD_GIT_HASH.into(),
+            model: Some(provider.model().into()),
+            profile_name: Some(provider.display_name().into()),
+            reasoning_effort: include_reasoning
+                .then(|| provider.analysis_reasoning_effort().map(str::to_owned))
+                .flatten(),
+            task: task.into(),
+            mode: "new".into(),
+            status: status.into(),
+            started_at,
+            ended_at: Some(Utc::now()),
+            elapsed_ms: elapsed.as_millis().min(u128::from(u64::MAX)) as u64,
+            api,
+        };
+        let root = self.data_directory().to_owned();
+        if let Err(error) = tokio::task::spawn_blocking(move || append(&root, &record))
+            .await
+            .map_err(CoreError::from)
+            .and_then(|result| result)
+        {
+            self.report_task_warning(id, &format!("消耗指标保存失败：{error}"));
+        }
+    }
+
     pub async fn consumption_history(&self) -> Result<ConsumptionHistory, CoreError> {
         let root = self.data_directory().to_owned();
         let mut history = tokio::task::spawn_blocking(move || read_history(&root)).await??;
-        let metrics = self.metrics.lock().await;
-        let active: BTreeMap<_, _> = metrics
-            .active
-            .values()
-            .chain(metrics.reviews.values())
-            .map(|run| (run.record.id.as_str(), run))
+        let active_records: Vec<ConsumptionRecord> = {
+            let metrics = self.metrics.lock().await;
+            metrics
+                .active
+                .values()
+                .chain(metrics.reviews.values())
+                .map(ActiveRun::snapshot)
+                .chain(
+                    metrics
+                        .translations
+                        .values()
+                        .flat_map(|run| run.snapshots(None, "running")),
+                )
+                .collect()
+        };
+        let active_ids: std::collections::HashSet<&str> = active_records
+            .iter()
+            .map(|record| record.id.as_str())
             .collect();
         history
             .records
-            .retain(|record| !active.contains_key(record.id.as_str()));
+            .retain(|record| !active_ids.contains(record.id.as_str()));
         for record in &mut history.records {
             if record.status == "running" {
                 record.status = "interrupted".into();
             }
         }
-        history
-            .records
-            .extend(active.values().map(|run| run.snapshot()));
+        history.records.extend(active_records);
         history.records.sort_by(|a, b| {
             b.started_at
                 .cmp(&a.started_at)
@@ -373,19 +619,36 @@ pub struct ConsumptionFilter {
     pub task: String,
     pub mode: String,
     pub status: String,
+    pub only_with_api: bool,
 }
 
 impl ConsumptionFilter {
     pub fn matches(&self, record: &ConsumptionRecord) -> bool {
         let date = record.started_at.with_timezone(&Local).date_naive();
+        let task_matches = match self.task.as_str() {
+            "" => true,
+            "translation" => matches!(
+                record.task.as_str(),
+                "translate" | "preview-translate" | "retranslate" | "candidate"
+            ),
+            "adaptation" => matches!(
+                record.task.as_str(),
+                "adapt" | "repair" | "expand" | "recognize"
+            ),
+            exact => exact == record.task,
+        };
+        let api_matches = !self.only_with_api
+            || has_recorded_api_usage(&record.api)
+            || record.status == "running";
         self.from.is_none_or(|from| date >= from)
             && self.through.is_none_or(|through| date <= through)
             && (self.version.is_empty() || self.version == record.version_key())
             && (self.model.is_empty() || self.model == record.model_key())
             && (self.project.is_empty() || self.project == record.project_id)
-            && (self.task.is_empty() || self.task == record.task)
+            && task_matches
             && (self.mode.is_empty() || self.mode == record.mode)
             && (self.status.is_empty() || self.status == record.status)
+            && api_matches
     }
 }
 
@@ -440,6 +703,14 @@ impl ConsumptionTotals {
 
     pub fn uncached_tokens(&self) -> u64 {
         self.cache_input_tokens.saturating_sub(self.cached_tokens)
+    }
+
+    pub fn total_tokens(&self) -> u64 {
+        self.input_tokens.saturating_add(self.output_tokens)
+    }
+
+    pub fn non_cached_input_tokens(&self) -> u64 {
+        self.input_tokens.saturating_sub(self.cached_tokens)
     }
 }
 
@@ -574,6 +845,7 @@ mod tests {
             task: "repair".into(),
             mode: "continued".into(),
             status: "completed".into(),
+            ..Default::default()
         };
         assert!(!filter.matches(&first));
         assert!(filter.matches(&second));
@@ -765,6 +1037,231 @@ mod tests {
         assert_eq!(
             reopened.consumption_history().await.unwrap().records.len(),
             3
+        );
+    }
+
+    #[test]
+    fn allocate_elapsed_preserves_total_across_single_proportional_and_zero_weights() {
+        assert_eq!(allocate_elapsed(500, &[]), Vec::<u64>::new());
+        assert_eq!(allocate_elapsed(500, &[120]), vec![500]);
+        assert_eq!(allocate_elapsed(100, &[1, 3]), vec![25, 75]);
+        assert_eq!(allocate_elapsed(10, &[1, 1, 1]), vec![4, 3, 3]);
+        assert_eq!(allocate_elapsed(10, &[0, 0, 0]), vec![4, 3, 3]);
+    }
+
+    #[test]
+    fn task_category_and_api_only_filters_group_tasks_and_skip_zero_api_completed_runs() {
+        let mut translate = record("t1", 400, Some(200));
+        translate.task = "translate".into();
+        let mut retranslate = record("t2", 100, None);
+        retranslate.task = "retranslate".into();
+        let mut adapt = record("a1", 800, Some(600));
+        adapt.task = "adapt".into();
+        let mut local_recognize = record("r0", 0, None);
+        local_recognize.task = "recognize".into();
+        local_recognize.model = None;
+        local_recognize.api = RequestMetrics::default();
+        let mut running_empty = record("r1", 0, None);
+        running_empty.task = "adapt".into();
+        running_empty.status = "running".into();
+        running_empty.api = RequestMetrics::default();
+        let mut terminology = record("term", 150, None);
+        terminology.task = "terminology".into();
+
+        let all = [
+            translate,
+            retranslate,
+            adapt,
+            local_recognize,
+            running_empty,
+            terminology,
+        ];
+
+        let translation_only = ConsumptionFilter {
+            task: "translation".into(),
+            only_with_api: true,
+            ..Default::default()
+        };
+        let (totals, _) = consumption_groups(&all, &translation_only, ConsumptionDimension::Task);
+        assert_eq!((totals.runs, totals.input_tokens), (2, 500));
+
+        let adaptation_only = ConsumptionFilter {
+            task: "adaptation".into(),
+            only_with_api: true,
+            ..Default::default()
+        };
+        let (totals, _) = consumption_groups(&all, &adaptation_only, ConsumptionDimension::Task);
+        assert_eq!((totals.runs, totals.input_tokens), (2, 800));
+
+        let terminology_only = ConsumptionFilter {
+            task: "terminology".into(),
+            only_with_api: true,
+            ..Default::default()
+        };
+        let (totals, _) = consumption_groups(&all, &terminology_only, ConsumptionDimension::Task);
+        assert_eq!((totals.runs, totals.input_tokens), (1, 150));
+    }
+
+    #[tokio::test]
+    async fn translation_and_terminology_metrics_record_usage_and_skip_cache_only_runs() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        fn spawn_mock_openai(bodies: Vec<&'static str>) -> (String, std::thread::JoinHandle<()>) {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let handle = std::thread::spawn(move || {
+                for body in bodies {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    let mut buf = [0_u8; 8192];
+                    let _ = stream.read(&mut buf);
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    stream.write_all(response.as_bytes()).unwrap();
+                }
+            });
+            (format!("http://{address}/v1"), handle)
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let game = root.path().join("game");
+        fs::create_dir(&game).unwrap();
+        fs::write(game.join("story.txt"), "Hello\nGoodbye").unwrap();
+        let app = Application::open(
+            root.path().join("data"),
+            &ToolPaths::new(root.path().join("tools")),
+        )
+        .await
+        .unwrap();
+        let project = app.add_project(&game).await.unwrap();
+
+        let (endpoint, server) = spawn_mock_openai(vec![
+            r#"{"choices":[{"finish_reason":"stop","message":{"content":"{\"0\":\"你好勇者\",\"1\":\"再见\"}"}}],"usage":{"prompt_tokens":320,"completion_tokens":45,"prompt_tokens_details":{"cached_tokens":120}}}"#,
+            r#"{"choices":[{"finish_reason":"stop","message":{"content":"{\"terms\":[{\"source\":\"Hero\",\"target\":\"勇者\",\"category\":\"角色\"}]}"}}],"usage":{"prompt_tokens":180,"completion_tokens":30}}"#,
+        ]);
+        app.save_api_profile(
+            crate::settings::ApiProfile {
+                id: "primary".into(),
+                name: "Primary Trans".into(),
+                endpoint,
+                model: "trans-model".into(),
+                protocol: "ChatCompletions".into(),
+                analysis_reasoning_effort: Some("high".into()),
+                ..Default::default()
+            },
+            Some("secret".into()),
+            false,
+        )
+        .await
+        .unwrap();
+        app.save_project_settings(
+            &project.id,
+            serde_json::json!({"translationProfileIds": ["primary"]}),
+        )
+        .await
+        .unwrap();
+
+        let units = vec![
+            crate::TranslationUnit {
+                id: "line-1".into(),
+                resource_path: "story.txt".into(),
+                locator: "1".into(),
+                source_text: "Hello Hero".into(),
+                context: "opening".into(),
+                speaker: Some("Hero".into()),
+                kind: "dialogue".into(),
+                protected_tokens: None,
+            },
+            crate::TranslationUnit {
+                id: "line-2".into(),
+                resource_path: "story.txt".into(),
+                locator: "2".into(),
+                source_text: "Goodbye".into(),
+                context: "ending".into(),
+                speaker: None,
+                kind: "dialogue".into(),
+                protected_tokens: None,
+            },
+        ];
+        gamel10n_translation::files::write_json(
+            &app.project_directory(&project.id)
+                .unwrap()
+                .join("extraction/native.json"),
+            &crate::StoredAnalysis {
+                schema_version: 2,
+                coverage_pending: false,
+                format: "fixture".into(),
+                source_directory: game.clone(),
+                resource_files: vec!["story.txt".into()],
+                source_hashes: BTreeMap::from([("story.txt".into(), hash_text("Hello\nGoodbye"))]),
+                adapter: None,
+                probe: None,
+                extraction: gamel10n_engines::protocol::ExtractionResult {
+                    units,
+                    warnings: vec![],
+                },
+            },
+        )
+        .unwrap();
+
+        let run = app
+            .translate_project(&project.id, Default::default())
+            .await
+            .unwrap();
+        assert_eq!((run.completed, run.failed), (2, 0));
+
+        // Second translation is 100% cache hit and must not append a 0-request record.
+        let cached_run = app
+            .translate_project(&project.id, Default::default())
+            .await
+            .unwrap();
+        assert_eq!(cached_run.cache_hits, 2);
+
+        let terms = app
+            .extract_project_terminology(&project.id, &crate::CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(terms.candidates.len(), 1);
+        server.join().unwrap();
+
+        let history = app.consumption_history().await.unwrap();
+        assert_eq!(history.records.len(), 2);
+        let trans = history
+            .records
+            .iter()
+            .find(|r| r.task == "translate")
+            .unwrap();
+        assert_eq!(trans.status, "completed");
+        assert_eq!(trans.profile_name.as_deref(), Some("Primary Trans"));
+        assert_eq!(trans.model.as_deref(), Some("trans-model"));
+        // Translation does not send reasoning effort, so it must stay None.
+        assert_eq!(trans.reasoning_effort, None);
+        assert_eq!(
+            (
+                trans.api.requests,
+                trans.api.input_tokens,
+                trans.api.output_tokens,
+                trans.api.cached_tokens
+            ),
+            (1, 320, 45, 120)
+        );
+        let term = history
+            .records
+            .iter()
+            .find(|r| r.task == "terminology")
+            .unwrap();
+        assert_eq!(term.status, "completed");
+        assert_eq!(term.reasoning_effort, None);
+        assert_eq!(
+            (
+                term.api.requests,
+                term.api.input_tokens,
+                term.api.output_tokens
+            ),
+            (1, 180, 30)
         );
     }
 }

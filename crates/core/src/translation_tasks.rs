@@ -745,6 +745,11 @@ impl Application {
         // Release translation concurrency capacity before building, but keep the project task.
         let result = {
             let _permit = self.translation_permit(cancellation).await?;
+            let mode = if matches!(input, TranslationInput::ResumePreview(_)) {
+                "continued"
+            } else {
+                "new"
+            };
             let analysis = match input {
                 TranslationInput::Preview(analysis) => analysis,
                 TranslationInput::ResumePreview(slot) => {
@@ -759,6 +764,8 @@ impl Application {
                     .await?
                     .ok_or_else(|| CoreError::InvalidData("请先识别并提取游戏文本。".into()))?,
             };
+            self.start_translation_metrics(id, operation, mode, &providers)
+                .await;
             let engine = TranslationEngine::new(
                 directory,
                 Some(self.data_directory().join("memory").join(id)),
@@ -789,6 +796,12 @@ impl Application {
                 self.translation_progress(id, operation, &source, &options, progress)
                     .await;
             }
+            let metrics_succeeded = match &result {
+                Ok(run_result) => Some(run_result.failed == 0),
+                Err(gamel10n_translation::execution::ExecutionError::Cancelled) => None,
+                Err(_) => Some(false),
+            };
+            self.finish_translation_metrics(id, metrics_succeeded).await;
             let mut cache = self.workbenches.lock().await;
             self.workbench_revision
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -959,6 +972,7 @@ impl Application {
         options: &TranslationOptions,
         mut progress: gamel10n_translation::execution::TranslationProgress,
     ) {
+        self.checkpoint_translation_metrics(id).await;
         if !progress.updates.is_empty() || !progress.failure_updates.is_empty() {
             let cached = self.workbenches.lock().await.get(id).cloned();
             if let Some(workbench) = cached {

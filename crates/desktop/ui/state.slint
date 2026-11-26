@@ -9,9 +9,52 @@ export struct TermRow { source: string, target: string }
 export struct TermCandidateRow { source: string, target: string, category: string, count: int, existing: string, selected: bool }
 export struct TokenDisplay { text: string, exact: string }
 export struct CleanupRow { id: string, title: string, description: string, size: string, selected: bool }
-export struct MetricGroupRow { label: string, detail: string, value: string, fraction: float }
-export struct ConsumptionRow { identity: string, configuration: string, counters: string }
-export struct TokenPoint { label: string, axis-label: string, detail: string, input: string, output: string, cached: string, x: float, input-y: float, output-y: float, cached-y: float, input-known: bool, output-known: bool, cached-known: bool, usage-partial: bool, cache-partial: bool }
+export struct MetricGroupRow {
+    label: string,
+    detail: string,
+    value: string,
+    share: string,
+    exact: string,
+    fraction: float,
+    uncached-fraction: float,
+    cached-fraction: float,
+    output-fraction: float,
+    project-id: string,
+    can-open: bool,
+}
+export struct ConsumptionRow {
+    timestamp: string,
+    project-name: string,
+    project-id: string,
+    can-open: bool,
+    task-label: string,
+    task-tone: int,
+    status-label: string,
+    status-tone: int,
+    configuration: string,
+    tokens-summary: string,
+    tokens-detail: string,
+    tokens-exact: string,
+}
+export struct TokenPoint {
+    label: string,
+    axis-label: string,
+    detail: string,
+    total: string,
+    uncached: string,
+    cached: string,
+    output: string,
+    x: float,
+    primary-y: float,
+    secondary-y: float,
+    tertiary-y: float,
+    primary-known: bool,
+    secondary-known: bool,
+    tertiary-known: bool,
+    primary-partial: bool,
+    secondary-partial: bool,
+    tertiary-partial: bool,
+}
 export struct TokenSegment { x1: float, y1: float, x2: float, y2: float, series: int }
 export struct MetricTick { label: string, fraction: float }
 
@@ -56,35 +99,39 @@ export global App {
     in-out property <[TokenSegment]> token-segments;
     in-out property <[MetricTick]> token-ticks;
     in-out property <bool> token-chart-known;
+    in-out property <int> token-chart-mode;
     in-out property <[ConsumptionRow]> consumption-rows;
-    in-out property <[string]> metrics-versions;
-    in-out property <[string]> metrics-version-keys;
     in-out property <[string]> metrics-models;
     in-out property <[string]> metrics-model-keys;
     in-out property <[string]> metrics-projects;
     in-out property <[string]> metrics-project-keys;
-    in-out property <int> metrics-version-index;
     in-out property <int> metrics-model-index;
     in-out property <int> metrics-project-index;
     in-out property <int> metrics-task-index;
-    in-out property <int> metrics-mode-index;
-    in-out property <int> metrics-status-index;
     in-out property <int> metrics-date-range;
     in-out property <string> metrics-from;
     in-out property <string> metrics-through;
     in-out property <int> metrics-dimension;
     in-out property <int> metrics-measure;
-    in-out property <int> metrics-aggregation;
     in-out property <int> metrics-tab;
     in-out property <int> metrics-offset;
+    in-out property <int> metrics-page-size: 20;
     in-out property <int> metrics-total;
     in-out property <bool> metrics-loading;
     in-out property <string> metrics-error;
-    in-out property <string> metrics-overview;
-    in-out property <string> metrics-tokens;
-    in-out property <string> metrics-timing;
-    in-out property <string> metrics-coverage;
-    in-out property <string> metrics-chart-title;
+    in-out property <string> metrics-total-value;
+    in-out property <string> metrics-total-sub;
+    in-out property <string> metrics-total-exact;
+    in-out property <string> metrics-uncached-value;
+    in-out property <string> metrics-uncached-sub;
+    in-out property <string> metrics-uncached-exact;
+    in-out property <string> metrics-cached-value;
+    in-out property <string> metrics-cached-sub;
+    in-out property <string> metrics-cached-exact;
+    in-out property <string> metrics-output-value;
+    in-out property <string> metrics-output-sub;
+    in-out property <string> metrics-output-exact;
+    in-out property <string> metrics-notice;
     in-out property <string> metrics-empty;
     in-out property <[ProjectRow]> projects;
     in-out property <length> project-scroll-y;
