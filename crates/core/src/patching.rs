@@ -186,6 +186,23 @@ impl PatchInstaller {
         game_directory: &Path,
         patch_directory: &Path,
     ) -> Result<PatchInstallResult, CoreError> {
+        self.install_with_options(game_directory, patch_directory, false)
+    }
+
+    pub fn install_overwriting_modified(
+        &self,
+        game_directory: &Path,
+        patch_directory: &Path,
+    ) -> Result<PatchInstallResult, CoreError> {
+        self.install_with_options(game_directory, patch_directory, true)
+    }
+
+    fn install_with_options(
+        &self,
+        game_directory: &Path,
+        patch_directory: &Path,
+        overwrite_modified: bool,
+    ) -> Result<PatchInstallResult, CoreError> {
         let game = directory_root(game_directory)?;
         let patch = directory_root(patch_directory)?;
         if paths_overlap(&game, &patch) {
@@ -261,6 +278,7 @@ impl PatchInstaller {
             }
         }
         // Protect recorded originals and detect external changes before installing any payload.
+        let mut modified = Vec::new();
         for file in &manifest.files {
             let target = safe_path(&game, &file.relative_path)?;
             if target.is_file() {
@@ -278,20 +296,21 @@ impl PatchInstaller {
                 let original_present =
                     same_hash(current.as_deref(), entry.original_sha256.as_deref());
                 if !original_present
-                    && !same_hash(current.as_deref(), entry.installed_sha256.as_deref())
-                {
-                    return Err(invalid(format!(
-                        "已安装文件被其他程序修改：{}",
-                        file.relative_path
-                    )));
-                }
-                if !original_present
                     && entry.original_existed
                     && self.find_original_backup(&game, entry)?.is_none()
                 {
                     return Err(missing_original(entry));
                 }
+                if !overwrite_modified
+                    && !original_present
+                    && !same_hash(current.as_deref(), entry.installed_sha256.as_deref())
+                {
+                    modified.push(file.relative_path.clone());
+                }
             }
+        }
+        if !modified.is_empty() {
+            return Err(CoreError::ModifiedInstalledFiles(modified));
         }
         for (relative, expected) in &manifest.required_sources {
             let target = safe_path(&game, relative)?;
@@ -322,7 +341,7 @@ impl PatchInstaller {
         if manifest.mode == BuildMode::Overlay
             || journal.extra.get("patchMode").and_then(Value::as_str) == Some("overlay")
         {
-            let restored = self.restore_selected(&game, &mut journal, |entry| {
+            let restored = self.restore_selected(&game, &mut journal, overwrite_modified, |entry| {
                 !targets.contains(&entry.relative_path.to_lowercase())
             })?;
             if !restored.conflicts.is_empty() {
@@ -488,10 +507,25 @@ impl PatchInstaller {
     }
 
     pub fn restore(&self, game_directory: &Path) -> Result<PatchRestoreResult, CoreError> {
+        self.restore_with_options(game_directory, false)
+    }
+
+    pub fn restore_overwriting_modified(
+        &self,
+        game_directory: &Path,
+    ) -> Result<PatchRestoreResult, CoreError> {
+        self.restore_with_options(game_directory, true)
+    }
+
+    fn restore_with_options(
+        &self,
+        game_directory: &Path,
+        overwrite_modified: bool,
+    ) -> Result<PatchRestoreResult, CoreError> {
         let game = directory_root(game_directory)?;
         let _lock = self.operation_lock(&game)?;
         let mut journal = self.load_journal(&game, true)?;
-        let result = self.restore_selected(&game, &mut journal, |_| true)?;
+        let result = self.restore_selected(&game, &mut journal, overwrite_modified, |_| true)?;
         if result.conflicts.is_empty() {
             journal.extra.remove("launch");
             journal.extra.remove("launchPatch");
@@ -505,12 +539,13 @@ impl PatchInstaller {
         &self,
         game: &Path,
         journal: &mut InstallationJournal,
+        overwrite_modified: bool,
         include: impl Fn(&InstallationEntry) -> bool,
     ) -> Result<PatchRestoreResult, CoreError> {
         let mut result = PatchRestoreResult {
             restored_files: 0,
             removed_files: 0,
-            conflicts: self.recover_inner(game, journal)?,
+            conflicts: self.recover_inner_with_options(game, journal, overwrite_modified)?,
         };
         let mut reserved: HashSet<_> = journal
             .entries
@@ -548,7 +583,9 @@ impl PatchInstaller {
                 }
                 continue;
             }
-            if !same_hash(current.as_deref(), entry.installed_sha256.as_deref()) {
+            if !overwrite_modified
+                && !same_hash(current.as_deref(), entry.installed_sha256.as_deref())
+            {
                 result.conflicts.push(entry.relative_path.clone());
                 continue;
             }
@@ -569,9 +606,20 @@ impl PatchInstaller {
                 .insert("launchPending".into(), Value::Bool(true));
             self.save_journal(game, journal)?;
             let entry = &journal.entries[position];
-            ensure_hash(&target, entry.installed_sha256.as_deref())?;
+            let expected_target = if overwrite_modified {
+                current.as_deref()
+            } else {
+                entry.installed_sha256.as_deref()
+            };
+            ensure_hash(&target, expected_target)?;
             if let Some(backup) = backup {
-                self.restore_original(&safe_path(game, &backup)?, &target, entry)?;
+                self.restore_original(
+                    &safe_path(game, &backup)?,
+                    &target,
+                    entry,
+                    overwrite_modified,
+                    expected_target,
+                )?;
                 result.restored_files += 1;
             } else {
                 remove_file(&target)?;
@@ -807,6 +855,15 @@ impl PatchInstaller {
         game: &Path,
         journal: &mut InstallationJournal,
     ) -> Result<Vec<String>, CoreError> {
+        self.recover_inner_with_options(game, journal, false)
+    }
+
+    fn recover_inner_with_options(
+        &self,
+        game: &Path,
+        journal: &mut InstallationJournal,
+        overwrite_modified: bool,
+    ) -> Result<Vec<String>, CoreError> {
         let mut conflicts = Vec::new();
         for position in (0..journal.entries.len()).rev() {
             self.check_cancelled()?;
@@ -838,6 +895,10 @@ impl PatchInstaller {
                     }
                     conflicts.push(entry.relative_path.clone());
                     continue;
+                } else if overwrite_modified
+                    && (!entry.original_existed || self.find_original_backup(game, &entry)?.is_some())
+                {
+                    journal.entries[position].restoring = false;
                 } else {
                     conflicts.push(entry.relative_path.clone());
                     continue;
@@ -866,6 +927,10 @@ impl PatchInstaller {
                 }
                 conflicts.push(entry.relative_path.clone());
                 continue;
+            } else if overwrite_modified
+                && (!entry.original_existed || self.find_original_backup(game, &entry)?.is_some())
+            {
+                journal.entries[position].pending_sha256 = None;
             } else {
                 conflicts.push(entry.relative_path.clone());
                 continue;
@@ -907,6 +972,8 @@ impl PatchInstaller {
             &safe_path(game, &backup)?,
             &safe_path(game, &entry.relative_path)?,
             entry,
+            false,
+            None,
         )?;
         self.complete_restore(game, journal, position)
     }
@@ -1011,7 +1078,7 @@ impl PatchInstaller {
                     return Ok(false);
                 }
                 // Consume even old copy-style backups by moving them back, preserving their original file dates.
-                self.restore_original(&backup, &target, entry)?;
+                self.restore_original(&backup, &target, entry, false, None)?;
             }
         }
         if entry.original_existed {
@@ -1063,9 +1130,11 @@ impl PatchInstaller {
         backup: &Path,
         target: &Path,
         entry: &InstallationEntry,
+        overwrite_modified: bool,
+        expected_target: Option<&str>,
     ) -> Result<(), CoreError> {
         self.report_file("正在移动备份恢复原版", backup, &entry.relative_path);
-        move_original(backup, target, entry)
+        move_original(backup, target, entry, overwrite_modified, expected_target)
     }
 
     fn record_missing_directories(
@@ -1574,10 +1643,21 @@ fn atomic_copy(
     Ok(())
 }
 
-fn move_original(backup: &Path, target: &Path, entry: &InstallationEntry) -> Result<(), CoreError> {
+fn move_original(
+    backup: &Path,
+    target: &Path,
+    entry: &InstallationEntry,
+    overwrite_modified: bool,
+    expected_target: Option<&str>,
+) -> Result<(), CoreError> {
     ensure_hash(backup, entry.original_sha256.as_deref())?;
     let current = hash_if_present(target)?;
-    if !same_hash(current.as_deref(), entry.installed_sha256.as_deref())
+    let matches_expected = if overwrite_modified {
+        same_hash(current.as_deref(), expected_target)
+    } else {
+        same_hash(current.as_deref(), entry.installed_sha256.as_deref())
+    };
+    if !matches_expected
         && !same_hash(current.as_deref(), entry.original_sha256.as_deref())
         && current.is_some()
     {
@@ -2514,6 +2594,92 @@ mod tests {
         assert_eq!(
             fs::read(fixture.game.join("data.bin.bak")).unwrap(),
             b"original"
+        );
+    }
+
+    #[test]
+    fn overwrite_confirmed_restore_and_install_preserve_verified_original_backup() {
+        let fixture = Fixture::new();
+        fixture.prepare();
+        fixture
+            .installer
+            .install(&fixture.game, &fixture.patch)
+            .unwrap();
+        // Simulate a game saving runtime settings into a patched config file.
+        fs::write(fixture.game.join("data.bin"), b"game saved settings").unwrap();
+
+        // Default install returns typed ModifiedInstalledFiles; confirmed overwrite installs v2
+        // while keeping the original .bak untouched.
+        fs::write(fixture.payload.join("data.bin"), b"translated v2").unwrap();
+        build_manifest(
+            &fixture.patch,
+            &BTreeMap::from([("data.bin".into(), hash_text("original"))]),
+        )
+        .unwrap();
+        assert!(matches!(
+            fixture.installer.install(&fixture.game, &fixture.patch),
+            Err(CoreError::ModifiedInstalledFiles(ref paths)) if paths == &["data.bin"]
+        ));
+        let installed = fixture
+            .installer
+            .install_overwriting_modified(&fixture.game, &fixture.patch)
+            .unwrap();
+        assert_eq!(installed.installed_files, 1);
+        assert_eq!(
+            fs::read(fixture.game.join("data.bin")).unwrap(),
+            b"translated v2"
+        );
+        assert_eq!(
+            fs::read(fixture.game.join("data.bin.bak")).unwrap(),
+            b"original"
+        );
+
+        // Simulate the game saving settings again, then confirm overwrite-restore.
+        fs::write(fixture.game.join("data.bin"), b"game saved settings 2").unwrap();
+        assert_eq!(
+            fixture.installer.restore(&fixture.game).unwrap().conflicts,
+            ["data.bin"]
+        );
+        let restored = fixture
+            .installer
+            .restore_overwriting_modified(&fixture.game)
+            .unwrap();
+        assert!(restored.conflicts.is_empty());
+        assert_eq!(restored.restored_files, 1);
+        assert_eq!(
+            fs::read(fixture.game.join("data.bin")).unwrap(),
+            b"original"
+        );
+        assert!(!fixture.game.join("data.bin.bak").exists());
+        let journal = fixture.installer.read_journal(&fixture.game).unwrap();
+        assert!(journal.entries.is_empty());
+        assert!(!journal.extra.contains_key("launchPending"));
+    }
+
+    #[test]
+    fn restore_overwriting_modified_still_rejects_tampered_backup() {
+        let fixture = Fixture::new();
+        fixture.prepare();
+        fixture
+            .installer
+            .install(&fixture.game, &fixture.patch)
+            .unwrap();
+        fs::write(fixture.game.join("data.bin"), b"game saved settings").unwrap();
+        fs::write(fixture.game.join("data.bin.bak"), b"tampered backup").unwrap();
+
+        let error = fixture
+            .installer
+            .restore_overwriting_modified(&fixture.game)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("游戏目录中的备份缺失或校验未通过"),
+            "{error}"
+        );
+        assert_eq!(
+            fs::read(fixture.game.join("data.bin")).unwrap(),
+            b"game saved settings"
         );
     }
 

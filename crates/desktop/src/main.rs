@@ -733,7 +733,9 @@ async fn dispatch(ctx: &Context, action: &str, input: &UiInput) -> Result<(), Co
                 "translate"
             }
             "install" => "install",
+            "install-overwrite" => "install-overwrite",
             "restore" => "restore",
+            "restore-overwrite" => "restore-overwrite",
             "cleanup" => "cleanup",
             "api-delete" => "api-delete",
             "version-delete" => "version-delete",

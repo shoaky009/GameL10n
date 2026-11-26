@@ -63,6 +63,14 @@ pub enum CoreError {
     ProjectBusy,
     #[error("启动配置已更新，请确认是否覆盖。")]
     LaunchConflict { revision: String },
+    #[error("已安装文件被其他程序修改：{}", .0.join("、"))]
+    ModifiedInstalledFiles(Vec<String>),
+    #[error("已恢复 {restored_files} 个原文件，移除 {removed_files} 个补丁文件；以下文件在安装后已被修改，未自动覆盖：{}", conflicts.join("、"))]
+    RestoreConflicts {
+        restored_files: usize,
+        removed_files: usize,
+        conflicts: Vec<String>,
+    },
     #[error("{0}")]
     WorkflowInput(String),
     #[error(transparent)]

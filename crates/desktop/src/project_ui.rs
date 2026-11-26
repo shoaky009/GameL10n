@@ -336,15 +336,57 @@ async fn handle_project_action(
             "请关闭游戏及汉化启动器。程序会核对原文件哈希，恢复原文件并移除工具添加的补丁文件。"
                 .into(),
         ),
-        "install" => {
+        "install" => match ctx
+            .app()
+            .await
+            .install_latest_patch(&input.project_id, Some(input.patch_path.as_ref()))
+            .await
+        {
+            Ok(()) => crate::launch_ui::refresh(ctx, &input.project_id, false).await?,
+            Err(CoreError::ModifiedInstalledFiles(paths)) => {
+                show_dialog(
+                    ctx,
+                    "install-overwrite",
+                    "已安装文件有改动",
+                    format!(
+                        "以下已安装文件在运行游戏后发生改动（如游戏保存配置）：\n{}\n\n原版备份（.bak）仍完好。是否覆盖这些改动并安装新补丁？（原版备份不会被覆盖）",
+                        paths.join("\n")
+                    ),
+                );
+            }
+            Err(error) => return Err(error),
+        },
+        "install-overwrite" => {
             ctx.app()
                 .await
-                .install_latest_patch(&input.project_id, Some(input.patch_path.as_ref()))
+                .install_latest_patch_overwriting_modified(
+                    &input.project_id,
+                    Some(input.patch_path.as_ref()),
+                )
                 .await?;
             crate::launch_ui::refresh(ctx, &input.project_id, false).await?;
         }
-        "restore" => {
-            ctx.app().await.restore_game(&input.project_id).await?;
+        "restore" => match ctx.app().await.restore_game(&input.project_id).await {
+            Ok(()) => crate::launch_ui::refresh(ctx, &input.project_id, false).await?,
+            Err(CoreError::RestoreConflicts { conflicts, .. }) => {
+                crate::launch_ui::refresh(ctx, &input.project_id, false).await?;
+                show_dialog(
+                    ctx,
+                    "restore-overwrite",
+                    "部分文件安装后有改动",
+                    format!(
+                        "以下文件在安装补丁后被游戏（如保存配置）或其他程序修改，未自动覆盖：\n{}\n\n确认后程序会先核对原版备份（.bak）哈希，校验通过后再用原版备份覆盖恢复（补丁新增文件将被移除）。是否放弃这些改动并恢复原版？",
+                        conflicts.join("\n")
+                    ),
+                );
+            }
+            Err(error) => return Err(error),
+        },
+        "restore-overwrite" => {
+            ctx.app()
+                .await
+                .restore_game_overwriting_modified(&input.project_id)
+                .await?;
             crate::launch_ui::refresh(ctx, &input.project_id, false).await?;
         }
         "cleanup-dialog" => preview_cleanup(ctx, input).await?,

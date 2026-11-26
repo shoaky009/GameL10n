@@ -5,7 +5,7 @@ import { ApiTestControls, WorkflowControls } from "settings.slint";
 export component DialogLayer inherits FocusScope {
     private property <bool> workflow-active: App.modal == "adapt" && App.adaptation-objective == 3;
     private property <bool> reuse-extracted-text: root.workflow-active && App.workflow-finish != 3 && App.workflow-use-existing-text;
-    private property <bool> destructive-confirm: App.modal == "remove" || App.modal == "cleanup" || App.modal == "engine-delete" || App.modal == "version-delete" || App.modal == "api-delete" || App.modal == "restore";
+    private property <bool> destructive-confirm: App.modal == "remove" || App.modal == "cleanup" || App.modal == "engine-delete" || App.modal == "version-delete" || App.modal == "api-delete" || App.modal == "restore" || App.modal == "restore-overwrite";
     private property <bool> readonly-modal: App.modal == "engine-review" || App.modal == "feedback" || App.modal == "patch-texts";
     function dismiss() {
         if App.modal == "adapt" { App.action("adapt-cancel", ""); }
@@ -291,6 +291,7 @@ export component DialogLayer inherits FocusScope {
                         text: App.modal == "launch" && App.launch-conflict-revision != "" ? "确认覆盖"
                             : App.modal == "resume-translation" ? "继续上次翻译"
                             : App.modal == "install" ? "安装补丁"
+                            : App.modal == "install-overwrite" ? "覆盖并安装补丁"
                             : App.modal == "project-adapter" ? "执行并提取文本"
                             : App.modal == "cleanup" ? "清理所选文件"
                             : App.modal == "engine-delete" ? "删除引擎"
@@ -298,6 +299,7 @@ export component DialogLayer inherits FocusScope {
                             : App.modal == "api-delete" ? "删除配置"
                             : App.modal == "remove" ? "确认移除"
                             : App.modal == "restore" ? "恢复原版"
+                            : App.modal == "restore-overwrite" ? "覆盖并恢复原版"
                             : App.modal == "api" ? "保存配置"
                             : App.modal == "add-term" ? "保存术语"
                             : App.modal == "terminology-extract" ? "合并到术语表（" + App.terminology-selected-count + " 条）"
@@ -306,7 +308,7 @@ export component DialogLayer inherits FocusScope {
                         enabled: (App.modal != "api" || !App.api-testing)
                             && (App.modal != "add-term" || (App.term-draft-source != "" && App.term-draft-target != ""))
                             && (App.modal != "terminology-extract" || (!App.terminology-extracting && App.terminology-selected-count > 0))
-                            && (App.modal != "install" || App.can-install-patch)
+                            && ((App.modal != "install" && App.modal != "install-overwrite") || App.can-install-patch)
                             && (App.modal != "project-adapter" || (App.adapter-index >= 0 && App.adapter-index < App.adapter-keys.length && !App.busy && !App.review-running))
                             && (App.modal != "cleanup" || (!App.cleanup-loading && App.cleanup-selected))
                             && (!root.reuse-extracted-text || App.workflow-can-use-existing-text);

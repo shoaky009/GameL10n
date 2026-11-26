@@ -2072,6 +2072,17 @@ impl Application {
         expected_directory: Option<&Path>,
         cancellation: &CancellationToken,
     ) -> Result<crate::patching::PatchInstallResult, CoreError> {
+        self.install_patch_in_task_with_overwrite(id, expected_directory, cancellation, false)
+            .await
+    }
+
+    async fn install_patch_in_task_with_overwrite(
+        &self,
+        id: &str,
+        expected_directory: Option<&Path>,
+        cancellation: &CancellationToken,
+        overwrite_modified: bool,
+    ) -> Result<crate::patching::PatchInstallResult, CoreError> {
         if cancellation.is_cancelled() {
             return Err(gamel10n_engines::EngineError::Cancelled.into());
         }
@@ -2099,11 +2110,15 @@ impl Application {
                     },
                 }
             });
-            PatchInstaller::new(root)
+            let installer = PatchInstaller::new(root)
                 .with_launch_fallback(fallback)
                 .with_cancellation(cancellation.clone())
-                .with_progress(progress)
-                .install(&project.game_directory, &patch.patch_directory)
+                .with_progress(progress);
+            if overwrite_modified {
+                installer.install_overwriting_modified(&project.game_directory, &patch.patch_directory)
+            } else {
+                installer.install(&project.game_directory, &patch.patch_directory)
+            }
         })
         .await
     }
@@ -2117,11 +2132,35 @@ impl Application {
         id: &str,
         expected_directory: Option<&Path>,
     ) -> Result<(), CoreError> {
+        self.install_latest_patch_with_overwrite(id, expected_directory, false)
+            .await
+    }
+
+    pub async fn install_latest_patch_overwriting_modified(
+        &self,
+        id: &str,
+        expected_directory: Option<&Path>,
+    ) -> Result<(), CoreError> {
+        self.install_latest_patch_with_overwrite(id, expected_directory, true)
+            .await
+    }
+
+    async fn install_latest_patch_with_overwrite(
+        &self,
+        id: &str,
+        expected_directory: Option<&Path>,
+        overwrite_modified: bool,
+    ) -> Result<(), CoreError> {
         let cancellation = self
             .begin(id, "install", "正在核对文件并安装汉化补丁。")
             .await?;
         let result = self
-            .install_patch_in_task(id, expected_directory, &cancellation)
+            .install_patch_in_task_with_overwrite(
+                id,
+                expected_directory,
+                &cancellation,
+                overwrite_modified,
+            )
             .await;
         self.finish(
             id,
@@ -2139,10 +2178,11 @@ impl Application {
         .await?;
         result.map(|_| ())
     }
-    pub(crate) async fn restore_game_in_task(
+    async fn restore_game_in_task_with_overwrite(
         &self,
         id: &str,
         cancellation: &CancellationToken,
+        overwrite_modified: bool,
     ) -> Result<crate::patching::PatchRestoreResult, CoreError> {
         if cancellation.is_cancelled() {
             return Err(gamel10n_engines::EngineError::Cancelled.into());
@@ -2151,19 +2191,45 @@ impl Application {
         let root = self.project_directory(id)?;
         let cancellation = cancellation.clone();
         self.run_file_task(id, "restore", move |progress| {
-            PatchInstaller::new(root)
+            let installer = PatchInstaller::new(root)
                 .with_cancellation(cancellation.clone())
-                .with_progress(progress)
-                .restore(&project.game_directory)
+                .with_progress(progress);
+            if overwrite_modified {
+                installer.restore_overwriting_modified(&project.game_directory)
+            } else {
+                installer.restore(&project.game_directory)
+            }
         })
         .await
     }
 
     pub async fn restore_game(&self, id: &str) -> Result<(), CoreError> {
+        self.restore_game_with_overwrite(id, false).await
+    }
+
+    pub async fn restore_game_overwriting_modified(&self, id: &str) -> Result<(), CoreError> {
+        self.restore_game_with_overwrite(id, true).await
+    }
+
+    async fn restore_game_with_overwrite(
+        &self,
+        id: &str,
+        overwrite_modified: bool,
+    ) -> Result<(), CoreError> {
         let cancellation = self
             .begin(id, "restore", "正在核对哈希并恢复原版。")
             .await?;
-        let result = self.restore_game_in_task(id, &cancellation).await;
+        let result = match self
+            .restore_game_in_task_with_overwrite(id, &cancellation, overwrite_modified)
+            .await
+        {
+            Ok(restored) if !restored.conflicts.is_empty() => Err(CoreError::RestoreConflicts {
+                restored_files: restored.restored_files,
+                removed_files: restored.removed_files,
+                conflicts: restored.conflicts,
+            }),
+            other => other,
+        };
         self.finish(
             id,
             "restore",
@@ -2171,10 +2237,8 @@ impl Application {
                 .as_ref()
                 .map(|r| {
                     format!(
-                        "已恢复 {} 个原文件，移除 {} 个补丁文件。{}",
-                        r.restored_files,
-                        r.removed_files,
-                        r.conflicts.join("；")
+                        "已恢复 {} 个原文件，移除 {} 个补丁文件。",
+                        r.restored_files, r.removed_files
                     )
                 })
                 .map_err(ToString::to_string),
