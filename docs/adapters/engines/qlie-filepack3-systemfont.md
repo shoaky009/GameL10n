@@ -43,6 +43,6 @@
 
 ## 启动组件接入与构建
 
-通过补丁的 `QlieLauncher.exe` 启动。它读取 `qlie-l10n/launch.xml` 并为当前游戏加载配套字体。配置路径相对启动器，`face` 须和字体内部名称一致。需要转区时使用玩家安装的 Locale Emulator，并保留原 EXE 和对应转区配置。
+通过补丁的 `QlieLauncher.exe` 启动。它读取 `qlie-l10n/launch.xml` 并为当前游戏加载配套字体。配置路径相对启动器，`face` 须和字体内部名称一致。需要转区时使用玩家安装的 Locale Emulator，并保留原 EXE 和对应转区配置；启动器通过 Windows Job Object（及跨提权时的目标进程跟踪）保持字体注册直到游戏进程实际退出，避免 `LEProc.exe` 提前退出导致字体过早卸载。
 
 用 `scripts/build_qlie_launcher.py` 构建 Windows x64 Rust 启动器，输出至 `target/runtime/adapter-components`。启动自检后需在原游戏中确认字体选择与显示。[启动器源码](../../../tools/GameL10n.QlieLauncher) · [工具准备](../../development.md#工具准备)

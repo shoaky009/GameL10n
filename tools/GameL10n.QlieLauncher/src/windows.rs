@@ -6,12 +6,13 @@ use std::{
     mem::size_of,
     os::windows::ffi::{OsStrExt, OsStringExt},
     path::{Path, PathBuf},
-    process::Command,
     ptr::{null, null_mut},
+    thread::sleep,
+    time::{Duration, Instant},
 };
 
 use windows_sys::Win32::{
-    Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0},
+    Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0},
     Globalization::{CP_ACP, GetACP, MultiByteToWideChar},
     Graphics::Gdi::{
         AddFontResourceExW, CreateCompatibleDC, DeleteDC, ENUMLOGFONTEXA, EnumFontFamiliesExA, HDC,
@@ -19,11 +20,24 @@ use windows_sys::Win32::{
     },
     System::{
         Com::{COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoUninitialize},
+        Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+            TH32CS_SNAPPROCESS,
+        },
+        IO::{CreateIoCompletionPort, GetQueuedCompletionStatus, OVERLAPPED},
+        JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JOBOBJECT_ASSOCIATE_COMPLETION_PORT,
+            JobObjectAssociateCompletionPortInformation, SetInformationJobObject,
+        },
         Registry::{
             HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ,
             RRF_SUBKEY_WOW6432KEY, RRF_SUBKEY_WOW6464KEY, RegGetValueW,
         },
-        Threading::{GetExitCodeProcess, INFINITE, WaitForSingleObject},
+        Threading::{
+            CREATE_SUSPENDED, CreateProcessW, GetExitCodeProcess, INFINITE, OpenProcess,
+            PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+            QueryFullProcessImageNameW, ResumeThread, STARTUPINFOW, WaitForSingleObject,
+        },
     },
     UI::{
         Controls::Dialogs::{
@@ -107,7 +121,7 @@ pub fn launch(args: &[OsString]) -> Result<i32> {
         arguments.push(game.as_os_str().to_owned());
     }
     let _fonts = RegisteredFonts::load(root, &config)?;
-    start_and_wait(&program, &arguments, directory, elevated)
+    start_and_wait(&program, &arguments, directory, &game, elevated)
 }
 
 struct RegisteredFonts(Vec<Vec<u16>>);
@@ -358,13 +372,19 @@ fn pick_locale_emulator() -> Result<PathBuf> {
     Err("已取消选择 Locale Emulator。".into())
 }
 
-struct ProcessHandle(HANDLE);
+const JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO: u32 = 4;
+const JOB_OBJECT_MSG_NEW_PROCESS: u32 = 6;
+const TARGET_APPEAR_TIMEOUT: Duration = Duration::from_secs(15);
 
-impl Drop for ProcessHandle {
+struct KernelHandle(HANDLE);
+
+impl Drop for KernelHandle {
     fn drop(&mut self) {
-        // SAFETY: This wrapper owns the process handle returned by ShellExecuteExW.
-        unsafe {
-            CloseHandle(self.0);
+        if !self.0.is_null() && self.0 != INVALID_HANDLE_VALUE {
+            // SAFETY: This wrapper owns one live kernel handle closed exactly once on drop.
+            unsafe {
+                CloseHandle(self.0);
+            }
         }
     }
 }
@@ -373,26 +393,37 @@ fn start_and_wait(
     program: &Path,
     arguments: &[OsString],
     directory: &Path,
+    target_game: &Path,
     elevated: bool,
 ) -> Result<i32> {
+    let target_key = normalized_image_key(target_game);
+    let indirect = normalized_image_key(program) != target_key;
+    let pre_existing = if indirect {
+        matching_pids(&target_key)
+    } else {
+        BTreeSet::new()
+    };
     if !elevated {
-        let status = Command::new(program)
-            .args(arguments)
-            .current_dir(directory)
-            .status()?;
-        return status.code().ok_or_else(|| "游戏进程未返回退出码。".into());
+        return start_and_wait_in_job(
+            program,
+            arguments,
+            directory,
+            indirect,
+            &target_key,
+            &pre_existing,
+        );
     }
-    let program = wide(program);
-    let directory = wide(directory);
+    let program_w = wide(program);
+    let directory_w = wide(directory);
     let verb = wide("runas");
     let parameters = command_line(arguments);
     let mut info = SHELLEXECUTEINFOW {
         cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
         fMask: SEE_MASK_NOCLOSEPROCESS,
         lpVerb: verb.as_ptr(),
-        lpFile: program.as_ptr(),
+        lpFile: program_w.as_ptr(),
         lpParameters: parameters.as_ptr(),
-        lpDirectory: directory.as_ptr(),
+        lpDirectory: directory_w.as_ptr(),
         nShow: SW_SHOWNORMAL,
         ..Default::default()
     };
@@ -403,7 +434,7 @@ fn start_and_wait(
     if info.hProcess.is_null() {
         return Err("游戏进程未能启动。".into());
     }
-    let process = ProcessHandle(info.hProcess);
+    let process = KernelHandle(info.hProcess);
     let mut code = 0;
     // SAFETY: process owns a valid waitable handle until both calls finish.
     unsafe {
@@ -413,7 +444,275 @@ fn start_and_wait(
             return Err(io::Error::last_os_error().into());
         }
     }
+    // Locale Emulator's elevated LEProc helper exits as soon as it spawns the game.
+    // Keep session fonts registered until the launched game process itself exits.
+    if code == 0 && indirect {
+        wait_for_target_process(&target_key, &pre_existing);
+    }
     Ok(code as i32)
+}
+
+fn start_and_wait_in_job(
+    program: &Path,
+    arguments: &[OsString],
+    directory: &Path,
+    indirect: bool,
+    target_key: &str,
+    pre_existing: &BTreeSet<u32>,
+) -> Result<i32> {
+    let mut cmdline = process_command_line(program, arguments);
+    let program_w = wide(program);
+    let directory_w = wide(directory);
+    let startup = STARTUPINFOW {
+        cb: size_of::<STARTUPINFOW>() as u32,
+        ..Default::default()
+    };
+    let mut proc_info = PROCESS_INFORMATION::default();
+    // SAFETY: All strings and structs remain live across CreateProcessW; cmdline is mutable as required.
+    let created = unsafe {
+        CreateProcessW(
+            program_w.as_ptr(),
+            cmdline.as_mut_ptr(),
+            null(),
+            null(),
+            0,
+            CREATE_SUSPENDED,
+            null(),
+            directory_w.as_ptr(),
+            &startup,
+            &mut proc_info,
+        )
+    };
+    if created == 0 {
+        return Err(io::Error::last_os_error().into());
+    }
+    let process = KernelHandle(proc_info.hProcess);
+    let thread = KernelHandle(proc_info.hThread);
+    // Attach a Job Object before resuming so indirect launchers (e.g. LEProc -> LEProc -> game)
+    // keep the job non-empty until the game itself exits, preventing premature font unloading.
+    let tracked = attach_job_completion_port(process.0);
+    // SAFETY: thread owns the suspended primary thread returned by CreateProcessW.
+    if unsafe { ResumeThread(thread.0) } == u32::MAX {
+        return Err(io::Error::last_os_error().into());
+    }
+    drop(thread);
+
+    let mut saw_target = false;
+    if let Some((_job, iocp)) = tracked {
+        loop {
+            let mut message = 0u32;
+            let mut key = 0usize;
+            let mut overlapped: *mut OVERLAPPED = null_mut();
+            // SAFETY: iocp is a valid completion port owned by this loop; pointers are writable.
+            let ok = unsafe {
+                GetQueuedCompletionStatus(
+                    iocp.0,
+                    &mut message,
+                    &mut key,
+                    &mut overlapped,
+                    INFINITE,
+                )
+            };
+            if ok == 0 {
+                break;
+            }
+            if message == JOB_OBJECT_MSG_NEW_PROCESS && indirect {
+                let pid = overlapped as usize as u32;
+                if pid_image_key(pid).as_deref() == Some(target_key) {
+                    saw_target = true;
+                }
+            } else if message == JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO {
+                break;
+            }
+        }
+    }
+    let mut code = 0u32;
+    // SAFETY: process owns a valid handle from CreateProcessW.
+    unsafe {
+        if WaitForSingleObject(process.0, INFINITE) != WAIT_OBJECT_0
+            || GetExitCodeProcess(process.0, &mut code) == 0
+        {
+            return Err(io::Error::last_os_error().into());
+        }
+    }
+    if code == 0 && indirect && !saw_target {
+        wait_for_target_process(target_key, pre_existing);
+    }
+    Ok(code as i32)
+}
+
+fn attach_job_completion_port(process: HANDLE) -> Option<(KernelHandle, KernelHandle)> {
+    // SAFETY: Null attributes/name create an anonymous job object owned by KernelHandle.
+    let job = unsafe { CreateJobObjectW(null(), null()) };
+    if job.is_null() {
+        return None;
+    }
+    let job = KernelHandle(job);
+    // SAFETY: INVALID_HANDLE_VALUE creates an unbound I/O completion port owned by KernelHandle.
+    let iocp = unsafe { CreateIoCompletionPort(INVALID_HANDLE_VALUE, null_mut(), 0, 1) };
+    if iocp.is_null() {
+        return None;
+    }
+    let iocp = KernelHandle(iocp);
+    let association = JOBOBJECT_ASSOCIATE_COMPLETION_PORT {
+        CompletionKey: job.0,
+        CompletionPort: iocp.0,
+    };
+    // SAFETY: Both handles are valid and association matches the requested information class size.
+    let linked = unsafe {
+        SetInformationJobObject(
+            job.0,
+            JobObjectAssociateCompletionPortInformation,
+            (&raw const association).cast(),
+            size_of::<JOBOBJECT_ASSOCIATE_COMPLETION_PORT>() as u32,
+        )
+    };
+    if linked == 0 {
+        return None;
+    }
+    // SAFETY: job and process are live handles; process is suspended before assignment.
+    if unsafe { AssignProcessToJobObject(job.0, process) } == 0 {
+        return None;
+    }
+    Some((job, iocp))
+}
+
+fn normalized_image_key(path: &Path) -> String {
+    let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let text = resolved.to_string_lossy();
+    let stripped = text
+        .strip_prefix(r"\\?\UNC\")
+        .map(|rest| format!(r"\\{rest}"))
+        .unwrap_or_else(|| text.strip_prefix(r"\\?\").unwrap_or(&text).to_owned());
+    stripped.replace('/', "\\").to_lowercase()
+}
+
+fn pid_image_key(pid: u32) -> Option<String> {
+    if pid == 0 {
+        return None;
+    }
+    // SAFETY: OpenProcess returns null on failure; valid handles are wrapped in KernelHandle.
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        return None;
+    }
+    let handle = KernelHandle(handle);
+    let mut buffer = vec![0u16; 32768];
+    let mut length = buffer.len() as u32;
+    // SAFETY: buffer holds `length` writable u16 units and handle has query rights.
+    if unsafe { QueryFullProcessImageNameW(handle.0, 0, buffer.as_mut_ptr(), &mut length) } == 0 {
+        return None;
+    }
+    let path = PathBuf::from(OsString::from_wide(&buffer[..length as usize]));
+    Some(normalized_image_key(&path))
+}
+
+fn matching_pids(target_key: &str) -> BTreeSet<u32> {
+    let mut pids = BTreeSet::new();
+    // SAFETY: TH32CS_SNAPPROCESS requires no process ID; returned handle is owned by KernelHandle.
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snapshot == INVALID_HANDLE_VALUE || snapshot.is_null() {
+        return pids;
+    }
+    let snapshot = KernelHandle(snapshot);
+    let mut entry = PROCESSENTRY32W {
+        dwSize: size_of::<PROCESSENTRY32W>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: entry.dwSize matches PROCESSENTRY32W; snapshot is a valid toolhelp snapshot.
+    if unsafe { Process32FirstW(snapshot.0, &mut entry) } != 0 {
+        loop {
+            if pid_image_key(entry.th32ProcessID).as_deref() == Some(target_key) {
+                pids.insert(entry.th32ProcessID);
+            }
+            // SAFETY: entry and snapshot remain valid for the next iteration.
+            if unsafe { Process32NextW(snapshot.0, &mut entry) } == 0 {
+                break;
+            }
+        }
+    }
+    pids
+}
+
+fn wait_for_target_process(target_key: &str, pre_existing: &BTreeSet<u32>) {
+    let deadline = Instant::now() + TARGET_APPEAR_TIMEOUT;
+    let mut watched = BTreeSet::new();
+    while Instant::now() < deadline {
+        watched = matching_pids(target_key)
+            .difference(pre_existing)
+            .copied()
+            .collect();
+        if !watched.is_empty() {
+            break;
+        }
+        sleep(Duration::from_millis(100));
+    }
+    if watched.is_empty() {
+        return;
+    }
+    let mut unwaitable = BTreeSet::new();
+    for &pid in &watched {
+        // SAFETY: OpenProcess returns null if access is denied (e.g. across elevation); otherwise owned.
+        let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+        if handle.is_null() {
+            unwaitable.insert(pid);
+        } else {
+            let handle = KernelHandle(handle);
+            // SAFETY: handle has PROCESS_SYNCHRONIZE and stays alive across the wait.
+            unsafe {
+                WaitForSingleObject(handle.0, INFINITE);
+            }
+        }
+    }
+    while !unwaitable.is_empty() {
+        let alive = matching_pids(target_key);
+        unwaitable.retain(|pid| alive.contains(pid));
+        if !unwaitable.is_empty() {
+            sleep(Duration::from_millis(500));
+        }
+    }
+}
+
+fn process_command_line(program: &Path, arguments: &[OsString]) -> Vec<u16> {
+    let mut output = Vec::new();
+    push_quoted_arg(&mut output, program.as_os_str(), true);
+    for argument in arguments {
+        output.push(b' ' as u16);
+        let needs_quotes = argument.is_empty()
+            || argument
+                .encode_wide()
+                .any(|unit| matches!(unit, 0x20 | 0x09 | 0x22));
+        push_quoted_arg(&mut output, argument, needs_quotes);
+    }
+    output.push(0);
+    output
+}
+
+fn push_quoted_arg(output: &mut Vec<u16>, argument: &OsStr, quote: bool) {
+    if !quote {
+        output.extend(argument.encode_wide());
+        return;
+    }
+    output.push(b'"' as u16);
+    let mut slashes = 0;
+    for unit in argument.encode_wide() {
+        if unit == b'\\' as u16 {
+            slashes += 1;
+            continue;
+        }
+        output.extend(std::iter::repeat_n(
+            b'\\' as u16,
+            if unit == b'"' as u16 {
+                slashes * 2 + 1
+            } else {
+                slashes
+            },
+        ));
+        slashes = 0;
+        output.push(unit);
+    }
+    output.extend(std::iter::repeat_n(b'\\' as u16, slashes * 2));
+    output.push(b'"' as u16);
 }
 
 fn command_line(arguments: &[OsString]) -> Vec<u16> {
@@ -422,26 +721,7 @@ fn command_line(arguments: &[OsString]) -> Vec<u16> {
         if i != 0 {
             output.push(b' ' as u16);
         }
-        output.push(b'"' as u16);
-        let mut slashes = 0;
-        for unit in argument.encode_wide() {
-            if unit == b'\\' as u16 {
-                slashes += 1;
-                continue;
-            }
-            output.extend(std::iter::repeat_n(
-                b'\\' as u16,
-                if unit == b'"' as u16 {
-                    slashes * 2 + 1
-                } else {
-                    slashes
-                },
-            ));
-            slashes = 0;
-            output.push(unit);
-        }
-        output.extend(std::iter::repeat_n(b'\\' as u16, slashes * 2));
-        output.push(b'"' as u16);
+        push_quoted_arg(&mut output, argument, true);
     }
     output.push(0);
     output
@@ -488,15 +768,44 @@ mod tests {
     #[test]
     fn direct_launch_waits_and_preserves_exit_status() {
         let command = std::env::var_os("COMSPEC").expect("Windows command processor");
+        let path = Path::new(&command);
         assert_eq!(
             start_and_wait(
-                Path::new(&command),
+                path,
                 &["/d".into(), "/c".into(), "exit 37".into()],
                 Path::new("."),
+                path,
                 false
             )
             .unwrap(),
             37
+        );
+    }
+
+    #[test]
+    fn job_object_waits_for_detached_grandchild_after_helper_exits() {
+        let command = std::env::var_os("COMSPEC").expect("Windows command processor");
+        let path = Path::new(&command);
+        let started = Instant::now();
+        // cmd.exe spawns a background ping.exe and exits immediately (just like LEProc.exe);
+        // the Job Object must keep waiting until ping.exe completes so fonts are not unloaded early.
+        let code = start_and_wait(
+            path,
+            &[
+                "/d".into(),
+                "/c".into(),
+                "start /b ping -n 2 127.0.0.1 >nul".into(),
+            ],
+            Path::new("."),
+            path,
+            false,
+        )
+        .unwrap();
+        assert_eq!(code, 0);
+        assert!(
+            started.elapsed() >= Duration::from_millis(800),
+            "expected job wait to hold until grandchild exited, got {:?}",
+            started.elapsed()
         );
     }
 }
