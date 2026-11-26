@@ -10,7 +10,7 @@ UTF16_BE = b"\xfe\xff"
 AVG_SCENARIO = "avg-scenario"
 RUBY = re.compile(r"\[rb,([^,\[\]\r\n]+),([^,\[\]\r\n]+)\]")
 SCENARIO_TAG = re.compile(r"\[(?!n\])[^\[\]]+\]")
-RUBY_OPEN, RUBY_CLOSE = "\ufdd0", "\ufdd1"
+RUBY_OPEN, RUBY_CLOSE, RUBY_COMMA = "\ufdd0", "\ufdd1", "\ufdd5"
 INDENT = "\ufdd2"
 NAME_JOIN = "\ufdd3\ufdd4"
 MULTI_NAME = re.compile(r"^([ \t]*【)([^【】\r\n]+(?:】【[^【】\r\n]+)+)(】)(?=[ \t]*\r?$)", re.M)
@@ -49,10 +49,13 @@ def decode(raw, *, unicode_scripts=False):
 
 
 def mask_ruby(text):
-    if RUBY_OPEN in text or RUBY_CLOSE in text:
+    if any(code in text for code in (RUBY_OPEN, RUBY_CLOSE, RUBY_COMMA)):
         raise ValueError("ImoScripter 脚本文字包含保留码位")
     # Single-character replacements leave the parser's source offsets intact.
-    return RUBY.sub(lambda tag: RUBY_OPEN + tag[0][1:-1] + RUBY_CLOSE, text)
+    return RUBY.sub(
+        lambda tag: f"{RUBY_OPEN}rb{RUBY_COMMA}{tag[1]}{RUBY_COMMA}{tag[2]}{RUBY_CLOSE}",
+        text,
+    )
 
 
 def mask_multi_name(text):
@@ -148,7 +151,8 @@ def patch(script, rows, *, unicode_scripts=False, dialect="imos"):
         masked_rows.append(masked)
     normalized = PC_TAIL.sub(r"\1\2\3]", script)
     result = qlie_imos.patch(mask_multi_name(mask_ruby(normalized)), masked_rows)
-    result = result.replace(RUBY_OPEN, "[").replace(RUBY_CLOSE, "]").replace(NAME_JOIN, "】【")
+    result = (result.replace(RUBY_OPEN, "[").replace(RUBY_CLOSE, "]")
+              .replace(RUBY_COMMA, ",").replace(NAME_JOIN, "】【"))
     if normalized == script and INDENT not in result:
         return result
     result = result.replace(INDENT, "　")

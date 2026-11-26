@@ -178,6 +178,34 @@ class QliePack31Test(unittest.TestCase):
         self.assertNotEqual(cipher, plain)
         self.assertEqual(qlie_pack31.chain_crypt(0x123456, cipher, encrypt=False), plain)
 
+        # Corrupted name_hash inside FilePack 3.1 HashVer1.4 lookup table must be rejected.
+        import struct
+        raw_pack = bytearray(path.read_bytes())
+        with path.open("rb") as stream:
+            idx = qlie_pack31.read_index(stream)
+            tail = qlie_pack31.writer_tail(stream, idx)
+        sig, buckets, count, ordinals, stored, is_comp, safety, ver, res = qlie_pack31.PACKHASH.unpack_from(tail, 0)
+        self.assertEqual(is_comp, 0)
+        plain_hash = bytearray(qlie_pack31.chain_crypt(qlie_pack31.HASH_CRYPT_KEY, tail[68:68 + stored], encrypt=False))
+        # Locate the first non-empty bucket's first entry name_hash and flip 1 bit.
+        pos = 0
+        for _ in range(buckets):
+            n = int.from_bytes(plain_hash[pos:pos + 4], "little")
+            pos += 4
+            if n:
+                ch_len = int.from_bytes(plain_hash[pos:pos + 2], "little")
+                pos += 2 + ch_len * 2 + 8
+                plain_hash[pos] ^= 1
+                break
+        bad_payload = qlie_pack31.chain_crypt(qlie_pack31.HASH_CRYPT_KEY, bytes(plain_hash), encrypt=True)
+        raw_pack[idx.index_end + 68:idx.index_end + 68 + stored] = bad_payload
+        bad_hash = self.root / "GameData/bad_name_hash.pack"
+        bad_hash.write_bytes(raw_pack)
+        with bad_hash.open("rb") as stream:
+            bad_idx = qlie_pack31.read_index(stream)
+            with self.assertRaisesRegex(ValueError, "文件名哈希或桶位置"):
+                qlie_pack31.writer_tail(stream, bad_idx)
+
 
 def _avg_scenario_installation(root):
     (root / "GameData/System").mkdir(parents=True)
@@ -608,3 +636,174 @@ class QliePack30Hash14Test(unittest.TestCase):
             idx = layout.index(stream)
             with self.assertRaisesRegex(ValueError, "HashVer1.4"):
                 layout.tail(stream, idx)
+
+        # Corrupted name_hash or wrong bucket in FilePack 3.0 HashVer1.4 must be rejected.
+        import struct
+
+        def corrupt_hash(names):
+            table = bytearray(struct.pack("<H", len(names)))
+            for ordinal, name in enumerate(names):
+                table += struct.pack("<H", len(name)) + name + struct.pack("<QI", ordinal * 2, 0)
+            table += bytes(2 * 255) + struct.pack(f"<{len(names)}H", *range(len(names)))
+            return bytes(table)
+
+        bad_lookup = self.root / "GameData/bad_lookup.pack"
+        bad_lookup.write_bytes(make_pack([("scenario/story.s", b"hello\r\n")], bytes([157]) * 256,
+                                         hash_version="1.4", table_override=corrupt_hash))
+        with bad_lookup.open("rb") as stream:
+            idx = layout.index(stream)
+            with self.assertRaisesRegex(ValueError, "文件名哈希或桶位置"):
+                layout.tail(stream, idx)
+
+    def test_ruby_inside_pc_does_not_block_sibling_edits_and_still_rejects_raw_commas(self):
+        script = "[pc,夕暮れの[rb,海,うみ]]\r\n\r\nこんにちは\r\n"
+        records = qlie_script.scan(script)
+        rows = [record.row() for record in records]
+        self.assertEqual(rows, [{"message": "夕暮れの[rb,海,うみ]"}, {"message": "こんにちは"}])
+
+        # Editing only a sibling dialogue line keeps [pc,...[rb,...]] untouched without delimiter errors.
+        sibling_rows = [rows[0], {"message": "更新済み"}]
+        patched = qlie_script.patch(script, sibling_rows)
+        self.assertIn("[pc,夕暮れの[rb,海,うみ]]", patched)
+        self.assertIn("更新済み", patched)
+        self.assertEqual([r.row() for r in qlie_script.scan(patched)], sibling_rows)
+
+        # Editing the [pc,...] line itself while preserving [rb,...] also works.
+        pc_rows = [{"message": "黄昏の[rb,海,うみ]"}, rows[1]]
+        patched_pc = qlie_script.patch(script, pc_rows)
+        self.assertIn("[pc,黄昏の[rb,海,うみ]]", patched_pc)
+        self.assertEqual([r.row() for r in qlie_script.scan(patched_pc)], pc_rows)
+
+        # Raw commas outside [rb,...] inside [pc,...] must still be rejected.
+        with self.assertRaisesRegex(ValueError, "delimiter injection"):
+            qlie_script.patch(script, [{"message": "黄昏,の[rb,海,うみ]"}, rows[1]])
+
+    def test_unroutable_bitmap_font_falls_back_to_system_font(self):
+        # Remove early replacement from ImoScripter_Format.s and have no ImoScripter_Custom.s.
+        # BitmapFont.find must return None so system-font fallback remains available.
+        from contextlib import ExitStack
+        root = self.output.parent / "unroutable_game"
+        root.mkdir()
+        _hash14_pack30_installation(root)
+        plain_format = (
+            "@@!Imo_Format_Text\r\n"
+            "\t\\case,Imo_FormatMode\r\n"
+            "\t\t\\ans,1\t\\subp,@@!Imo_FormatModeMulti,,ParamStr[0]\r\n"
+            "\t\\end\r\n"
+            "\\ret\r\n"
+            "@@!Imo_FormatModeMulti\r\n"
+            "\t\\var,str,s\r\n"
+            "\t\\trim,ParamStr[0]\r\n"
+            "\t\\cal,s=ResultStr[0]\r\n"
+            "\t\\cal,Imo_FormatText[idx]=Imo_FormatText[idx]+s\r\n"
+            "\\ret\r\n"
+        )
+        # Rebuild data7.pack with plain_format (no Imo_RepTextTable route).
+        files = [p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()]
+        req = qlie_pack_adapter.execute(dict(operation="probe", sourceDirectory=str(root), resourceFiles=files,
+                                             templateId="qlie-pack3-imos"))["probe"]["requiredFiles"]
+        with ExitStack() as stack:
+            ins = qlie_pack_adapter.locate(root, {}, req, stack)
+            src7, idx7 = ins.archives["GameData/data7.pack"]
+            rebuilt = root / "GameData/data7.new.pack"
+            with rebuilt.open("w+b") as dst7:
+                ins.layout.rebuild(src7, dst7, idx7, ins.internal_keys["GameData/data7.pack"],
+                                   ins.external_key, ins.game_key, {"avg/imoscripter_format.s": plain_format.encode("cp932")})
+        rebuilt.replace(root / "GameData/data7.pack")
+
+        with ExitStack() as stack:
+            ins = qlie_pack_adapter.locate(root, {}, req, stack)
+            self.assertIsNotNone(ins.font_layout)
+            self.assertIsNone(ins.bitmap_font)
+
+        # Building a non-CP932 translation now enters system-font asset resolution instead of crashing in bitmap routing.
+        units = qlie_pack_adapter.execute(dict(operation="extract", sourceDirectory=str(root), resourceFiles=req,
+                                               templateId="qlie-pack3-imos"))["extraction"]["units"]
+        with self.assertRaisesRegex(ValueError, "启动器|字体素材"):
+            qlie_pack_adapter.execute(dict(
+                operation="build", sourceDirectory=str(root), outputDirectory=str(self.output.parent / "sfnt_out"),
+                resourceFiles=req, translations={units[2]["id"]: "汉"}, templateId="qlie-pack3-imos",
+            ))
+
+    def test_display_verify_accepts_valid_unregistered_tail_and_still_rejects_bad_glyph_or_tail_downgrade(self):
+        # Build a FilePack 3.0 game using an unregistered HashVer1.5 tail and verify custom adapter display readback.
+        src = self.output.parent / "hash15_src"
+        out = self.output.parent / "hash15_out"
+        for d in (src / "GameData/System", src / "DLL", out / "GameData/System", out / "DLL", out / "qlie-l10n"):
+            d.mkdir(parents=True)
+        (src / "game.exe").write_bytes(key_resource_exe())
+        (src / "DLL/key.fkey").write_bytes(EXTERNAL_KEY)
+        cfg_orig = "\r\n".join(f"Font[{i}].Name=ＭＳ 明朝" for i in range(8)) + "\r\n"
+        (src / "GameData/System/config.txt").write_bytes(cfg_orig.encode("cp932"))
+        fontdata_orig = "\r\n".join(f"Font[{i}].List[0]=system_fix" for i in range(8)) + "\r\n"
+        story_orig = "こんにちは\r\n"
+        (src / "GameData/data0.pack").write_bytes(make_pack([
+            ("system/font/fontdata.dat", fontdata_orig.encode("cp932")),
+            ("avg/projectsetting.txt", b"FormatType=1\r\n"),
+            ("avg/setting.txt", b"ReturnCode=[n]\r\n"),
+            ("scenario/story.s", story_orig.encode("cp932")),
+        ], bytes([113]) * 256, hash_version="1.5"))
+
+        mapping = {0xE000: ord("汉")}
+        serif = qlie_systemfont.family("Serif", mapping) + " Regular"
+        (out / "game.exe").write_bytes(key_resource_exe())
+        (out / "DLL/key.fkey").write_bytes(EXTERNAL_KEY)
+        (out / "GameData/System/config.txt").write_bytes(
+            ("\r\n".join(f"Font[{i}].Name={serif}" for i in range(8)) + "\r\n").encode("cp932")
+        )
+        (out / "QlieLauncher.exe").write_bytes(b"stub")
+        (out / "qlie-l10n/Serif.ttf").write_bytes(b"stub")
+        (out / "qlie-l10n/launch.xml").write_bytes((
+            '<?xml version="1.0" encoding="utf-8"?>'
+            f'<launch executable="game.exe"><font file="qlie-l10n/Serif.ttf" face="{serif}" /></launch>'
+        ).encode("utf-8"))
+        fontdata_patched = "\r\n".join(f"Font[{i}].List[0]=system" for i in range(8)) + "\r\n"
+        (out / "GameData/data0.pack").write_bytes(make_pack([
+            ("system/font/fontdata.dat", fontdata_patched.encode("cp932")),
+            ("avg/projectsetting.txt", b"FormatType=1\r\n"),
+            ("avg/setting.txt", b"ReturnCode=[n]\r\n"),
+            ("scenario/story.s", "こんにち\ue000\r\n".encode("cp932")),
+        ], bytes([113]) * 256, hash_version="1.5"))
+
+        resources = ["DLL/key.fkey", "GameData/System/config.txt", "GameData/data0.pack", "game.exe"]
+        built_files = [*resources, "QlieLauncher.exe", "qlie-l10n/launch.xml", "qlie-l10n/Serif.ttf"]
+        samples_file = out / "samples.json"
+        samples_file.write_text(json.dumps([dict(
+            resourcePath="GameData/data0.pack", locator="custom-loc-0",
+            original="こんにちは", expected="こんにち汉",
+        )], ensure_ascii=False), encoding="utf-8")
+        req = dict(output=str(out), source=str(src), resources=resources, mode="replace",
+                   files=built_files, samplesFile=str(samples_file), launcher="QlieLauncher.exe",
+                   template=False, toolPaths={})
+
+        # 1. Valid unregistered-tail custom patch passes display readback with a clear tail warning.
+        evidence = qlie_display.verify(req)
+        self.assertEqual(evidence["aliases"], {"\ue000": "汉"})
+        self.assertEqual([f["face"] for f in evidence["fonts"]], [serif])
+        self.assertTrue(any("HashVer1.5" in w for w in evidence["warnings"]), evidence)
+
+        # 2. Tampering the script text/glyph mapping on the same unregistered-tail patch is still rejected.
+        (out / "GameData/data0.pack").write_bytes(make_pack([
+            ("system/font/fontdata.dat", fontdata_patched.encode("cp932")),
+            ("avg/projectsetting.txt", b"FormatType=1\r\n"),
+            ("avg/setting.txt", b"ReturnCode=[n]\r\n"),
+            ("scenario/story.s", "こんにち誤\r\n".encode("cp932")),
+        ], bytes([113]) * 256, hash_version="1.5"))
+        with self.assertRaisesRegex(ValueError, "缺少一致的解码或字形映射"):
+            qlie_display.verify(req)
+
+        # 3. Replacing a known HashVer1.4 original volume with an unregistered tail in output must be rejected.
+        (src / "GameData/data0.pack").write_bytes(make_pack([
+            ("system/font/fontdata.dat", fontdata_orig.encode("cp932")),
+            ("avg/projectsetting.txt", b"FormatType=1\r\n"),
+            ("avg/setting.txt", b"ReturnCode=[n]\r\n"),
+            ("scenario/story.s", story_orig.encode("cp932")),
+        ], bytes([113]) * 256, hash_version="1.4"))
+        (out / "GameData/data0.pack").write_bytes(make_pack([
+            ("system/font/fontdata.dat", fontdata_patched.encode("cp932")),
+            ("avg/projectsetting.txt", b"FormatType=1\r\n"),
+            ("avg/setting.txt", b"ReturnCode=[n]\r\n"),
+            ("scenario/story.s", "こんにち\ue000\r\n".encode("cp932")),
+        ], bytes([113]) * 256, hash_version="1.5"))
+        with self.assertRaisesRegex(ValueError, "原封包使用宿主已登记尾表"):
+            qlie_display.verify(req)

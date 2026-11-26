@@ -539,9 +539,14 @@ impl Verification<'_> {
             } else {
                 "full-display-readback"
             });
-            check
+            let warnings = check
                 .verify(self.service, &built, &build, units, self.cancellation)
                 .await?;
+            for warning in warnings {
+                if !self.result.diagnostics.contains(&warning) {
+                    self.result.diagnostics.push(warning);
+                }
+            }
         }
         let mut extract = built.extraction_request(self.source_directory, &output, self.resources);
         if let Some(probe) = self.probe {

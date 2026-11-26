@@ -48,7 +48,25 @@ def key_resource_exe():
     return header + (resource + b'\xc3').ljust(512, b'\0')
 
 
-def make_pack(members, internal_key, *, hash_version='1.3'):
+def _pack30_hash_table(names):
+    buckets = [[] for _ in range(256)]
+    for ordinal, name in enumerate(names):
+        name_hash = 0
+        for index, byte in enumerate(name, 1):
+            name_hash = ((byte << (index & 15)) + name_hash) & 0x3fffffff
+        bucket = sum(byte * index for index, byte in enumerate(name, 1)) & 0xff
+        buckets[bucket].append((ordinal, name, name_hash))
+    table = bytearray()
+    for items in buckets:
+        table += struct.pack('<H', len(items))
+        for ordinal, name, name_hash in items:
+            table += struct.pack('<H', len(name)) + name
+            table += struct.pack('<QI', ordinal * 2, name_hash)
+    table += struct.pack(f'<{len(names)}H', *range(len(names)))
+    return bytes(table)
+
+
+def make_pack(members, internal_key, *, hash_version='1.3', table_override=None):
     arc_key = qlie.hash_v3(bytes(256)) & 0xFFFFFFF
     contents = bytearray()
     index = bytearray()
@@ -64,28 +82,25 @@ def make_pack(members, internal_key, *, hash_version='1.3'):
                              entry.packed, entry.encryption, qlie.hash_v3(cipher))
         contents.extend(cipher)
 
-    table = struct.pack('<H', len(names))
-    for ordinal, name in enumerate(names):
-        table += struct.pack('<H', len(name)) + name
-        table += struct.pack('<QI', ordinal * 2, 0)
-    table += bytes(2 * 255) + struct.pack(f'<{len(names)}H', *range(len(names)))
+    table = _pack30_hash_table(names) if table_override is None else table_override(names)
     # Identity byte-pair table with skips over both halves of the alphabet.
     packed = b'1PC\xff' + struct.pack('<II', 0, len(table))
     packed += bytes([255, 128, 254]) + struct.pack('<I', len(table)) + table
     hash_entry = qlie.Entry('hash', b'hash', 0, len(packed), len(packed), 0, 1, 0)
     encrypted = qlie.encrypt(packed, hash_entry, 0x428, mode='legacy')
-    if hash_version == '1.4':
+    if hash_version == '1.3':
+        tail = b'HashVer1.3\0\0\0\0\0\0' + struct.pack('<IIII', 256, len(names), len(names) * 2, len(encrypted))
+        tail += encrypted + bytes(32) + struct.pack('<I', 32 + len(encrypted)) + bytes(1024)
+    else:
         from adapters.components import qlie_pack31 as pack31
 
+        sig = f'HashVer{hash_version}'.encode('ascii').ljust(16, b'\0')
         pack_hash = pack31.PACKHASH.pack(
-            pack31.TAIL_SIGNATURE, 256, len(names), len(names) * 2, len(encrypted), 1, 0, 0, bytes(24),
+            sig, 256, len(names), len(names) * 2, len(encrypted), 1, 0, 0, bytes(24),
         )
         key_signature = pack31.chain_crypt(arc_key, pack31.PACKKEY_SIGNATURE, encrypt=True)
         tail = (pack_hash + encrypted
                 + pack31.PACKKEY_PREFIX.pack(key_signature, len(pack_hash) + len(encrypted)) + bytes(1024))
-    else:
-        tail = b'HashVer1.3\0\0\0\0\0\0' + struct.pack('<IIII', 256, len(names), len(names) * 2, len(encrypted))
-        tail += encrypted + bytes(32) + struct.pack('<I', 32 + len(encrypted)) + bytes(1024)
     footer = b'FilePackVer3.0\0\0' + struct.pack('<IQ', len(names), len(contents))
     return contents + index + tail + footer
 

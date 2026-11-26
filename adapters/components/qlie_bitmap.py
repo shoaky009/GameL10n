@@ -205,7 +205,13 @@ class BitmapFont:
             rules[rule[1]] = rule[2]
         if len(set(rules.values())) != len(rules):
             raise ValueError("QLIE 中文外字重复占用位图字符")
-        return cls(install, members, table, rules)
+        candidate = cls(install, members, table, rules)
+        if not rules:
+            try:
+                candidate.routes({})
+            except ValueError:
+                return None
+        return candidate
 
     def read(self, key, limit):
         path, entry = self.members[key][0]

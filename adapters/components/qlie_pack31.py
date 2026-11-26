@@ -168,6 +168,46 @@ def writer_tail(stream, index):
             or hash_size != key_offset or key_offset != PACKHASH.size + data_size
             or chain_crypt(index.arc_key, key_signature, encrypt=False) != PACKKEY_SIGNATURE):
         raise ValueError("FilePack 3.1 回包需要已确认的 HashVer1.4 查找表与密钥块")
+    data = chain_crypt(HASH_CRYPT_KEY, tail[PACKHASH.size:PACKHASH.size + data_size], encrypt=False)
+    if is_compressed:
+        if data[:4] != b"1PC\xff" or len(data) < 12:
+            raise ValueError("FilePack 3.1 HashVer1.4 压缩查找表签名无效")
+        data = qlie.decompress(data, expected_size=struct.unpack_from("<I", data, 8)[0], max_output=MAX_TAIL)
+    pos, refs = 0, []
+
+    def take(size):
+        nonlocal pos
+        if size < 0 or pos + size > len(data):
+            raise ValueError("FilePack 3.1 HashVer1.4 查找表数据截断")
+        chunk = data[pos:pos + size]
+        pos += size
+        return chunk
+
+    for bucket_index in range(table_size):
+        bucket_count = int.from_bytes(take(4), "little")
+        if len(refs) + bucket_count > count:
+            raise ValueError("FilePack 3.1 HashVer1.4 桶条目数超出范围")
+        for _ in range(bucket_count):
+            char_count = int.from_bytes(take(2), "little")
+            if not 0 < char_count <= 256:
+                raise ValueError("FilePack 3.1 HashVer1.4 文件名长度无效")
+            raw_name = take(char_count * 2)
+            offset, name_hash = struct.unpack("<QI", take(12))
+            expected_hash = filename_hash(raw_name)
+            if name_hash != expected_hash or bucket_index != hash_bucket(expected_hash):
+                raise ValueError("FilePack 3.1 HashVer1.4 文件名哈希或桶位置与成员名不一致")
+            refs.append((raw_name, offset))
+    mapping = struct.unpack("<" + "I" * count, take(ordinals))
+    if pos != len(data) or len(refs) != count or sorted(mapping) != list(range(count)):
+        raise ValueError("FilePack 3.1 HashVer1.4 序号映射表与成员数量不符")
+    seen = set()
+    for raw_name, offset in refs:
+        if offset % 4 or offset >= ordinals:
+            raise ValueError("FilePack 3.1 HashVer1.4 查找偏移超出序号表")
+        ordinal = mapping[offset // 4]
+        if ordinal in seen or raw_name != index.entries[ordinal].raw_name:
+            raise ValueError("FilePack 3.1 HashVer1.4 文件名或序号与索引不一致")
+        seen.add(ordinal)
     return tail
 
 

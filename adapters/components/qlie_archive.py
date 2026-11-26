@@ -18,6 +18,32 @@ HASH13_SIGNATURE = b"HashVer1.3\0\0\0\0\0\0"
 HASH14_SIGNATURE = qlie_pack31.TAIL_SIGNATURE
 
 
+def tail_signature(stream, index):
+    if index.file_size - 28 - index.index_end < 16:
+        return None
+    return qlie_pack31.read_at(stream, index.index_end, 16)
+
+
+def tail_label(signature):
+    if not signature:
+        return "未知尾表"
+    text = signature.split(b"\0", 1)[0]
+    if text and all(0x20 <= byte < 0x7f for byte in text):
+        return text.decode("ascii")
+    return "未知尾表"
+
+
+def filename_hash30(raw_name):
+    result = 0
+    for index, byte in enumerate(raw_name, 1):
+        result = ((byte << (index & 15)) + result) & 0x3fffffff
+    return result
+
+
+def hash_bucket30(raw_name):
+    return sum(byte * index for index, byte in enumerate(raw_name, 1)) & 0xff
+
+
 def version(stream):
     size = stream.seek(0, 2)
     if size is None:
@@ -62,7 +88,7 @@ def hash14_tail30(stream, index, *, max_bytes=MAX_TAIL):
         pos += length
         return chunk
 
-    for _ in range(buckets):
+    for bucket_index in range(buckets):
         bucket_count = int.from_bytes(take(2), "little")
         if len(refs) + bucket_count > count:
             raise ValueError("FilePack 3.0 HashVer1.4 桶条目数超出范围")
@@ -71,7 +97,9 @@ def hash14_tail30(stream, index, *, max_bytes=MAX_TAIL):
             if not 0 < name_length <= 256:
                 raise ValueError("FilePack 3.0 HashVer1.4 文件名长度无效")
             name = take(name_length)
-            offset, _name_hash = struct.unpack("<QI", take(12))
+            offset, name_hash = struct.unpack("<QI", take(12))
+            if name_hash != filename_hash30(name) or bucket_index != hash_bucket30(name):
+                raise ValueError("FilePack 3.0 HashVer1.4 文件名哈希或桶位置与成员名不一致")
             refs.append((name, offset))
     mapping = struct.unpack("<" + "H" * count, take(mapping_size))
     if pos != len(data) or len(refs) != count or sorted(mapping) != list(range(count)):
@@ -170,6 +198,7 @@ class Pack30:
     template = "qlie-pack3-imos"
     key_source = "external-and-executable"
     unicode_scripts = False
+    known_tails = (HASH13_SIGNATURE, HASH14_SIGNATURE)
 
     def index(self, stream):
         return qlie.read_index(stream, max_entries=16_000, max_index_bytes=MAX_INDEX)
@@ -208,6 +237,7 @@ class Pack31:
     template = "qlie-pack31-imos"
     key_source = "embedded"
     unicode_scripts = True
+    known_tails = (HASH14_SIGNATURE,)
 
     def index(self, stream):
         return qlie_pack31.read_index(stream)

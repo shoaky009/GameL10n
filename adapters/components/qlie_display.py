@@ -5,6 +5,7 @@ from pathlib import Path
 from xml.etree import ElementTree
 
 from . import engine_archive as archive
+from . import qlie_archive
 from . import qlie_bitmap as bitmap
 from . import qlie_pack_adapter as pack
 from . import qlie_script
@@ -99,6 +100,27 @@ class EffectiveResources:
         return (self.output if relative in self.files else self.original) / relative
 
 
+def inspect_tails(install, *, source_archives=None, unregistered_source=None):
+    """Validate known lookup tails strictly; allow unregistered tails only when present in source."""
+    unregistered = {}
+    for path, (stream, index) in install.archives.items():
+        sig = qlie_archive.tail_signature(stream, index)
+        if sig in install.layout.known_tails:
+            install.layout.tail(stream, index)
+            continue
+        if unregistered_source is not None:
+            if path in unregistered_source or (
+                source_archives is not None and path not in source_archives and unregistered_source
+            ):
+                if index.file_size - 28 - index.index_end < 1060:
+                    raise ValueError(f"{path}：QLIE 封包尾表长度不足，缺少密钥区")
+                unregistered[path] = qlie_archive.tail_label(sig)
+                continue
+            raise ValueError(f"{path}：原封包使用宿主已登记尾表，但回包后尾表变为未登记格式（{qlie_archive.tail_label(sig)}）")
+        unregistered[path] = qlie_archive.tail_label(sig)
+    return unregistered
+
+
 def verify(request):
     output = Path(request["output"])
     original = Path(request["source"])
@@ -107,23 +129,38 @@ def verify(request):
     root = EffectiveResources(original, output, files) if overlay else output
     with Path(request["samplesFile"]).open(encoding="utf-8") as stream:
         samples = json.load(stream)
+    warnings = []
     with ExitStack() as stack:
+        source_archives = None
+        unregistered_source = None
         if not request["template"]:
             try:
-                source = pack.locate(original, {}, request["resources"], stack)
+                source = pack.locate(original, {}, request["resources"], stack, validate_tail=False)
+                source_archives = set(source.archives)
+                unregistered_source = inspect_tails(source)
             except ValueError as error:
                 if any(path in files for path in (font.MAPPING, font.LAUNCH, font.LAUNCHER)):
                     raise ValueError(
                         f"宿主独立显示回读器（非工作区适配器源码）不支持当前 QLIE 脚本方言：{error}。"
                         "补丁含私用字形或字体启动资源，不能跳过独立核验，需在宿主补充该方言的显示回读支持"
                     ) from error
-                return dict(fonts=[], aliases={})  # FilePack also carries other script formats.
+                return dict(fonts=[], aliases={}, warnings=[])  # FilePack also carries other script formats.
             samples = locate_samples(source, samples)
             if not samples:
-                return dict(fonts=[], aliases={})
+                return dict(fonts=[], aliases={}, warnings=[])
         effective_files = [*request["resources"], *files] if overlay else files
         try:
-            install = pack.locate(root, {}, [p for p in effective_files if p != font.MAPPING], stack)
+            install = pack.locate(root, {}, [p for p in effective_files if p != font.MAPPING], stack,
+                                  validate_tail=bool(request["template"]))
+            if not request["template"]:
+                unregistered_output = inspect_tails(
+                    install, source_archives=source_archives, unregistered_source=unregistered_source,
+                )
+                if unregistered_output:
+                    labels = "、".join(sorted(set(unregistered_output.values())))
+                    warnings.append(
+                        f"QLIE 封包尾表版本（{labels}）未在宿主登记；已独立核验脚本成员、译文与字形，文件名查找表需另行确认。"
+                    )
         except ValueError as error:
             raise ValueError(
                 f"宿主独立显示回读器（非工作区适配器源码）检查回填结果失败：{error}。"
@@ -162,7 +199,7 @@ def verify(request):
                 if actual != expected and actual != bitmap.dialogue_mask(expected):
                     raise ValueError(f"QLIE 外字位图中的「{char}」与目标汉字的字形不一致")
         if not aliases:
-            return dict(fonts=[], aliases={})
+            return dict(fonts=[], aliases={}, warnings=warnings)
         slot, char = next(iter(aliases.items()))
         evidence = f"QLIE 试译字符「{char}」在游戏脚本中写为 U+{ord(slot):04X}"
         if install.bitmap_font:
@@ -195,4 +232,4 @@ def verify(request):
         if missing or not selected:
             raise ValueError(f"{evidence}，启动器没有加载游戏选用的字体：{', '.join(sorted(missing))}")
         return dict(fonts=[dict(face=face, path=registered[face], fixed=face in fixed)
-                           for face in sorted(selected)], aliases=aliases)
+                           for face in sorted(selected)], aliases=aliases, warnings=warnings)

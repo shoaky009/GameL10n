@@ -15,6 +15,8 @@ struct FontSelection {
 struct DisplayEvidence {
     fonts: Vec<FontSelection>,
     aliases: BTreeMap<char, char>,
+    #[serde(default)]
+    warnings: Vec<String>,
 }
 
 pub(super) struct QlieDisplay {
@@ -189,7 +191,7 @@ impl QlieDisplay {
         request: &AdapterRequest,
         units: &[TranslationUnit],
         cancellation: &CancellationToken,
-    ) -> Result<(), EngineError> {
+    ) -> Result<Vec<String>, EngineError> {
         let translations = request
             .translations
             .as_ref()
@@ -216,7 +218,7 @@ impl QlieDisplay {
             "toolPaths":{"hostCommand":[service.tools.vntextpatch()]},
         }), cancellation).await?)?;
         if evidence.aliases.is_empty() {
-            return Ok(());
+            return Ok(evidence.warnings);
         }
         let launcher = launcher
             .ok_or_else(|| EngineError::Rejected("QLIE 字形替换缺少字体启动入口".into()))?;
@@ -239,6 +241,6 @@ impl QlieDisplay {
         for font in &evidence.fonts {
             verify_font(output, font, &evidence.aliases)?;
         }
-        Ok(())
+        Ok(evidence.warnings)
     }
 }

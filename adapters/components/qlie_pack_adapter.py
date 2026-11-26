@@ -191,7 +191,7 @@ def system_font(root, request, files, indices):
         return None, str(error)
 
 
-def locate(root, request, files, stack):
+def locate(root, request, files, stack, *, validate_tail=True):
     packs = [path for path in files if path.lower().startswith("gamedata/")
              and path.count("/") == 1 and path.lower().endswith(".pack")]
     executables = [path for path in files if "/" not in path and path.lower().endswith(".exe")]
@@ -268,7 +268,7 @@ def locate(root, request, files, stack):
         raise ValueError("ImoScripter 配置副本超出读取范围")
     fingerprints = {}
     for path, (stream, index) in indices.items():
-        if path in selected:
+        if validate_tail and path in selected:
             layout.tail(stream, index)
         fingerprints[path] = archive.hash_range(stream, index.index_offset, index.file_size - index.index_offset)
     font_entries = {}
@@ -306,7 +306,8 @@ def locate(root, request, files, stack):
             for path, entry in entries:
                 volume = indices[path]
                 if path not in local_keys:
-                    layout.tail(*volume)
+                    if validate_tail:
+                        layout.tail(*volume)
                     local_keys[path] = layout.key(*volume, external_key, game_key)
                 raw = layout.read(*volume, entry, local_keys[path], game_key, font.CONFIG_BYTES)
                 docs.append(font.Document.read(path, entry.name, raw))
