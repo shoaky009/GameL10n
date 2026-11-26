@@ -43,9 +43,14 @@ $runtimeFiles = @(
     Get-Item -LiteralPath (Join-Path $runtime 'adapter-components/GameL10n.FontBridge.dll')
     Get-Item -LiteralPath (Join-Path $runtime 'adapter-components/GameL10n.FontBridge.LICENSE')
     $references = Join-Path $repo 'third_party/engine-tools'
-    foreach ($file in Get-ChildItem -LiteralPath $references -Recurse -File) {
-        $relative = [IO.Path]::GetRelativePath($references, $file.FullName)
-        Get-Item -LiteralPath (Join-Path $runtime (Join-Path 'engine-tools' $relative))
+    foreach ($pinFile in Get-ChildItem -LiteralPath $references -File -Filter '*.json') {
+        $pin = Get-Content -LiteralPath $pinFile.FullName -Raw | ConvertFrom-Json
+        $revision = [string]$pin.revision
+        if ($revision -notmatch '^[0-9a-fA-F]{40}$') {
+            throw "Invalid engine-tools revision in $($pinFile.Name): $revision"
+        }
+        Get-Item -LiteralPath (Join-Path $runtime (Join-Path 'engine-tools' $pinFile.Name))
+        Get-Item -LiteralPath (Join-Path $runtime (Join-Path 'engine-tools' (Join-Path 'references' (Join-Path $revision 'library.zip'))))
     }
     Get-ChildItem -LiteralPath (Join-Path $repo 'adapters/components') -File -Filter '*.py'
     Get-Item -LiteralPath (Join-Path $repo 'adapters/components/VNTextProxy-LICENSE.txt')
