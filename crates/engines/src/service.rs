@@ -4,7 +4,7 @@ mod discover;
 mod display;
 mod verification;
 
-pub(crate) const VERIFIER_REVISION: u32 = 24;
+pub(crate) const VERIFIER_REVISION: u32 = 25;
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},

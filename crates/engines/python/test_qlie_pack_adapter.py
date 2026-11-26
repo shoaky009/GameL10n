@@ -427,7 +427,8 @@ class QlieAvgScenarioTest(unittest.TestCase):
         self.assertEqual(evidence["aliases"], {"\ue000": "汉"})
         self.assertEqual({f["face"] for f in evidence["fonts"]}, {sans, serif})
 
-        # Unknown QLIE dialect with PUA launcher artifacts must not silently bypass display verification.
+        # Unknown QLIE dialect with PUA/launcher artifacts undergoes dialect-independent verification:
+        # broken artifacts are still rejected, while valid launcher + launch.xml + fonts (+ glyphs.json) pass with warning.
         unknown_root = self.output.parent / "unknown_game"
         unknown_root.mkdir()
         (unknown_root / "GameData").mkdir()
@@ -435,14 +436,35 @@ class QlieAvgScenarioTest(unittest.TestCase):
         (unknown_root / "game.exe").write_bytes(key_resource_exe())
         (unknown_root / "DLL/key.fkey").write_bytes(EXTERNAL_KEY)
         (unknown_root / "GameData/data0.pack").write_bytes(make_pack([("story.s", b"hello\r\n")], bytes([113]) * 256))
-        with self.assertRaisesRegex(ValueError, "宿主独立显示回读器"):
-            qlie_display.verify(dict(
-                output=str(out), source=str(unknown_root),
-                resources=["DLL/key.fkey", "GameData/data0.pack", "game.exe"],
-                mode="replace", files=[*built_files, qlie_systemfont.MAPPING],
-                samplesFile=str(samples_file), launcher="QlieLauncher.exe",
-                template=False, toolPaths={},
-            ))
+        unknown_req = dict(
+            output=str(out), source=str(unknown_root),
+            resources=["DLL/key.fkey", "GameData/data0.pack", "game.exe"],
+            mode="replace", files=[*built_files, qlie_systemfont.MAPPING],
+            samplesFile=str(samples_file), launcher="QlieLauncher.exe",
+            template=False, toolPaths={},
+        )
+        # Missing/corrupted glyphs.json file referenced in built files must be rejected.
+        (out / qlie_systemfont.MAPPING).write_bytes(b"{}")
+        with self.assertRaisesRegex(ValueError, "缺少有效字形映射"):
+            qlie_display.verify(unknown_req)
+
+        # Valid glyphs.json + launch.xml + launcher + font files pass with a clear diagnostic warning.
+        (out / qlie_systemfont.MAPPING).write_bytes(qlie_systemfont.map_bytes(mapping))
+        unknown_ev = qlie_display.verify(unknown_req)
+        self.assertEqual(unknown_ev["aliases"], {"\ue000": "汉"})
+        self.assertEqual({f["face"] for f in unknown_ev["fonts"]}, {sans, serif})
+        self.assertTrue(any("未登记当前 QLIE 脚本方言或封包布局" in w for w in unknown_ev["warnings"]), unknown_ev)
+
+        # Missing launcher entry on an unknown dialect with launch.xml/glyphs.json is still rejected.
+        with self.assertRaisesRegex(ValueError, "补丁启动入口缺少加载配套字体的配置"):
+            qlie_display.verify(dict(unknown_req, launcher=None))
+
+        # Unknown dialect with launcher + launch.xml + fonts (without PUA glyphs.json, e.g. Unicode font bundling)
+        # still returns fonts for host TTF/LE verification and records a diagnostic warning.
+        unicode_ev = qlie_display.verify(dict(unknown_req, files=built_files))
+        self.assertEqual(unicode_ev["aliases"], {})
+        self.assertEqual({f["face"] for f in unicode_ev["fonts"]}, {sans, serif})
+        self.assertTrue(any("未发现字形映射表" in w for w in unicode_ev["warnings"]), unicode_ev)
 
 
 def _minimal_of_atlas():
@@ -807,6 +829,80 @@ class QliePack30Hash14Test(unittest.TestCase):
             ("scenario/story.s", "こんにち\ue000\r\n".encode("cp932")),
         ], bytes([113]) * 256, hash_version="1.5"))
         with self.assertRaisesRegex(ValueError, "原封包使用宿主已登记尾表"):
+            qlie_display.verify(req)
+
+    def test_display_verify_handles_unregistered_font_layout_and_rejects_broken_known_layout(self):
+        # 1. Original game with unregistered 10-slot fontdata.dat (custom adapter with PUA + launcher + glyphs.json).
+        src = self.output.parent / "custom_font_src"
+        out = self.output.parent / "custom_font_out"
+        for d in (src / "GameData/System", src / "DLL", out / "GameData/System", out / "DLL", out / "qlie-l10n"):
+            d.mkdir(parents=True)
+        (src / "game.exe").write_bytes(key_resource_exe())
+        (src / "DLL/key.fkey").write_bytes(EXTERNAL_KEY)
+        cfg_10 = "\r\n".join(f"Font[{i}].Name=ＭＳ 明朝" for i in range(10)) + "\r\n"
+        fd_10 = "\r\n".join(f"Font[{i}].List[0]=system" for i in range(10)) + "\r\n"
+        (src / "GameData/System/config.txt").write_bytes(cfg_10.encode("cp932"))
+        (src / "GameData/data0.pack").write_bytes(make_pack([
+            ("system/font/fontdata.dat", fd_10.encode("cp932")),
+            ("avg/projectsetting.txt", b"FormatType=1\r\n"),
+            ("avg/setting.txt", b"ReturnCode=[n]\r\n"),
+            ("scenario/story.s", "こんにちは\r\n".encode("cp932")),
+        ], bytes([113]) * 256, hash_version="1.4"))
+
+        mapping = {0xE000: ord("汉")}
+        serif = qlie_systemfont.family("Serif", mapping) + " Regular"
+        (out / "game.exe").write_bytes(key_resource_exe())
+        (out / "DLL/key.fkey").write_bytes(EXTERNAL_KEY)
+        (out / "GameData/System/config.txt").write_bytes(
+            ("\r\n".join(f"Font[{i}].Name={serif}" for i in range(10)) + "\r\n").encode("cp932")
+        )
+        (out / "QlieLauncher.exe").write_bytes(b"stub")
+        (out / "qlie-l10n/Serif.ttf").write_bytes(b"stub")
+        (out / "qlie-l10n/launch.xml").write_bytes((
+            '<?xml version="1.0" encoding="utf-8"?>'
+            f'<launch executable="game.exe"><font file="qlie-l10n/Serif.ttf" face="{serif}" /></launch>'
+        ).encode("utf-8"))
+        (out / qlie_systemfont.MAPPING).write_bytes(qlie_systemfont.map_bytes(mapping))
+        (out / "GameData/data0.pack").write_bytes(make_pack([
+            ("system/font/fontdata.dat", fd_10.encode("cp932")),
+            ("avg/projectsetting.txt", b"FormatType=1\r\n"),
+            ("avg/setting.txt", b"ReturnCode=[n]\r\n"),
+            ("scenario/story.s", "こんにち\ue000\r\n".encode("cp932")),
+        ], bytes([113]) * 256, hash_version="1.4"))
+
+        resources = ["DLL/key.fkey", "GameData/System/config.txt", "GameData/data0.pack", "game.exe"]
+        built_files = [*resources, "QlieLauncher.exe", "qlie-l10n/launch.xml", "qlie-l10n/Serif.ttf", qlie_systemfont.MAPPING]
+        samples_file = out / "samples.json"
+        samples_file.write_text(json.dumps([dict(
+            resourcePath="GameData/data0.pack", locator="custom-loc-0",
+            original="こんにちは", expected="こんにち汉",
+        )], ensure_ascii=False), encoding="utf-8")
+        req = dict(output=str(out), source=str(src), resources=resources, mode="replace",
+                   files=built_files, samplesFile=str(samples_file), launcher="QlieLauncher.exe",
+                   template=False, toolPaths={})
+
+        ev = qlie_display.verify(req)
+        self.assertEqual(ev["aliases"], {"\ue000": "汉"})
+        self.assertEqual([f["face"] for f in ev["fonts"]], [serif])
+        self.assertTrue(any("未登记当前 QLIE 字体配置布局" in w for w in ev["warnings"]), ev)
+
+        # Conflicting glyphs.json mapping on the same unregistered layout must still be rejected.
+        (out / qlie_systemfont.MAPPING).write_bytes(qlie_systemfont.map_bytes({0xE000: ord("字")}))
+        with self.assertRaisesRegex(ValueError, "映射为「字」"):
+            qlie_display.verify(req)
+        (out / qlie_systemfont.MAPPING).write_bytes(qlie_systemfont.map_bytes(mapping))
+
+        # 2. If the original game had a recognized 8-slot font layout, breaking it in the patch must still be rejected.
+        cfg_8 = "\r\n".join(f"Font[{i}].Name=ＭＳ 明朝" for i in range(8)) + "\r\n"
+        fd_8 = "\r\n".join(f"Font[{i}].List[0]=system" for i in range(8)) + "\r\n"
+        (src / "GameData/System/config.txt").write_bytes(cfg_8.encode("cp932"))
+        (src / "GameData/data0.pack").write_bytes(make_pack([
+            ("system/font/fontdata.dat", fd_8.encode("cp932")),
+            ("avg/projectsetting.txt", b"FormatType=1\r\n"),
+            ("avg/setting.txt", b"ReturnCode=[n]\r\n"),
+            ("scenario/story.s", "こんにちは\r\n".encode("cp932")),
+        ], bytes([113]) * 256, hash_version="1.4"))
+        with self.assertRaisesRegex(ValueError, "缺少可核验的系统字体选择"):
             qlie_display.verify(req)
 
     def test_qlie_sfnt_preserves_variable_font_subfamily_and_avg_leading_bracket_prose(self):

@@ -121,34 +121,157 @@ def inspect_tails(install, *, source_archives=None, unregistered_source=None):
     return unregistered
 
 
+LAUNCHER_ARTIFACTS = (font.MAPPING, font.LAUNCH, font.LAUNCHER)
+
+
+def has_launcher_artifacts(files):
+    return any(path in files for path in LAUNCHER_ARTIFACTS)
+
+
+def recognized_font_slots(install):
+    if not install.font_resources:
+        return None, install.font_diagnostic or "缺少可核验的系统字体表或外置配置"
+    try:
+        return install.font_resources.slots(), ""
+    except ValueError as error:
+        return None, str(error)
+
+
+def verify_launcher_bundle(
+    root,
+    request,
+    files,
+    effective_files,
+    *,
+    evidence,
+    expected_executable=None,
+    required_faces=None,
+    fixed_faces=frozenset(),
+):
+    launcher = request.get("launcher")
+    if (not launcher or "/" in launcher or launcher not in files
+            or font.LAUNCH not in effective_files):
+        raise ValueError(f"{evidence}，补丁启动入口缺少加载配套字体的配置")
+    try:
+        launch = ElementTree.fromstring(archive.read_file(root / font.LAUNCH, font.CONFIG_BYTES))
+    except ElementTree.ParseError as error:
+        raise ValueError(f"{evidence}，字体启动配置 XML 解析失败：{error}") from error
+    if launch.tag != "launch":
+        raise ValueError(f"{evidence}，字体启动配置未指向当前游戏 EXE")
+    configured_exe = launch.get("executable")
+    if expected_executable is not None:
+        if configured_exe != expected_executable:
+            raise ValueError(f"{evidence}，字体启动配置未指向当前游戏 EXE")
+    else:
+        known_files = {path.casefold() for path in (*request["resources"], *files)}
+        if (not configured_exe or configured_exe != configured_exe.strip()
+                or "/" in configured_exe or "\\" in configured_exe
+                or not configured_exe.lower().endswith(".exe")
+                or configured_exe.casefold() not in known_files):
+            raise ValueError(f"{evidence}，字体启动配置未指向当前游戏根目录的 EXE：{configured_exe or '(空)'}")
+    registered = {}
+    for node in launch.findall("font"):
+        face = node.get("face")
+        raw_file = node.get("file")
+        if not face or face != face.strip() or not raw_file:
+            raise ValueError(f"{evidence}，启动配置的字体项缺少有效 face 或 file")
+        path = archive.member_name(raw_file)
+        if face in registered or path not in files:
+            raise ValueError(f"{evidence}，启动配置的字体文件缺失或名称重复：{path}")
+        registered[face] = path
+    if not registered:
+        raise ValueError(f"{evidence}，字体启动配置未声明任何配套字体")
+    if required_faces is not None:
+        missing = required_faces - registered.keys()
+        if missing or not required_faces:
+            raise ValueError(f"{evidence}，启动器没有加载游戏选用的字体：{', '.join(sorted(missing))}")
+        selected = sorted(required_faces)
+    else:
+        selected = sorted(registered)
+    return [dict(face=face, path=registered[face], fixed=face in fixed_faces) for face in selected]
+
+
+def read_declared_aliases(root, effective_files, *, evidence, script_aliases=None):
+    if font.MAPPING not in effective_files:
+        return dict(script_aliases or {})
+    declared = {chr(slot): chr(code) for slot, code in font.old_mapping(root, effective_files).items()}
+    if script_aliases is None:
+        return declared
+    for slot, char in script_aliases.items():
+        if slot in declared and declared[slot] != char:
+            raise ValueError(
+                f"{evidence}，但 {font.MAPPING} 将 U+{ord(slot):04X} 映射为「{declared[slot]}」"
+            )
+    return {**declared, **script_aliases}
+
+
+def verify_unregistered_bundle(
+    root,
+    request,
+    files,
+    effective_files,
+    *,
+    evidence,
+    warning,
+    expected_executable=None,
+    aliases=None,
+):
+    merged_aliases = read_declared_aliases(root, effective_files, evidence=evidence, script_aliases=aliases)
+    fonts = verify_launcher_bundle(
+        root,
+        request,
+        files,
+        effective_files,
+        evidence=evidence,
+        expected_executable=expected_executable,
+    )
+    return dict(fonts=fonts, aliases=merged_aliases, warnings=[warning])
+
+
 def verify(request):
     output = Path(request["output"])
     original = Path(request["source"])
     files = request["files"]
     overlay = set(files) if request["mode"] == "overlay" else set()
     root = EffectiveResources(original, output, files) if overlay else output
+    effective_files = [*request["resources"], *files] if overlay else files
     with Path(request["samplesFile"]).open(encoding="utf-8") as stream:
         samples = json.load(stream)
     warnings = []
     with ExitStack() as stack:
+        source = None
         source_archives = None
         unregistered_source = None
+        source_font_slots = None
         if not request["template"]:
             try:
                 source = pack.locate(original, {}, request["resources"], stack, validate_tail=False)
                 source_archives = set(source.archives)
                 unregistered_source = inspect_tails(source)
+                source_font_slots, _ = recognized_font_slots(source)
             except ValueError as error:
-                if any(path in files for path in (font.MAPPING, font.LAUNCH, font.LAUNCHER)):
-                    raise ValueError(
-                        f"宿主独立显示回读器（非工作区适配器源码）不支持当前 QLIE 脚本方言：{error}。"
-                        "补丁含私用字形或字体启动资源，不能跳过独立核验，需在宿主补充该方言的显示回读支持"
-                    ) from error
+                if has_launcher_artifacts(files) or has_launcher_artifacts(effective_files):
+                    detail = (
+                        "已独立核验字体启动器、字体文件与字形映射，脚本译文回读与字体选用需进游戏确认。"
+                        if font.MAPPING in effective_files else
+                        "已独立核验字体启动器与字体文件，未发现字形映射表，脚本译文回读与实际显示需进游戏确认。"
+                    )
+                    return verify_unregistered_bundle(
+                        root, request, files, effective_files,
+                        evidence="QLIE 未登记方言的字体启动补丁",
+                        warning=f"宿主未登记当前 QLIE 脚本方言或封包布局（{error}）；{detail}",
+                    )
                 return dict(fonts=[], aliases={}, warnings=[])  # FilePack also carries other script formats.
             samples = locate_samples(source, samples)
             if not samples:
+                if has_launcher_artifacts(files):
+                    return verify_unregistered_bundle(
+                        root, request, files, effective_files,
+                        evidence="QLIE 字体启动补丁",
+                        warning="试译样本未命中宿主已识别的 QLIE 剧本字段；已独立核验字体启动器与字体资源，实际显示需进游戏确认。",
+                        expected_executable=source.executable,
+                    )
                 return dict(fonts=[], aliases={}, warnings=[])
-        effective_files = [*request["resources"], *files] if overlay else files
         try:
             install = pack.locate(root, {}, [p for p in effective_files if p != font.MAPPING], stack,
                                   validate_tail=bool(request["template"]))
@@ -163,8 +286,8 @@ def verify(request):
                     )
         except ValueError as error:
             raise ValueError(
-                f"宿主独立显示回读器（非工作区适配器源码）检查回填结果失败：{error}。"
-                "请核对回填产物与宿主支持的 QLIE 脚本/字体布局，修改工作区适配器无法绕过此宿主门禁"
+                f"宿主独立显示回读器检查回填结果失败：{error}。"
+                "原版资源可被宿主识别，请核对回填后的封包结构、脚本与字体配置"
             ) from error
         base = pack.unicode_dialogue(root, install, patched=True) if samples and request["template"] else set()
         if base and base | install.font_resources.selected_faces() != {font.UNICODE_FACE}:
@@ -199,20 +322,38 @@ def verify(request):
                 if actual != expected and actual != bitmap.dialogue_mask(expected):
                     raise ValueError(f"QLIE 外字位图中的「{char}」与目标汉字的字形不一致")
         if not aliases:
+            if not request["template"] and has_launcher_artifacts(files):
+                declared = read_declared_aliases(root, effective_files, evidence="QLIE 字体启动补丁")
+                fonts = verify_launcher_bundle(
+                    root, request, files, effective_files,
+                    evidence="QLIE 字体启动补丁",
+                    expected_executable=install.executable,
+                )
+                return dict(fonts=fonts, aliases=declared, warnings=warnings)
             return dict(fonts=[], aliases={}, warnings=warnings)
         slot, char = next(iter(aliases.items()))
         evidence = f"QLIE 试译字符「{char}」在游戏脚本中写为 U+{ord(slot):04X}"
         if install.bitmap_font:
             raise ValueError(f"{evidence}，游戏含外字图标槽，缺少该私用码位实际绘制目标汉字的证据")
-        if not install.font_resources:
-            raise ValueError(f"{evidence}，缺少可核验的系统字体选择：{install.font_diagnostic}")
-        if (not request["launcher"] or "/" in request["launcher"] or request["launcher"] not in files
-                or font.LAUNCH not in effective_files or not install.executable):
+        install_slots, install_font_reason = recognized_font_slots(install)
+        if install_slots is None:
+            if not request["template"] and source_font_slots is None:
+                res = verify_unregistered_bundle(
+                    root, request, files, effective_files,
+                    evidence=evidence,
+                    warning=(
+                        f"宿主未登记当前 QLIE 字体配置布局（{install_font_reason}）；"
+                        "已独立核验试译码位、字体启动器与字形映射，游戏字体选用需进游戏确认。"
+                    ),
+                    expected_executable=install.executable,
+                    aliases=aliases,
+                )
+                res["warnings"] = [*warnings, *res["warnings"]]
+                return res
+            raise ValueError(f"{evidence}，缺少可核验的系统字体选择：{install_font_reason}")
+        if not install.executable:
             raise ValueError(f"{evidence}，补丁启动入口缺少加载配套字体的配置")
-        launch = ElementTree.fromstring(archive.read_file(root / font.LAUNCH, font.CONFIG_BYTES))
-        if launch.tag != "launch" or launch.get("executable") != install.executable:
-            raise ValueError(f"{evidence}，字体启动配置未指向当前游戏 EXE")
-        slots = install.font_resources.slots().values()
+        slots = install_slots.values()
         fixed = {face for selector, face in slots if selector == "system_fix"}
         all_faces = script_faces | all_script_faces(install)
         selected = (
@@ -221,15 +362,11 @@ def verify(request):
             | {face for face in all_faces if not install.font_resources.is_ignored_face(face)}
         )
         selected.update(inherited_faces(install))
-        registered = {}
-        for node in launch.findall("font"):
-            face = node.get("face")
-            path = archive.member_name(node.get("file"))
-            if face in registered or path not in files:
-                raise ValueError(f"{evidence}，启动配置的字体文件缺失或名称重复：{path}")
-            registered[face] = path
-        missing = selected - registered.keys()
-        if missing or not selected:
-            raise ValueError(f"{evidence}，启动器没有加载游戏选用的字体：{', '.join(sorted(missing))}")
-        return dict(fonts=[dict(face=face, path=registered[face], fixed=face in fixed)
-                           for face in sorted(selected)], aliases=aliases, warnings=warnings)
+        fonts = verify_launcher_bundle(
+            root, request, files, effective_files,
+            evidence=evidence,
+            expected_executable=install.executable,
+            required_faces=selected,
+            fixed_faces=fixed,
+        )
+        return dict(fonts=fonts, aliases=aliases, warnings=warnings)

@@ -258,7 +258,7 @@ impl QlieDisplay {
             "mode":build.mode, "files":build.files, "samplesFile":samples.path(), "launcher":launcher,
             "toolPaths":{"hostCommand":[service.tools.vntextpatch()]},
         }), cancellation).await?)?;
-        if evidence.aliases.is_empty() {
+        if evidence.aliases.is_empty() && evidence.fonts.is_empty() {
             return Ok(evidence.warnings);
         }
         let launcher = launcher
@@ -423,14 +423,18 @@ mod tests {
             fixed: false,
         };
 
-        // Non-Regular default weight (100) with ID 17 = "Regular" collides in Locale Emulator.
+        // Non-Regular default weight (100) with ID 17 = "Regular" collides in Locale Emulator
+        // even when no PUA aliases are present (e.g., bundled Unicode custom font).
         fs::write(dir.path().join("Sans.ttf"), minimal_sfnt("Regular", Some(100.0))).unwrap();
         let err = verify_font(dir.path(), &font_spec, &aliases).unwrap_err();
         assert!(err.to_string().contains("排版子族"), "{err}");
+        let err_no_alias = verify_font(dir.path(), &font_spec, &BTreeMap::new()).unwrap_err();
+        assert!(err_no_alias.to_string().contains("排版子族"), "{err_no_alias}");
 
-        // Preserving ID 17 = "Thin" passes cleanly.
+        // Preserving ID 17 = "Thin" passes cleanly both with and without PUA aliases.
         fs::write(dir.path().join("Sans.ttf"), minimal_sfnt("Thin", Some(100.0))).unwrap();
         verify_font(dir.path(), &font_spec, &aliases).unwrap();
+        verify_font(dir.path(), &font_spec, &BTreeMap::new()).unwrap();
 
         // Static font (no fvar) with ID 17 = "Regular" passes cleanly.
         fs::write(dir.path().join("Sans.ttf"), minimal_sfnt("Regular", None)).unwrap();
