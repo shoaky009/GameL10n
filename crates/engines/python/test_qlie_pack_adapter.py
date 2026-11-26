@@ -12,6 +12,7 @@ PIN = json.loads((TOOLS / "current.json").read_text(encoding="utf-8"))
 sys.path[:0] = [str(REPO), str(TOOLS / "references" / PIN["revision"] / "library.zip")]
 
 from adapters.components import (
+    qlie_archive,
     qlie_bitmap,
     qlie_display,
     qlie_pack31,
@@ -413,3 +414,197 @@ class QlieAvgScenarioTest(unittest.TestCase):
                 samplesFile=str(samples_file), launcher="QlieLauncher.exe",
                 template=False, toolPaths={},
             ))
+
+
+def _minimal_of_atlas():
+    import struct
+    data = bytearray(qlie_bitmap.PIXELS + qlie_bitmap.PAGE)
+    data[:5] = b"\x04" + "外字".encode("cp932")
+    fullwidth = qlie_bitmap.code_index("あ")
+    data[qlie_bitmap.WIDTHS + fullwidth] = 64
+    data[qlie_bitmap.ADVANCES + fullwidth] = 64
+    data[qlie_bitmap.PALETTE + 4:qlie_bitmap.PALETTE + 8] = bytes.fromhex("ffffffff")
+    struct.pack_into("<5H", data, qlie_bitmap.HEADER, 64, 64, 1, 4, 4)
+    return bytes(data)
+
+
+def _hash14_pack30_installation(root):
+    (root / "GameData/System").mkdir(parents=True)
+    (root / "DLL").mkdir()
+    (root / "game.exe").write_bytes(key_resource_exe())
+    (root / "DLL/key.fkey").write_bytes(EXTERNAL_KEY)
+    (root / "GameData/System/config.txt").write_bytes((
+        "\r\n".join([
+            *[f"Font[{i}].Name=ＭＳ 明朝" for i in range(6)],
+            "Font[6].Name=外字",
+            "Font[7].Name=ＭＳ 明朝",
+        ]) + "\r\n"
+    ).encode("cp932"))
+    fontdata = "\r\n".join(
+        f"Font[{i}].List[0]={'外字' if i == 6 else 'system_fix'}" for i in range(8)
+    ) + "\r\n"
+    startup = '\t\\sub,@@!Misc_FontSetup,"Misc\\Misc.s"\r\n'
+    misc = (
+        "@@!Misc_FontSetup\r\n"
+        "\t\\cal,n=6\r\n"
+        "\t\\scp,cfg\r\n"
+        '\t\t\\fn2,n,"外字"\r\n'
+        "\\ret\r\n"
+    )
+    format_s = (
+        "@@!Imo_Format_Text\r\n"
+        "\t\\case,Imo_FormatMode\r\n"
+        "\t\t\\ans,1\t\\subp,@@!Imo_FormatModeMulti,,ParamStr[0]\r\n"
+        "\t\\end\r\n"
+        "\\ret\r\n"
+        "@@!Imo_FormatModeMulti\r\n"
+        "\t\\var,str,s\r\n"
+        "\t\\trim,ParamStr[0]\r\n"
+        "\t\\scp,Imo_RepTextTable\t\\brep,ResultStr[0]\r\n"
+        "\t\\cal,s=ResultStr[0]\r\n"
+        '\t\\if,ResultStr[0]=="【"\\then\r\n'
+        "\t\t\\sub,@@!Imo_FormatDeleteCode,,s,ResultStr[0]\r\n"
+        "\t\t\\cal,Imo_FormatName[idx]=ResultStr[0]\r\n"
+        "\t\t\\ret\r\n"
+        "\t\\end\r\n"
+        "\t\\cal,Imo_FormatText[idx]=Imo_FormatText[idx]+s\r\n"
+        "\\ret\r\n"
+    )
+    select_s = (
+        "@@!Select\r\n"
+        "\t\\scp,SelectButtonList\t\\a,ParamStr[i]\r\n"
+        "\\ret\r\n"
+    )
+    base_s = '@@!Base\r\n\t\\scp,Imo_RepTextTable\t\\l,"ImoScripter_RepTextList.txt"\t\\sort\r\n\\ret\r\n'
+    scenario = (
+        "【アリス】【龍之介】\r\n"
+        "「爽やかな[rb,風の精,シルフィード]」\r\n"
+        "\r\n"
+        "^select,進む,戻る\r\n"
+    )
+    (root / "GameData/data0.pack").write_bytes(make_pack([
+        ("startup.s", startup.encode("cp932")),
+        ("system/font/fontdata.dat", fontdata.encode("cp932")),
+        ("system/font/外字.of", _minimal_of_atlas()),
+    ], bytes([113]) * 256, hash_version="1.4"))
+    (root / "GameData/data6.pack").write_bytes(make_pack([
+        ("scenario/story.s", scenario.encode("cp932")),
+    ], bytes([157]) * 256, hash_version="1.4"))
+    (root / "GameData/data7.pack").write_bytes(make_pack([
+        ("avg/projectsetting.txt", b"FormatType=1\r\n"),
+        ("avg/setting.txt", b"ReturnCode=[n]\r\n"),
+        ("avg/imoscripter_fontlist.txt", "font[0].name=ＭＳ 明朝\r\nfont[6].name=外字.of\r\n".encode("cp932")),
+        ("avg/imoscripter_reptextlist.txt", "〈ハ〉=[f,6]０[f]\r\n".encode("cp932")),
+        ("avg/imoscripter_base.s", base_s.encode("cp932")),
+        ("avg/imoscripter_format.s", format_s.encode("cp932")),
+        ("avg/avgsystem_selectobject.s", select_s.encode("cp932")),
+        ("avg/include_route.s", b"@@!AVG_RouteCreate\r\n\tResultInt[0]=RInt0\r\n\\ret\r\n"),
+        ("misc/misc.s", misc.encode("cp932")),
+    ], bytes([199]) * 256, hash_version="1.4"))
+
+
+class QliePack30Hash14Test(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name) / "game"
+        self.root.mkdir()
+        _hash14_pack30_installation(self.root)
+        self.output = Path(directory.name) / "patch"
+        self.files = [path.relative_to(self.root).as_posix() for path in self.root.rglob("*") if path.is_file()]
+
+    def test_pack30_hash14_probe_ruby_multiname_early_bitmap_route_and_roundtrip(self):
+        archives = ["GameData/data0.pack", "GameData/data6.pack", "GameData/data7.pack"]
+        sample_report = qlie_samples.probe(dict(
+            files={path: self.root / path for path in [*archives, "game.exe", "DLL/key.fkey"]},
+            archives=archives, executables=["game.exe"], keyFile="DLL/key.fkey",
+        ))
+        self.assertEqual(sample_report["status"], "sampled", sample_report)
+        self.assertEqual(sample_report["templateId"], "qlie-pack3-imos")
+        self.assertEqual(sample_report["writerLayout"], "HashVer1.4")
+
+        probe = qlie_pack_adapter.execute(dict(
+            operation="probe", sourceDirectory=str(self.root), resourceFiles=self.files,
+            templateId="qlie-pack3-imos",
+        ))
+        self.assertTrue(probe["systemFont"]["matched"], probe)
+        required = probe["probe"]["requiredFiles"]
+        self.assertIn("GameData/System/config.txt", required)
+
+        units = qlie_pack_adapter.execute(dict(
+            operation="extract", sourceDirectory=str(self.root), resourceFiles=required,
+            templateId="qlie-pack3-imos",
+        ))["extraction"]["units"]
+        self.assertEqual([u["sourceText"] for u in units], [
+            "「爽やかな[rb,風の精,シルフィード]」", "アリス】【龍之介", "進む", "戻る",
+        ])
+        ruby_unit = units[0]
+        self.assertEqual(ruby_unit["protectedTokens"], ["[rb,風の精,シルフィード]"])
+
+        # Original roundtrip stays byte-identical on HashVer1.4 packs.
+        originals = {u["id"]: u["sourceText"] for u in units}
+        qlie_pack_adapter.execute(dict(
+            operation="build", sourceDirectory=str(self.root), outputDirectory=str(self.output),
+            resourceFiles=required, translations=originals, templateId="qlie-pack3-imos",
+        ))
+        for path in required:
+            self.assertEqual((self.output / path).read_bytes(), (self.root / path).read_bytes())
+
+        # CP932 edits preserve [rb,...], preserve single-＠ multi-name identity, and validate cleanly.
+        name_unit = units[1]
+        edits = {
+            ruby_unit["id"]: "「更新済みの[rb,風の精,シルフィード]」",
+            name_unit["id"]: "別名／連名",
+        }
+        out2 = self.output.parent / "patch2"
+        build = qlie_pack_adapter.execute(dict(
+            operation="build", sourceDirectory=str(self.root), outputDirectory=str(out2),
+            resourceFiles=required, translations=edits, templateId="qlie-pack3-imos",
+        ))["build"]
+        self.assertTrue(qlie_pack_adapter.execute(dict(
+            operation="validate", sourceDirectory=str(self.root), outputDirectory=str(out2),
+            resourceFiles=required, outputFiles=build["files"], translations=edits,
+            templateId="qlie-pack3-imos",
+        ))["validation"]["passed"])
+        reextracted = qlie_pack_adapter.execute(dict(
+            operation="extract", sourceDirectory=str(out2), resourceFiles=required,
+            templateId="qlie-pack3-imos",
+        ))["extraction"]["units"]
+        self.assertEqual(reextracted, [dict(u, sourceText=edits.get(u["id"], u["sourceText"])) for u in units])
+
+        from contextlib import ExitStack
+        with ExitStack() as stack:
+            install = qlie_pack_adapter.locate(out2, {}, required, stack)
+            self.assertIsNotNone(install.bitmap_font)
+            _, idx6 = install.archives["GameData/data6.pack"]
+            story = next(e for e in idx6.entries if e.name == "scenario/story.s")
+            raw_script = install.read("GameData/data6.pack", story, 1 << 20).decode("cp932")
+            self.assertIn("【アリス】【龍之介＠別名／連名】", raw_script)
+            # Early Imo_FormatModeMulti route requires patching only AvgSystem_SelectObject.s.
+            changes = {}
+            install.bitmap_font.routes(changes)
+            self.assertEqual(list(changes.get("GameData/data7.pack", {})), ["avg/avgsystem_selectobject.s"])
+            self.assertIn(qlie_bitmap.CHOICE_EXPANSION, changes["GameData/data7.pack"]["avg/avgsystem_selectobject.s"].decode("cp932"))
+
+    def test_pack30_hash14_rejects_tampered_packkey_or_hash_size(self):
+        path = self.root / "GameData/data6.pack"
+        layout = qlie_archive.Pack30()
+        corrupted = bytearray(path.read_bytes())
+        sig_offset = len(corrupted) - 28 - qlie_pack31.KEY_AREA_BYTES - qlie_pack31.PACKKEY_PREFIX.size
+        corrupted[sig_offset] ^= 1
+        bad = self.root / "GameData/bad_sig.pack"
+        bad.write_bytes(corrupted)
+        with bad.open("rb") as stream:
+            idx = layout.index(stream)
+            with self.assertRaisesRegex(ValueError, "HashVer1.4"):
+                layout.tail(stream, idx)
+
+        corrupted_size = bytearray(path.read_bytes())
+        hsize_offset = len(corrupted_size) - 28 - qlie_pack31.KEY_AREA_BYTES - 4
+        corrupted_size[hsize_offset] ^= 1
+        bad_size = self.root / "GameData/bad_size.pack"
+        bad_size.write_bytes(corrupted_size)
+        with bad_size.open("rb") as stream:
+            idx = layout.index(stream)
+            with self.assertRaisesRegex(ValueError, "HashVer1.4"):
+                layout.tail(stream, idx)

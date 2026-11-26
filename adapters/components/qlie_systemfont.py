@@ -191,7 +191,9 @@ class Resources:
                     and selector.casefold() in self.bitmap_names))
 
     def is_ignored_face(self, face):
-        return face in INHERITED or face.casefold() in self.bitmap_names
+        folded = face.casefold()
+        return (face in INHERITED or folded in self.bitmap_names
+                or (folded.endswith(".of") and folded[:-3] in self.bitmap_names))
 
     def slots(self):
         entries = FONT_LIST.findall(self.table.text)

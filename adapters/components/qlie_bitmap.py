@@ -13,6 +13,7 @@ TABLE = "avg/imoscripter_reptextlist.txt"
 ATLAS = "system/font/外字.of"
 BASE = "avg/imoscripter_base.s"
 MESSAGE = "avg/imoscripter_custom.s"
+FORMAT = "avg/imoscripter_format.s"
 CHOICES = "avg/avgsystem_selectobject.s"
 TOKEN = re.compile(r"<GL([0-9A-F]{4})>")
 RULE = re.compile(r"(<GL[0-9A-F]{4}>)=\[f,6\](.)\[f\]")
@@ -21,6 +22,15 @@ LOAD = re.compile(r'\\scp,Imo_RepTextTable[ \t]+\\l,"ImoScripter_RepTextList\.tx
 SLOT = re.compile(r'\\cal,n=6\s+\\scp,cfg\s+\\fn2,n,"外字"', re.I)
 DIALOGUE = re.compile(r'(?m)^([ \t]*)\\scp,Imo_RepTextTable[ \t]+\\brep,Imo_FormatText[ \t]*\r?\n'
                       r'[ \t]*\\cal,Imo_FormatText=ResultStr\[0\]([ \t]*\r?\n)', re.I)
+MULTI_DISPATCH = re.compile(r'\\ans,1[ \t]+\\subp,@@!Imo_FormatModeMulti,,ParamStr\[0\]', re.I)
+MULTI_ROUTINE = re.compile(r'^@@!Imo_FormatModeMulti[ \t]*\r?\n(.*?)(?=^\\ret\b|^@@|\Z)', re.I | re.M | re.S)
+MULTI_ENTRY = re.compile(
+    r'\\trim,ParamStr\[0\][ \t]*\r?\n[ \t]*\\scp,Imo_RepTextTable[ \t]+\\brep,ResultStr\[0\][ \t]*\r?\n'
+    r'[ \t]*\\cal,s=ResultStr\[0\][ \t]*\r?\n', re.I)
+MULTI_NAME = re.compile(
+    r'\\sub,@@!Imo_FormatDeleteCode,,s,ResultStr\[0\][ \t]*\r?\n'
+    r'[ \t]*\\cal,Imo_FormatName\[idx\]=ResultStr\[0\]', re.I)
+MULTI_TEXT = re.compile(r'\\cal,Imo_FormatText\[idx\]=Imo_FormatText\[idx\]\+s\b', re.I)
 OPTION = re.compile(r'(?m)^([ \t]*)\\scp,SelectButtonList[ \t]+\\a,ParamStr\[i\]([ \t]*\r?\n)', re.I)
 NAME_EXPANSION = r"\scp,Imo_RepTextTable \brep,Imo_FormatName"
 CHOICE_EXPANSION = r"\scp,Imo_RepTextTable \brep,ParamStr[i]"
@@ -144,6 +154,20 @@ def apply_routes(name, script):
     return script
 
 
+def has_multi_route(script):
+    if not MULTI_DISPATCH.search(script):
+        return False
+    routine = MULTI_ROUTINE.search(script)
+    if not routine:
+        return False
+    body = routine[1]
+    entry = MULTI_ENTRY.search(body)
+    if not entry:
+        return False
+    rest = body[entry.end():]
+    return bool(MULTI_NAME.search(rest) and MULTI_TEXT.search(rest))
+
+
 @dataclass
 class BitmapFont:
     install: object
@@ -156,14 +180,14 @@ class BitmapFont:
         resource = install.font_resources
         if not resource or ("6", "0", "外字") not in font.FONT_LIST.findall(resource.table.text):
             return None
-        required = {ATLAS, TABLE, BASE, MESSAGE, CHOICES}
+        required = {ATLAS, TABLE, BASE, CHOICES}
         members = {}
         for path, (_, index) in install.archives.items():
             for entry in index.entries:
                 key = entry.name.replace("\\", "/").casefold()
-                if key in required or key in ("startup.s", font.SETUP_MEMBER):
+                if key in required or key in ("startup.s", font.SETUP_MEMBER, MESSAGE, FORMAT):
                     members.setdefault(key, []).append((path, entry))
-        if not required <= members.keys():
+        if not required <= members.keys() or not (MESSAGE in members or FORMAT in members):
             return None
         if len(members[TABLE]) != 1 or len(members[ATLAS]) != 1:
             raise ValueError("QLIE 外字替换表和位图需要唯一的来源卷")
@@ -206,7 +230,12 @@ class BitmapFont:
             for p, e in setups
         ):
             raise ValueError("QLIE 初始化缺少第 6 号字体槽的外字选择")
-        for key in (MESSAGE, CHOICES):
+        formats = self.members.get(FORMAT, [])
+        early_route = bool(formats) and all(has_multi_route(document(p, e).text) for p, e in formats)
+        targets = (CHOICES,) if early_route else (MESSAGE, CHOICES)
+        if not early_route and MESSAGE not in self.members:
+            raise ValueError("QLIE 对白未经过外字替换表")
+        for key in targets:
             for path, entry in self.members[key]:
                 doc = document(path, entry)
                 edited = apply_routes(key, doc.text)

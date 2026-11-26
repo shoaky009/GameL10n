@@ -12,6 +12,8 @@ RUBY = re.compile(r"\[rb,([^,\[\]\r\n]+),([^,\[\]\r\n]+)\]")
 SCENARIO_TAG = re.compile(r"\[(?!n\])[^\[\]]+\]")
 RUBY_OPEN, RUBY_CLOSE = "\ufdd0", "\ufdd1"
 INDENT = "\ufdd2"
+NAME_JOIN = "\ufdd3\ufdd4"
+MULTI_NAME = re.compile(r"^([ \t]*【)([^【】\r\n]+(?:】【[^【】\r\n]+)+)(】)(?=[ \t]*\r?$)", re.M)
 PC_TAIL = re.compile(r"^([ \t　]*(?:\[spd,0\])?\[pc,)([^\[\]\r\n]*)\]([、。！？…]+)(?=\r?$)", re.M)
 INDEX_ASSIGNMENT = re.compile(r"[A-Za-z_]\w*\[[0-9]+\]=[A-Za-z_]\w*", re.ASCII)
 
@@ -53,6 +55,13 @@ def mask_ruby(text):
     return RUBY.sub(lambda tag: RUBY_OPEN + tag[0][1:-1] + RUBY_CLOSE, text)
 
 
+def mask_multi_name(text):
+    if any(code in text for code in NAME_JOIN):
+        raise ValueError("ImoScripter 脚本文字包含保留码位")
+    # Preserve the exact two-character width so source offsets stay intact.
+    return MULTI_NAME.sub(lambda m: m[1] + m[2].replace("】【", NAME_JOIN) + m[3], text)
+
+
 def assignment_helper(script):
     lines = [line.strip() for line in script.splitlines() if line.strip()]
     if not lines or not lines[0].startswith("@@!"):
@@ -64,18 +73,22 @@ def assignment_helper(script):
 def scan(script, *, unicode_scripts=False, dialect="imos"):
     if dialect == AVG_SCENARIO:
         return tuple(ScenarioRecord(field) for field in qlie_legacy.qlie_fields(script))
-    if not unicode_scripts:
-        return qlie_imos.scan(script)
     if assignment_helper(script):
         return ()
     script = PC_TAIL.sub(r"\1\2\3]", script)
-    masked = mask_ruby(script)
+    masked = mask_multi_name(mask_ruby(script))
     records = qlie_imos.scan(masked)
     if masked == script:
         return records
-    return tuple(replace(record, parts=tuple(
-        replace(part, raw=script[part.start:part.end]) for part in record.parts))
-        for record in records)
+    return tuple(
+        replace(
+            record,
+            parts=tuple(replace(part, raw=script[part.start:part.end]) for part in record.parts),
+            speaker=(replace(record.speaker, raw=script[record.speaker.start:record.speaker.end])
+                     if record.speaker else None),
+        )
+        for record in records
+    )
 
 
 def _patch_scenario(script, rows):
@@ -111,27 +124,31 @@ def _patch_scenario(script, rows):
 def patch(script, rows, *, unicode_scripts=False, dialect="imos"):
     if dialect == AVG_SCENARIO:
         return _patch_scenario(script, rows)
-    if not unicode_scripts:
-        return qlie_imos.patch(script, rows)
     if not rows and assignment_helper(script):
         return script
-    records = scan(script, unicode_scripts=True)
+    records = scan(script, unicode_scripts=unicode_scripts)
     original = [record.row() for record in records]
     if original == rows:
         return script
-    if INDENT in script or any(INDENT in text for row in rows for text in row.values()):
-        raise ValueError("QLIE 脚本文字包含保留的缩进码位")
+    if INDENT in script or any(INDENT in text or any(code in text for code in NAME_JOIN)
+                               for row in rows for text in row.values()):
+        raise ValueError("QLIE 脚本文字包含保留的缩进或姓名码位")
     masked_rows = []
     for before, after in zip(original, rows, strict=True):
         if any(sorted(RUBY.findall(before[field])) != sorted(RUBY.findall(after[field])) for field in before):
             raise ValueError("QLIE 译文的注音标签发生变化")
         masked = {field: mask_ruby(text) for field, text in after.items()}
+        if "name" in masked and "】【" in before["name"]:
+            name = masked["name"]
+            if "】【" in name and (name.startswith("】【") or name.endswith("】【") or "】【】【" in name):
+                raise ValueError("QLIE 多人名分隔符位置无效")
+            masked["name"] = name.replace("】【", NAME_JOIN)
         # One full-width space determines the line role. Extra indentation belongs to the visible text.
         masked["message"] = re.sub(r"^　+", lambda m: INDENT * len(m[0]), masked["message"], flags=re.M)
         masked_rows.append(masked)
     normalized = PC_TAIL.sub(r"\1\2\3]", script)
-    result = qlie_imos.patch(mask_ruby(normalized), masked_rows)
-    result = result.replace(RUBY_OPEN, "[").replace(RUBY_CLOSE, "]")
+    result = qlie_imos.patch(mask_multi_name(mask_ruby(normalized)), masked_rows)
+    result = result.replace(RUBY_OPEN, "[").replace(RUBY_CLOSE, "]").replace(NAME_JOIN, "】【")
     if normalized == script and INDENT not in result:
         return result
     result = result.replace(INDENT, "　")
@@ -144,7 +161,7 @@ def patch(script, rows, *, unicode_scripts=False, dialect="imos"):
             elif tail:
                 lines[i] = re.sub(r"([、。！？…]+)\](?=\r?$)", r"]\1", lines[i])
         result = "".join(lines)
-    rebuilt = scan(result, unicode_scripts=True)
+    rebuilt = scan(result, unicode_scripts=unicode_scripts)
     if [record.row() for record in rebuilt] != rows or (
         [[p.kind for p in r.parts] for r in rebuilt] != [[p.kind for p in r.parts] for r in records]
     ):

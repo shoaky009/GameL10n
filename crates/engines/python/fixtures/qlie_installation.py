@@ -48,7 +48,7 @@ def key_resource_exe():
     return header + (resource + b'\xc3').ljust(512, b'\0')
 
 
-def make_pack(members, internal_key):
+def make_pack(members, internal_key, *, hash_version='1.3'):
     arc_key = qlie.hash_v3(bytes(256)) & 0xFFFFFFF
     contents = bytearray()
     index = bytearray()
@@ -74,8 +74,18 @@ def make_pack(members, internal_key):
     packed += bytes([255, 128, 254]) + struct.pack('<I', len(table)) + table
     hash_entry = qlie.Entry('hash', b'hash', 0, len(packed), len(packed), 0, 1, 0)
     encrypted = qlie.encrypt(packed, hash_entry, 0x428, mode='legacy')
-    tail = b'HashVer1.3\0\0\0\0\0\0' + struct.pack('<IIII', 256, len(names), len(names) * 2, len(encrypted))
-    tail += encrypted + bytes(32) + struct.pack('<I', 32 + len(encrypted)) + bytes(1024)
+    if hash_version == '1.4':
+        from adapters.components import qlie_pack31 as pack31
+
+        pack_hash = pack31.PACKHASH.pack(
+            pack31.TAIL_SIGNATURE, 256, len(names), len(names) * 2, len(encrypted), 1, 0, 0, bytes(24),
+        )
+        key_signature = pack31.chain_crypt(arc_key, pack31.PACKKEY_SIGNATURE, encrypt=True)
+        tail = (pack_hash + encrypted
+                + pack31.PACKKEY_PREFIX.pack(key_signature, len(pack_hash) + len(encrypted)) + bytes(1024))
+    else:
+        tail = b'HashVer1.3\0\0\0\0\0\0' + struct.pack('<IIII', 256, len(names), len(names) * 2, len(encrypted))
+        tail += encrypted + bytes(32) + struct.pack('<I', 32 + len(encrypted)) + bytes(1024)
     footer = b'FilePackVer3.0\0\0' + struct.pack('<IQ', len(names), len(contents))
     return contents + index + tail + footer
 

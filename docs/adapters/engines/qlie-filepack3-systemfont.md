@@ -4,7 +4,7 @@
 
 两个模板支持 ImoScripter（`FormatType=1`、`ReturnCode=[n]`）及早期 `Library/Avg`（`library/avg/setting.txt` 含 `DefaultFormat=Multi`、`scenario/*.s` 行式剧情脚本）两种已确认脚本配置，按同一启动目录下 `GameData` 的封包版本选择索引、密钥和回包实现。
 
-- `qlie-pack3-imos` 适用于 `FilePackVer3.0` 与 `HashVer1.3`。模板用 EXE 的 `IconKeyImage` 和 `DLL/key.fkey` 读取每卷的内部密钥，按原字节保留匹配的 EXE 和转区配置。`Library/Avg` 方言保留 `【原身份＠译名】` 与 `[f,N]` 等非换行控制标签，并同步替换系统脚本中的 `\fn2` 字体名及默认配置字体。
+- `qlie-pack3-imos` 适用于 `FilePackVer3.0` 与 `HashVer1.3` / `HashVer1.4`（含 256 桶文件名序号核验及 `PACKKEY` 链式签名校验）。模板用 EXE 的 `IconKeyImage` 和 `DLL/key.fkey` 读取每卷的内部密钥，按原字节保留匹配的 EXE 和转区配置。ImoScripter CP932 脚本同样保护 `[rb,正文,注音]` 标签、忽略索引赋值辅助脚本并保留 `【甲】【乙】` 连写人名的原身份分隔；`Library/Avg` 方言保留 `【原身份＠译名】` 与 `[f,N]` 等非换行控制标签，并同步替换系统脚本中的 `\fn2` 字体名及默认配置字体。
 - `qlie-pack31-imos` 适用于 `FilePackVer3.1`、`HashVer1.4`（含 `PACKHASH` 头部与 `PACKKEY` 链式签名校验）和首项内置密钥布局。按成员识别脚本编码，UTF-16 保留字节序和 BOM，CP932 脚本可使用下述字形映射。`[rb,正文,注音]` 作为完整标签保护。
 
 模板核对各卷的脚本配置，从索引中选出脚本和配置所需的卷。按原封包及成员路径区分同名脚本，提取对白、人名、选项及已识别的显示字段。回包保留成员顺序及查找表，验收会回读改写成员并校验其他成员的原字节。卷的覆盖顺序、系统文本、中文显示及排版需单独确认。
@@ -15,13 +15,13 @@
 
 ## 系统字体布局
 
-3.0 模板检查外置 `GameData/System/config.txt` 和卷内唯一的 `system/font/fontdata.dat`。支持 0 到 7 号单层字体布局，使用 MS Gothic 或 MS Mincho 的 `system`、`system_fix` 字体，可按 `fontdata.dat` 规则保留封包内已存在的 `.of` 位图外字槽（如第 6 号 `外字` 或第 5 号 `外字登録`）。若卷内存在 `script/config/default.txt` 的默认字体或系统脚本中的 `\fn2` 字体设置，补丁会同步更新。其他布局仍可使用严格 CP932 的提取和回填。
+3.0 模板检查外置 `GameData/System/config.txt` 和卷内唯一的 `system/font/fontdata.dat`。支持 0 到 7 号单层字体布局，使用 MS Gothic 或 MS Mincho 的 `system`、`system_fix` 字体，可按 `fontdata.dat` 规则保留封包内已存在的 `.of` 位图外字槽（如第 6 号 `外字` 或第 5 号 `外字登録`，并兼容字体列表中的 `<名称>.of` 引用）。若卷内存在 `script/config/default.txt` 的默认字体或系统脚本中的 `\fn2` 字体设置，补丁会同步更新。其他布局仍可使用严格 CP932 的提取和回填。
 
 3.1 模板按根目录中成对出现的游戏 EXE 和同名 `.exe.le.config` 确定日语转区入口。双层布局使用卷内 `system/font/fontdata.txt`，0 号槽包含 `system`、`system_ext`，其余七个槽继承 `base`。
 
 对于已验证的 IMOSURUME 2.2.0.0 运行时，启动脚本会调用合并 `Avg/ImoScripter_FontList.txt` 与 `Avg/Setting.txt` 的字体初始化例程。此布局的私用码位可能显示为引擎图标。含译文的 CP932 剧本改用带 BOM 的 UTF-16LE，直接写入中文，已有 Unicode 剧本保留字节序。对白使用 Windows 微软雅黑（Microsoft YaHei），普通启动和恢复默认字体都会在各槽继承前设置该字体，保留字号、样式及玩家的外置配置。试译与全量翻译使用相同规则，通过 LE 启动原 EXE。适配验收回读实际剧本编码、译文及启动字体选择。Unicode 脚本的识别可参考 [VNTextPatch 的 QLIE 读取器](../../../third_party/VNTextPatch/Scripts/QlieScript.cs)。
 
-对于已有剧本替换表、对白替换指令和第 6 号外字槽的 ImoScripter 布局，模板使用游戏自带的 OF 位图字体。CP932 无法表示的 BMP 字符使用剧本标签，替换表在显示时切换到位图槽并恢复原字体。补丁将中文字形写入字库的空闲位置，保留原有图标，可沿用原游戏的启动方式。支持带 64 像素方格的索引色字形页。补字以 Windows 宋体为底稿，适度加粗细笔画，减少缩到对白字号时的断笔。验收从封包回读标签、替换规则和字形像素。存档标题需要单独确认替换入口。
+对于已有剧本替换表、对白替换指令（含 `ImoScripter_Custom.s` 回显阶段替换或 `ImoScripter_Format.s` `Imo_FormatModeMulti` 入口统一替换）和第 6 号外字槽的 ImoScripter 布局，模板使用游戏自带的 OF 位图字体。CP932 无法表示的 BMP 字符使用剧本标签，替换表在显示时切换到位图槽并恢复原字体。补丁将中文字形写入字库的空闲位置，保留原有图标，可沿用原游戏的启动方式。支持带 64 像素方格的索引色字形页。补字以 Windows 宋体为底稿，适度加粗细笔画，减少缩到对白字号时的断笔。验收从封包回读标签、替换规则和字形像素。存档标题需要单独确认替换入口。
 
 封包读取器和文字显示能力分别匹配。接入其他 FilePack 版本时，先确认索引、密钥和回包能往返，再按实际脚本编码、字体槽和显示指令选择已有方案。其余已支持的系统字体布局按逐文件编码处理。需要使用私用字形时，模板更新外置配置与卷内字体表，使用配套启动器加载字体。
 

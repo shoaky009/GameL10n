@@ -396,9 +396,9 @@ def text_units(relative, member, row_number, record, row, *, unicode_scripts, di
         unit_id, locator = field_identity(relative, member, row_number, field)
         kind = "name" if field == "name" else kinds.get(record.parts[0].kind, "dialogue")
         tokens = ["\n"] if field == "message" and len(record.parts) > 1 else []
-        if unicode_scripts:
+        if dialect != script_format.AVG_SCENARIO:
             tokens.extend(dict.fromkeys(tag[0] for tag in script_format.RUBY.finditer(text)))
-        elif dialect == script_format.AVG_SCENARIO:
+        else:
             tokens.extend(dict.fromkeys(tag[0] for tag in script_format.SCENARIO_TAG.finditer(text)))
         yield field, dict(id=unit_id,
                           resourcePath=relative, locator=locator, context=member, sourceText=text,

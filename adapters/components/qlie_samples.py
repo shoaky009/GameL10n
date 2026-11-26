@@ -265,7 +265,7 @@ def trial_volumes(request, report, layout, volumes):
             continue
         report.update(stage='archive-rebuild', archive=path, trials=[trial], memberReadStatus='passed')
         try:
-            layout.tail(stream, index)
+            tail = layout.tail(stream, index)
             if layout.unicode_scripts:
                 changes = {entry.name: replacement}
                 with tempfile.TemporaryFile() as output:
@@ -275,8 +275,9 @@ def trial_volumes(request, report, layout, volumes):
         except ValueError as error:
             report['error'] = str(error)[:240]
             continue
+        writer_layout = 'HashVer1.4' if tail.startswith(b'HashVer1.4\0\0\0\0\0\0') else 'HashVer1.3'
         result = dict(report, status='sampled', stage='completed', templateId=layout.template,
-                      writerLayout='HashVer1.4' if layout.unicode_scripts else 'HashVer1.3')
+                      writerLayout=writer_layout)
         result.pop('error', None)
         if proof:
             result.update(indexFingerprint=proof, sampleHash=archive.hash_range(stream, 0, index.file_size))

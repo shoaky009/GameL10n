@@ -502,7 +502,7 @@ pub(crate) const ARCHIVE_TEMPLATES: &[ArchiveTemplate] = &[
         extra_runtime_checks: &[],
         prepared_next_action: DEFAULT_PREPARED_NEXT_ACTION,
         distinct_volume_names: false,
-        limitations: "需要同一启动目录的 EXE 图标密钥、外部与各卷内部密钥、HashVer1.3 和一致的脚本配置。匹配 ImoScripter 替换表、第 6 号外字槽和 OF 字库时将中文写入游戏位图，沿用原启动方式。其余系统字体布局可生成配套字体，游戏内显示需单独验收",
+        limitations: "需要同一启动目录的 EXE 图标密钥、外部与各卷内部密钥、HashVer1.3/1.4 和一致的脚本配置。匹配 ImoScripter 替换表、第 6 号外字槽和 OF 字库时将中文写入游戏位图，沿用原启动方式。其余系统字体布局可生成配套字体，游戏内显示需单独验收",
     },
     ArchiveTemplate {
         id: QLIE_PACK31_TEMPLATE,
