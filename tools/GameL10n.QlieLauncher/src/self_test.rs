@@ -29,31 +29,50 @@ pub fn run() -> Result<()> {
 }
 
 pub fn fixture_font(face: &str) -> Vec<u8> {
-    let text: Vec<_> = face.encode_utf16().flat_map(u16::to_be_bytes).collect();
-    let mut font = vec![0; 58 + text.len() * 2];
+    fixture_font_with_family(face, face)
+}
+
+pub fn fixture_font_with_family(family: &str, full: &str) -> Vec<u8> {
+    let entries = [
+        (0x409u16, 1u16, family),
+        (0x409u16, 4u16, full),
+        (0x411u16, 1u16, family),
+        (0x411u16, 4u16, full),
+    ];
+    let encoded: Vec<Vec<u8>> = entries
+        .iter()
+        .map(|(_, _, text)| text.encode_utf16().flat_map(u16::to_be_bytes).collect())
+        .collect();
+    let header_and_records = 6 + entries.len() * 12;
+    let string_bytes: usize = encoded.iter().map(Vec::len).sum();
+    let name_len = header_and_records + string_bytes;
+    let mut font = vec![0; 28 + name_len];
     font[..4].copy_from_slice(&0x00010000u32.to_be_bytes());
     font[4..6].copy_from_slice(&1u16.to_be_bytes());
     font[12..16].copy_from_slice(b"name");
     font[20..24].copy_from_slice(&28u32.to_be_bytes());
-    font[24..28].copy_from_slice(&((30 + text.len() * 2) as u32).to_be_bytes());
-    font[30..32].copy_from_slice(&2u16.to_be_bytes());
-    font[32..34].copy_from_slice(&30u16.to_be_bytes());
-    for (i, language) in [0x409u16, 0x411].into_iter().enumerate() {
+    font[24..28].copy_from_slice(&(name_len as u32).to_be_bytes());
+    font[30..32].copy_from_slice(&(entries.len() as u16).to_be_bytes());
+    font[32..34].copy_from_slice(&(header_and_records as u16).to_be_bytes());
+    let mut cursor = 0usize;
+    for (i, ((language, name_id, _), bytes)) in entries.iter().zip(encoded.iter()).enumerate() {
         let at = 34 + i * 12;
         for (j, value) in [
             3,
             1,
-            language,
-            4,
-            text.len() as u16,
-            (i * text.len()) as u16,
+            *language,
+            *name_id,
+            bytes.len() as u16,
+            cursor as u16,
         ]
         .into_iter()
         .enumerate()
         {
             font[at + j * 2..at + j * 2 + 2].copy_from_slice(&value.to_be_bytes());
         }
-        font[58 + i * text.len()..58 + (i + 1) * text.len()].copy_from_slice(&text);
+        let dest = 28 + header_and_records + cursor;
+        font[dest..dest + bytes.len()].copy_from_slice(bytes);
+        cursor += bytes.len();
     }
     font
 }

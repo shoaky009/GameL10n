@@ -117,8 +117,23 @@ def _patch_scenario(script, rows):
             edits[index] = value
     if not edits:
         return script
-    result = qlie_legacy.patch_qlie(script, edits)
+    # A leading 【 is legal prose in Library/Avg when the line does not end in 】
+    # (e.g. "【キリエ】─"). Mask only existing message prefixes preserving offsets,
+    # then verify both field kinds and text rows after patching.
+    marker = "\ufdd6"
+    if marker in script or any(marker in value for value in edits.values()):
+        raise ValueError("QLIE 剧情脚本文字包含保留码位")
+    chars = list(script)
+    masked_edits = dict(edits)
+    for index, value in edits.items():
+        field = records[index].field
+        if field.kind == "message" and field.raw.startswith("【") and value.startswith("【"):
+            chars[field.start] = marker
+            masked_edits[index] = marker + value[1:]
+    result = qlie_legacy.patch_qlie("".join(chars), masked_edits).replace(marker, "【")
     rebuilt = scan(result, dialect=AVG_SCENARIO)
+    if [record.field.kind for record in rebuilt] != [record.field.kind for record in records]:
+        raise ValueError("QLIE 剧情脚本字段类型发生变化")
     if [record.row() for record in rebuilt] != rows:
         raise ValueError("QLIE 剧情脚本回填后字段文字发生变化")
     return result

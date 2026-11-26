@@ -37,12 +37,12 @@
 
 `qlie-sfnt-font` 提供其他已确认单字体布局所需的独立字体试验。模板使用按需准备的字体素材和 `qlie-japanese-font-launcher`。单独检查素材时可用 `inspect_adapter_component` 查询 `qlie-systemfont-assets` 的固定下载地址及哈希，使用 `download_tool` 下载到 `work/`。
 
-用 `component("qlie_font", request, input=..., output=..., family=..., map=...)` 生成配套 SFNT 字体。配置名使用字体 `name` 表 ID 4 的完整 Regular 名称，保留原有外字槽并附字体许可。[组件接口](../components.md#接入与版本管理)
+用 `component("qlie_font", request, input=..., output=..., family=..., map=...)` 生成配套 SFNT 字体。配置名使用字体 `name` 表 ID 4 的完整 Regular 名称，保留原有外字槽并附字体许可；对默认字重非 Regular 的可变字体，衍生字体保留原 `name` 表 ID 17/22 排版子族，避免转区枚举时默认字重实例与 Regular（`wght=400`）冲突而被 Locale Emulator 隐藏。[组件接口](../components.md#接入与版本管理)
 
 复制 `qlie-sfnt-font` 后，运行组件说明中的 `probeCall`，传入一个解包的 CP932 脚本、候选 SFNT 字体和已确认可用的码位。小样会试写简体字、复读译文并生成配套字体。正式适配仍需验收整包回填和游戏显示。
 
 ## 启动组件接入与构建
 
-通过补丁的 `QlieLauncher.exe` 启动。它读取 `qlie-l10n/launch.xml` 并为当前游戏加载配套字体。配置路径相对启动器，`face` 须和字体内部名称一致。需要转区时使用玩家安装的 Locale Emulator，并保留原 EXE 和对应转区配置；启动器通过 Windows Job Object（及跨提权时的目标进程跟踪）保持字体注册直到游戏进程实际退出，避免 `LEProc.exe` 提前退出导致字体过早卸载。
+通过补丁的 `QlieLauncher.exe` 启动。它读取 `qlie-l10n/launch.xml` 并为当前游戏加载配套字体。配置路径相对启动器，`face` 须和字体内部名称（`name` 表 ID 4）一致，同时启动器会核验字体族名（ID 1）与 `SHIFTJIS_CHARSET` 枚举中不存在会遮蔽转区枚举的同名冲突实例。需要转区时使用玩家安装的 Locale Emulator，并保留原 EXE 和对应转区配置；启动器通过 Windows Job Object（及跨提权时的目标进程跟踪）保持字体注册直到游戏进程实际退出，避免 `LEProc.exe` 提前退出导致字体过早卸载。
 
 用 `scripts/build_qlie_launcher.py` 构建 Windows x64 Rust 启动器，输出至 `target/runtime/adapter-components`。启动自检后需在原游戏中确认字体选择与显示。[启动器源码](../../../tools/GameL10n.QlieLauncher) · [工具准备](../../development.md#工具准备)

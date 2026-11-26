@@ -122,11 +122,17 @@ def build_cmap(mapping):
     return struct.pack(">2H", 0, len(tables)) + b"".join(struct.pack(">HHI", *row) for row in tables) + bmp + full
 
 
-def rename(data, family):
+def rename(data, family, *, variable=False):
     replacements = {
         1: family, 2: "Regular", 3: f"{family};QLIE;3", 4: family + " Regular",
-        6: family + "-Regular", 16: family, 17: "Regular", 21: family, 22: "Regular",
+        6: family + "-Regular", 16: family, 21: family,
     }
+    if not variable:
+        # Preserve typographic/WWS subfamily names on variable fonts whose default axis is not
+        # Regular (e.g. Thin/ExtraLight). Overwriting ID 17/22 to "Regular" makes GDI emit a
+        # colliding elfFullName for the default instance, which poisons Locale Emulator's
+        # EnumFontFamiliesEx cache and hides the real Regular (wght=400) face from the game.
+        replacements[17] = replacements[22] = "Regular"
     start = u16(data, 4)
     records, values = bytearray(), bytearray()
     for index in range(u16(data, 2)):
@@ -174,7 +180,7 @@ def derive(source, family, aliases):
                 raise ValueError(f"QLIE 字体缺少字符 U+{code:04X}")
             mapping[slot] = mapping[code]
         tables[b"cmap"] = build_cmap(mapping)
-        tables[b"name"] = rename(tables[b"name"], family)
+        tables[b"name"] = rename(tables[b"name"], family, variable=b"fvar" in tables)
         normalize_metrics(tables)
         struct.pack_into(">I", tables[b"head"], 8, 0)
     except (KeyError, struct.error) as error:

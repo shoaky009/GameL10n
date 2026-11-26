@@ -127,6 +127,47 @@ fn verify_font(
             font.path, font.face
         )));
     }
+    let families: Vec<_> = face
+        .names()
+        .into_iter()
+        .filter(|name| name.name_id == ttf_parser::name_id::FAMILY && name.is_unicode())
+        .filter_map(|name| name.to_string())
+        .collect();
+    if families.is_empty()
+        || families.iter().any(|name| name.trim().is_empty())
+        || families.windows(2).any(|pair| pair[0] != pair[1])
+    {
+        return Err(EngineError::Rejected(format!(
+            "字体 {} 缺少一致的字体族名",
+            font.path
+        )));
+    }
+    if face.is_variable() {
+        let non_regular_default_weight = face.variation_axes().into_iter().any(|axis| {
+            axis.tag == ttf_parser::Tag::from_bytes(b"wght")
+                && (axis.def_value - 400.0).abs() > f32::EPSILON
+        });
+        let collides_with_regular = non_regular_default_weight
+            && font
+                .face
+                .to_ascii_lowercase()
+                .ends_with(" regular")
+            && face.names().into_iter().any(|name| {
+                matches!(
+                    name.name_id,
+                    ttf_parser::name_id::TYPOGRAPHIC_SUBFAMILY | ttf_parser::name_id::WWS_SUBFAMILY
+                ) && name.is_unicode()
+                    && name
+                        .to_string()
+                        .is_some_and(|value| value.eq_ignore_ascii_case("regular"))
+            });
+        if collides_with_regular {
+            return Err(EngineError::Rejected(format!(
+                "可变字体 {} 将非 Regular 默认字重的排版子族改写为 Regular，转区枚举时会与 Regular 实例冲突并隐藏字体",
+                font.path
+            )));
+        }
+    }
     for (&slot, &ch) in aliases {
         let glyph = face.glyph_index(ch);
         if glyph.is_none_or(|glyph| glyph.0 == 0) || face.glyph_index(slot) != glyph {
@@ -242,5 +283,157 @@ impl QlieDisplay {
             verify_font(output, font, &evidence.aliases)?;
         }
         Ok(evidence.warnings)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn minimal_sfnt(subfamily_17: &str, default_weight: Option<f32>) -> Vec<u8> {
+        let mut tables: Vec<([u8; 4], Vec<u8>)> = Vec::new();
+
+        // head (54 bytes): version 1.0, unitsPerEm=1000, indexToLocFormat=0
+        let mut head = vec![0u8; 54];
+        head[..4].copy_from_slice(&0x00010000u32.to_be_bytes());
+        head[12..16].copy_from_slice(&0x5F0F3CF5u32.to_be_bytes());
+        head[18..20].copy_from_slice(&1000u16.to_be_bytes());
+        tables.push((*b"head", head));
+
+        // hhea (36 bytes): version 1.0, numberOfHMetrics=2
+        let mut hhea = vec![0u8; 36];
+        hhea[..4].copy_from_slice(&0x00010000u32.to_be_bytes());
+        hhea[34..36].copy_from_slice(&2u16.to_be_bytes());
+        tables.push((*b"hhea", hhea));
+
+        // maxp (6 bytes): version 0.5 / 1.0, numGlyphs=2
+        let mut maxp = vec![0u8; 6];
+        maxp[..4].copy_from_slice(&0x00005000u32.to_be_bytes());
+        maxp[4..6].copy_from_slice(&2u16.to_be_bytes());
+        tables.push((*b"maxp", maxp));
+
+        // cmap format 4 mapping U+4E2D ('中') and U+E000 -> glyph 1
+        let mut cmap = Vec::new();
+        cmap.extend_from_slice(&0u16.to_be_bytes()); // version
+        cmap.extend_from_slice(&1u16.to_be_bytes()); // numTables
+        cmap.extend_from_slice(&3u16.to_be_bytes()); // platformID = Windows
+        cmap.extend_from_slice(&1u16.to_be_bytes()); // encodingID = Unicode BMP
+        cmap.extend_from_slice(&12u32.to_be_bytes()); // offset
+        // Format 4 with 3 segments: 0x4E2D, 0xE000, 0xFFFF
+        let mut f4 = Vec::new();
+        f4.extend_from_slice(&4u16.to_be_bytes());
+        f4.extend_from_slice(&38u16.to_be_bytes()); // length = 14 + 3*8
+        f4.extend_from_slice(&0u16.to_be_bytes()); // lang
+        f4.extend_from_slice(&6u16.to_be_bytes()); // segCountX2
+        f4.extend_from_slice(&4u16.to_be_bytes()); // searchRange
+        f4.extend_from_slice(&1u16.to_be_bytes()); // entrySelector
+        f4.extend_from_slice(&2u16.to_be_bytes()); // rangeShift
+        for end in [0x4E2Du16, 0xE000, 0xFFFF] {
+            f4.extend_from_slice(&end.to_be_bytes());
+        }
+        f4.extend_from_slice(&0u16.to_be_bytes()); // reservedPad
+        for start in [0x4E2Du16, 0xE000, 0xFFFF] {
+            f4.extend_from_slice(&start.to_be_bytes());
+        }
+        for delta in [
+            (1u16).wrapping_sub(0x4E2D),
+            (1u16).wrapping_sub(0xE000),
+            1u16,
+        ] {
+            f4.extend_from_slice(&delta.to_be_bytes());
+        }
+        for ro in [0u16, 0, 0] {
+            f4.extend_from_slice(&ro.to_be_bytes());
+        }
+        cmap.extend_from_slice(&f4);
+        tables.push((*b"cmap", cmap));
+
+        // name table: ID 1, 2, 4, 16, 17
+        let entries = [
+            (1u16, "QlieSans1234567890"),
+            (2u16, "Regular"),
+            (4u16, "QlieSans1234567890 Regular"),
+            (16u16, "QlieSans1234567890"),
+            (17u16, subfamily_17),
+        ];
+        let mut recs = Vec::new();
+        let mut storage = Vec::new();
+        for (nid, text) in entries {
+            let encoded: Vec<u8> = text.encode_utf16().flat_map(u16::to_be_bytes).collect();
+            for v in [3u16, 1, 0x0409, nid, encoded.len() as u16, storage.len() as u16] {
+                recs.extend_from_slice(&v.to_be_bytes());
+            }
+            storage.extend_from_slice(&encoded);
+        }
+        let mut name = Vec::new();
+        name.extend_from_slice(&0u16.to_be_bytes());
+        name.extend_from_slice(&(entries.len() as u16).to_be_bytes());
+        name.extend_from_slice(&((6 + recs.len()) as u16).to_be_bytes());
+        name.extend_from_slice(&recs);
+        name.extend_from_slice(&storage);
+        tables.push((*b"name", name));
+
+        if let Some(def_wt) = default_weight {
+            // fvar v1.0: 1 wght axis, 0 named instances
+            let mut fvar = Vec::new();
+            for v in [1u16, 0, 16, 2, 1, 20, 0, 8] {
+                fvar.extend_from_slice(&v.to_be_bytes());
+            }
+            fvar.extend_from_slice(b"wght");
+            fvar.extend_from_slice(&((100.0 * 65536.0) as i32).to_be_bytes());
+            fvar.extend_from_slice(&((def_wt * 65536.0) as i32).to_be_bytes());
+            fvar.extend_from_slice(&((900.0 * 65536.0) as i32).to_be_bytes());
+            fvar.extend_from_slice(&0u16.to_be_bytes());
+            fvar.extend_from_slice(&256u16.to_be_bytes());
+            tables.push((*b"fvar", fvar));
+        }
+
+        tables.sort_by_key(|(tag, _)| *tag);
+        let n = tables.len() as u16;
+        let mut out = Vec::new();
+        out.extend_from_slice(&0x00010000u32.to_be_bytes());
+        out.extend_from_slice(&n.to_be_bytes());
+        out.extend_from_slice(&0u16.to_be_bytes());
+        out.extend_from_slice(&0u16.to_be_bytes());
+        out.extend_from_slice(&0u16.to_be_bytes());
+        let mut offset = 12 + tables.len() * 16;
+        for (tag, data) in &tables {
+            out.extend_from_slice(tag);
+            out.extend_from_slice(&0u32.to_be_bytes());
+            out.extend_from_slice(&(offset as u32).to_be_bytes());
+            out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            offset += (data.len() + 3) & !3;
+        }
+        for (_, data) in &tables {
+            out.extend_from_slice(data);
+            while out.len() % 4 != 0 {
+                out.push(0);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn verify_font_rejects_variable_font_with_colliding_regular_subfamily() {
+        let dir = tempfile::tempdir().unwrap();
+        let aliases = BTreeMap::from([('\u{e000}', '中')]);
+        let font_spec = FontSelection {
+            path: "Sans.ttf".into(),
+            face: "QlieSans1234567890 Regular".into(),
+            fixed: false,
+        };
+
+        // Non-Regular default weight (100) with ID 17 = "Regular" collides in Locale Emulator.
+        fs::write(dir.path().join("Sans.ttf"), minimal_sfnt("Regular", Some(100.0))).unwrap();
+        let err = verify_font(dir.path(), &font_spec, &aliases).unwrap_err();
+        assert!(err.to_string().contains("排版子族"), "{err}");
+
+        // Preserving ID 17 = "Thin" passes cleanly.
+        fs::write(dir.path().join("Sans.ttf"), minimal_sfnt("Thin", Some(100.0))).unwrap();
+        verify_font(dir.path(), &font_spec, &aliases).unwrap();
+
+        // Static font (no fvar) with ID 17 = "Regular" passes cleanly.
+        fs::write(dir.path().join("Sans.ttf"), minimal_sfnt("Regular", None)).unwrap();
+        verify_font(dir.path(), &font_spec, &aliases).unwrap();
     }
 }

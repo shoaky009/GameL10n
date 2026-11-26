@@ -19,6 +19,7 @@ from adapters.components import (
     qlie_pack_adapter,
     qlie_samples,
     qlie_script,
+    qlie_sfnt,
     qlie_systemfont,
 )
 from crates.engines.python.fixtures.qlie_installation import (
@@ -807,3 +808,79 @@ class QliePack30Hash14Test(unittest.TestCase):
         ], bytes([113]) * 256, hash_version="1.5"))
         with self.assertRaisesRegex(ValueError, "原封包使用宿主已登记尾表"):
             qlie_display.verify(req)
+
+    def test_qlie_sfnt_preserves_variable_font_subfamily_and_avg_leading_bracket_prose(self):
+        import struct
+
+        def make_min_sfnt(*, variable):
+            head = bytearray(54)
+            struct.pack_into(">IH", head, 0, 0x00010000, 0)
+            struct.pack_into(">I", head, 12, 0x5F0F3CF5)
+            struct.pack_into(">H", head, 18, 1000)
+            hhea = bytearray(36)
+            struct.pack_into(">I", hhea, 0, 0x00010000)
+            os2 = bytearray(96)
+            struct.pack_into(">H", os2, 0, 4)
+            cmap = qlie_sfnt.build_cmap({ord("中"): 1})
+            entries = [
+                (1, "Noto Sans SC Thin"), (2, "Regular"), (3, "id"),
+                (4, "Noto Sans SC Thin"), (6, "NotoSansSC-Thin"),
+                (16, "Noto Sans SC"), (17, "Thin"), (21, "Noto Sans SC"), (22, "Thin"),
+            ]
+            recs, storage = bytearray(), bytearray()
+            for nid, text in entries:
+                val = text.encode("utf-16-be")
+                recs += struct.pack(">6H", 3, 1, 0x0409, nid, len(val), len(storage))
+                storage += val
+            name = struct.pack(">3H", 0, len(entries), 6 + len(recs)) + recs + storage
+            tables = {b"head": bytes(head), b"hhea": bytes(hhea), b"OS/2": bytes(os2), b"cmap": cmap, b"name": name}
+            if variable:
+                tables[b"fvar"] = struct.pack(">8H4siii2H", 1, 0, 16, 2, 1, 20, 0, 8, b"wght",
+                                              100 << 16, 100 << 16, 900 << 16, 0, 256)
+            ordered = sorted(tables.items())
+            n = len(ordered)
+            offset = 12 + n * 16
+            out = bytearray(offset + sum((len(d) + 3) & ~3 for _, d in ordered))
+            struct.pack_into(">4s4H", out, 0, b"\0\1\0\0", n, 16, 0, 0)
+            for i, (tag, data) in enumerate(ordered):
+                struct.pack_into(">4sIII", out, 12 + i * 16, tag, qlie_sfnt.checksum(data), offset, len(data))
+                out[offset:offset + len(data)] = data
+                offset += (len(data) + 3) & ~3
+            return bytes(out)
+
+        def read_names(font_bytes):
+            nt = struct.unpack_from(">H", font_bytes, 4)[0]
+            for i in range(nt):
+                tag, _, off, ln = struct.unpack_from(">4sIII", font_bytes, 12 + i * 16)
+                if tag == b"name":
+                    nd = font_bytes[off:off + ln]
+                    _, cnt, str_off = struct.unpack_from(">3H", nd, 0)
+                    out = {}
+                    for j in range(cnt):
+                        pid, eid, lid, nid, length, soff = struct.unpack_from(">6H", nd, 6 + j * 12)
+                        if pid == 3 and eid == 1 and lid == 0x0409:
+                            out[nid] = nd[str_off + soff:str_off + soff + length].decode("utf-16-be")
+                    return out
+            raise AssertionError("missing name table")
+
+        var_names = read_names(qlie_sfnt.derive(make_min_sfnt(variable=True), "QlieSansTest", {0xE000: ord("中")}))
+        self.assertEqual(var_names[1], "QlieSansTest")
+        self.assertEqual(var_names[4], "QlieSansTest Regular")
+        self.assertEqual(var_names[16], "QlieSansTest")
+        self.assertEqual(var_names[17], "Thin")
+        self.assertEqual(var_names[22], "Thin")
+
+        static_names = read_names(qlie_sfnt.derive(make_min_sfnt(variable=False), "QlieSansTest", {0xE000: ord("中")}))
+        self.assertEqual(static_names[1], "QlieSansTest")
+        self.assertEqual(static_names[4], "QlieSansTest Regular")
+        self.assertEqual(static_names[17], "Regular")
+        self.assertEqual(static_names[22], "Regular")
+
+        # Library/Avg prose starting with 【 (not ending with 】) must roundtrip and reject role changes.
+        avg = "@@Main\r\n【キリエ】─\r\nこんにちは\r\n"
+        rows = [r.row() for r in qlie_script.scan(avg, dialect=qlie_script.AVG_SCENARIO)]
+        self.assertEqual(rows, [{"message": "【キリエ】─"}, {"message": "こんにちは"}])
+        patched = qlie_script.patch(avg, [{"message": "【基里埃】─"}, {"message": "你好"}], dialect=qlie_script.AVG_SCENARIO)
+        self.assertIn("【基里埃】─", patched)
+        with self.assertRaisesRegex(ValueError, "字段类型发生变化"):
+            qlie_script.patch(avg, [{"message": "【基里埃】"}, {"message": "你好"}], dialect=qlie_script.AVG_SCENARIO)

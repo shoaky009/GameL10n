@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     ffi::{OsStr, OsString},
     fs::File,
     io,
@@ -156,9 +156,10 @@ impl Drop for ComApartment {
 impl RegisteredFonts {
     fn load(root: &Path, config: &LaunchConfig) -> Result<Self> {
         let mut loaded = Self(Vec::new());
+        let mut expected = Vec::with_capacity(config.fonts.len());
         for entry in &config.fonts {
             let path = config::under_root(root, &entry.file)?;
-            font::verify_font_metadata(&mut File::open(&path)?, &entry.face)?;
+            let family = font::verify_font_metadata(&mut File::open(&path)?, &entry.face)?;
             let path = wide(&path);
             // Flags 0 make the font visible to the game and Locale Emulator in this session.
             // SAFETY: The path is terminated and GDI copies its contents before returning.
@@ -166,8 +167,9 @@ impl RegisteredFonts {
                 return Err(format!("无法加载汉化字体：{}", entry.file).into());
             }
             loaded.0.push(path);
+            expected.push((entry.face.clone(), family));
         }
-        verify_font_names(config)?;
+        verify_font_names(&expected)?;
         Ok(loaded)
     }
 }
@@ -194,11 +196,27 @@ impl Drop for DeviceContext {
     }
 }
 
-fn verify_font_names(config: &LaunchConfig) -> Result<()> {
-    let mut missing: BTreeSet<_> = config
-        .fonts
+struct ExpectedFont {
+    face: String,
+    family_lower: String,
+    matched: bool,
+    shadowed: bool,
+}
+
+fn verify_font_names(expected_fonts: &[(String, String)]) -> Result<()> {
+    let mut expected: BTreeMap<String, ExpectedFont> = expected_fonts
         .iter()
-        .map(|font| font.face.to_lowercase())
+        .map(|(face, family)| {
+            (
+                face.to_lowercase(),
+                ExpectedFont {
+                    face: face.clone(),
+                    family_lower: family.to_lowercase(),
+                    matched: false,
+                    shadowed: false,
+                },
+            )
+        })
         .collect();
     // SAFETY: A null source requests a memory DC owned by this function.
     let handle = unsafe { CreateCompatibleDC(null_mut()) };
@@ -210,25 +228,65 @@ fn verify_font_names(config: &LaunchConfig) -> Result<()> {
         lfCharSet: SHIFTJIS_CHARSET,
         ..Default::default()
     };
-    // SAFETY: EnumFontFamiliesExA calls the callback synchronously; missing is exclusively
+    // SAFETY: EnumFontFamiliesExA calls the callback synchronously; expected is exclusively
     // borrowed until it returns, and the DC/query have the required GDI layouts.
     unsafe {
         EnumFontFamiliesExA(
             dc.0,
             &query,
             Some(enumerate_font),
-            (&mut missing as *mut BTreeSet<String>) as isize,
+            (&mut expected as *mut BTreeMap<String, ExpectedFont>) as isize,
             0,
         );
     }
+    let shadowed: Vec<_> = expected
+        .values()
+        .filter(|entry| entry.shadowed)
+        .map(|entry| entry.face.as_str())
+        .collect();
+    if !shadowed.is_empty() {
+        return Err(format!(
+            "汉化字体存在与转区枚举冲突的同名实例，转区运行会被隐藏，请重新生成补丁：{}",
+            shadowed.join("、")
+        )
+        .into());
+    }
+    let missing: Vec<_> = expected
+        .values()
+        .filter(|entry| !entry.matched)
+        .map(|entry| entry.face.as_str())
+        .collect();
     if !missing.is_empty() {
         return Err(format!(
             "游戏无法识别汉化字体，请重新生成补丁：{}",
-            missing.into_iter().collect::<Vec<_>>().join("、")
+            missing.join("、")
         )
         .into());
     }
     Ok(())
+}
+
+fn decode_ansi(bytes: &[u8]) -> Option<String> {
+    let length = bytes
+        .iter()
+        .position(|&byte| byte == 0)
+        .unwrap_or(bytes.len());
+    if length == 0 {
+        return None;
+    }
+    let mut text = [0u16; 128];
+    // SAFETY: The source slice and fixed destination buffer cover the supplied lengths.
+    let size = unsafe {
+        MultiByteToWideChar(
+            CP_ACP,
+            0,
+            bytes.as_ptr(),
+            length as i32,
+            text.as_mut_ptr(),
+            text.len() as i32,
+        )
+    };
+    (size > 0).then(|| String::from_utf16_lossy(&text[..size as usize]))
 }
 
 unsafe extern "system" fn enumerate_font(
@@ -245,28 +303,26 @@ unsafe extern "system" fn enumerate_font(
     if font.elfLogFont.lfCharSet != SHIFTJIS_CHARSET {
         return 1;
     }
-    let length = font
-        .elfFullName
-        .iter()
-        .position(|&byte| byte == 0)
-        .unwrap_or(font.elfFullName.len());
-    let mut text = [0u16; 128];
-    // QLIE compares the ANSI full name, not lfFaceName or a wide variable-instance name.
-    // SAFETY: The source slice and fixed destination buffer cover the supplied lengths.
-    let size = unsafe {
-        MultiByteToWideChar(
-            CP_ACP,
-            0,
-            font.elfFullName.as_ptr(),
-            length as i32,
-            text.as_mut_ptr(),
-            text.len() as i32,
-        )
+    // QLIE matches elfFullName, while Locale Emulator caches by (elfFullName, lfCharSet)
+    // and rejects any entry whose lfFaceName differs from the TTF name ID 1 family.
+    let face_bytes = font.elfLogFont.lfFaceName.map(|byte| byte as u8);
+    let (Some(full), Some(face)) = (
+        decode_ansi(&font.elfFullName),
+        decode_ansi(&face_bytes),
+    ) else {
+        return 1;
     };
-    if size > 0 {
-        // SAFETY: data is the exclusive, live set passed by verify_font_names.
-        let missing = unsafe { &mut *(data as *mut BTreeSet<String>) };
-        missing.remove(&String::from_utf16_lossy(&text[..size as usize]).to_lowercase());
+    if full.starts_with('@') || face.starts_with('@') {
+        return 1;
+    }
+    // SAFETY: data is the exclusive, live map passed by verify_font_names.
+    let expected = unsafe { &mut *(data as *mut BTreeMap<String, ExpectedFont>) };
+    if let Some(entry) = expected.get_mut(&full.to_lowercase()) {
+        if face.to_lowercase() == entry.family_lower {
+            entry.matched = true;
+        } else {
+            entry.shadowed = true;
+        }
     }
     1
 }
