@@ -6,6 +6,7 @@ import struct
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 import zlib
 
 
@@ -89,3 +90,24 @@ class WhaleDatTest(unittest.TestCase):
         self.assertEqual(whale_script.asset_names(script), {
             "st/002M/121_A.tlg", "st/002M/S002_1FA1AA_0001_M.tlg", "bg/BLACK.tlg", "bgm/tune.ogg",
         })
+
+    def test_streaming_rebuild_uses_format_limit_and_entry_budget(self):
+        script = "【花子】「こんにちは」\r\n".encode("cp932")
+        patched = "【花子】「長い文章と確認テスト0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ」\r\n".encode("cp932")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "original.dat"
+            source.write_bytes(dat([("begin", 2, script), ("end", 2, b"trace")]))
+            name = f'{whale_dat.crc64(b"begin"):016x}.script'
+            replacement = root / "replacement.script"
+            replacement.write_bytes(patched)
+            request = dict(protocolVersion=1, component="archive.whale-dat", archive=str(source),
+                           gameTitle="Fixture", operation="rebuild", replacements={name: str(replacement)})
+            with patch.object(engine_archive, "MAX_ARCHIVE", 16):
+                rebuilt = root / "rebuilt.dat"
+                report = engine_archive.execute(dict(request, outputFile=str(rebuilt)))
+                self.assertEqual(report["changedCount"], 1)
+            with patch.object(whale_dat, "MAX_ARCHIVE", len(source.read_bytes())):
+                with self.assertRaisesRegex(ValueError, "32-bit"):
+                    engine_archive.execute(dict(request, outputFile=str(root / "overflow.dat")))
+                self.assertFalse((root / "overflow.dat").exists())

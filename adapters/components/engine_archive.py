@@ -951,13 +951,13 @@ def whale_rebuild(request, source, stream, whale, index, game_key):
         raise ValueError("Whale DAT rebuild requires a script-only v2 volume")
     if game_key is None:
         raise ValueError("Whale DAT rebuild requires gameTitle")
-    if index.length > MAX_ARCHIVE:
-        raise ValueError("Whale script archive exceeds the rebuild budget")
+    if index.length > whale.MAX_ARCHIVE:
+        raise ValueError("Whale script archive exceeds the 32-bit DAT address space")
     output = checked_path(request["outputFile"])
     separate(source, output)
     by_name = {entry.name: entry for entry in index.entries}
     replacements = request.get("replacements") or {}
-    if not isinstance(replacements, dict) or len(replacements) > 128 or replacements.keys() - by_name.keys():
+    if not isinstance(replacements, dict) or len(replacements) > MAX_ENTRIES or replacements.keys() - by_name.keys():
         raise ValueError("invalid Whale script replacement mapping")
     changes, budget = {}, MAX_TOTAL
     for name, path in replacements.items():
@@ -990,11 +990,11 @@ def whale_rebuild(request, source, stream, whale, index, game_key):
                         copy_range(stream, target, entry.offset, entry.size)
                         updated[entry.key] = replace(entry, offset=offset)
                     before = entry.offset + entry.size
-                    if target.tell() > MAX_ARCHIVE:
-                        raise ValueError("rebuilt Whale DAT exceeds the output budget")
+                    if target.tell() > whale.MAX_ARCHIVE:
+                        raise ValueError("rebuilt Whale DAT exceeds the 32-bit address space")
                 copy_range(stream, target, before, index.length - before)
-                if target.tell() > MAX_ARCHIVE:
-                    raise ValueError("rebuilt Whale DAT exceeds the output budget")
+                if target.tell() > whale.MAX_ARCHIVE:
+                    raise ValueError("rebuilt Whale DAT exceeds the 32-bit address space")
                 whale.write_script_index(target, [updated[entry.key] for entry in index.entries])
                 result = whale.read_index(target, (), MAX_ENTRIES)
                 if [entry.key for entry in result.entries] != [entry.key for entry in index.entries]:
