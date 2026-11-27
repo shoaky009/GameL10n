@@ -150,10 +150,16 @@ def _prepare(data, proxy, output):
             path.parent.mkdir(parents=True, exist_ok=True)
             with path.open("xb") as destination:
                 destination.write(content)
-    return [dict(path=path.relative_to(Path.cwd().resolve()).as_posix(),
-                 sha256=hashlib.sha256(content).hexdigest(), reused=exists,
-                 role="license" if path.name == LICENSE_NAME else "asset")
-            for (path, content), exists in zip(files, reused)]
+    workspace = Path.cwd().resolve()
+    prepared = []
+    for (path, content), exists in zip(files, reused):
+        relative = path.relative_to(workspace).as_posix()
+        item = dict(path=relative, sha256=hashlib.sha256(content).hexdigest(), reused=exists,
+                    role="license" if path.name == LICENSE_NAME else "asset")
+        if relative.startswith("src/tools/"):
+            item["releasePath"] = relative[len("src/"):]
+        prepared.append(item)
+    return prepared
 
 
 def execute(request):

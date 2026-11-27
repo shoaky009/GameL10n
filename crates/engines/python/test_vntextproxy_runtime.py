@@ -71,6 +71,11 @@ class VNTextProxyRuntimeTest(unittest.TestCase):
         self.assertFalse((self.root / "outside.txt").exists())
         repeated = RUNTIME.execute(dict(operation="prepare", output="src/runtime/proxy", **request))
         self.assertTrue(all(item["reused"] for item in repeated["files"]))
+        self.assertTrue(all("releasePath" not in item for item in repeated["files"]))
+        tools = RUNTIME.execute(dict(operation="prepare", output="src/tools/vntextproxy", **request))
+        self.assertTrue(tools["success"], tools)
+        self.assertEqual({item["releasePath"] for item in tools["files"]}, {
+            "tools/vntextproxy/d3d9.dll", "tools/vntextproxy/licenses/VNTextProxy-LICENSE.txt"})
 
     def test_unpinned_archive_or_unknown_proxy_does_not_create_output(self):
         archive = self.root / "untrusted.zip"
