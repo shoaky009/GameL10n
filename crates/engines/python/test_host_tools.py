@@ -67,6 +67,26 @@ print('original')
         self.assertEqual(lossy['byteOffsets'], [None])
         self.assertEqual(lossy['encoding'], 'cp932')
 
+    def test_utf16_read_and_common_script_directory_search(self):
+        (self.root / 'work/nested/config.tjs').write_bytes('AB字体CD'.encode('utf-16-le'))
+        (self.root / 'work/nested/scene.ast').write_bytes('XY対話ZW'.encode('utf-16-be'))
+        read_le = self.execute('read_file', path='work/nested/config.tjs', encoding='utf16le')
+        self.assertEqual(read_le['content'], 'AB字体CD')
+        self.assertEqual(read_le['encoding'], 'utf16le')
+        read_be = self.execute('read_file', path='work/nested/scene.ast', encoding='utf16be')
+        self.assertEqual(read_be['content'], 'XY対話ZW')
+        self.assertEqual(read_be['encoding'], 'utf16be')
+        found_le = self.execute('search_text', path='work/nested', query='字体', encoding='utf16le')
+        self.assertEqual(len(found_le['matches']), 1)
+        self.assertEqual(found_le['matches'][0]['path'], 'work/nested/config.tjs')
+        self.assertEqual(found_le['matches'][0]['byteOffset'], 4)
+        self.assertEqual(found_le['matches'][0]['encoding'], 'utf16le')
+        found_be = self.execute('search_text', path='work/nested', query='対話', encoding='utf16be')
+        self.assertEqual(len(found_be['matches']), 1)
+        self.assertEqual(found_be['matches'][0]['path'], 'work/nested/scene.ast')
+        self.assertEqual(found_be['matches'][0]['byteOffset'], 4)
+        self.assertEqual(found_be['matches'][0]['encoding'], 'utf16be')
+
     def test_bound_inputs_keep_original_reads_and_paths_separate_from_installed_files(self):
         game = self.root / 'game'
         source = self.root / 'source'

@@ -136,6 +136,15 @@ def list_files(request):
                 more=len(files) > limit, nextOffset=offset + min(len(files), limit))
 
 
+TEXT_ENCODINGS = {
+    'utf8': 'utf-8',
+    'cp932': 'cp932',
+    'cp936': 'cp936',
+    'utf16le': 'utf-16-le',
+    'utf16be': 'utf-16-be',
+}
+
+
 def read_file(request):
     logical, path = InputFiles(request).resolve(request['path'])
     if logical.suffix.lower() in ('.key', '.pem', '.pfx') or logical.name.lower().startswith('.env'):
@@ -143,16 +152,16 @@ def read_file(request):
     total = path.stat().st_size
     offset = reference_number(request, 'offset', 0, 0, total)
     encoding = request.get('encoding') or ('utf8' if workspace_text(request, logical) else 'hex')
-    if encoding not in ('hex', 'utf8', 'cp932', 'cp936'):
-        raise ValueError('encoding 必须是 hex、utf8、cp932 或 cp936。')
+    if encoding != 'hex' and encoding not in TEXT_ENCODINGS:
+        raise ValueError('encoding 必须是 hex、utf8、cp932、cp936、utf16le 或 utf16be。')
     default_length = 2048 if encoding == 'hex' else 4096
     length = min(reference_number(request, 'length', default_length, 1, 32768), total - offset)
     with path.open('rb') as stream:
         stream.seek(offset)
         data = stream.read(length)
     end = offset + len(data)
-    return dict(bytes=total, content=data.hex().upper() if encoding == 'hex' else data.decode(encoding, errors='replace'),
-                encoding=encoding, offset=offset, length=len(data), more=end < total)
+    content = data.hex().upper() if encoding == 'hex' else data.decode(TEXT_ENCODINGS[encoding], errors='replace')
+    return dict(bytes=total, content=content, encoding=encoding, offset=offset, length=len(data), more=end < total)
 
 
 def search_text(request):
@@ -164,7 +173,8 @@ def search_text(request):
         raise ValueError('搜索文本长度必须在 1 到 256 之间。')
     def search_file(logical, current, offset, budget, maximum):
         encoding = request.get('encoding') or ('utf8' if workspace_text(request, logical) else 'cp932')
-        if encoding not in ('utf8', 'cp932', 'cp936'):
+        codec = TEXT_ENCODINGS.get(encoding)
+        if codec is None:
             raise ValueError('不支持的文字编码。')
         size = current.stat().st_size
         if offset > size:
@@ -172,15 +182,15 @@ def search_text(request):
         with current.open('rb') as stream:
             stream.seek(offset)
             data = stream.read(budget)
-        content = data.decode(encoding, errors='replace')
-        exact = content.encode(encoding, errors='replace') == data
+        content = data.decode(codec, errors='replace')
+        exact = content.encode(codec, errors='replace') == data
         matches, offsets, consumed = [], [], len(data)
         for match in re.finditer(re.escape(query), content, re.IGNORECASE):
             start = max(0, match.start() - 80)
             matches.append(content[start:start + len(query) + 160])
-            offsets.append(offset + len(content[:match.start()].encode(encoding)) if exact else None)
+            offsets.append(offset + len(content[:match.start()].encode(codec)) if exact else None)
             if len(matches) == maximum:
-                consumed = len(content[:match.end()].encode(encoding)) if exact else len(data)
+                consumed = len(content[:match.end()].encode(codec)) if exact else len(data)
                 break
         return dict(matches=matches, byteOffsets=offsets, encoding=encoding, scannedBytes=len(data),
                     nextOffset=offset + consumed, more=offset + consumed < size)
@@ -189,6 +199,7 @@ def search_text(request):
         return search_file(logical, path, offset, 4 << 20, 20)
     import itertools
     extensions = {'.cs','.py','.ps1','.md','.txt','.json','.jsonl','.xml','.csv','.log','.ini','.cfg','.ks','.rpy',
+                  '.tjs','.ast','.art','.s','.soc','.ss','.lua','.js','.ts','.html','.css','.scr','.rl',
                   '.csproj','.rsp','.c','.h','.cpp','.hpp','.yaml','.yml','.toml'}
     files = list(itertools.islice(((logical, physical) for logical, physical in view.files(relative)
                                   if logical.suffix.lower() in extensions and not logical.name.lower().startswith('.env')), offset, offset + 65))

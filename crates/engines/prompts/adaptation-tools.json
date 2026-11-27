@@ -280,7 +280,7 @@
       "type": "function",
       "function": {
         "name": "read_file",
-        "description": "Read a bounded file slice. root=game uses original production inputs; installed reads currently installed bytes for diagnostics. encoding: hex, utf8, cp932, cp936. Source/JSON and workspace work/*.txt/.log/.csv reports default to utf8; unknown game resources default to hex. Use search_text byteOffsets for targeted reads instead of rereading whole files. Returns the encoding used.",
+        "description": "Read a bounded file slice. root=game uses original production inputs; installed reads currently installed bytes for diagnostics. encoding: hex, utf8, cp932, cp936, utf16le, utf16be. Source/JSON and workspace work/*.txt/.log/.csv reports default to utf8; unknown game resources default to hex. Use search_text byteOffsets for targeted reads instead of rereading whole files. Returns the encoding used.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -310,7 +310,9 @@
                 "hex",
                 "utf8",
                 "cp932",
-                "cp936"
+                "cp936",
+                "utf16le",
+                "utf16be"
               ]
             }
           },
@@ -416,7 +418,7 @@
       "type": "function",
       "function": {
         "name": "search_text",
-        "description": "Search a file byte range or a directory of text/source files. Returns at most 20 excerpts with byte offsets. File offset is bytes; directory offset is a file cursor, with fileByteOffset for resuming inside that file. Pass returned nextOffset and nextFileByteOffset until more=false. Directory scans are bounded to 64 text files and 4 MiB per call; binary archives are excluded. Source defaults to utf8; unknown game files to cp932.",
+        "description": "Search a file byte range or a directory of text/source files. Returns at most 20 excerpts with byte offsets. File offset is bytes; directory offset is a file cursor, with fileByteOffset for resuming inside that file. Pass returned nextOffset and nextFileByteOffset until more=false. Directory scans are bounded to 64 text files and 4 MiB per call; binary archives are excluded. encoding: utf8, cp932, cp936, utf16le, utf16be. Source defaults to utf8; unknown game files to cp932.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -435,7 +437,14 @@
               "type": "string"
             },
             "encoding": {
-              "type": "string"
+              "type": "string",
+              "enum": [
+                "utf8",
+                "cp932",
+                "cp936",
+                "utf16le",
+                "utf16be"
+              ]
             },
             "offset": {
               "type": "integer"
