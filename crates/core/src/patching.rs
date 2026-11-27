@@ -8,8 +8,11 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
-use gamel10n_engines::protocol::{BuildMode, LaunchLocation, LaunchTarget};
-use gamel10n_translation::files::{hash_file, hash_text, read_json, write_json};
+use gamel10n_engines::protocol::{BuildMode, GAME_ROOT_DIR, LaunchLocation, LaunchTarget};
+use gamel10n_translation::{
+    files::{hash_file, hash_text, read_json, write_json},
+    storage::SHA256_HEX_LEN,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tempfile::NamedTempFile;
@@ -18,6 +21,23 @@ use crate::{CoreError, logs::FileProgress};
 
 pub const MANIFEST_FILENAME: &str = "patch-manifest.json";
 pub const PAYLOAD_DIRECTORY: &str = "files";
+pub const PATCHES_DIR: &str = "patches";
+pub const RUNTIME_TEST_FILENAME: &str = "runtime-test.json";
+pub const TEST_STATUS_PASSED: &str = "passed";
+pub const TEST_STATUS_FAILED: &str = "failed";
+pub const TEST_STATUS_NOT_TESTED: &str = "not-tested";
+pub(crate) const BACKUP_SUFFIX: &str = ".bak";
+
+const INSTALLATION_JOURNAL_FILENAME: &str = "installation.json";
+const LEGACY_INSTALLER_DIR: &str = ".avg-translator";
+const MANIFEST_SCHEMA_VERSION: u32 = 2;
+const JOURNAL_SCHEMA_VERSION: u32 = 1;
+const RUNTIME_TEST_SCHEMA_VERSION: u32 = 1;
+const MAX_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
+#[cfg(windows)]
+const WIN32_CREATE_NO_WINDOW: u32 = 0x0800_0000;
+#[cfg(unix)]
+const UNIX_OWNER_WRITE_BIT: u32 = 0o200;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -140,7 +160,7 @@ impl PatchInstaller {
     }
 
     pub fn journal_path(&self) -> PathBuf {
-        self.project_directory.join("installation.json")
+        self.project_directory.join(INSTALLATION_JOURNAL_FILENAME)
     }
 
     pub fn with_launch_fallback(mut self, launch: Option<LaunchTarget>) -> Self {
@@ -227,12 +247,12 @@ impl PatchInstaller {
                 return Err(invalid(format!("启动程序不存在：{}", executable.display())));
             }
             let working = &launch.configuration.working_directory;
-            let directory = if working == "." {
+            let directory = if working == GAME_ROOT_DIR {
                 game.clone()
             } else {
                 safe_path(&game, working)?
             };
-            let output_directory = if working == "." {
+            let output_directory = if working == GAME_ROOT_DIR {
                 payload.clone()
             } else {
                 safe_path(&payload, working)?
@@ -704,23 +724,26 @@ impl PatchInstaller {
         status: &str,
         notes: &str,
     ) -> Result<RuntimeTestRecord, CoreError> {
-        if !matches!(status, "passed" | "failed" | "not-tested") {
+        if !matches!(
+            status,
+            TEST_STATUS_PASSED | TEST_STATUS_FAILED | TEST_STATUS_NOT_TESTED
+        ) {
             return Err(invalid("实机验证状态无效。"));
         }
         let patch_directory = directory_root(patch_directory)?;
         let project = std::path::absolute(&self.project_directory)?;
-        if !patch_directory.starts_with(project.join("patches")) {
+        if !patch_directory.starts_with(project.join(PATCHES_DIR)) {
             return Err(invalid("实机记录必须属于当前项目的补丁。"));
         }
         let record = RuntimeTestRecord {
-            schema_version: 1,
+            schema_version: RUNTIME_TEST_SCHEMA_VERSION,
             tested_at: Utc::now(),
             patch_directory,
             status: status.into(),
             notes: notes.into(),
         };
         write_json(
-            &safe_path(&record.patch_directory, "runtime-test.json")?,
+            &safe_path(&record.patch_directory, RUNTIME_TEST_FILENAME)?,
             &record,
         )?;
         Ok(record)
@@ -730,7 +753,7 @@ impl PatchInstaller {
         &self,
         patch_directory: &Path,
     ) -> Result<Option<RuntimeTestRecord>, CoreError> {
-        let path = safe_path(patch_directory, "runtime-test.json")?;
+        let path = safe_path(patch_directory, RUNTIME_TEST_FILENAME)?;
         if path.is_file() {
             Ok(Some(read_json(&path)?))
         } else {
@@ -775,7 +798,7 @@ impl PatchInstaller {
             .open(path)?;
         lock.try_lock()
             .map_err(|error| invalid(format!("另一个进程正在安装或恢复此游戏：{error}")))?;
-        let legacy_path = game.join(".avg-translator/install.lock");
+        let legacy_path = game.join(LEGACY_INSTALLER_DIR).join("install.lock");
         check_path(&legacy_path)?;
         let legacy = if legacy_path.is_file() {
             let file = OpenOptions::new()
@@ -797,7 +820,7 @@ impl PatchInstaller {
     fn load_journal(&self, game: &Path, migrate: bool) -> Result<InstallationJournal, CoreError> {
         let current = self.journal_path();
         check_path(&current)?;
-        let legacy = game.join(".avg-translator/patch-journal.json");
+        let legacy = game.join(LEGACY_INSTALLER_DIR).join("patch-journal.json");
         check_path(&legacy)?;
         let mut journal: Option<InstallationJournal> = if current.is_file() {
             Some(read_installation_journal(&current)?)
@@ -819,7 +842,7 @@ impl PatchInstaller {
             }
         }
         let mut journal = journal.unwrap_or_else(|| InstallationJournal {
-            schema_version: 1,
+            schema_version: JOURNAL_SCHEMA_VERSION,
             game_directory: Some(game.to_path_buf()),
             entries: Vec::new(),
             created_directories: Vec::new(),
@@ -1010,7 +1033,7 @@ impl PatchInstaller {
             candidates.sort_by_key(|entry| entry.file_name());
             for candidate in candidates {
                 let name = candidate.file_name().to_string_lossy().to_lowercase();
-                if name.starts_with(&prefix) && name.ends_with(".bak") {
+                if name.starts_with(&prefix) && name.ends_with(BACKUP_SUFFIX) {
                     check_path(&candidate.path())?;
                     if same_hash(
                         hash_if_present(&candidate.path())?.as_deref(),
@@ -1219,7 +1242,7 @@ fn read_installation_journal(path: &Path) -> Result<InstallationJournal, CoreErr
 /// Reads metadata only; installation additionally checks the payload bytes.
 pub fn read_manifest(patch_directory: &Path) -> Result<PatchManifest, CoreError> {
     let path = safe_path(patch_directory, MANIFEST_FILENAME)?;
-    if fs::metadata(&path)?.len() > 16 * 1024 * 1024 {
+    if fs::metadata(&path)?.len() > MAX_MANIFEST_BYTES {
         return Err(invalid("补丁清单过大。"));
     }
     let mut manifest: PatchManifest = read_json(&path)?;
@@ -1238,7 +1261,7 @@ pub fn build_manifest(
     collect_files(&payload, &payload, &mut paths)?;
     paths.sort();
     let mut manifest = PatchManifest {
-        schema_version: 2,
+        schema_version: MANIFEST_SCHEMA_VERSION,
         files: Vec::new(),
         mode: BuildMode::Replace,
         required_sources: BTreeMap::new(),
@@ -1294,7 +1317,7 @@ fn validate_manifest(manifest: &mut PatchManifest) -> Result<(), CoreError> {
             return Err(invalid("补丁启动程序必须包含在补丁文件清单中。"));
         }
     }
-    if manifest.schema_version != 2 {
+    if manifest.schema_version != MANIFEST_SCHEMA_VERSION {
         return Err(invalid("补丁清单版本不支持，请重新生成补丁。"));
     }
     let mut paths = HashSet::new();
@@ -1340,7 +1363,7 @@ fn validate_manifest(manifest: &mut PatchManifest) -> Result<(), CoreError> {
 }
 
 fn validate_journal(journal: &InstallationJournal, game: &Path) -> Result<(), CoreError> {
-    if journal.schema_version != 1 {
+    if journal.schema_version != JOURNAL_SCHEMA_VERSION {
         return Err(invalid("安装记录版本不支持。"));
     }
     if journal
@@ -1375,7 +1398,7 @@ fn validate_journal(journal: &InstallationJournal, game: &Path) -> Result<(), Co
             if !backup
                 .to_lowercase()
                 .starts_with(&(relative.to_lowercase() + "."))
-                || !backup.to_lowercase().ends_with(".bak")
+                || !backup.to_lowercase().ends_with(BACKUP_SUFFIX)
                 || !backups.insert(backup.to_lowercase())
             {
                 return Err(invalid("原始备份位置无效。"));
@@ -1442,7 +1465,7 @@ pub(crate) fn normalize_relative(relative: &str) -> Result<String, CoreError> {
     if relative
         .split('/')
         .next()
-        .is_some_and(|part| part.eq_ignore_ascii_case(".avg-translator"))
+        .is_some_and(|part| part.eq_ignore_ascii_case(LEGACY_INSTALLER_DIR))
     {
         return Err(invalid("补丁不能修改安装器状态目录。"));
     }
@@ -1472,7 +1495,7 @@ pub(crate) fn check_path(path: &Path) -> Result<(), CoreError> {
                 #[cfg(windows)]
                 let linked = {
                     use std::os::windows::fs::MetadataExt;
-                    linked || metadata.file_attributes() & 0x400 != 0
+                    linked || metadata.file_attributes() & crate::WIN32_FILE_ATTRIBUTE_REPARSE_POINT != 0
                 };
                 if linked {
                     return Err(invalid(format!(
@@ -1525,7 +1548,7 @@ fn ensure_hash(path: &Path, expected: Option<&str>) -> Result<(), CoreError> {
 }
 
 fn validate_hash(hash: &str) -> Result<(), CoreError> {
-    if hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if hash.len() == SHA256_HEX_LEN && hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         Ok(())
     } else {
         Err(invalid("SHA-256 必须为 64 位十六进制字符串。"))
@@ -1590,12 +1613,12 @@ fn choose_backup(
     relative: &str,
     reserved: &HashSet<String>,
 ) -> Result<String, CoreError> {
-    let mut candidate = relative.to_owned() + ".bak";
+    let mut candidate = relative.to_owned() + BACKUP_SUFFIX;
     let mut suffix = 0_u32;
     while reserved.contains(&candidate.to_lowercase()) || safe_path(game, &candidate)?.exists() {
         suffix += 1;
         candidate = format!(
-            "{relative}.{}.{suffix}.bak",
+            "{relative}.{}.{suffix}{BACKUP_SUFFIX}",
             Utc::now().timestamp_nanos_opt().unwrap_or_default()
         );
     }
@@ -1698,7 +1721,7 @@ fn make_writable(path: &Path) -> Result<(), CoreError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        permissions.set_mode(permissions.mode() | 0o200);
+        permissions.set_mode(permissions.mode() | UNIX_OWNER_WRITE_BIT);
     }
     fs::set_permissions(path, permissions)?;
     Ok(())
@@ -1747,7 +1770,7 @@ pub fn ensure_game_closed(game_directory: &Path) -> Result<(), CoreError> {
             .trim_end_matches(['/', '\\'])
             .to_owned()
             + "\\";
-        let output = Command::new("powershell.exe").creation_flags(0x08000000).args(["-NoProfile", "-NonInteractive", "-Command", "$ErrorActionPreference='Stop'; $root=[Environment]::GetEnvironmentVariable('GAMEL10N_INSTALL_GAME_ROOT'); Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($root,[StringComparison]::OrdinalIgnoreCase) } | Select-Object -ExpandProperty Name"]).env("GAMEL10N_INSTALL_GAME_ROOT", root).stdin(Stdio::null()).output()?;
+        let output = Command::new("powershell.exe").creation_flags(WIN32_CREATE_NO_WINDOW).args(["-NoProfile", "-NonInteractive", "-Command", "$ErrorActionPreference='Stop'; $root=[Environment]::GetEnvironmentVariable('GAMEL10N_INSTALL_GAME_ROOT'); Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($root,[StringComparison]::OrdinalIgnoreCase) } | Select-Object -ExpandProperty Name"]).env("GAMEL10N_INSTALL_GAME_ROOT", root).stdin(Stdio::null()).output()?;
         if !output.status.success() {
             return Err(invalid("无法检查游戏进程，请确认系统进程查询可用后重试。"));
         }

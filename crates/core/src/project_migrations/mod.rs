@@ -1,7 +1,12 @@
 //! Ordered, per-game upgrades. A version is committed only after its files are usable.
 mod workbench_v1;
-use crate::{CoreError, GameProject, workbench::page_file::Pages};
+use crate::{
+    CoreError, GameProject,
+    application::{EXTRACTION_DIR, NATIVE_EXTRACTION_FILE},
+    workbench::page_file::Pages,
+};
 use gamel10n_translation::{
+    execution::{MEMORY_DIR, TRANSLATION_ERRORS_FILE},
     files::{FileError, read_json, write_json},
     storage::TranslationPolicy,
 };
@@ -18,6 +23,7 @@ use workbench_v1::stamp;
 const CURRENT_VERSION: u32 = 1;
 const RECORD: &str = "project-migrations.json";
 const FOLDER: &str = "workbench-v1";
+const LOCK_FILE: &str = "migration.lock";
 
 fn recoverable(result: Result<Pages, CoreError>) -> Result<Option<Pages>, CoreError> {
     match result {
@@ -52,16 +58,16 @@ pub(crate) fn stamps(dir: &Path, legacy: &Path) -> io::Result<Stamps> {
         dir.join(RECORD),
         root.join(crate::workbench::page_file::DATA),
         root.join(crate::workbench::page_file::INDEX),
-        dir.join("extraction/native.json"),
-        dir.join("extraction"),
-        dir.join("translation-errors.json"),
+        dir.join(NATIVE_EXTRACTION_FILE),
+        dir.join(EXTRACTION_DIR),
+        dir.join(TRANSLATION_ERRORS_FILE),
         legacy.to_owned(),
     ]
     .iter()
     .map(|p| stamp(p))
     .collect::<io::Result<_>>()?;
     let mut shards = BTreeMap::new();
-    workbench_v1::list(&dir.join("memory"), &mut shards, "memory", false)?;
+    workbench_v1::list(&dir.join(MEMORY_DIR), &mut shards, MEMORY_DIR, false)?;
     Ok(Stamps { files, shards })
 }
 pub(crate) fn open(
@@ -80,7 +86,7 @@ pub(crate) fn open(
     {
         return Ok(Some(pages));
     }
-    if !directory.join("extraction").is_dir() {
+    if !directory.join(EXTRACTION_DIR).is_dir() {
         return Ok(None);
     }
     fs::create_dir_all(&root)?;
@@ -88,7 +94,7 @@ pub(crate) fn open(
         .write(true)
         .create(true)
         .truncate(false)
-        .open(root.join("migration.lock"))?;
+        .open(root.join(LOCK_FILE))?;
     lock.lock()?;
     let previous = version(&record)?;
     // A process exit can leave an unpublished temporary file. Only the lock holder creates these.

@@ -161,15 +161,13 @@ fn approved(state: &Session) -> Result<BTreeMap<String, String>, EngineError> {
     )?)
 }
 
+const MAX_STAGE_BATCH_FILES: usize = 256;
+
 pub(super) fn invalidate(state: &mut Session) {
     state.verified_package = None;
     state.verified_fingerprint = None;
     state.verification = None;
-    for key in [
-        "verificationCache",
-        "trialVerificationCache",
-        "discoveryVerificationCache",
-    ] {
+    for key in VERIFICATION_CACHE_KEYS {
         state.extra.remove(key);
     }
 }
@@ -319,7 +317,7 @@ pub(super) fn reconcile(
     // Commit selection changes and rebind copies together; failed copies remain detectable on retry.
     let mut updated = Session::default();
     updated.extra.insert("resourceHashes".into(), json!(next));
-    for files in rebound.chunks(256) {
+    for files in rebound.chunks(MAX_STAGE_BATCH_FILES) {
         stage(
             request,
             workspace,
@@ -358,10 +356,10 @@ pub(super) fn stage(
     progress: ProgressCallback<'_>,
 ) -> Result<Value, EngineError> {
     cancelled(cancellation)?;
-    if files.len() > 256 || (files.is_empty() && !replace) {
-        return Err(EngineError::Protocol(
-            "每次选择 1 到 256 个资源文件；replace=true 可用空列表清空。".into(),
-        ));
+    if files.len() > MAX_STAGE_BATCH_FILES || (files.is_empty() && !replace) {
+        return Err(EngineError::Protocol(format!(
+            "每次选择 1 到 {MAX_STAGE_BATCH_FILES} 个资源文件；replace=true 可用空列表清空。"
+        )));
     }
     let previous = approved(state)?;
     let root = resource_path(workspace, "resources")?;

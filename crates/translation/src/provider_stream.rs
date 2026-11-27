@@ -2,12 +2,15 @@
 use super::*;
 use std::time::Instant;
 
-const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_STREAM_BYTES: usize = 64 * 1024 * 1024;
 const MAX_IGNORED_EVENT_TYPES: usize = 16;
+const UTF8_BOM: &[u8] = b"\xef\xbb\xbf";
 
 fn invalid(detail: &str) -> ProviderError {
-    let mut error = ProviderError::new("stream-format", "API 流式响应格式无效，未接受本次结果。");
+    let mut error = ProviderError::new(
+        diagnostic_codes::STREAM_FORMAT,
+        "API 流式响应格式无效，未接受本次结果。",
+    );
     error.diagnostic.detail = Some(detail.into());
     error.outcome_unknown = true;
     error
@@ -54,12 +57,12 @@ impl Decoder {
     ) -> Result<(), ProviderError> {
         self.pending.extend_from_slice(bytes);
         if !self.started {
-            if self.pending.len() < 3 && b"\xef\xbb\xbf".starts_with(&self.pending) {
+            if self.pending.len() < UTF8_BOM.len() && UTF8_BOM.starts_with(&self.pending) {
                 return Ok(());
             }
             self.started = true;
-            if self.pending.starts_with(b"\xef\xbb\xbf") {
-                self.pending.drain(..3);
+            if self.pending.starts_with(UTF8_BOM) {
+                self.pending.drain(..UTF8_BOM.len());
             }
         }
         if self.skip_lf && !self.pending.is_empty() {
@@ -180,7 +183,7 @@ fn append(target: &mut Value, value: &Value, bytes: &mut usize) -> Result<(), Pr
             *bytes = bytes.saturating_add(text.len());
             if *bytes > MAX_RESPONSE_BYTES {
                 return Err(ProviderError::new(
-                    "response-size-limit",
+                    diagnostic_codes::RESPONSE_SIZE_LIMIT,
                     "组装后的 API 响应超过大小限制。",
                 ));
             }
@@ -228,7 +231,7 @@ impl Chat {
         }
         if choices.len() != 1 || choices[0]["index"] != 0 {
             return Err(ProviderError::new(
-                "chat-choices",
+                diagnostic_codes::CHAT_CHOICES,
                 "API 必须返回一个完整响应。",
             ));
         }
@@ -250,7 +253,7 @@ impl Chat {
                 {
                     let index = call["index"]
                         .as_u64()
-                        .filter(|i| *i < 128)
+                        .filter(|i| *i < MAX_TOOL_CALLS as u64)
                         .ok_or_else(|| invalid("Invalid streamed tool-call index."))?;
                     let output = self.calls.entry(index).or_insert(json!({}));
                     let fields = call
@@ -289,7 +292,10 @@ impl Chat {
 
     fn finish(&mut self) -> Result<(), ProviderError> {
         if !self.finished {
-            return Err(ProviderError::new("chat-incomplete", "模型未完成响应。"));
+            return Err(ProviderError::new(
+                diagnostic_codes::CHAT_INCOMPLETE,
+                "模型未完成响应。",
+            ));
         }
         if !self.calls.is_empty() {
             if self.calls.keys().copied().ne(0..self.calls.len() as u64) {
@@ -356,8 +362,10 @@ impl Assembly {
             || value["type"] == "error"
             || value.get("error").is_some_and(|error| !error.is_null())
         {
-            let mut error =
-                ProviderError::new("stream-error", "服务商返回流式错误，未接受本次结果。");
+            let mut error = ProviderError::new(
+                diagnostic_codes::STREAM_ERROR,
+                "服务商返回流式错误，未接受本次结果。",
+            );
             error.outcome_unknown = true;
             return Err(error);
         }
@@ -411,7 +419,7 @@ impl Assembly {
             "response.output_item.added" | "response.output_item.done" => {
                 let index = value["output_index"]
                     .as_u64()
-                    .filter(|i| *i < 128)
+                    .filter(|i| *i < MAX_TOOL_CALLS as u64)
                     .ok_or_else(|| invalid("Invalid Responses output index."))?;
                 let item = &value["item"];
                 if !item.is_object() || !item["id"].is_string() || !item["type"].is_string() {
@@ -528,7 +536,7 @@ impl OpenAiProvider {
             let response = tokio::select! {
                 biased;
                 _ = cancellation.cancelled() => {
-                    return Err(ProviderError::new("cancelled", "任务已取消。"));
+                    return Err(ProviderError::new(diagnostic_codes::CANCELLED, "任务已取消。"));
                 }
                 result = tokio::time::timeout_at(first_deadline, async {
                     self.request_count.fetch_add(1, Ordering::Relaxed);
@@ -538,13 +546,13 @@ impl OpenAiProvider {
                     Ok(Ok(response)) => response,
                     Ok(Err(error)) => {
                         if error.is_timeout() {
-                            timing.timeout_stage = Some("first-response");
+                            timing.timeout_stage = Some(AnalysisStreamTiming::TIMEOUT_STAGE_FIRST_RESPONSE);
                         }
-                        return Err(ProviderError::transport(error, "network-error", "发送分析请求或等待 HTTP 响应头失败", &self.settings.api_key));
+                        return Err(ProviderError::transport(error, diagnostic_codes::NETWORK_ERROR, "发送分析请求或等待 HTTP 响应头失败", &self.settings.api_key));
                     }
                     Err(_) => {
-                        timing.timeout_stage = Some("first-response");
-                        let mut error = ProviderError::new("request-timeout", "等待分析响应头超时。");
+                        timing.timeout_stage = Some(AnalysisStreamTiming::TIMEOUT_STAGE_FIRST_RESPONSE);
+                        let mut error = ProviderError::new(diagnostic_codes::REQUEST_TIMEOUT, "等待分析响应头超时。");
                         error.diagnostic.detail = Some(format!("等待 HTTP 响应头达到 {} ms", self.analysis_first_response_timeout.as_millis()));
                         return Err(error);
                     }
@@ -553,7 +561,7 @@ impl OpenAiProvider {
             let status = response.status();
             if !status.is_success() {
                 let mut error = ProviderError::new(
-                    "http-error",
+                    diagnostic_codes::HTTP_ERROR,
                     &format!("API 请求失败（HTTP {}）。", status.as_u16()),
                 );
                 error.status_code = Some(status.as_u16());
@@ -582,24 +590,28 @@ impl OpenAiProvider {
                 let chunk = tokio::select! {
                     biased;
                     _ = cancellation.cancelled() => {
-                        return Err(ProviderError::new("cancelled", "任务已取消。"));
+                        return Err(ProviderError::new(diagnostic_codes::CANCELLED, "任务已取消。"));
                     }
                     result = tokio::time::timeout_at(deadline,response.chunk()) => match result {
                         Ok(Ok(chunk)) => chunk,
                         Ok(Err(cause)) => {
                             if cause.is_timeout() {
-                                timing.timeout_stage = Some(if first.is_none() { "first-response" } else { "stream-idle" });
+                                timing.timeout_stage = Some(if first.is_none() {
+                                    AnalysisStreamTiming::TIMEOUT_STAGE_FIRST_RESPONSE
+                                } else {
+                                    AnalysisStreamTiming::TIMEOUT_STAGE_STREAM_IDLE
+                                });
                             }
-                            return Err(ProviderError::transport(cause, "network-interrupted",
+                            return Err(ProviderError::transport(cause, diagnostic_codes::NETWORK_INTERRUPTED,
                                 &format!("读取 SSE 响应体失败（已收 {wire_bytes} 字节）"), &self.settings.api_key));
                         }
                         Err(_) => {
                             timing.timeout_stage = Some(if first.is_none() {
-                                "first-response"
+                                AnalysisStreamTiming::TIMEOUT_STAGE_FIRST_RESPONSE
                             } else {
-                                "stream-idle"
+                                AnalysisStreamTiming::TIMEOUT_STAGE_STREAM_IDLE
                             });
-                            let mut error = ProviderError::new("request-timeout", "分析响应等待超时。");
+                            let mut error = ProviderError::new(diagnostic_codes::REQUEST_TIMEOUT, "分析响应等待超时。");
                             error.diagnostic.detail = Some(if first.is_none() {
                                 format!("HTTP 已返回，等待 SSE 首字节达到请求时限 {} ms", self.analysis_first_response_timeout.as_millis())
                             } else {
@@ -610,7 +622,7 @@ impl OpenAiProvider {
                     }
                 };
                 let Some(chunk) = chunk else {
-                    let mut error = ProviderError::new("stream-incomplete", "API 流式响应缺少终止事件。");
+                    let mut error = ProviderError::new(diagnostic_codes::STREAM_INCOMPLETE, "API 流式响应缺少终止事件。");
                     error.diagnostic.detail = Some(format!("SSE 响应体已到 EOF，共 {wire_bytes} 字节，缺少终止事件"));
                     return Err(error);
                 };
@@ -627,7 +639,7 @@ impl OpenAiProvider {
                 wire_bytes = wire_bytes.saturating_add(chunk.len());
                 if wire_bytes > MAX_STREAM_BYTES {
                     return Err(ProviderError::new(
-                        "response-size-limit",
+                        diagnostic_codes::RESPONSE_SIZE_LIMIT,
                         "API 流式传输超过大小限制。",
                     ));
                 }
@@ -642,7 +654,7 @@ impl OpenAiProvider {
                         .len();
                     if output_len > MAX_RESPONSE_BYTES {
                         return Err(ProviderError::new(
-                            "response-size-limit",
+                            diagnostic_codes::RESPONSE_SIZE_LIMIT,
                             "组装后的 API 响应超过大小限制。",
                         ));
                     }
@@ -685,7 +697,7 @@ impl OpenAiProvider {
                         .as_str()
                         .or_else(|| assembly.response_id.as_str())
                         .filter(|id| {
-                            id.len() <= 256
+                            id.len() <= MAX_REQUEST_ID_LEN
                                 && !id.chars().any(char::is_control)
                                 && (self.settings.api_key.is_empty()
                                     || !id.contains(&self.settings.api_key))

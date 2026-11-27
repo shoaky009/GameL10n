@@ -1,11 +1,16 @@
 use std::{collections::BTreeMap, path::PathBuf};
 
 use clap::{Parser, Subcommand};
-use gamel10n_core::settings::GlobalSettings;
-use gamel10n_core::{Application, ToolPaths, default_data_directory};
+use gamel10n_core::{
+    Application, DEFAULT_PAGE_SIZE, ToolPaths,
+    catalog::ENGINE_TOOLS_DIR,
+    default_data_directory,
+    settings::{GlobalSettings, SETTINGS_FILENAME},
+    workbench::FILTER_ALL,
+};
 use gamel10n_engines::{
     CancellationToken, EngineService, PackageManifest,
-    protocol::AdapterRequest,
+    protocol::{AdapterRequest, PROTOCOL_VERSION, RESPONSE_FILE_KEY},
     python::PythonAdapter,
     vntextpatch::{FORMATS, VnTextPatch},
 };
@@ -59,11 +64,11 @@ enum Operation {
         project_id: String,
         #[arg(long, default_value = "")]
         query: String,
-        #[arg(long, default_value = "all")]
+        #[arg(long, default_value = FILTER_ALL)]
         status: String,
         #[arg(long, default_value_t = 0)]
         offset: usize,
-        #[arg(long, default_value_t = 100)]
+        #[arg(long, default_value_t = DEFAULT_PAGE_SIZE)]
         limit: usize,
     },
     /// 列出原生脚本解析器键。
@@ -106,10 +111,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     } = arguments.command
     {
         let request: AdapterRequest = read_json(&request)?;
-        if request.protocol_version != 1 {
+        if request.protocol_version != PROTOCOL_VERSION {
             return Err("不支持的协议版本。".into());
         }
-        if request.extra.contains_key("responseFile") {
+        if request.extra.contains_key(RESPONSE_FILE_KEY) {
             return Err("工具入口使用 stdout JSON，请省略 responseFile。".into());
         }
         let cancellation = CancellationToken::new();
@@ -117,7 +122,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             .data_directory
             .clone()
             .unwrap_or_else(default_data_directory)
-            .join("settings.json");
+            .join(SETTINGS_FILENAME);
         let settings: GlobalSettings =
             if (package.is_some() || python_adapter.is_some()) && settings_path.try_exists()? {
                 read_json(&settings_path)?
@@ -134,7 +139,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                         .data_directory
                         .clone()
                         .unwrap_or_else(default_data_directory)
-                        .join("extensions/engine-tools"),
+                        .join(ENGINE_TOOLS_DIR),
                 )
                 .execute(&handle, &request, &cancellation)
                 .await?
@@ -210,7 +215,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             query,
             offset,
         } => {
-            let page = app.text_page(&project_id, &query, offset, 100).await?;
+            let page = app
+                .text_page(&project_id, &query, offset, DEFAULT_PAGE_SIZE)
+                .await?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(
@@ -246,10 +253,14 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 let started = std::time::Instant::now();
                 let result = async {
                     let metadata = app.open_project(&project.id).await?;
-                    let page = app.text_page(&project.id, "", 0, 100).await?;
+                    let page = app
+                        .text_page(&project.id, "", 0, DEFAULT_PAGE_SIZE)
+                        .await?;
                     let cold_ms = started.elapsed().as_secs_f64() * 1000.0;
                     let cached = std::time::Instant::now();
-                    let again = app.text_page(&project.id, "", 0, 100).await?;
+                    let again = app
+                        .text_page(&project.id, "", 0, DEFAULT_PAGE_SIZE)
+                        .await?;
                     let cached_ms = cached.elapsed().as_secs_f64() * 1000.0;
                     let expected = metadata
                         .extra

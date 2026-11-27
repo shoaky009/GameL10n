@@ -1,10 +1,18 @@
 //! Translation task coordination and provider selection, without desktop dependencies.
 
-use crate::{Application, CancellationToken, CoreError, application::CachedAnalysis};
+use crate::{
+    Application, CancellationToken, CoreError,
+    application::{CachedAnalysis, EXTRACTION_DIR},
+    metrics::{MODE_CONTINUED, MODE_NEW},
+    settings::{
+        FORMAT_PLAIN_TEXT, MAX_CONCURRENT_TRANSLATIONS, PROTOCOL_RESPONSES, project_settings_keys,
+    },
+    task_op,
+};
 use gamel10n_engines::protocol::ExtractionResult;
 use gamel10n_translation::files::{read_json, write_json, write_json_compact};
 use gamel10n_translation::{
-    execution::{TranslationEngine, TranslationOptions, TranslationRunResult},
+    execution::{MEMORY_DIR, TranslationEngine, TranslationOptions, TranslationRunResult},
     provider::{ApiProtocol, OpenAiProvider, ProviderSettings, TranslationFormat},
 };
 use serde::{Deserialize, Serialize};
@@ -14,6 +22,10 @@ use std::{
     time::Duration,
 };
 use tokio::sync::Notify;
+
+const TRANSLATION_SCOPE_FILE: &str = "translation-scope.json";
+const MAX_PREVIEW_SLOT: u8 = 1;
+const PERMIT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Default)]
 pub(crate) struct TranslationScheduler {
@@ -647,12 +659,12 @@ impl Application {
                 endpoint: profile.endpoint.clone(),
                 api_key: self.decrypt_key(profile).await?,
                 model: profile.model.clone(),
-                protocol: if profile.protocol == "Responses" {
+                protocol: if profile.protocol == PROTOCOL_RESPONSES {
                     ApiProtocol::Responses
                 } else {
                     ApiProtocol::ChatCompletions
                 },
-                translation_format: if profile.translation_format == "PlainText" {
+                translation_format: if profile.translation_format == FORMAT_PLAIN_TEXT {
                     TranslationFormat::PlainText
                 } else {
                     TranslationFormat::JsonBatch
@@ -676,7 +688,11 @@ impl Application {
                 return Err(gamel10n_engines::EngineError::Cancelled.into());
             }
             let notified = self.translation_scheduler.changed.notified();
-            let maximum = self.settings().await?.maximum_translations.clamp(1, 8);
+            let maximum = self
+                .settings()
+                .await?
+                .maximum_translations
+                .clamp(1, MAX_CONCURRENT_TRANSLATIONS);
             {
                 let mut active = self
                     .translation_scheduler
@@ -692,7 +708,7 @@ impl Application {
                 biased;
                 _ = cancellation.cancelled() => return Err(gamel10n_engines::EngineError::Cancelled.into()),
                 _ = notified => {}
-                _ = tokio::time::sleep(Duration::from_millis(250)) => {}
+                _ = tokio::time::sleep(PERMIT_POLL_INTERVAL) => {}
             }
         }
     }
@@ -707,12 +723,12 @@ impl Application {
         cancellation: &CancellationToken,
     ) -> Result<TranslationRunResult, CoreError> {
         let project = self.store.get(id).await?;
-        if options.batch_size == TranslationOptions::default().batch_size {
+        if options.batch_size == TranslationOptions::DEFAULT_BATCH_SIZE {
             options.batch_size = project
                 .settings
-                .get("batchSize")
+                .get(project_settings_keys::BATCH_SIZE)
                 .and_then(Value::as_u64)
-                .unwrap_or(TranslationOptions::default().batch_size as u64)
+                .unwrap_or(TranslationOptions::DEFAULT_BATCH_SIZE as u64)
                 as usize;
         }
         let providers = self.translation_providers(id).await?;
@@ -746,9 +762,9 @@ impl Application {
         let result = {
             let _permit = self.translation_permit(cancellation).await?;
             let mode = if matches!(input, TranslationInput::ResumePreview(_)) {
-                "continued"
+                MODE_CONTINUED
             } else {
-                "new"
+                MODE_NEW
             };
             let analysis = match input {
                 TranslationInput::Preview(analysis) => analysis,
@@ -768,7 +784,7 @@ impl Application {
                 .await;
             let engine = TranslationEngine::new(
                 directory,
-                Some(self.data_directory().join("memory").join(id)),
+                Some(self.data_directory().join(MEMORY_DIR).join(id)),
             );
             let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
             let report = move |progress| {
@@ -833,13 +849,13 @@ impl Application {
         resume_slot: Option<u8>,
     ) -> Result<TranslationRunResult, CoreError> {
         let operation = if options.retranslation_id.is_some() {
-            "retranslate"
+            task_op::RETRANSLATE
         } else if options.candidate_only {
-            "candidate"
+            task_op::CANDIDATE
         } else {
-            "translate"
+            task_op::TRANSLATE
         };
-        let side_task = if operation == "translate" && !options.build_patch_after {
+        let side_task = if operation == task_op::TRANSLATE && !options.build_patch_after {
             self.begin_preview_translation(id, resume_slot.is_some())
                 .await?
         } else {
@@ -856,7 +872,7 @@ impl Application {
             _ => TranslationInput::Committed,
         };
         let operation = if parallel {
-            "preview-translate"
+            task_op::PREVIEW_TRANSLATE
         } else {
             operation
         };
@@ -885,9 +901,13 @@ impl Application {
             }
             // A failed trial build must remain resumable even when every translation is already saved.
             if options.build_patch_after {
-                final_operation = "build";
-                self.progress(id, "build", "翻译已保存，正在检查原始资源并生成补丁。")
-                    .await;
+                final_operation = task_op::BUILD;
+                self.progress(
+                    id,
+                    task_op::BUILD,
+                    "翻译已保存，正在检查原始资源并生成补丁。",
+                )
+                .await;
                 patch = Some(
                     self.generate_patch_in_task(
                         id,
@@ -953,7 +973,7 @@ impl Application {
         message: &str,
         progress: Option<&gamel10n_translation::execution::TranslationProgress>,
     ) {
-        if operation == "preview-translate" {
+        if operation == task_op::PREVIEW_TRANSLATE {
             self.preview_translation_progress(id, message, progress)
                 .await;
         } else {
@@ -983,7 +1003,7 @@ impl Application {
             .await;
         let _ = self.events.send(crate::AppEvent::TranslationChanged {
             project_id: id.into(),
-            parallel: operation == "preview-translate",
+            parallel: operation == task_op::PREVIEW_TRANSLATE,
             progress,
         });
     }
@@ -997,10 +1017,14 @@ impl Application {
         let directory = self.project_directory(id)?;
         let mut scope = TranslationScope::from_options(options, false);
         tokio::task::spawn_blocking(move || -> Result<(), CoreError> {
-            let scope_path = directory.join("translation-scope.json");
+            let scope_path = directory.join(TRANSLATION_SCOPE_FILE);
             let previous = saved_preview_slot(&directory);
             // Keep the previous input readable until the new scope has committed.
-            let slot = if previous == Some(0) { 1 } else { 0 };
+            let slot = if previous == Some(0) {
+                MAX_PREVIEW_SLOT
+            } else {
+                0
+            };
             let input_path = preview_input_path(&directory, slot)?;
             let source = analysis.extraction();
             if let Some(ids) = &scope.unit_ids {
@@ -1042,11 +1066,11 @@ impl Application {
         completed: bool,
     ) -> Result<(), CoreError> {
         let directory = self.store.directory(id)?;
-        let path = directory.join("translation-scope.json");
+        let path = directory.join(TRANSLATION_SCOPE_FILE);
         let scope = TranslationScope::from_options(options, completed);
         tokio::task::spawn_blocking(move || -> Result<(), CoreError> {
             write_json(&path, &scope)?;
-            for slot in 0..=1 {
+            for slot in 0..=MAX_PREVIEW_SLOT {
                 let _ = std::fs::remove_file(preview_input_path(&directory, slot)?);
             }
             Ok(())
@@ -1055,7 +1079,7 @@ impl Application {
         Ok(())
     }
     pub async fn translation_scope(&self, id: &str) -> Result<Option<TranslationScope>, CoreError> {
-        let path = self.store.directory(id)?.join("translation-scope.json");
+        let path = self.store.directory(id)?.join(TRANSLATION_SCOPE_FILE);
         if !path.is_file() {
             return Ok(None);
         }
@@ -1067,7 +1091,7 @@ impl Application {
         let configuration = &settings.api_configuration;
         let analysis = project
             .settings
-            .get("analysisProfileId")
+            .get(project_settings_keys::ANALYSIS_PROFILE_ID)
             .and_then(Value::as_str)
             .or(configuration.analysis_profile_id.as_deref());
         let label = |id: &str| {
@@ -1104,16 +1128,18 @@ fn preview_input_path(
     directory: &std::path::Path,
     slot: u8,
 ) -> Result<std::path::PathBuf, CoreError> {
-    if slot > 1 {
+    if slot > MAX_PREVIEW_SLOT {
         return Err(CoreError::InvalidData("翻译输入快照无效。".into()));
     }
     Ok(directory
-        .join("extraction")
+        .join(EXTRACTION_DIR)
         .join(format!("translation-input-{slot}.json")))
 }
 
 pub(crate) fn saved_preview_slot(directory: &std::path::Path) -> Option<u8> {
-    if !(0..=1).any(|slot| preview_input_path(directory, slot).is_ok_and(|path| path.is_file())) {
+    if !(0..=MAX_PREVIEW_SLOT)
+        .any(|slot| preview_input_path(directory, slot).is_ok_and(|path| path.is_file()))
+    {
         return None;
     }
     #[derive(Deserialize)]
@@ -1121,7 +1147,7 @@ pub(crate) fn saved_preview_slot(directory: &std::path::Path) -> Option<u8> {
     struct ScopeHeader {
         preview_slot: Option<u8>,
     }
-    let slot = read_json::<ScopeHeader>(&directory.join("translation-scope.json"))
+    let slot = read_json::<ScopeHeader>(&directory.join(TRANSLATION_SCOPE_FILE))
         .ok()?
         .preview_slot?;
     preview_input_path(directory, slot)

@@ -1,10 +1,25 @@
 //! Project-owned recognition, adaptation and verified patch operations.
 use crate::{
     Application, CancellationToken, CoreError, StoredAnalysis,
-    application::resolve_relative,
-    catalog::{AdapterVersion, EngineCatalog, GameCompatibility},
+    application::{
+        ANALYSIS_SCHEMA_REFERENCE, ANALYSIS_SCHEMA_SNAPSHOT, NATIVE_EXTRACTION_FILE,
+        resolve_relative,
+    },
+    catalog::{
+        AdapterVersion, DISCOVERY_INDEX_VERSION, ENGINE_TOOLS_DIR, EXTENSIONS_DIR, EngineCatalog,
+        GameCompatibility, PACKAGES_DIR,
+    },
     logs::{FileProgress, LogSource},
-    patching::{PAYLOAD_DIRECTORY, PatchInstaller, build_manifest, remove_unchanged_files},
+    metrics::{
+        MODE_CONTINUED, MODE_REUSED, STATUS_COMPLETED, STATUS_FAILED, STATUS_PAUSED,
+        STATUS_UNSUPPORTED,
+    },
+    patching::{
+        MANIFEST_FILENAME, PATCHES_DIR, PAYLOAD_DIRECTORY, PatchInstaller, TEST_STATUS_FAILED,
+        TEST_STATUS_NOT_TESTED, TEST_STATUS_PASSED, build_manifest, remove_unchanged_files,
+    },
+    settings::{PROTOCOL_RESPONSES, project_settings_keys},
+    task_op,
 };
 pub use gamel10n_engines::adaptation::RepairIssue;
 use gamel10n_engines::{
@@ -14,13 +29,20 @@ use gamel10n_engines::{
         AdaptationInputs, AdaptationLimits, AdaptationRequest, AdaptationResult,
         SMALL_EXTRACTION_THRESHOLD,
     },
-    discovery::Inventory,
-    protocol::{AdapterRequest, BuildMode, ProbeResult},
+    discovery::{
+        ADAPTER_SRC_DIR, BUILTIN_KIRIKIRI_SMIL_ID, BUILTIN_SFA16_ID, BUILTIN_SIGLUS_ID, Inventory,
+    },
+    protocol::{
+        AdapterRequest, BuildMode, GAME_ROOT_DIR, OP_BUILD, OP_EXTRACT, OP_PROBE, OP_VALIDATE,
+        ProbeResult,
+    },
+    review::ADAPTATION_SESSION_PATH,
     service::GeneratedAdapterReuseFailure,
 };
 use gamel10n_translation::{
     files::{hash_file, hash_text, read_json, write_json, write_json_compact},
     provider::{ApiProtocol, OpenAiProvider, ProviderSettings, TranslationFormat},
+    storage::SHA256_HEX_LEN,
     validate_units,
 };
 use serde::{Deserialize, Serialize};
@@ -31,6 +53,25 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
+
+pub const ADAPTATION_RESULT_FILE: &str = "adaptation-result.json";
+pub const ADAPTATION_PROGRESS_FILE: &str = "adaptation-progress.json";
+pub const LATEST_PATCH_RESULT_FILE: &str = "latest-result.json";
+pub(crate) const PATCH_RESULT_SUFFIX: &str = ".result.json";
+pub(crate) const PATCH_TEXTS_SUFFIX: &str = ".texts.json";
+pub(crate) const SOURCES_DIR: &str = "sources";
+pub(crate) const VALIDATION_DIR: &str = "validation";
+
+const PATCH_VALIDATION_SUFFIX: &str = ".validation.json";
+const PATCH_FINGERPRINT_VERSION: u32 = 3;
+const MAX_DIAGNOSTIC_CHARS: usize = 2_000;
+const MAX_DIAGNOSTICS_RETAINED: usize = 12;
+const MAX_REUSE_FAILURES: usize = 6;
+const MAX_EVIDENCE_EXCERPT_CHARS: usize = 200;
+const MAX_REPAIR_SAMPLES: usize = 3;
+const MAX_REPAIR_WARNINGS: usize = 4;
+const STAGE_EXTRACTION: &str = "extraction";
+const STAGE_ORIGINAL_ROUNDTRIP: &str = "original-roundtrip";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -172,19 +213,16 @@ fn saved_adaptation_objective(
         #[serde(default)]
         objective: Value,
     }
-    let saved =
-        match read_json::<SavedObjective>(&directory.join("adaptation/current/session.json")) {
-            Ok(saved) => AdaptationObjective::from_saved(&saved.objective)?,
-            Err(gamel10n_translation::files::FileError::Io { source, .. })
-                if source.kind() == std::io::ErrorKind::NotFound =>
-            {
-                None
-            }
-            Err(gamel10n_translation::files::FileError::Json { source, .. }) if !source.is_io() => {
-                None
-            }
-            Err(error) => return Err(error.into()),
-        };
+    let saved = match read_json::<SavedObjective>(&directory.join(ADAPTATION_SESSION_PATH)) {
+        Ok(saved) => AdaptationObjective::from_saved(&saved.objective)?,
+        Err(gamel10n_translation::files::FileError::Io { source, .. })
+            if source.kind() == std::io::ErrorKind::NotFound =>
+        {
+            None
+        }
+        Err(gamel10n_translation::files::FileError::Json { source, .. }) if !source.is_io() => None,
+        Err(error) => return Err(error.into()),
+    };
     Ok(saved.or_else(|| {
         crate::projects::extraction_coverage_pending(&project.extra)
             .then_some(AdaptationObjective::ExpandCoverage)
@@ -206,21 +244,20 @@ pub(crate) fn resumable_adaptation(
 ) -> Result<Option<SavedAdaptation>, CoreError> {
     // A successful regular extraction supersedes the model session left by an earlier attempt.
     if previous_task
-        .is_some_and(|task| task.operation == "recognize" && task.succeeded == Some(true))
-        && directory.join("extraction/native.json").is_file()
+        .is_some_and(|task| task.operation == task_op::RECOGNIZE && task.succeeded == Some(true))
+        && directory.join(NATIVE_EXTRACTION_FILE).is_file()
     {
         return Ok(None);
     }
-    let saved =
-        match read_json::<SavedAdaptation>(&directory.join("adaptation/current/session.json")) {
-            Ok(saved) => saved,
-            Err(gamel10n_translation::files::FileError::Io { source, .. })
-                if source.kind() == std::io::ErrorKind::NotFound =>
-            {
-                return Ok(None);
-            }
-            Err(error) => return Err(error.into()),
-        };
+    let saved = match read_json::<SavedAdaptation>(&directory.join(ADAPTATION_SESSION_PATH)) {
+        Ok(saved) => saved,
+        Err(gamel10n_translation::files::FileError::Io { source, .. })
+            if source.kind() == std::io::ErrorKind::NotFound =>
+        {
+            return Ok(None);
+        }
+        Err(error) => return Err(error.into()),
+    };
     let unfinished = !matches!(
         saved.last_status,
         Some(
@@ -228,7 +265,7 @@ pub(crate) fn resumable_adaptation(
                 | gamel10n_engines::AdaptationStatus::Reused
         )
     ) || previous_task
-        .is_some_and(|task| task.operation == "adapt" && task.succeeded != Some(true));
+        .is_some_and(|task| task.operation == task_op::ADAPT && task.succeeded != Some(true));
     Ok(unfinished.then_some(saved))
 }
 
@@ -298,7 +335,7 @@ impl Application {
                     crate::metrics::SOFTWARE_VERSION,
                     crate::metrics::BUILD_GIT_HASH,
                 )
-                .with_shared_directory(self.data_directory().join("extensions/engine-tools")),
+                .with_shared_directory(self.data_directory().join(ENGINE_TOOLS_DIR)),
         )
     }
     pub async fn package_directories(&self) -> Result<Vec<PathBuf>, CoreError> {
@@ -316,7 +353,7 @@ impl Application {
         let project = self.store.get(id).await?;
         let profile_id = project
             .settings
-            .get("analysisProfileId")
+            .get(project_settings_keys::ANALYSIS_PROFILE_ID)
             .and_then(Value::as_str)
             .or(settings.api_configuration.analysis_profile_id.as_deref())
             .ok_or_else(|| CoreError::InvalidData("请先选择分析 API。".into()))?;
@@ -330,7 +367,7 @@ impl Application {
             endpoint: p.endpoint.clone(),
             api_key: self.decrypt_key(p).await?,
             model: p.model.clone(),
-            protocol: if p.protocol == "Responses" {
+            protocol: if p.protocol == PROTOCOL_RESPONSES {
                 ApiProtocol::Responses
             } else {
                 ApiProtocol::ChatCompletions
@@ -345,7 +382,7 @@ impl Application {
             maximum_output_tokens: p.analysis_output_limit()?,
             maximum_tokens: project
                 .settings
-                .get("adaptationTokenBudget")
+                .get(project_settings_keys::ADAPTATION_TOKEN_BUDGET)
                 .and_then(Value::as_u64)
                 .unwrap_or(settings.adaptation_token_budget),
         };
@@ -364,7 +401,7 @@ impl Application {
         let token = self
             .begin_with_review_evidence(
                 id,
-                "extract",
+                task_op::EXTRACT,
                 &format!("正在使用 {label} 检查游戏资源。"),
                 true,
             )
@@ -372,7 +409,7 @@ impl Application {
         let result = self.extract_selected(id, selected, &token).await;
         self.finish(
             id,
-            "extract",
+            task_op::EXTRACT,
             result
                 .as_ref()
                 .map(|count| format!("{label} 已提取 {count} 条文本。"))
@@ -415,8 +452,8 @@ impl Application {
                 let confirmed = detail.games.iter().any(|g| {
                     g.game_id == project.id
                         && g.coverage_confirmed
-                        && g.structure_status == "passed"
-                        && g.runtime_status != "failed"
+                        && g.structure_status == TEST_STATUS_PASSED
+                        && g.runtime_status != TEST_STATUS_FAILED
                 });
                 let coverage = if confirmed
                     || (current
@@ -500,7 +537,7 @@ impl Application {
         let recover_missing = if continuing
             && !self
                 .project_directory(id)?
-                .join("extraction/native.json")
+                .join(NATIVE_EXTRACTION_FILE)
                 .is_file()
         {
             let root = self.data_directory().to_owned();
@@ -517,9 +554,9 @@ impl Application {
             false
         };
         let mut operation = if forced || (continuing && !recover_missing) {
-            "adapt"
+            task_op::ADAPT
         } else {
-            "recognize"
+            task_op::RECOGNIZE
         };
         let task;
         let cancellation = if let Some(cancellation) = task_cancellation {
@@ -546,8 +583,8 @@ impl Application {
         self.metrics_details(
             id,
             operation,
-            Some("recognize"),
-            continuing.then_some("continued"),
+            Some(task_op::RECOGNIZE),
+            continuing.then_some(MODE_CONTINUED),
             None,
         )
         .await;
@@ -555,10 +592,11 @@ impl Application {
             if recover_missing {
                 let recovered = self.recognize_existing(id, &cancellation, true).await?;
                 if let Some(count) = recovered.accepted_extraction() {
-                    self.metrics_details(id, operation, None, Some("reused"), None).await;
+                    self.metrics_details(id, operation, None, Some(MODE_REUSED), None)
+                        .await;
                     return Ok(RecognitionResult::Extracted(count));
                 }
-                operation = "adapt";
+                operation = task_op::ADAPT;
                 self.progress(id, operation, "本地复用未恢复文本，正在续接上次智能适配。")
                     .await;
             }
@@ -599,11 +637,12 @@ impl Application {
             }
             if let Some(count) = recognized.accepted_extraction() {
                 if recognized.known_game {
-                    self.metrics_details(id, operation, None, Some("reused"), None).await;
+                    self.metrics_details(id, operation, None, Some(MODE_REUSED), None)
+                        .await;
                 }
                 return Ok(RecognitionResult::Extracted(count));
             }
-            operation = "adapt";
+            operation = task_op::ADAPT;
             let (message, instruction, objective) = if let Some(count) = recognized.extracted {
                 let message = format!("常规适配仅提取 {count} 条文本，已保留结果；正在智能检查文字覆盖，确认是否遗漏主要脚本。");
                 let instruction = format!("常规适配仅提取 {count} 条文本（少于 {SMALL_EXTRACTION_THRESHOLD} 条），尚不能确认文字覆盖。请核对已匹配解析器、提取来源和实际游戏资源；不要把说明文件、辅助文本或少量可解析文本误认为主要脚本已提取完成。数量只是检查线索；若确为小体量游戏，可根据资源证据确认，无需凑足文本数量。已有结果可用 inspect_existing_text 查看。\n\n{instruction}");
@@ -729,7 +768,7 @@ impl Application {
                 if candidate
                     .descriptor
                     .as_ref()
-                    .is_none_or(|d| d.discovery_index_version != 1)
+                    .is_none_or(|d| d.discovery_index_version != DISCOVERY_INDEX_VERSION)
                     && !candidate.matches_inventory(&inventory)
                 {
                     continue;
@@ -757,7 +796,7 @@ impl Application {
         .await??;
         self.progress(
             id,
-            "recognize",
+            task_op::RECOGNIZE,
             &format!(
                 "已扫描 {} 个文件，筛选出 {} 个扩展适配器候选；接下来检查候选与内置解析器。",
                 inventory.files.len(),
@@ -804,23 +843,24 @@ impl Application {
                     tokio::select! {
                         biased;
                         Some(progress) = rx.recv() => {
-                            self.progress(id, "recognize", &progress.message).await;
+                            self.progress(id, task_op::RECOGNIZE, &progress.message).await;
                         }
                         result = &mut discovery => break result,
                     }
                 }
             };
             while let Ok(progress) = rx.try_recv() {
-                self.progress(id, "recognize", &progress.message).await;
+                self.progress(id, task_op::RECOGNIZE, &progress.message)
+                    .await;
             }
             let discovered = discovered?;
             diagnostics.extend(
                 discovered
                     .diagnostics
                     .into_iter()
-                    .map(|message| message.chars().take(2000).collect::<String>()),
+                    .map(|message| message.chars().take(MAX_DIAGNOSTIC_CHARS).collect::<String>()),
             );
-            diagnostics.truncate(12);
+            diagnostics.truncate(MAX_DIAGNOSTICS_RETAINED);
             reuse_failures.extend(discovered.reuse_failures);
             for observation in discovered.builtin_probes {
                 builtin_probes.insert(observation.format.clone(), observation);
@@ -841,7 +881,9 @@ impl Application {
                     } => (
                         id.clone(),
                         version.clone(),
-                        package_directory.as_ref().map(|path| path.join("src")),
+                        package_directory
+                            .as_ref()
+                            .map(|path| path.join(ADAPTER_SRC_DIR)),
                     ),
                     _ => (
                         probe.adapter_id.clone(),
@@ -877,7 +919,7 @@ impl Application {
                         stage,
                         message,
                     })) => {
-                        let message = message.chars().take(2000).collect::<String>();
+                        let message = message.chars().take(MAX_DIAGNOSTIC_CHARS).collect::<String>();
                         if !excluded.insert((adapter_id.clone(), version.clone())) {
                             return Err(CoreError::InvalidData(
                                 "候选适配器未被正确排除，识别已停止。".into(),
@@ -885,7 +927,7 @@ impl Application {
                         }
                         self.progress(
                             id,
-                            "recognize",
+                            task_op::RECOGNIZE,
                             &format!("适配器 {adapter_id} {version} 不兼容：{message}；继续检查其他候选。"),
                         )
                         .await;
@@ -905,7 +947,7 @@ impl Application {
                     Err(error) => return Err(error),
                 }
             }
-            reuse_failures.truncate(6);
+            reuse_failures.truncate(MAX_REUSE_FAILURES);
             {
                 let _project = self.lock_project(id).await?;
                 let mut current = self.store.get(id).await?;
@@ -958,7 +1000,7 @@ impl Application {
             .task_state(id)
             .await
             .map(|state| state.operation)
-            .unwrap_or_else(|| "extract".into());
+            .unwrap_or_else(|| task_op::EXTRACT.into());
         self.progress(id, &operation, "正在核对原始资源。").await;
         let target = directory.clone();
         let game = project.game_directory.clone();
@@ -968,7 +1010,7 @@ impl Application {
         let legacy_source = previous
             .as_ref()
             .and_then(|cached| cached.native().ok())
-            .filter(|stored| stored.schema_version == 1)
+            .filter(|stored| stored.schema_version == ANALYSIS_SCHEMA_SNAPSHOT)
             .filter(|stored| {
                 inputs.is_some_and(|inputs| {
                     inputs
@@ -1004,7 +1046,7 @@ impl Application {
                 .await;
             extraction
         } else {
-            let mut request = AdapterRequest::new("extract", source.directory());
+            let mut request = AdapterRequest::new(OP_EXTRACT, source.directory());
             request.resource_files = Some(files.clone());
             request.set_probe_context(&probe);
             self.progress(id, &operation, "正在提取并校验文本身份。")
@@ -1014,7 +1056,7 @@ impl Application {
                 .await?
                 .extraction
                 .ok_or_else(|| gamel10n_engines::EngineError::Incompatible {
-                    stage: "extraction",
+                    stage: STAGE_EXTRACTION,
                     message: "适配器未返回提取结果。".into(),
                 })?;
             extraction
@@ -1022,21 +1064,21 @@ impl Application {
                 .retain(|unit| !unit.source_text.trim().is_empty());
             validate_units(&extraction.units).map_err(|error| {
                 gamel10n_engines::EngineError::Incompatible {
-                    stage: "extraction",
+                    stage: STAGE_EXTRACTION,
                     message: error.to_string(),
                 }
             })?;
             self.progress(id, &operation, "正在验证原文字节回填。")
                 .await;
             let roundtrip = tempfile::tempdir()?;
-            request.operation = "build".into();
+            request.operation = OP_BUILD.into();
             request.output_directory = Some(roundtrip.path().to_path_buf());
             let built = service
                 .execute_with_hashes(&adapter, &request, Some(&hashes), None, cancellation)
                 .await?
                 .build
                 .ok_or_else(|| gamel10n_engines::EngineError::Incompatible {
-                    stage: "original-roundtrip",
+                    stage: STAGE_ORIGINAL_ROUNDTRIP,
                     message: "适配器未返回原文回填结果。".into(),
                 })?;
             if built.mode == BuildMode::Overlay && !built.files.is_empty() {
@@ -1048,7 +1090,7 @@ impl Application {
                     .await?
                     .extraction
                     .ok_or_else(|| gamel10n_engines::EngineError::Incompatible {
-                        stage: "original-roundtrip",
+                        stage: STAGE_ORIGINAL_ROUNDTRIP,
                         message: "覆盖包未返回回读文本。".into(),
                     })?;
                 let by_id: BTreeMap<_, _> = actual
@@ -1064,24 +1106,24 @@ impl Application {
                         .any(|unit| by_id.get(unit.id.as_str()).copied() != Some(unit))
                 {
                     return Err(gamel10n_engines::EngineError::Incompatible {
-                        stage: "original-roundtrip",
+                        stage: STAGE_ORIGINAL_ROUNDTRIP,
                         message: "原文覆盖包改变了文本内容或身份。".into(),
                     }
                     .into());
                 }
-                request.operation = "validate".into();
+                request.operation = OP_VALIDATE.into();
                 built.set_output_context(&mut request);
                 let validation = service
                     .execute_with_hashes(&adapter, &request, Some(&hashes), None, cancellation)
                     .await?
                     .validation
                     .ok_or_else(|| gamel10n_engines::EngineError::Incompatible {
-                        stage: "original-roundtrip",
+                        stage: STAGE_ORIGINAL_ROUNDTRIP,
                         message: "覆盖包未返回结构验证结果。".into(),
                     })?;
                 if !validation.passed || !validation.issues.is_empty() {
                     return Err(gamel10n_engines::EngineError::Incompatible {
-                        stage: "original-roundtrip",
+                        stage: STAGE_ORIGINAL_ROUNDTRIP,
                         message: "原文覆盖包未通过结构验证。".into(),
                     }
                     .into());
@@ -1096,7 +1138,7 @@ impl Application {
                     // Adapters may omit untouched files; every emitted source must round-trip exactly.
                     if rebuilt.is_file() && hash_file(&rebuilt)? != *expected {
                         return Err(gamel10n_engines::EngineError::Incompatible {
-                            stage: "original-roundtrip",
+                            stage: STAGE_ORIGINAL_ROUNDTRIP,
                             message: format!("原文回填改变资源：{file}"),
                         }
                         .into());
@@ -1121,7 +1163,11 @@ impl Application {
         let coverage_pending =
             coverage == ExtractionCoverage::CheckIfSmall && count < SMALL_EXTRACTION_THRESHOLD;
         let stored = StoredAnalysis {
-            schema_version: if legacy_source.is_some() { 1 } else { 2 },
+            schema_version: if legacy_source.is_some() {
+                ANALYSIS_SCHEMA_SNAPSHOT
+            } else {
+                ANALYSIS_SCHEMA_REFERENCE
+            },
             coverage_pending,
             format: adapter.id().into(),
             source_directory: legacy_source.unwrap_or_else(|| project.game_directory.clone()),
@@ -1148,9 +1194,9 @@ impl Application {
                 title: project.name,
                 variant: probe.engine_id.clone(),
                 adapter_version: probe.adapter_version.clone(),
-                structure_status: "passed".into(),
+                structure_status: TEST_STATUS_PASSED.into(),
                 coverage_confirmed: true,
-                runtime_status: "not-tested".into(),
+                runtime_status: TEST_STATUS_NOT_TESTED.into(),
                 updated_at: Some(chrono::Utc::now().to_rfc3339()),
             };
             if let PackageRegistration::Trial(replaces) = registration {
@@ -1276,7 +1322,7 @@ impl Application {
         } else {
             "正在智能适配：准备分析环境和已有进度。"
         };
-        let cancellation = self.begin(id, "adapt", message).await?;
+        let cancellation = self.begin(id, task_op::ADAPT, message).await?;
         let result = self
             .run_adaptation(id, instruction, start, &cancellation)
             .await;
@@ -1287,7 +1333,7 @@ impl Application {
         );
         self.finish_with_log_source(
             id,
-            "adapt",
+            task_op::ADAPT,
             result
                 .as_ref()
                 .map_err(ToString::to_string)
@@ -1315,18 +1361,24 @@ impl Application {
         // Validate configuration before creating an adaptation workspace or changing its state.
         let (provider, limits) = self.analysis_provider(id).await?;
         let objective = start.objective;
-        self.metrics_provider(id, "adapt", &provider).await;
+        self.metrics_provider(id, task_op::ADAPT, &provider).await;
         let task = match objective {
-            AdaptationObjective::Repair => Some("repair"),
-            AdaptationObjective::ExpandCoverage => Some("expand"),
-            AdaptationObjective::Develop => Some("adapt"),
+            AdaptationObjective::Repair => Some(task_op::REPAIR),
+            AdaptationObjective::ExpandCoverage => Some(task_op::EXPAND),
+            AdaptationObjective::Develop => Some(task_op::ADAPT),
         };
         let continuing = self
             .project_directory(id)?
-            .join("adaptation/current/session.json")
+            .join(ADAPTATION_SESSION_PATH)
             .is_file();
-        self.metrics_details(id, "adapt", task, continuing.then_some("continued"), None)
-            .await;
+        self.metrics_details(
+            id,
+            task_op::ADAPT,
+            task,
+            continuing.then_some(MODE_CONTINUED),
+            None,
+        )
+        .await;
         let improve_existing = improving_existing(&project);
         let instruction = if !start.resume_session
             && objective == AdaptationObjective::Repair
@@ -1354,7 +1406,7 @@ impl Application {
         let sources = baseline.clone();
         let token = cancellation.clone();
         let mut inputs = self
-            .run_file_task(id, "adapt", move |progress| {
+            .run_file_task(id, task_op::ADAPT, move |progress| {
                 let baseline = sources
                     .as_ref()
                     .map(|value| {
@@ -1455,7 +1507,7 @@ impl Application {
             game_directory: project.game_directory.clone(),
             project_directory: directory,
             inputs,
-            package_directory: self.data_directory().join("extensions"),
+            package_directory: self.data_directory().join(EXTENSIONS_DIR),
             package_directories: packages,
             reference_package_directories: references,
             indexed_packages,
@@ -1485,12 +1537,12 @@ impl Application {
         let result = loop {
             tokio::select! {
                 biased;
-                Some(progress) = rx.recv() => self.engine_progress(id, "adapt", progress).await?,
+                Some(progress) = rx.recv() => self.engine_progress(id, task_op::ADAPT, progress).await?,
                 result = &mut future => break result,
             }
         };
         while let Ok(progress) = rx.try_recv() {
-            self.engine_progress(id, "adapt", progress).await?;
+            self.engine_progress(id, task_op::ADAPT, progress).await?;
         }
         let mut result = result?;
         if let Some(adapter) = &result.adapter {
@@ -1516,7 +1568,7 @@ impl Application {
                 service
                     .execute(
                         adapter,
-                        &AdapterRequest::new("probe", &project.game_directory),
+                        &AdapterRequest::new(OP_PROBE, &project.game_directory),
                         cancellation,
                     )
                     .await?
@@ -1529,7 +1581,7 @@ impl Application {
             .ok_or_else(|| CoreError::InvalidData("已发布适配器未匹配当前游戏。".into()))?;
             let trial = result.status == gamel10n_engines::AdaptationStatus::Activated;
             let coverage = if trial
-                && !(request.objective.eq_ignore_ascii_case("repair")
+                && !(request.objective.eq_ignore_ascii_case(task_op::REPAIR)
                     && crate::projects::extraction_coverage_pending(&project.extra))
             {
                 ExtractionCoverage::Confirmed
@@ -1564,22 +1616,22 @@ impl Application {
         }
         let status = match result.status {
             gamel10n_engines::AdaptationStatus::Activated
-            | gamel10n_engines::AdaptationStatus::Reused => "completed",
+            | gamel10n_engines::AdaptationStatus::Reused => STATUS_COMPLETED,
             gamel10n_engines::AdaptationStatus::Failed
-            | gamel10n_engines::AdaptationStatus::Unavailable => "failed",
-            gamel10n_engines::AdaptationStatus::Unsupported => "unsupported",
-            _ => "paused",
+            | gamel10n_engines::AdaptationStatus::Unavailable => STATUS_FAILED,
+            gamel10n_engines::AdaptationStatus::Unsupported => STATUS_UNSUPPORTED,
+            _ => STATUS_PAUSED,
         };
         self.metrics_details(
             id,
-            "adapt",
+            task_op::ADAPT,
             None,
-            (result.status == gamel10n_engines::AdaptationStatus::Reused).then_some("reused"),
+            (result.status == gamel10n_engines::AdaptationStatus::Reused).then_some(MODE_REUSED),
             Some(status),
         )
         .await;
         write_json(
-            &self.project_directory(id)?.join("adaptation-result.json"),
+            &self.project_directory(id)?.join(ADAPTATION_RESULT_FILE),
             &result,
         )?;
         Ok(result)
@@ -1610,7 +1662,7 @@ impl Application {
             )
             .await;
         }
-        let progress_path = self.project_directory(id)?.join("adaptation-progress.json");
+        let progress_path = self.project_directory(id)?.join(ADAPTATION_PROGRESS_FILE);
         // Ephemeral progress snapshots must not abort an active task if briefly locked on Windows.
         match tokio::task::spawn_blocking(move || write_json(&progress_path, &snapshot)).await {
             Ok(Ok(())) => {}
@@ -1657,7 +1709,7 @@ impl Application {
                 .task_state(id)
                 .await
                 .map(|task| task.operation)
-                .unwrap_or_else(|| "build".into());
+                .unwrap_or_else(|| task_op::BUILD.into());
             let (source, _) = self
                 .run_file_task(id, &operation, move |progress| {
                     let stored = baseline.native()?;
@@ -1709,7 +1761,7 @@ impl Application {
         )
         .map_err(|e| CoreError::InvalidData(e.to_string()))?;
         let package = resolve_relative(
-            &self.data_directory().join("extensions/packages"),
+            &self.data_directory().join(EXTENSIONS_DIR).join(PACKAGES_DIR),
             &format!("{}/{}", probe.adapter_id, probe.adapter_version),
         )?;
         let adapter = if package.is_dir() {
@@ -1728,11 +1780,11 @@ impl Application {
                     .ok_or_else(|| CoreError::InvalidData("原文记录的内置脚本格式未知。".into()))?
                     .to_string(),
             }
-        } else if probe.adapter_id == "engine.siglus" {
+        } else if probe.adapter_id == BUILTIN_SIGLUS_ID {
             AdapterHandle::BuiltinSiglus
-        } else if probe.adapter_id == "engine.sfa16.aos-v2" {
+        } else if probe.adapter_id == BUILTIN_SFA16_ID {
             AdapterHandle::BuiltinSfa16
-        } else if probe.adapter_id == "engine.kirikiri-smil-smile" {
+        } else if probe.adapter_id == BUILTIN_KIRIKIRI_SMIL_ID {
             AdapterHandle::BuiltinKirikiriSmil
         } else {
             return Err(CoreError::InvalidData(format!(
@@ -1787,13 +1839,15 @@ impl Application {
         unit_ids: Option<Vec<String>>,
         reviewed_only: bool,
     ) -> Result<PathBuf, CoreError> {
-        let cancellation = self.begin(id, "build", "正在检查原始资源和译文。").await?;
+        let cancellation = self
+            .begin(id, task_op::BUILD, "正在检查原始资源和译文。")
+            .await?;
         let result = self
             .generate_patch_in_task(id, unit_ids.as_deref(), reviewed_only, &cancellation)
             .await;
         self.finish(
             id,
-            "build",
+            task_op::BUILD,
             result
                 .as_ref()
                 .map(|p| format!("补丁已生成：{}。尚未验证游戏内显示。", p.display()))
@@ -1849,10 +1903,14 @@ impl Application {
             }),
         };
         let root = self.project_directory(id)?;
-        fs::create_dir_all(root.join("patches"))?;
+        fs::create_dir_all(root.join(PATCHES_DIR))?;
         let fingerprint = {
-            let mut inputs =
-                json!({"adapter":adapter,"sources":hashes,"texts":translations,"version":3});
+            let mut inputs = json!({
+                "adapter": adapter,
+                "sources": hashes,
+                "texts": translations,
+                "version": PATCH_FINGERPRINT_VERSION,
+            });
             if copy_count != 0 {
                 inputs["additionalTextCopies"] = json!(copy_count);
             }
@@ -1866,10 +1924,10 @@ impl Application {
                     .map_err(|e| CoreError::InvalidData(e.to_string()))?,
             )
         };
-        let destination = root.join("patches").join(&fingerprint);
+        let destination = root.join(PATCHES_DIR).join(&fingerprint);
         let result_record = root
-            .join("patches")
-            .join(format!("{fingerprint}.result.json"));
+            .join(PATCHES_DIR)
+            .join(format!("{fingerprint}{PATCH_RESULT_SUFFIX}"));
         if destination.is_dir() && result_record.is_file() {
             let mut previous: PatchResult = read_json(&result_record)?;
             let manifest = crate::patching::read_manifest(&destination)?;
@@ -1892,22 +1950,22 @@ impl Application {
                 .extra
                 .insert("adapterVersionRef".into(), json!(adapter_version));
             write_json(&result_record, &previous)?;
-            write_json(&root.join("latest-result.json"), &previous)?;
+            write_json(&root.join(LATEST_PATCH_RESULT_FILE), &previous)?;
             return Ok(destination);
         }
         let patch = tempfile::Builder::new()
             .prefix("patch-")
-            .tempdir_in(root.join("patches"))?;
+            .tempdir_in(root.join(PATCHES_DIR))?;
         let payload = patch.path().join(PAYLOAD_DIRECTORY);
         fs::create_dir(&payload)?;
-        let mut request = AdapterRequest::new("build", source);
+        let mut request = AdapterRequest::new(OP_BUILD, source);
         request.resource_files = Some(files);
         request.translations = Some(translations.clone());
         request.output_directory = Some(payload);
         if let Some(p) = &probe {
             request.set_probe_context(p);
         }
-        self.progress(id, "build", "正在回填译文并验证补丁结构。")
+        self.progress(id, task_op::BUILD, "正在回填译文并验证补丁结构。")
             .await;
         let mut built = service
             .execute_with_hashes(&adapter, &request, Some(&hashes), None, cancellation)
@@ -1924,7 +1982,7 @@ impl Application {
                 "所选译文没有产生需要写入的修改。".into(),
             ));
         }
-        request.operation = "validate".into();
+        request.operation = OP_VALIDATE.into();
         built.set_output_context(&mut request);
         let validation = service
             .execute_with_hashes(&adapter, &request, Some(&hashes), None, cancellation)
@@ -1932,7 +1990,8 @@ impl Application {
             .validation
             .ok_or_else(|| CoreError::InvalidData("适配器未返回结构验证结果。".into()))?;
         if !validation.passed || !validation.issues.is_empty() {
-            let report = PathBuf::from("patches").join(format!("{fingerprint}.validation.json"));
+            let report =
+                PathBuf::from(PATCHES_DIR).join(format!("{fingerprint}{PATCH_VALIDATION_SUFFIX}"));
             write_json(&root.join(&report), &validation)?;
             return Err(CoreError::InvalidData(format!(
                 "补丁结构验证失败：{}。完整校验报告：{}",
@@ -1971,7 +2030,7 @@ impl Application {
             let game = self.store.get(id).await?;
             crate::launch::validate_configuration(&game.game_directory, &launch.configuration)?;
         }
-        write_json(&patch.path().join("patch-manifest.json"), &manifest)?;
+        write_json(&patch.path().join(MANIFEST_FILENAME), &manifest)?;
         if destination.exists() {
             return Err(CoreError::InvalidData(
                 "同一补丁目录已存在但缺少提交记录，已有文件已保留。".into(),
@@ -2008,15 +2067,15 @@ impl Application {
         };
         // The selection is tied to this immutable patch, so later edits do not change its preview.
         write_json_compact(
-            &root.join("patches").join(format!(
-                "{}.texts.json",
+            &root.join(PATCHES_DIR).join(format!(
+                "{}{PATCH_TEXTS_SUFFIX}",
                 path.file_name().unwrap_or_default().to_string_lossy()
             )),
             &translations,
         )?;
         write_json(&result_record, &result)?;
         fs::rename(patch.path(), &path)?;
-        write_json(&root.join("latest-result.json"), &result)?;
+        write_json(&root.join(LATEST_PATCH_RESULT_FILE), &result)?;
         Ok::<_, CoreError>(path)
     }
 
@@ -2033,11 +2092,16 @@ impl Application {
         if let (Some(baseline), Ok(page)) = (baseline, &page) {
             for unit in &baseline.extraction().units {
                 if let Some(expected) = page.texts.get(&unit.id).and_then(Value::as_str) {
-                    let excerpt = |value: &str| value.chars().take(200).collect::<String>();
+                    let excerpt = |value: &str| {
+                        value
+                            .chars()
+                            .take(MAX_EVIDENCE_EXCERPT_CHARS)
+                            .collect::<String>()
+                    };
                     samples.push(json!({"id":unit.id,"resource":unit.resource_path,
                         "locator":excerpt(&unit.locator),"source":excerpt(&unit.source_text),
                         "expected":excerpt(expected)}));
-                    if samples.len() == 3 {
+                    if samples.len() == MAX_REPAIR_SAMPLES {
                         break;
                     }
                 }
@@ -2047,14 +2111,14 @@ impl Application {
             json!({"adapter":patch.extra.get("adapterVersionRef"),"trial":patch.is_trial,
             "translatedUnits":patch.translated_units,"launchExecutable":patch.launch_executable,
             "runtimeStatus":patch.validation.get("runtimeStatus"),"warnings":patch.warnings.iter()
-                .take(4).map(|s|s.chars().take(200).collect::<String>()).collect::<Vec<_>>(),
+                .take(MAX_REPAIR_WARNINGS).map(|s|s.chars().take(MAX_EVIDENCE_EXCERPT_CHARS).collect::<String>()).collect::<Vec<_>>(),
             "samples":samples,"sampleReadError":page.err().map(|e|e.to_string())}),
         ))
     }
 
     pub async fn latest_patch(&self, id: &str) -> Result<Option<PatchResult>, CoreError> {
         let root = self.project_directory(id)?;
-        let path = root.join("latest-result.json");
+        let path = root.join(LATEST_PATCH_RESULT_FILE);
         if !path.is_file() {
             return Ok(None);
         }
@@ -2099,14 +2163,14 @@ impl Application {
         }
         let root = self.project_directory(id)?;
         let cancellation = cancellation.clone();
-        self.run_file_task(id, "install", move |progress| {
+        self.run_file_task(id, task_op::INSTALL, move |progress| {
             let fallback = patch.launch_executable.as_ref().map(|executable| {
                 gamel10n_engines::protocol::LaunchTarget {
                     location: gamel10n_engines::protocol::LaunchLocation::Patch,
                     configuration: gamel10n_engines::protocol::LaunchConfiguration {
                         executable: executable.clone(),
                         arguments: String::new(),
-                        working_directory: ".".into(),
+                        working_directory: GAME_ROOT_DIR.into(),
                     },
                 }
             });
@@ -2152,7 +2216,7 @@ impl Application {
         overwrite_modified: bool,
     ) -> Result<(), CoreError> {
         let cancellation = self
-            .begin(id, "install", "正在核对文件并安装汉化补丁。")
+            .begin(id, task_op::INSTALL, "正在核对文件并安装汉化补丁。")
             .await?;
         let result = self
             .install_patch_in_task_with_overwrite(
@@ -2164,7 +2228,7 @@ impl Application {
             .await;
         self.finish(
             id,
-            "install",
+            task_op::INSTALL,
             result
                 .as_ref()
                 .map(|r| {
@@ -2190,7 +2254,7 @@ impl Application {
         let project = self.store.get(id).await?;
         let root = self.project_directory(id)?;
         let cancellation = cancellation.clone();
-        self.run_file_task(id, "restore", move |progress| {
+        self.run_file_task(id, task_op::RESTORE, move |progress| {
             let installer = PatchInstaller::new(root)
                 .with_cancellation(cancellation.clone())
                 .with_progress(progress);
@@ -2217,7 +2281,7 @@ impl Application {
         overwrite_modified: bool,
     ) -> Result<(), CoreError> {
         let cancellation = self
-            .begin(id, "restore", "正在核对哈希并恢复原版。")
+            .begin(id, task_op::RESTORE, "正在核对哈希并恢复原版。")
             .await?;
         let result = match self
             .restore_game_in_task_with_overwrite(id, &cancellation, overwrite_modified)
@@ -2232,7 +2296,7 @@ impl Application {
         };
         self.finish(
             id,
-            "restore",
+            task_op::RESTORE,
             result
                 .as_ref()
                 .map(|r| {
@@ -2252,7 +2316,7 @@ impl Application {
         package: &Path,
     ) -> Result<VerificationResult, CoreError> {
         let cancellation = self
-            .begin(id, "verify", "正在验证所选适配器发布包。")
+            .begin(id, task_op::VERIFY, "正在验证所选适配器发布包。")
             .await?;
         let result = async {
             let (_, source_input, files, _, probe) = self.build_source(id, &cancellation).await?;
@@ -2274,7 +2338,7 @@ impl Application {
                 .cached_analysis(id)
                 .await?
                 .ok_or_else(|| CoreError::InvalidData("请先提取项目文本。".into()))?;
-            let root = self.project_directory(id)?.join("validation");
+            let root = self.project_directory(id)?.join(VALIDATION_DIR);
             fs::create_dir_all(&root)?;
             let output = tempfile::Builder::new()
                 .prefix("package-")
@@ -2309,7 +2373,7 @@ impl Application {
         .await;
         self.finish(
             id,
-            "verify",
+            task_op::VERIFY,
             result
                 .as_ref()
                 .map(|r| r.diagnostics.join("\n"))
@@ -2369,10 +2433,10 @@ pub(crate) fn source_inputs(
                 "已有资源快照路径包含上级目录。".into(),
             ));
         }
-        let sources = std::path::absolute(project.join("sources"))?;
+        let sources = std::path::absolute(project.join(SOURCES_DIR))?;
         let source = std::path::absolute(&baseline.source_directory)?;
         crate::patching::check_path(&source)?;
-        let reference = baseline.schema_version == 2;
+        let reference = baseline.schema_version == ANALYSIS_SCHEMA_REFERENCE;
         if (reference && source != std::path::absolute(game)?)
             || (!reference && (source == sources || !source.starts_with(&sources)))
         {
@@ -2393,7 +2457,7 @@ pub(crate) fn source_inputs(
         let mut hashes = BTreeMap::new();
         for (relative, hash) in &baseline.source_hashes {
             let relative = crate::patching::normalize_relative(relative)?;
-            if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            if hash.len() != SHA256_HEX_LEN || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
                 return Err(CoreError::InvalidData(format!(
                     "已有资源的 SHA-256 无效：{relative}"
                 )));

@@ -10,6 +10,7 @@ mod settings_ui;
 mod terminology_ui;
 mod time_ui;
 mod token_ui;
+mod ui_contract;
 #[cfg(test)]
 mod ui_preview_tests;
 mod window_redraw;
@@ -21,6 +22,7 @@ mod workbench_ui;
 use clap::Parser;
 use gamel10n_core::{
     Application, CoreError, ToolPaths, catalog::EngineCatalog, default_data_directory,
+    workbench::FILTER_ALL,
 };
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use std::{
@@ -30,8 +32,19 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
+    time::Duration,
 };
 use tokio::sync::RwLock;
+use ui_contract::{modal, page, page_arg, project_tab};
+
+pub(crate) const TASK_STOP_TIMEOUT: Duration = Duration::from_secs(60);
+pub(crate) const TASK_STOP_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
+pub(crate) const REPOSITORY_URL: &str = env!("CARGO_PKG_REPOSITORY");
+#[cfg(windows)]
+pub(crate) const OPEN_COMMAND: &str = "explorer.exe";
+#[cfg(not(windows))]
+pub(crate) const OPEN_COMMAND: &str = "xdg-open";
 
 #[expect(
     clippy::todo,
@@ -120,8 +133,11 @@ impl Context {
         let id = id.to_owned();
         self.update(move |ui| {
             let app = ui.global::<App>();
-            if app.get_project_id().as_str() == id && app.get_page() == 0 && app.get_tab() == 1 {
-                app.invoke_action("texts".into(), "refresh".into());
+            if app.get_project_id().as_str() == id
+                && app.get_page() == page::PROJECT
+                && app.get_tab() == project_tab::WORKBENCH
+            {
+                app.invoke_action("texts".into(), page_arg::REFRESH.into());
             }
         });
     }
@@ -130,14 +146,17 @@ impl Context {
         let selection = workbench_ui::selection_action(action);
         let navigation = matches!(action, "project" | "project-reference" | "tab" | "navigate")
             || (action == "open"
-                && input.page == 0
+                && input.page == page::PROJECT
                 && matches!(input.argument.as_str(), "adapter" | "knowledge"));
-        let list_navigation =
-            action == "texts" && matches!(input.argument.as_str(), "0" | "next" | "previous");
+        let list_navigation = action == "texts"
+            && matches!(
+                input.argument.as_str(),
+                page_arg::FIRST | page_arg::NEXT | page_arg::PREVIOUS
+            );
         // Stamp every action at the click, including actions that only refresh an existing view.
         input.view_revision = if navigation
             || matches!(action, "editor-step" | "review-next")
-            || action == "texts" && input.argument != "refresh"
+            || action == "texts" && input.argument != page_arg::REFRESH
             || action == "metrics" && input.argument != "auto"
         {
             self.generation.fetch_add(1, Ordering::SeqCst) + 1
@@ -146,7 +165,7 @@ impl Context {
         };
         input.editor_revision = if navigation
             || list_navigation
-            || (action == "confirm" && input.argument != "install")
+            || (action == "confirm" && input.argument != modal::INSTALL)
             || matches!(
                 action,
                 "edit-changed"
@@ -170,7 +189,7 @@ impl Context {
             self.edit_generation.load(Ordering::SeqCst)
         };
         let app = ui.global::<App>();
-        if action == "confirm" && input.argument == "version-delete" {
+        if action == "confirm" && input.argument == modal::VERSION_DELETE {
             input.engine_id = app.get_engine_delete_target().into();
             input.version_id = app.get_version_delete_target().into();
         }
@@ -184,8 +203,8 @@ impl Context {
                     .collect();
             }
         }
-        if input.page == 0
-            && input.tab == 1
+        if input.page == page::PROJECT
+            && input.tab == project_tab::WORKBENCH
             && (matches!(action, "editor-step" | "review-next")
                 || action == "texts" && (list_navigation || app.get_texts().row_count() == 0))
         {
@@ -314,28 +333,14 @@ impl UiInput {
             } else {
                 String::new()
             },
-            kind_filter: [
-                "all", "dialogue", "name", "choice", "ui", "item", "skill", "system",
-            ]
-            .get(a.get_kind_filter().max(0) as usize)
-            .unwrap_or(&"all")
-            .to_string(),
-            status_filter: [
-                "all",
-                "missing",
-                "pending",
-                "reviewed",
-                "edited",
-                "invalid",
-                "failed",
-                "candidate",
-                "automatic",
-                "manual",
-                "unknown",
-            ]
-            .get(a.get_status_filter().max(0) as usize)
-            .unwrap_or(&"all")
-            .to_string(),
+            kind_filter: workbench_ui::KIND_FILTERS
+                .get(a.get_kind_filter().max(0) as usize)
+                .unwrap_or(&FILTER_ALL)
+                .to_string(),
+            status_filter: workbench_ui::STATUS_FILTERS
+                .get(a.get_status_filter().max(0) as usize)
+                .unwrap_or(&FILTER_ALL)
+                .to_string(),
             only_selected: a.get_only_selected(),
             offset: a.get_offset().max(0) as usize,
             engine_id: a.get_engine_id().into(),
@@ -358,7 +363,7 @@ impl UiInput {
             tab: a.get_tab(),
             api_id: a.get_api_id().into(),
             api_copying: a.get_api_copying(),
-            api_test_draft: a.get_modal() == "api",
+            api_test_draft: a.get_modal() == modal::API,
             api_name: a.get_api_name().into(),
             api_endpoint: a.get_api_endpoint().into(),
             api_model: a.get_api_model().into(),
@@ -382,7 +387,7 @@ impl UiInput {
             terminology: a.get_terminology().into(),
             term_draft_source: a.get_term_draft_source().into(),
             term_draft_target: a.get_term_draft_target().into(),
-            terminology_selected: if a.get_modal().as_str() == "terminology-extract" {
+            terminology_selected: if a.get_modal().as_str() == modal::TERMINOLOGY_EXTRACT {
                 a.get_terminology_candidates()
                     .iter()
                     .filter(|row| row.selected)
@@ -455,7 +460,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     ui.global::<App>()
         .set_build_git_hash(gamel10n_core::metrics::BUILD_GIT_HASH.into());
     ui.global::<App>()
-        .set_repository_url(env!("CARGO_PKG_REPOSITORY").into());
+        .set_repository_url(REPOSITORY_URL.into());
     ui.global::<App>()
         .set_software_license(env!("CARGO_PKG_LICENSE").into());
     ui.global::<App>()
@@ -537,14 +542,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     return;
                 }
-                let stopped = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+                let stopped = tokio::time::timeout(TASK_STOP_TIMEOUT, async {
                     loop {
                         if !app.cancel_all_tasks().await
                             && ctx.active_actions.load(Ordering::Acquire) == 0
                         {
                             break;
                         }
-                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        tokio::time::sleep(TASK_STOP_POLL_INTERVAL).await;
                     }
                 })
                 .await;
@@ -566,7 +571,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if let Err(error) = window_state.save() {
         eprintln!("无法保存窗口状态：{error}");
     }
-    runtime.shutdown_timeout(std::time::Duration::from_secs(3));
+    runtime.shutdown_timeout(RUNTIME_SHUTDOWN_TIMEOUT);
     Ok(())
 }
 
@@ -582,7 +587,10 @@ fn install_actions(ui: &MainWindow, context: &Context) {
         let mut input = UiInput::capture(&ui, argument.to_string());
         let action = action.to_string();
         // A background save or translation result must not supersede pending user navigation.
-        if action == "texts" && input.argument == "refresh" && ui.global::<App>().get_loading() {
+        if action == "texts"
+            && input.argument == page_arg::REFRESH
+            && ui.global::<App>().get_loading()
+        {
             return;
         }
         if matches!(action.as_str(), "adapt" | "resume-adaptation") {
@@ -590,7 +598,7 @@ fn install_actions(ui: &MainWindow, context: &Context) {
         }
         if action == "project" {
             let mut session = ctx.session.lock().unwrap_or_else(|e| e.into_inner());
-            if input.page == 0
+            if input.page == page::PROJECT
                 && input.project_id == input.argument
                 && session.requested_project == input.argument
             {
@@ -650,7 +658,7 @@ fn install_actions(ui: &MainWindow, context: &Context) {
                 if !state.as_ref().is_some_and(|s| s.message == message) {
                     let _ = app
                         .log_error(
-                            if input.page == 0 {
+                            if input.page == page::PROJECT {
                                 &input.project_id
                             } else {
                                 ""
@@ -706,8 +714,8 @@ async fn dispatch(ctx: &Context, action: &str, input: &UiInput) -> Result<(), Co
     let (action, input) = if action == "confirm" {
         confirmed = input.clone();
         let action = match input.argument.as_str() {
-            "api" => "api-save",
-            "launch" => {
+            modal::API => "api-save",
+            modal::LAUNCH => {
                 if !input.launch_conflict_revision.is_empty() {
                     confirmed
                         .launch_revision
@@ -721,27 +729,27 @@ async fn dispatch(ctx: &Context, action: &str, input: &UiInput) -> Result<(), Co
                     "launch-save"
                 }
             }
-            "adapt" => "adapt",
-            "workflow-settings" => "workflow-save",
-            "add-term" => "add-term-save",
-            "terminology-extract" => "terminology-apply",
-            "remove" => "remove",
-            "patch" => "generate-patch",
-            "directory" => "switch-directory",
-            "retranslate" => {
+            modal::ADAPT => "adapt",
+            modal::WORKFLOW_SETTINGS => "workflow-save",
+            modal::ADD_TERM => "add-term-save",
+            modal::TERMINOLOGY_EXTRACT => "terminology-apply",
+            modal::REMOVE => "remove",
+            modal::PATCH => "generate-patch",
+            modal::DIRECTORY => "switch-directory",
+            modal::RETRANSLATE => {
                 confirmed.argument = "retranslate".into();
                 "translate"
             }
-            "install" => "install",
-            "install-overwrite" => "install-overwrite",
-            "restore" => "restore",
-            "restore-overwrite" => "restore-overwrite",
-            "cleanup" => "cleanup",
-            "api-delete" => "api-delete",
-            "version-delete" => "version-delete",
-            "verify-version" => "verify-version-confirm",
-            "bulk-review" => "bulk-review-confirm",
-            "resume-translation" => {
+            modal::INSTALL => "install",
+            modal::INSTALL_OVERWRITE => "install-overwrite",
+            modal::RESTORE => "restore",
+            modal::RESTORE_OVERWRITE => "restore-overwrite",
+            modal::CLEANUP => "cleanup",
+            modal::API_DELETE => "api-delete",
+            modal::VERSION_DELETE => "version-delete",
+            modal::VERIFY_VERSION => "verify-version-confirm",
+            modal::BULK_REVIEW => "bulk-review-confirm",
+            modal::RESUME_TRANSLATION => {
                 confirmed.argument = "resume".into();
                 "translate"
             }
@@ -749,7 +757,10 @@ async fn dispatch(ctx: &Context, action: &str, input: &UiInput) -> Result<(), Co
         };
         if !matches!(
             input.argument.as_str(),
-            "launch" | "workflow-settings" | "add-term" | "terminology-extract"
+            modal::LAUNCH
+                | modal::WORKFLOW_SETTINGS
+                | modal::ADD_TERM
+                | modal::TERMINOLOGY_EXTRACT
         ) {
             ctx.update(|ui| ui.global::<App>().set_modal("".into()));
         }
@@ -860,10 +871,6 @@ pub fn open_path(path: PathBuf) -> Result<(), CoreError> {
             path.display()
         )));
     }
-    #[cfg(windows)]
-    let command = "explorer.exe";
-    #[cfg(not(windows))]
-    let command = "xdg-open";
-    std::process::Command::new(command).arg(path).spawn()?;
+    std::process::Command::new(OPEN_COMMAND).arg(path).spawn()?;
     Ok(())
 }

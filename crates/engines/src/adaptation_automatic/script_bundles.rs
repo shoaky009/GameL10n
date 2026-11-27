@@ -1,13 +1,16 @@
 //! Ren'Py and Kirikiri bundled script/archive template qualification.
-use super::{TEMPLATE_BYTES, extension, record, reject, supported};
+use super::{extension, record, reject, supported};
 use crate::adaptation::{Session, text};
+use crate::adaptation_assets::{
+    ARCHIVE_RPA3_COMPONENT, LOOSE_KIRIKIRI_KS_TEMPLATE, LOOSE_RENPY_RPYC_TEMPLATE,
+    LOOSE_RENPY_TEMPLATE, MAX_ARCHIVE_ENTRIES, MAX_ARCHIVE_MANIFEST_BYTES,
+    MAX_TEMPLATE_TOTAL_BYTES, RENPY_MIXED_TEMPLATE, RPA3_RENPY_RPYC_TEMPLATE, RPA3_RENPY_TEMPLATE,
+};
 use crate::discovery::resolve_relative;
 use crate::{CancellationToken, EngineError, EngineService};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, fs, path::Path};
 
-const MAX_ARCHIVE_MANIFEST_BYTES: u64 = 8 * 1024 * 1024;
-const MAX_ARCHIVE_ENTRIES: u64 = 10_000;
 const MAX_RPYC_SCRIPT_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_RPY_SCRIPT_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -83,15 +86,15 @@ pub(super) fn plan(paths: &BTreeMap<String, u64>) -> Result<BundlePlan, EngineEr
     let mixed = !renpy.is_empty() && !compiled.is_empty()
         || !archives.is_empty() && (!renpy.is_empty() || !compiled.is_empty());
     let template_id = if mixed {
-        "renpy-mixed"
+        RENPY_MIXED_TEMPLATE
     } else if !archives.is_empty() {
-        "rpa3-renpy"
+        RPA3_RENPY_TEMPLATE
     } else if !compiled.is_empty() {
-        "loose-renpy-rpyc"
+        LOOSE_RENPY_RPYC_TEMPLATE
     } else if !renpy.is_empty() {
-        "loose-renpy"
+        LOOSE_RENPY_TEMPLATE
     } else {
-        "loose-kirikiri-ks"
+        LOOSE_KIRIKIRI_KS_TEMPLATE
     };
     Ok(BundlePlan {
         template_id,
@@ -142,7 +145,7 @@ pub(super) async fn inspect_archives(
                 workspace,
                 state,
                 &json!({
-                    "id": "archive.rpa3",
+                    "id": ARCHIVE_RPA3_COMPONENT,
                     "operation": "inspect",
                     "archive": format!("resources/{resource}"),
                     "output": output,
@@ -176,7 +179,7 @@ pub(super) async fn inspect_archives(
             )
             .ok_or_else(|| reject("封包脚本超出预算。"))?;
         read += manifest["readBytes"].as_u64().unwrap_or(0);
-        if entries > MAX_ARCHIVE_ENTRIES || selected_bytes > TEMPLATE_BYTES {
+        if entries > MAX_ARCHIVE_ENTRIES || selected_bytes > MAX_TEMPLATE_TOTAL_BYTES {
             return Err(reject(
                 "全部封包合计超过自动组合的 10,000 成员／256 MiB 脚本预算。",
             ));
@@ -232,13 +235,13 @@ pub(super) async fn inspect_archives(
         report["mediaOnlyArchives"] = json!(media);
     }
     let id = if sources > 0 && compiled > 0 {
-        "renpy-mixed"
+        RENPY_MIXED_TEMPLATE
     } else if scripts == 0 && plan.loose_renpy == 0 && plan.loose_compiled == 0 {
         return Err(reject(
             "全部资源中都没有模板支持的 .rpy 或 RPYC2 编译脚本；未生成或发布适配器。",
         ));
     } else if !plan.mixed && compiled > 0 {
-        "rpa3-renpy-rpyc"
+        RPA3_RENPY_RPYC_TEMPLATE
     } else {
         text(&template, "id")?
     };

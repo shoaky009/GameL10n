@@ -5,6 +5,8 @@ use gamel10n_core::CoreError;
 use slint::ComponentHandle;
 use std::{sync::atomic::Ordering, time::Duration};
 
+const LOG_REFRESH_DEBOUNCE: Duration = Duration::from_millis(25);
+
 pub async fn refresh(ctx: &Context, id: &str) -> Result<(), CoreError> {
     let epoch = ctx.root_generation.load(Ordering::Acquire);
     let revision = {
@@ -17,7 +19,7 @@ pub async fn refresh(ctx: &Context, id: &str) -> Result<(), CoreError> {
         }
         ctx.log_generation.fetch_add(1, Ordering::AcqRel) + 1
     };
-    tokio::time::sleep(Duration::from_millis(25)).await;
+    tokio::time::sleep(LOG_REFRESH_DEBOUNCE).await;
     if ctx.log_generation.load(Ordering::Acquire) != revision
         || ctx.root_generation.load(Ordering::Acquire) != epoch
     {

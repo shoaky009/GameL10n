@@ -4,6 +4,7 @@ use crate::{
     TranslationUnit,
     compatibility::legacy_json,
     files::{self, hash_text, read_json, write_json, write_json_compact},
+    text::{DOUBLE_BRACKET_CLOSE, DOUBLE_BRACKET_OPEN},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -13,6 +14,22 @@ use std::{
     path::{Path, PathBuf},
 };
 use thiserror::Error;
+
+pub const DEFAULT_TARGET_LANGUAGE: &str = "简体中文";
+pub const EDITS_SNAPSHOT_FILE: &str = "translation-edits.json";
+pub const EDITS_JOURNAL_FILE: &str = "translation-edits.jsonl";
+pub const LEGACY_IMPORT_MARKER_FILE: &str = ".legacy-import.json";
+pub const SHA256_HEX_LEN: usize = 64;
+
+const SHARD_PREFIX_LEN: usize = 2;
+const MEMORY_SHARD_SCHEMA_V1: u32 = 1;
+const MEMORY_SHARD_SCHEMA_VERSION: u32 = 2;
+const EDITS_SCHEMA_VERSION: u32 = 1;
+const LEGACY_IMPORT_SCHEMA_VERSION: u32 = 1;
+const JSON_EXTENSION: &str = "json";
+const JSON_SUFFIX: &str = ".json";
+const BACKUP_SUFFIX: &str = ".bak";
+const JSON_BACKUP_SUFFIX: &str = ".json.bak";
 
 #[derive(Debug, Error)]
 pub enum StorageError {
@@ -40,7 +57,7 @@ fn version() -> String {
 impl Default for TranslationPolicy {
     fn default() -> Self {
         Self {
-            target_language: "简体中文".into(),
+            target_language: DEFAULT_TARGET_LANGUAGE.into(),
             style: String::new(),
             terminology: BTreeMap::new(),
             version: version(),
@@ -74,22 +91,24 @@ pub fn source_signature(unit: &TranslationUnit) -> String {
 }
 
 fn emphasis_groups(source: &str) -> Vec<&str> {
+    let open_len = DOUBLE_BRACKET_OPEN.len();
+    let close_len = DOUBLE_BRACKET_CLOSE.len();
     let mut groups = Vec::new();
     let mut offset = 0;
-    while let Some(start) = source[offset..].find("[[") {
+    while let Some(start) = source[offset..].find(DOUBLE_BRACKET_OPEN) {
         let start = offset + start;
-        let Some(end) = source[start + 2..].find("]]") else {
+        let Some(end) = source[start + open_len..].find(DOUBLE_BRACKET_CLOSE) else {
             break;
         };
-        let end = start + 2 + end;
-        if end > start + 2
-            && source[start + 2..end]
+        let end = start + open_len + end;
+        if end > start + open_len
+            && source[start + open_len..end]
                 .bytes()
                 .all(|byte| byte.is_ascii_alphabetic())
         {
-            groups.push(&source[start..end + 2]);
+            groups.push(&source[start..end + close_len]);
         }
-        offset = end + 2;
+        offset = end + close_len;
     }
     groups
 }
@@ -155,9 +174,9 @@ pub struct TranslationMemory {
 impl TranslationMemory {
     /// Opens read-only history, loading at most one shard at a time until a batch is committed.
     pub fn load(directory: PathBuf, legacy_directory: Option<&Path>) -> Result<Self, StorageError> {
-        let marker: Option<Value> = read_recoverable(&directory.join(".legacy-import.json"))?;
+        let marker: Option<Value> = read_recoverable(&directory.join(LEGACY_IMPORT_MARKER_FILE))?;
         if marker.as_ref().is_some_and(|value| {
-            value.get("schemaVersion") != Some(&json!(1))
+            value.get("schemaVersion") != Some(&json!(LEGACY_IMPORT_SCHEMA_VERSION))
                 || value.get("entryCount").and_then(Value::as_u64).is_none()
         }) {
             return Err(StorageError::Invalid("旧版缓存导入记录无效".into()));
@@ -178,10 +197,10 @@ impl TranslationMemory {
                 };
                 if path
                     .extension()
-                    .is_some_and(|extension| extension == "json")
+                    .is_some_and(|extension| extension == JSON_EXTENSION)
                 {
                     legacy_keys
-                        .entry(key[..2].into())
+                        .entry(key[..SHARD_PREFIX_LEN].into())
                         .or_default()
                         .push(key.into());
                 }
@@ -202,7 +221,8 @@ impl TranslationMemory {
             && let Some(keys) = self.legacy_keys.get(prefix)
         {
             for key in keys {
-                let mut entry: MemoryEntry = read_json(&legacy.join(format!("{key}.json")))?;
+                let mut entry: MemoryEntry =
+                    read_json(&legacy.join(format!("{key}{JSON_SUFFIX}")))?;
                 if entry.key.as_ref() != Some(key) {
                     return Err(StorageError::Invalid("旧版缓存键不一致".into()));
                 }
@@ -210,17 +230,20 @@ impl TranslationMemory {
                 entries.insert(key.clone(), entry);
             }
         }
-        if let Some(shard) =
-            read_recoverable::<MemoryShard>(&self.directory.join(format!("{prefix}.json")))?
-        {
-            if !matches!(shard.schema_version, 1 | 2) {
+        if let Some(shard) = read_recoverable::<MemoryShard>(
+            &self.directory.join(format!("{prefix}{JSON_SUFFIX}")),
+        )? {
+            if !matches!(
+                shard.schema_version,
+                MEMORY_SHARD_SCHEMA_V1 | MEMORY_SHARD_SCHEMA_VERSION
+            ) {
                 return Err(StorageError::Invalid("不支持的缓存分片版本".into()));
             }
             for (key, mut entry) in shard.entries {
                 if !valid_key(&key)
                     || !key.starts_with(prefix)
                     || entry.key.as_ref().is_some_and(|stored| stored != &key)
-                    || (shard.schema_version == 1 && entry.key.is_none())
+                    || (shard.schema_version == MEMORY_SHARD_SCHEMA_V1 && entry.key.is_none())
                 {
                     return Err(StorageError::Invalid("缓存分片键不一致".into()));
                 }
@@ -264,14 +287,14 @@ impl TranslationMemory {
             return Err(StorageError::Invalid("缓存键无效".into()));
         }
         let emphasis = emphasis_groups(&unit.source_text);
-        let primary = self.shard(&key[..2])?.contains_key(&key);
+        let primary = self.shard(&key[..SHARD_PREFIX_LEN])?.contains_key(&key);
         if !primary {
             if emphasis.is_empty() {
                 return Ok(None);
             }
             key = key_with_emphasis(unit, policy, false);
         }
-        let Some(entry) = self.shard(&key[..2])?.get(&key) else {
+        let Some(entry) = self.shard(&key[..SHARD_PREFIX_LEN])?.get(&key) else {
             return Ok(None);
         };
         if entry.source_text != unit.source_text || entry.context != unit.context {
@@ -295,7 +318,7 @@ impl TranslationMemory {
             }
             entry.key = None;
             pending
-                .entry(key[..2].into())
+                .entry(key[..SHARD_PREFIX_LEN].into())
                 .or_default()
                 .insert(key, entry);
         }
@@ -306,13 +329,15 @@ impl TranslationMemory {
             if self.directory.is_dir() {
                 for entry in fs::read_dir(&self.directory)? {
                     let name = entry?.file_name().to_string_lossy().into_owned();
-                    if (name.len() == 7 && name.ends_with(".json")
-                        || name.len() == 11 && name.ends_with(".json.bak"))
-                        && name.as_bytes()[..2]
+                    if (name.len() == SHARD_PREFIX_LEN + JSON_SUFFIX.len()
+                        && name.ends_with(JSON_SUFFIX)
+                        || name.len() == SHARD_PREFIX_LEN + JSON_BACKUP_SUFFIX.len()
+                            && name.ends_with(JSON_BACKUP_SUFFIX))
+                        && name.as_bytes()[..SHARD_PREFIX_LEN]
                             .iter()
                             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
                     {
-                        prefixes.insert(name[..2].to_owned());
+                        prefixes.insert(name[..SHARD_PREFIX_LEN].to_owned());
                     }
                 }
             }
@@ -323,16 +348,19 @@ impl TranslationMemory {
             let mut values = self.read_shard(&prefix)?;
             values.extend(pending.remove(&prefix).unwrap_or_default());
             let shard = MemoryShard {
-                schema_version: 2,
+                schema_version: MEMORY_SHARD_SCHEMA_VERSION,
                 entries: values,
             };
-            write_json_compact(&self.directory.join(format!("{prefix}.json")), &shard)?;
+            write_json_compact(
+                &self.directory.join(format!("{prefix}{JSON_SUFFIX}")),
+                &shard,
+            )?;
             entry_count += shard.entries.len();
         }
         if importing {
             write_json(
-                &self.directory.join(".legacy-import.json"),
-                &json!({"schemaVersion":1,"entryCount":entry_count}),
+                &self.directory.join(LEGACY_IMPORT_MARKER_FILE),
+                &json!({"schemaVersion":LEGACY_IMPORT_SCHEMA_VERSION,"entryCount":entry_count}),
             )?;
             self.legacy_directory = None;
             self.legacy_keys.clear();
@@ -342,7 +370,7 @@ impl TranslationMemory {
 }
 
 pub fn valid_key(value: &str) -> bool {
-    value.len() == 64
+    value.len() == SHA256_HEX_LEN
         && value
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
@@ -418,7 +446,7 @@ impl Default for TranslationEdits {
     fn default() -> Self {
         Self {
             revision: 0,
-            schema_version: 1,
+            schema_version: EDITS_SCHEMA_VERSION,
             entries: BTreeMap::new(),
             candidates: BTreeMap::new(),
             extra: BTreeMap::new(),
@@ -430,13 +458,13 @@ impl TranslationEdits {
         crate::edits::load_edits(directory).map(|(edits, _)| edits)
     }
     pub(crate) fn load_snapshot(directory: &Path) -> Result<Self, StorageError> {
-        let path = directory.join("translation-edits.json");
+        let path = directory.join(EDITS_SNAPSHOT_FILE);
         let value = if path.exists() {
             read_json(&path)?
         } else {
             Self::default()
         };
-        if value.schema_version != 1
+        if value.schema_version != EDITS_SCHEMA_VERSION
             || value
                 .entries
                 .iter()
@@ -444,7 +472,7 @@ impl TranslationEdits {
                 .any(|(key, entry)| !valid_edit(key, entry))
         {
             return Err(StorageError::Invalid(
-                "校对记录格式无效，请保留 translation-edits.json 检查".into(),
+                format!("校对记录格式无效，请保留 {EDITS_SNAPSHOT_FILE} 检查"),
             ));
         }
         Ok(value)
@@ -461,7 +489,7 @@ impl TranslationEdits {
     }
     pub fn save(&self, directory: &Path) -> Result<(), StorageError> {
         Ok(write_json_compact(
-            &directory.join("translation-edits.json"),
+            &directory.join(EDITS_SNAPSHOT_FILE),
             self,
         )?)
     }
@@ -474,7 +502,7 @@ fn is_zero(value: &u64) -> bool {
 pub fn read_recoverable<T: serde::de::DeserializeOwned>(
     path: &Path,
 ) -> Result<Option<T>, StorageError> {
-    let backup = PathBuf::from(format!("{}.bak", path.display()));
+    let backup = PathBuf::from(format!("{}{BACKUP_SUFFIX}", path.display()));
     if path.is_file() {
         match read_json(path) {
             Ok(value) => return Ok(Some(value)),

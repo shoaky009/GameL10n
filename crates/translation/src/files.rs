@@ -29,11 +29,19 @@ pub fn io_error(path: &Path, source: io::Error) -> FileError {
     }
 }
 
+#[cfg(windows)]
+const WIN32_ERROR_ACCESS_DENIED: i32 = 5;
+#[cfg(windows)]
+const WIN32_ERROR_SHARING_VIOLATION: i32 = 32;
+const HASH_BUFFER_BYTES: usize = 64 * 1024;
+
 fn is_transient_windows_error(error: &io::Error) -> bool {
     #[cfg(windows)]
     {
-        matches!(error.raw_os_error(), Some(5 | 32))
-            || error.kind() == io::ErrorKind::PermissionDenied
+        matches!(
+            error.raw_os_error(),
+            Some(WIN32_ERROR_ACCESS_DENIED | WIN32_ERROR_SHARING_VIOLATION)
+        ) || error.kind() == io::ErrorKind::PermissionDenied
     }
     #[cfg(not(windows))]
     {
@@ -235,7 +243,7 @@ pub fn hash_bytes(bytes: &[u8]) -> String {
 pub fn hash_file(path: &Path) -> Result<String, FileError> {
     let mut stream = File::open(path).map_err(|error| io_error(path, error))?;
     let mut hash = Sha256::new();
-    let mut buffer = vec![0_u8; 64 * 1024];
+    let mut buffer = vec![0_u8; HASH_BUFFER_BYTES];
     loop {
         let size = stream
             .read(&mut buffer)

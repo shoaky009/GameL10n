@@ -1,9 +1,14 @@
 use crate::{
     CoreError, GameProject,
-    application::load_analysis,
+    application::{EXTRACTION_DIR, NATIVE_EXTRACTION_FILE, load_analysis},
+    patching::BACKUP_SUFFIX,
     workbench::{Workbench, page_file::Pages},
 };
-use gamel10n_translation::{files::hash_bytes, storage::TranslationPolicy};
+use gamel10n_translation::{
+    execution::{MEMORY_DIR, TRANSLATION_ERRORS_FILE},
+    files::hash_bytes,
+    storage::{LEGACY_IMPORT_MARKER_FILE, TranslationPolicy},
+};
 use std::{collections::BTreeMap, fs, io, path::Path, sync::Arc, time::SystemTime};
 pub(crate) type Stamp = Option<(u64, SystemTime)>;
 pub(super) fn stamp(path: &Path) -> io::Result<Stamp> {
@@ -29,7 +34,9 @@ pub(super) fn list(
         let name = format!("{prefix}/{}", entry.file_name().to_string_lossy());
         let kind = entry.file_type()?;
         if kind.is_file()
-            && (name.ends_with(".json") || name.ends_with(".bak") || name.ends_with(".sha256"))
+            && (name.ends_with(".json")
+                || name.ends_with(BACKUP_SUFFIX)
+                || name.ends_with(".sha256"))
         {
             match entry.metadata() {
                 Ok(info) => {
@@ -51,18 +58,27 @@ pub(super) fn inputs(
     policy: &TranslationPolicy,
 ) -> Result<String, CoreError> {
     let mut files = BTreeMap::new();
-    let native = stamp(&dir.join("extraction/native.json"))?;
+    let native = stamp(&dir.join(NATIVE_EXTRACTION_FILE))?;
     if native.is_some() {
         files.insert("native".into(), native);
     } else {
-        list(&dir.join("extraction"), &mut files, "extraction", true)?;
+        list(
+            &dir.join(EXTRACTION_DIR),
+            &mut files,
+            EXTRACTION_DIR,
+            true,
+        )?;
     }
     files.insert(
         "failures".into(),
-        stamp(&dir.join("translation-errors.json"))?,
+        stamp(&dir.join(TRANSLATION_ERRORS_FILE))?,
     );
-    list(&dir.join("memory"), &mut files, "memory", false)?;
-    if !dir.join("memory/.legacy-import.json").is_file() {
+    list(&dir.join(MEMORY_DIR), &mut files, MEMORY_DIR, false)?;
+    if !dir
+        .join(MEMORY_DIR)
+        .join(LEGACY_IMPORT_MARKER_FILE)
+        .is_file()
+    {
         list(legacy, &mut files, "legacy", false)?;
     }
     let bytes = serde_json::to_vec(&(files, &project.id, project.extra.get("analysis"), policy))

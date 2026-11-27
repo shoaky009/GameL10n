@@ -12,7 +12,7 @@ use std::{
 use gamel10n_translation::{
     TokenUsage,
     files::{hash_file, hash_text, read_json, write_json},
-    provider::OpenAiProvider,
+    provider::{ESTIMATED_BYTES_PER_TOKEN, OpenAiProvider},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -47,13 +47,30 @@ pub struct EngineReviewResult {
 
 type SourceHashes = Vec<(String, String)>;
 
+pub const ADAPTATION_SESSION_PATH: &str = "adaptation/current/session.json";
+
+const ADAPTATION_WORKSPACE_DIR: &str = "adaptation/current";
+const ADAPTATION_SRC_DIR: &str = "adaptation/current/src";
+const SESSION_FILE: &str = "session.json";
+const REVIEW_SESSION_LOG_PATH: &str = "logs/engine-review-session.json";
+const OVERVIEW_EVIDENCE_PATH: &str = "overview";
+const KNOWLEDGE_INSPECTION_PREFIX: &str = "knowledge:";
+const FAMILY_MATCH_FIELDS: [&str; 3] = ["key", "name", "adapterId"];
+const REVIEW_CACHE_VERSION: u32 = 2;
+const MAX_KNOWLEDGE_OFFSET: u64 = 100_000;
+const KNOWLEDGE_NAME_LIMIT: usize = 160;
+const KNOWLEDGE_KEY_LIMIT: usize = 80;
+const MAX_KNOWLEDGE_TOOLS: usize = 4;
+const MAX_KNOWLEDGE_ALIASES: usize = 12;
+const MAX_KNOWLEDGE_TOOL_FILES: usize = 12;
+const MAX_KNOWLEDGE_PAGE_ITEMS: usize = 12;
 const REVIEW_SUMMARY_LIMIT: usize = 4000;
 const KNOWLEDGE_SUMMARY_LIMIT: usize = 400;
 const CONDITIONS_LIMIT: usize = 1600;
 const GUIDANCE_LIMIT: usize = 8000;
 
 fn review_evidence(directory: &Path) -> Result<(Vec<InventoryFile>, SourceHashes), EngineError> {
-    let source = directory.join("adaptation/current/src");
+    let source = directory.join(ADAPTATION_SRC_DIR);
     let mut evidence = Vec::new();
     let mut hashes = Vec::new();
     if source.is_dir() {
@@ -64,7 +81,7 @@ fn review_evidence(directory: &Path) -> Result<(Vec<InventoryFile>, SourceHashes
             ));
         }
         for file in inventory.files {
-            let path = format!("adaptation/current/src/{}", file.path);
+            let path = format!("{ADAPTATION_SRC_DIR}/{}", file.path);
             hashes.push((
                 path.clone(),
                 hash_file(&resolve_relative(directory, &path)?).map_err(file_error)?,
@@ -99,7 +116,7 @@ fn review_library_fingerprint(
     dependencies: &[String],
 ) -> Result<String, EngineError> {
     let mut keys = crate::adaptation_context::knowledge_candidates(state);
-    for field in ["key", "name", "adapterId"] {
+    for field in FAMILY_MATCH_FIELDS {
         if let Some(value) = state.family[field].as_str() {
             keys.push(value.into());
         }
@@ -156,9 +173,10 @@ pub(crate) fn read_knowledge(
         None => 0,
         Some(value) => value
             .as_u64()
-            .filter(|offset| *offset <= 100000)
-            .ok_or_else(|| EngineError::Protocol("offset 必须为 0–100000 的整数。".into()))?
-            as usize,
+            .filter(|offset| *offset <= MAX_KNOWLEDGE_OFFSET)
+            .ok_or_else(|| {
+                EngineError::Protocol(format!("offset 必须为 0–{MAX_KNOWLEDGE_OFFSET} 的整数。"))
+            })? as usize,
     };
     let mut matched: Vec<_> = entries
         .iter()
@@ -205,7 +223,7 @@ pub(crate) fn knowledge_preview(entry: &Value) -> Value {
 pub(crate) fn knowledge_page(items: impl Iterator<Item = Value>) -> Vec<Value> {
     let mut page = Vec::new();
     let mut bytes = 0;
-    for item in items.take(12) {
+    for item in items.take(MAX_KNOWLEDGE_PAGE_ITEMS) {
         let size = item.to_string().len() + 1;
         // Leave room for metadata below the history's 8 KiB preview threshold.
         // A single oversized source remains retrievable through read_tool_result.
@@ -219,7 +237,7 @@ pub(crate) fn knowledge_page(items: impl Iterator<Item = Value>) -> Vec<Value> {
 }
 
 fn knowledge_names(entry: &Value) -> Vec<&str> {
-    ["key", "name", "adapterId"]
+    FAMILY_MATCH_FIELDS
         .iter()
         .filter_map(|key| entry["family"][key].as_str())
         .chain(
@@ -247,8 +265,8 @@ impl EngineService {
         progress: ProgressCallback<'_>,
     ) -> Result<EngineReviewResult, EngineError> {
         limits.validate()?;
-        let workspace = project_directory.join("adaptation/current");
-        let session_path = workspace.join("session.json");
+        let workspace = project_directory.join(ADAPTATION_WORKSPACE_DIR);
+        let session_path = workspace.join(SESSION_FILE);
         let project_root = project_directory.to_owned();
         let knowledge_root = knowledge_directory.to_owned();
         let (state, evidence, evidence_fingerprint, library) =
@@ -263,7 +281,7 @@ impl EngineService {
             .map_err(file_error)??;
         let report = project_directory.join("engine-review.json");
         if let Ok(mut previous) = read_json::<EngineReviewResult>(&report)
-            && previous.cache_version == 2
+            && previous.cache_version == REVIEW_CACHE_VERSION
             && previous.evidence_fingerprint == evidence_fingerprint
             && previous.library_fingerprint
                 == review_library_fingerprint(&library, &state, &previous.knowledge_dependencies)?
@@ -294,7 +312,7 @@ impl EngineService {
             let request_messages = evidence::request_messages(&messages, latest_exchange);
             let estimated = (serde_json::to_vec(&request_messages)?.len()
                 + serde_json::to_vec(&tools)?.len()) as u64
-                / 3
+                / ESTIMATED_BYTES_PER_TOKEN
                 + 1;
             let remaining = limits.maximum_tokens.saturating_sub(tokens(&usage));
             if remaining < estimated + 128 {
@@ -382,9 +400,9 @@ impl EngineService {
                 let result = match call.name.as_str() {
                     "read_evidence" => {
                         let relative = text(&args, "path")?;
-                        if relative == "overview" {
-                            Ok(json!({"evidencePath":"overview","result":overview}))
-                        } else if relative.ends_with("session.json") {
+                        if relative == OVERVIEW_EVIDENCE_PATH {
+                            Ok(json!({"evidencePath":OVERVIEW_EVIDENCE_PATH,"result":overview}))
+                        } else if relative.ends_with(SESSION_FILE) {
                             Err(EngineError::Rejected(
                                 "会话正文请按工具 ID 使用 read_tool_result，避免读取全部会话。"
                                     .into(),
@@ -406,16 +424,18 @@ impl EngineService {
                         &workspace, &state, &messages, &args,
                     )
                     .inspect(|value| {
-                        if value["evidencePath"] == evidence::ADAPTATION_RESULT_PATH
+                        if value["evidencePath"] == ADAPTATION_SESSION_PATH
                             && value["found"] != false
                         {
-                            inspected
-                                .insert(evidence::ADAPTATION_RESULT_PATH.into(), String::new());
+                            inspected.insert(ADAPTATION_SESSION_PATH.into(), String::new());
                         }
                     }),
                     "read_knowledge" => {
                         if let Some(id) = args.get("id").and_then(Value::as_str) {
-                            inspected.insert(format!("knowledge:{id}"), String::new());
+                            inspected.insert(
+                                format!("{KNOWLEDGE_INSPECTION_PREFIX}{id}"),
+                                String::new(),
+                            );
                         }
                         read_knowledge(knowledge_directory, &args, None)
                     }
@@ -470,7 +490,7 @@ impl EngineService {
                     json!({"role":"tool","tool_call_id":call.id,"content":value.to_string()}),
                 );
                 write_json(
-                    &project_directory.join("logs/engine-review-session.json"),
+                    &project_directory.join(REVIEW_SESSION_LOG_PATH),
                     &json!({"messages":messages,"usage":usage,"finished":false}),
                 )
                 .map_err(file_error)?;
@@ -481,7 +501,7 @@ impl EngineService {
         let entry_id = submission.entry_id;
         let mut knowledge_dependencies: Vec<_> = inspected
             .keys()
-            .filter_map(|key| key.strip_prefix("knowledge:").map(str::to_owned))
+            .filter_map(|key| key.strip_prefix(KNOWLEDGE_INSPECTION_PREFIX).map(str::to_owned))
             .collect();
         if let Some(id) = &entry_id {
             knowledge_dependencies.push(id.clone());
@@ -489,7 +509,7 @@ impl EngineService {
         knowledge_dependencies.sort();
         knowledge_dependencies.dedup();
         let result = EngineReviewResult {
-            cache_version: 2,
+            cache_version: REVIEW_CACHE_VERSION,
             library_fingerprint: review_library_fingerprint(
                 &knowledge_entries(knowledge_directory)?,
                 &state,
@@ -507,7 +527,7 @@ impl EngineService {
         };
         write_json(&report, &result).map_err(file_error)?;
         write_json(
-            &project_directory.join("logs/engine-review-session.json"),
+            &project_directory.join(REVIEW_SESSION_LOG_PATH),
             &json!({"messages":messages,"usage":result.usage,"finished":true}),
         )
         .map_err(file_error)?;
@@ -560,7 +580,7 @@ pub(crate) fn knowledge_entries_with_warning(
 const MAX_KNOWLEDGE_BYTES: u64 = 512 * 1024;
 
 fn read_knowledge_entry(path: &Path, id: &str) -> Result<Value, EngineError> {
-    if !stable_key(id, 160) || id.len() < 2 {
+    if !stable_key(id, KNOWLEDGE_NAME_LIMIT) || id.len() < 2 {
         return Err(EngineError::Protocol("无效的引擎经验标识。".into()));
     }
     let file = fs::File::open(path)?;
@@ -637,9 +657,9 @@ fn validate_knowledge(entry: &Value) -> Result<(), EngineError> {
 fn validate_knowledge_fields(entry: &Value) -> Result<(), EngineError> {
     let family = &entry["family"];
     let key = text(family, "key")?;
-    let name = require_knowledge_text(family, "name", 160)?;
+    let name = require_knowledge_text(family, "name", KNOWLEDGE_NAME_LIMIT)?;
     if !matches!(family["kind"].as_str(), Some("engine" | "template"))
-        || !stable_key(key, 80)
+        || !stable_key(key, KNOWLEDGE_KEY_LIMIT)
         || name.chars().any(char::is_control)
         || !stable_key(text(entry, "key")?, 64)
     {
@@ -655,16 +675,16 @@ fn validate_knowledge_fields(entry: &Value) -> Result<(), EngineError> {
         require_knowledge_text(entry, key, maximum)?;
     }
     let invalid_aliases = || {
-        EngineError::Protocol(
-            "经验的 aliases 必须为最多 12 项的数组，每项须为非空白文本，长度上限为 160。".into(),
-        )
+        EngineError::Protocol(format!(
+            "经验的 aliases 必须为最多 {MAX_KNOWLEDGE_ALIASES} 项的数组，每项须为非空白文本，长度上限为 {KNOWLEDGE_NAME_LIMIT}。"
+        ))
     };
     let aliases = entry["aliases"].as_array().ok_or_else(invalid_aliases)?;
-    if aliases.len() > 12
+    if aliases.len() > MAX_KNOWLEDGE_ALIASES
         || aliases.iter().any(|alias| {
-            alias
-                .as_str()
-                .is_none_or(|alias| alias.trim().is_empty() || alias.encode_utf16().count() > 160)
+            alias.as_str().is_none_or(|alias| {
+                alias.trim().is_empty() || alias.encode_utf16().count() > KNOWLEDGE_NAME_LIMIT
+            })
         })
     {
         return Err(invalid_aliases());
@@ -694,19 +714,19 @@ fn validate_knowledge_attachments(entry: &Value) -> Result<(), EngineError> {
     let tools = entry["tools"].as_array().ok_or_else(invalid)?;
     let mut names = BTreeSet::new();
     let mut source_bytes = 0usize;
-    if tools.len() > 4 {
+    if tools.len() > MAX_KNOWLEDGE_TOOLS {
         return Err(invalid());
     }
     for tool in tools {
-        let name = require_knowledge_text(tool, "name", 80)?;
-        require_knowledge_text(tool, "description", 400)?;
-        require_knowledge_text(tool, "usage", 1600)?;
+        let name = require_knowledge_text(tool, "name", KNOWLEDGE_KEY_LIMIT)?;
+        require_knowledge_text(tool, "description", KNOWLEDGE_SUMMARY_LIMIT)?;
+        require_knowledge_text(tool, "usage", CONDITIONS_LIMIT)?;
         if !names.insert(name) {
             return Err(invalid());
         }
         let files = tool["files"].as_object().ok_or_else(invalid)?;
         let mut paths = BTreeSet::new();
-        if files.is_empty() || files.len() > 12 {
+        if files.is_empty() || files.len() > MAX_KNOWLEDGE_TOOL_FILES {
             return Err(invalid());
         }
         for (path, source) in files {
@@ -872,9 +892,9 @@ fn save_improvement(
     if citations.is_empty()
         || citations.len() > 8
         || citations.iter().any(|path| {
-            path != "overview"
+            path != OVERVIEW_EVIDENCE_PATH
                 && (!inspected.contains_key(path)
-                    || path != "adaptation/current/session.json"
+                    || path != ADAPTATION_SESSION_PATH
                         && !evidence_files.iter().any(|file| file.path == *path))
         })
     {
@@ -896,7 +916,9 @@ fn save_improvement(
     } else {
         None
     };
-    if previous.is_some() && !inspected.contains_key(&format!("knowledge:{id}")) {
+    if previous.is_some()
+        && !inspected.contains_key(&format!("{KNOWLEDGE_INSPECTION_PREFIX}{id}"))
+    {
         return Err(EngineError::Rejected(
             "更新已有变体经验前必须 read_knowledge(id) 核对完整内容。".into(),
         ));
@@ -920,10 +942,10 @@ fn save_improvement(
         .cloned()
         .unwrap_or_default();
     if let Some(captured) = draft.get("tools").and_then(Value::as_array) {
-        if captured.len() > 4 {
-            return Err(EngineError::Protocol(
-                "经验最多保存 4 个参数化 Python 工具。".into(),
-            ));
+        if captured.len() > MAX_KNOWLEDGE_TOOLS {
+            return Err(EngineError::Protocol(format!(
+                "经验最多保存 {MAX_KNOWLEDGE_TOOLS} 个参数化 Python 工具。"
+            )));
         }
         for tool in captured {
             let name = text(tool, "name")?;
@@ -991,7 +1013,7 @@ fn review_tools() -> Vec<Value> {
         definition(
             "read_knowledge",
             "Search short shared engine experience previews by query; use nextOffset to page. Read full id before merging. Entries are conditional references.",
-            json!({"id":string,"query":string,"offset":{"type":"integer","minimum":0,"maximum":100000}}),
+            json!({"id":string,"query":string,"offset":{"type":"integer","minimum":0,"maximum":MAX_KNOWLEDGE_OFFSET}}),
             &[],
         ),
         definition(

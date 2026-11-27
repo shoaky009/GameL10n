@@ -1,35 +1,44 @@
 //! Persisted model/tool orchestration, independent of desktop UI and adapter runtime.
 use super::history;
 use super::*;
-use gamel10n_translation::provider::ProviderError;
+use gamel10n_translation::provider::{
+    ESTIMATED_BYTES_PER_TOKEN, HTTP_REQUEST_TIMEOUT, ProviderError, diagnostic_codes,
+};
 use std::time::Duration;
 
 const MAX_TURN_RETRIES: u8 = 2;
+const MAX_RETRY_BACKOFF: Duration = Duration::from_secs(30);
+const PROGRESS_REVIEW_TURN_INTERVAL: u32 = 24;
 
 fn turn_retry(error: &ProviderError, attempt: u8) -> Option<(&'static str, Duration)> {
     let code = error.diagnostic.code.as_str();
     match (error.status_code, code) {
-        (Some(408), _)
+        (Some(HTTP_REQUEST_TIMEOUT), _)
         | (
             None,
-            "network-error" | "network-interrupted" | "request-timeout" | "stream-incomplete",
+            diagnostic_codes::NETWORK_ERROR
+            | diagnostic_codes::NETWORK_INTERRUPTED
+            | diagnostic_codes::REQUEST_TIMEOUT
+            | diagnostic_codes::STREAM_INCOMPLETE,
         ) => {
             let delay = error
                 .retry_after
                 .unwrap_or(Duration::from_secs(u64::from(attempt)));
-            Some(("network-retry", delay.min(Duration::from_secs(30))))
+            Some(("network-retry", delay.min(MAX_RETRY_BACKOFF)))
         }
-        (None, "tool-call" | "agent-tool-format") => Some(("tool-call-retry", Duration::ZERO)),
+        (None, diagnostic_codes::TOOL_CALL | diagnostic_codes::AGENT_TOOL_FORMAT) => {
+            Some(("tool-call-retry", Duration::ZERO))
+        }
         (
             None,
-            "stream-format"
-            | "api-json-syntax"
-            | "chat-choices"
-            | "chat-incomplete"
-            | "responses-status"
-            | "responses-output"
-            | "responses-incomplete"
-            | "empty-content",
+            diagnostic_codes::STREAM_FORMAT
+            | diagnostic_codes::API_JSON_SYNTAX
+            | diagnostic_codes::CHAT_CHOICES
+            | diagnostic_codes::CHAT_INCOMPLETE
+            | diagnostic_codes::RESPONSES_STATUS
+            | diagnostic_codes::RESPONSES_OUTPUT
+            | diagnostic_codes::RESPONSES_INCOMPLETE
+            | diagnostic_codes::EMPTY_CONTENT,
         ) => Some(("stream-format-retry", Duration::ZERO)),
         _ => None,
     }
@@ -680,7 +689,7 @@ pub(super) async fn run(
                     >= if key == "lastImplementationTurn" {
                         60
                     } else {
-                        24
+                        PROGRESS_REVIEW_TURN_INTERVAL
                     }
                 {
                     0
@@ -691,7 +700,11 @@ pub(super) async fn run(
         }
     }
     if state.verified_package.is_some() {
-        set_number(state, "highestVerificationMilestone", 4);
+        set_number(
+            state,
+            "highestVerificationMilestone",
+            verification::MILESTONE_COMPLETE,
+        );
     }
     state.decision.references = format!(
         "{}\n{}",
@@ -1020,11 +1033,11 @@ impl<T: Fn(Value) -> Result<(), EngineError>> AdaptationRun<'_, '_, T> {
         }
         let implementation_review = state.total_turns.saturating_sub(
             number(state, "lastImplementationTurn").max(number(state, "lastEfficiencyReviewTurn")),
-        ) >= 24;
+        ) >= PROGRESS_REVIEW_TURN_INTERVAL;
         let verification_review = state.total_turns.saturating_sub(
             number(state, "lastVerificationProgressTurn")
                 .max(number(state, "lastVerificationReviewTurn")),
-        ) >= 24;
+        ) >= PROGRESS_REVIEW_TURN_INTERVAL;
         if implementation_review || verification_review {
             let mut review = String::new();
             if implementation_review {
@@ -1087,7 +1100,10 @@ impl<T: Fn(Value) -> Result<(), EngineError>> AdaptationRun<'_, '_, T> {
     async fn model_turn(&mut self, state: &mut Session) -> Result<Option<RunOutcome>, EngineError> {
         let (mut decision_context, visible, retained) = self.decision_context(state)?;
         let output_limit = self.request.limits.maximum_output_tokens;
-        let estimated = (visible + self.instructions.len() + self.tools_bytes) as u64 / 3 + 1;
+        let estimated =
+            (visible + self.instructions.len() + self.tools_bytes) as u64
+                / ESTIMATED_BYTES_PER_TOKEN
+                + 1;
         let remaining = self
             .request
             .limits
@@ -1169,7 +1185,7 @@ impl<T: Fn(Value) -> Result<(), EngineError>> AdaptationRun<'_, '_, T> {
                     self.next_retry = Some((operation, error.failure_summary(), delay));
                     return Ok(None);
                 }
-                if error.diagnostic.code == "output-token-limit"
+                if error.diagnostic.code == diagnostic_codes::OUTPUT_TOKEN_LIMIT
                     && !self.recovering_output
                     && requested == output_limit
                     && remaining.saturating_sub(tokens(&error.usage))

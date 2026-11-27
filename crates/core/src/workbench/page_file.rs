@@ -16,6 +16,15 @@ pub(crate) const DATA: &str = "pages.bin";
 pub(crate) const INDEX: &str = "pages.idx";
 pub(crate) const TEMP_PREFIX: &str = ".workbench-build-";
 const MAGIC: &[u8; 8] = b"GL10nP01";
+const HEADER_LEN: usize = MAGIC.len() + gamel10n_translation::storage::SHA256_HEX_LEN;
+const SECTION_HEADER_LEN: u64 = 12;
+const INDEX_ENTRY_LEN: usize = 12;
+const FLAG_HAS_MODEL: u8 = 1 << 0;
+const FLAG_HAS_SPEAKER: u8 = 1 << 1;
+const FLAG_INVALID: u8 = 1 << 2;
+const FLAG_FAILED: u8 = 1 << 3;
+const FNV1A_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV1A_PRIME: u64 = 0x0100_0000_01b3;
 
 fn invalid() -> CoreError {
     CoreError::DamagedWorkbench("页数据或索引校验失败。".into())
@@ -87,10 +96,10 @@ impl<'a> Record<'a> {
     pub fn next(b: &mut &'a [u8]) -> Result<Self, CoreError> {
         let flags = take(b, 1)?[0];
         Ok(Self {
-            has_model: flags & 1 != 0,
-            has_speaker: flags & 2 != 0,
-            invalid: flags & 4 != 0,
-            failed: flags & 8 != 0,
+            has_model: flags & FLAG_HAS_MODEL != 0,
+            has_speaker: flags & FLAG_HAS_SPEAKER != 0,
+            invalid: flags & FLAG_INVALID != 0,
+            failed: flags & FLAG_FAILED != 0,
             id: get_str(b)?,
             kind: get_str(b)?,
             source: Field::read(b)?,
@@ -101,12 +110,20 @@ impl<'a> Record<'a> {
         })
     }
     fn write(b: &mut Vec<u8>, unit: &TranslationUnit, state: &RowState) -> Result<(), CoreError> {
-        b.push(
-            u8::from(state.model.is_some())
-                | u8::from(unit.speaker.is_some()) << 1
-                | u8::from(!state.issues.is_empty()) << 2
-                | u8::from(state.failure.is_some()) << 3,
-        );
+        let mut flags = 0;
+        if state.model.is_some() {
+            flags |= FLAG_HAS_MODEL;
+        }
+        if unit.speaker.is_some() {
+            flags |= FLAG_HAS_SPEAKER;
+        }
+        if !state.issues.is_empty() {
+            flags |= FLAG_INVALID;
+        }
+        if state.failure.is_some() {
+            flags |= FLAG_FAILED;
+        }
+        b.push(flags);
         put_str(b, &unit.id)?;
         put_str(b, &unit.kind)?;
         for s in [
@@ -170,8 +187,8 @@ pub(crate) struct Pages {
 
 fn id_hash(id: &str) -> u64 {
     // Collisions are resolved against the actual ID in the page.
-    id.bytes().fold(0xcbf29ce484222325, |h, b| {
-        (h ^ u64::from(b)).wrapping_mul(0x100000001b3)
+    id.bytes().fold(FNV1A_OFFSET_BASIS, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(FNV1A_PRIME)
     })
 }
 fn write_section(file: &mut File, bytes: &[u8]) -> Result<(), CoreError> {
@@ -188,7 +205,7 @@ fn read_section(file: &mut File, offset: u64, end: u64) -> Result<Vec<u8>, CoreE
     if len
         > end
             .checked_sub(offset)
-            .and_then(|s| s.checked_sub(12))
+            .and_then(|s| s.checked_sub(SECTION_HEADER_LEN))
             .ok_or_else(invalid)?
     {
         return Err(invalid());
@@ -209,9 +226,9 @@ fn read_exact(file: &mut File, bytes: &mut [u8]) -> Result<(), CoreError> {
     })
 }
 fn header(file: &mut File, key: &str) -> Result<(), CoreError> {
-    let mut head = [0; 72];
+    let mut head = [0; HEADER_LEN];
     read_exact(file, &mut head)?;
-    if &head[..8] != MAGIC || head[8..] != *key.as_bytes() {
+    if &head[..MAGIC.len()] != MAGIC || head[MAGIC.len()..] != *key.as_bytes() {
         return Err(invalid());
     }
     Ok(())
@@ -369,7 +386,7 @@ impl Pages {
         let mut idx = File::open(root.join(INDEX))?;
         header(&mut idx, key)?;
         let len = idx.metadata()?.len();
-        let data = read_section(&mut idx, 72, len)?;
+        let data = read_section(&mut idx, HEADER_LEN as u64, len)?;
         if idx.stream_position()? != len {
             return Err(invalid());
         }
@@ -378,8 +395,8 @@ impl Pages {
         let directory: Directory =
             serde_json::from_slice(take(&mut bytes, size)?).map_err(json_error)?;
         if directory.summary.total as u64 != u64::from_le_bytes(expected)
-            || bytes.len() / 12 != directory.summary.total
-            || !bytes.len().is_multiple_of(12)
+            || bytes.len() / INDEX_ENTRY_LEN != directory.summary.total
+            || !bytes.len().is_multiple_of(INDEX_ENTRY_LEN)
             || directory.blocks.len() != directory.summary.total.div_ceil(SIZE)
             || directory
                 .blocks

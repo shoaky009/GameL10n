@@ -1,4 +1,7 @@
-use super::{EngineCatalog, EngineDiscoveryDescriptor, LibraryIndex};
+use super::{
+    DISCOVERY_INDEX_VERSION, EXTENSIONS_DIR, EngineCatalog, EngineDiscoveryDescriptor,
+    LIBRARY_INDEX_FILE, LIBRARY_STATE_FILE, LibraryIndex, SOURCE_EXTERNAL,
+};
 use gamel10n_engines::discovery::{DiscoveryFilter, Inventory, validate_pattern};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
@@ -20,8 +23,8 @@ pub(crate) struct DiscoveryCatalogCache {
 impl DiscoveryCatalogCache {
     pub(crate) fn open(&mut self, root: &Path) -> Result<EngineCatalog, crate::CoreError> {
         let stamp = || CatalogStamp {
-            files: ["library-index.json", "library-state.json"].map(|file| {
-                let metadata = root.join("extensions").join(file).metadata().ok()?;
+            files: [LIBRARY_INDEX_FILE, LIBRARY_STATE_FILE].map(|file| {
+                let metadata = root.join(EXTENSIONS_DIR).join(file).metadata().ok()?;
                 Some((metadata.modified().ok()?, metadata.len()))
             }),
             revision: super::CATALOG_REVISION.load(std::sync::atomic::Ordering::Acquire),
@@ -96,13 +99,16 @@ impl PackageRoutes {
         let mut routes = Self::default();
         for (id, family) in &index.families {
             for (version, entry) in &family.versions {
-                if entry.source != 1 {
+                if entry.source != SOURCE_EXTERNAL {
                     continue;
                 }
                 let descriptor = entry
                     .extra
                     .get("discovery")
-                    .filter(|value| value["discoveryIndexVersion"].as_u64() == Some(1))
+                    .filter(|value| {
+                        value["discoveryIndexVersion"].as_u64()
+                            == Some(u64::from(DISCOVERY_INDEX_VERSION))
+                    })
                     .and_then(|value| serde_json::from_value(value.clone()).ok());
                 let number = routes.packages.len();
                 match descriptor.as_ref().and_then(buckets) {

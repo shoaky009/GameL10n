@@ -2,6 +2,8 @@
 use super::*;
 use std::io::Read;
 
+const MAX_FONT_FILE_BYTES: usize = 64 * 1024 * 1024;
+
 fn bytes(workspace: &Path, path: &str) -> Result<Vec<u8>, EngineError> {
     if !["work/", "resources/", "src/"]
         .iter()
@@ -14,11 +16,13 @@ fn bytes(workspace: &Path, path: &str) -> Result<Vec<u8>, EngineError> {
     let path = resolve_relative(workspace, path)?;
     let file = fs::File::open(path)?;
     let mut data = Vec::new();
-    file.take(64 * 1024 * 1024 + 1).read_to_end(&mut data)?;
-    if data.len() > 64 * 1024 * 1024 {
-        return Err(EngineError::Rejected(
-            "字体实验单个输入不能超过 64 MiB。".into(),
-        ));
+    file.take(MAX_FONT_FILE_BYTES as u64 + 1)
+        .read_to_end(&mut data)?;
+    if data.len() > MAX_FONT_FILE_BYTES {
+        return Err(EngineError::Rejected(format!(
+            "字体实验单个输入不能超过 {} MiB。",
+            MAX_FONT_FILE_BYTES / (1024 * 1024)
+        )));
     }
     Ok(data)
 }

@@ -1,9 +1,13 @@
 //! OpenAI-compatible HTTP APIs for translation and host-owned tool conversations.
 
 use crate::{
-    TokenUsage, TranslationUnit, files::hash_text, storage::TranslationPolicy, text::ProtectedText,
+    DEFAULT_UNIT_KIND, TokenUsage, TranslationUnit, files::hash_text, storage::TranslationPolicy,
+    text::ProtectedText,
 };
-use reqwest::header::{HeaderMap, HeaderValue};
+use reqwest::{
+    StatusCode,
+    header::{HeaderMap, HeaderValue},
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -21,9 +25,65 @@ use tokio_util::sync::CancellationToken;
 #[path = "provider_stream.rs"]
 mod stream;
 
+pub mod diagnostic_codes {
+    pub const AGENT_TOOL_FORMAT: &str = "agent-tool-format";
+    pub const API_JSON_SYNTAX: &str = "api-json-syntax";
+    pub const CANCELLED: &str = "cancelled";
+    pub const CHAT_CHOICES: &str = "chat-choices";
+    pub const CHAT_INCOMPLETE: &str = "chat-incomplete";
+    pub const CONFIGURATION: &str = "configuration";
+    pub const CONNECTION_TOOL_CALL: &str = "connection-tool-call";
+    pub const EMPTY_CONTENT: &str = "empty-content";
+    pub const HTTP_ERROR: &str = "http-error";
+    pub const MODEL_REFUSAL: &str = "model-refusal";
+    pub const NETWORK_ERROR: &str = "network-error";
+    pub const NETWORK_INTERRUPTED: &str = "network-interrupted";
+    pub const OUTPUT_TOKEN_LIMIT: &str = "output-token-limit";
+    pub const REQUEST_SIZE_LIMIT: &str = "request-size-limit";
+    pub const REQUEST_TIMEOUT: &str = "request-timeout";
+    pub const RESPONSE_SIZE_LIMIT: &str = "response-size-limit";
+    pub const RESPONSES_INCOMPLETE: &str = "responses-incomplete";
+    pub const RESPONSES_OUTPUT: &str = "responses-output";
+    pub const RESPONSES_STATUS: &str = "responses-status";
+    pub const STREAM_ERROR: &str = "stream-error";
+    pub const STREAM_FORMAT: &str = "stream-format";
+    pub const STREAM_INCOMPLETE: &str = "stream-incomplete";
+    pub const TOOL_CALL: &str = "tool-call";
+    pub const TRANSLATION_JSON_SYNTAX: &str = "translation-json-syntax";
+    pub const TRANSLATION_MISSING_IDS: &str = "translation-missing-ids";
+    pub const TRANSLATION_UNKNOWN_ID: &str = "translation-unknown-id";
+    pub const TRANSLATION_VALUE_TYPE: &str = "translation-value-type";
+}
+
+pub const ESTIMATED_BYTES_PER_TOKEN: u64 = 3;
+pub const HTTP_REQUEST_TIMEOUT: u16 = StatusCode::REQUEST_TIMEOUT.as_u16();
+pub const HTTP_TOO_MANY_REQUESTS: u16 = StatusCode::TOO_MANY_REQUESTS.as_u16();
+
+const HTTP_BAD_REQUEST: u16 = StatusCode::BAD_REQUEST.as_u16();
+const HTTP_UNAUTHORIZED: u16 = StatusCode::UNAUTHORIZED.as_u16();
+const HTTP_FORBIDDEN: u16 = StatusCode::FORBIDDEN.as_u16();
+const HTTP_CONFLICT: u16 = StatusCode::CONFLICT.as_u16();
+const HTTP_UNPROCESSABLE_ENTITY: u16 = StatusCode::UNPROCESSABLE_ENTITY.as_u16();
+const HTTP_TOO_EARLY: u16 = 425;
+const HTTP_UNAVAILABLE_FOR_LEGAL_REASONS: u16 = StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS.as_u16();
+const HTTP_GATEWAY_TIMEOUT: u16 = StatusCode::GATEWAY_TIMEOUT.as_u16();
+
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
 const ANALYSIS_FIRST_RESPONSE_TIMEOUT: Duration = Duration::from_secs(180);
 const ANALYSIS_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+const MAX_RATE_LIMIT_DELAY: Duration = Duration::from_secs(30);
+const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+const MAX_COMPLETION_TEXT_BYTES: usize = 512 * 1024;
+const MAX_TOOL_ARGUMENTS_BYTES: usize = 512 * 1024;
+const MAX_TOOL_CALLS: usize = 128;
+const MAX_RESPONSE_PREVIEW_CHARS: usize = 4096;
+const MAX_REQUEST_ID_LEN: usize = 256;
+const MAX_SETTING_IDENTIFIER_LEN: usize = 256;
+const MAX_EXTRACTED_TERM_CHARS: usize = 64;
+const MAX_TOOL_ARGUMENT_JSON_DEPTH: usize = 32;
+const REDACTED_MARKER: &str = "[redacted]";
+const CHAT_COMPLETIONS_ROUTE: &str = "/chat/completions";
+const RESPONSES_ROUTE: &str = "/responses";
 
 type RetryCallback<'a> = &'a (dyn Fn(&ProviderError, u64) + Send + Sync);
 
@@ -42,10 +102,10 @@ impl CompletionMode<'_> {
 
     fn retries(self, error: &ProviderError) -> bool {
         match error.status_code {
-            Some(429 | 500..=599) => !matches!(self, Self::ConnectionTest),
-            Some(408) => matches!(self, Self::Review(_)),
+            Some(HTTP_TOO_MANY_REQUESTS | 500..=599) => !matches!(self, Self::ConnectionTest),
+            Some(HTTP_REQUEST_TIMEOUT) => matches!(self, Self::Review(_)),
             // A timed-out stream can already have reported billable usage.
-            None if error.diagnostic.code == "request-timeout" => {
+            None if error.diagnostic.code == diagnostic_codes::REQUEST_TIMEOUT => {
                 matches!(self, Self::Review(_))
                     && error.usage.input_tokens == 0
                     && error.usage.output_tokens == 0
@@ -94,7 +154,7 @@ impl fmt::Debug for ProviderSettings {
             .debug_struct("ProviderSettings")
             .field("model", &self.model)
             .field("protocol", &self.protocol)
-            .field("api_key", &"[redacted]")
+            .field("api_key", &REDACTED_MARKER)
             .finish_non_exhaustive()
     }
 }
@@ -142,14 +202,29 @@ impl ProviderError {
         }
     }
     pub fn is_refusal(&self) -> bool {
-        self.diagnostic.code == "model-refusal"
+        self.diagnostic.code == diagnostic_codes::MODEL_REFUSAL
     }
     pub fn is_cancelled(&self) -> bool {
-        self.diagnostic.code == "cancelled"
+        self.diagnostic.code == diagnostic_codes::CANCELLED
+    }
+    pub(crate) fn is_non_retryable_client_error(&self) -> bool {
+        matches!(
+            self.status_code,
+            Some(400..=499)
+                if !matches!(
+                    self.status_code,
+                    Some(
+                        HTTP_REQUEST_TIMEOUT
+                            | HTTP_CONFLICT
+                            | HTTP_TOO_EARLY
+                            | HTTP_TOO_MANY_REQUESTS
+                    )
+                )
+        )
     }
     fn transport(cause: reqwest::Error, code: &str, stage: &str, key: &str) -> Self {
         let code = if cause.is_timeout() {
-            "request-timeout"
+            diagnostic_codes::REQUEST_TIMEOUT
         } else {
             code
         };
@@ -168,7 +243,7 @@ impl ProviderError {
         }
         let mut detail = chain.join(" → ");
         if !key.is_empty() {
-            detail = detail.replace(key, "[redacted]");
+            detail = detail.replace(key, REDACTED_MARKER);
         }
         let detail: String = detail
             .chars()
@@ -184,46 +259,58 @@ impl ProviderError {
         self.status_code.is_none()
             && matches!(
                 self.diagnostic.code.as_str(),
-                "api-json-syntax"
-                    | "chat-choices"
-                    | "responses-output"
-                    | "translation-json-syntax"
-                    | "translation-missing-ids"
-                    | "translation-unknown-id"
-                    | "translation-value-type"
+                diagnostic_codes::API_JSON_SYNTAX
+                    | diagnostic_codes::CHAT_CHOICES
+                    | diagnostic_codes::RESPONSES_OUTPUT
+                    | diagnostic_codes::TRANSLATION_JSON_SYNTAX
+                    | diagnostic_codes::TRANSLATION_MISSING_IDS
+                    | diagnostic_codes::TRANSLATION_UNKNOWN_ID
+                    | diagnostic_codes::TRANSLATION_VALUE_TYPE
             )
     }
     pub fn failure_summary(&self) -> String {
         let summary: String = match self.status_code {
             Some(_) if self.is_refusal() => self.message.clone(),
-            Some(429) => "限流或额度限制（HTTP 429）".into(),
-            Some(401) => "身份验证失败，请检查 API Key（HTTP 401）".into(),
-            Some(403) => "没有访问此接口或模型的权限（HTTP 403）".into(),
-            Some(status @ (408 | 504)) => format!("服务商响应超时（HTTP {status}）"),
+            Some(HTTP_TOO_MANY_REQUESTS) => "限流或额度限制（HTTP 429）".into(),
+            Some(HTTP_UNAUTHORIZED) => "身份验证失败，请检查 API Key（HTTP 401）".into(),
+            Some(HTTP_FORBIDDEN) => "没有访问此接口或模型的权限（HTTP 403）".into(),
+            Some(status @ (HTTP_REQUEST_TIMEOUT | HTTP_GATEWAY_TIMEOUT)) => {
+                format!("服务商响应超时（HTTP {status}）")
+            }
             Some(status @ 500..) => format!("服务商异常（HTTP {status}）"),
             Some(status) => format!("请求被拒绝（HTTP {status}）"),
             None => match self.diagnostic.code.as_str() {
-                "network-error" | "network-interrupted" => &self.message,
-                "request-timeout" if self.diagnostic.detail.is_some() => &self.message,
-                "request-timeout" => "请求超时",
-                "stream-incomplete" => "流式响应提前结束，缺少终止事件",
-                "stream-format" => "流式响应格式无效",
-                "stream-error" => "服务商返回流式错误",
-                "output-token-limit" => "模型输出达到长度上限，结果被截断，可减少每批文本数",
-                "translation-missing-ids" => "返回格式不正确：遗漏了部分文本",
-                "translation-unknown-id" => "返回格式不正确：文本 ID 与请求不符",
-                "translation-value-type" => "返回格式不正确：译文不是文本",
-                "empty-content" => "模型返回了空内容",
-                "chat-choices" | "responses-status" | "responses-output" => &self.message,
-                "tool-call" | "agent-tool-format" => {
+                diagnostic_codes::NETWORK_ERROR | diagnostic_codes::NETWORK_INTERRUPTED => {
+                    &self.message
+                }
+                diagnostic_codes::REQUEST_TIMEOUT if self.diagnostic.detail.is_some() => {
+                    &self.message
+                }
+                diagnostic_codes::REQUEST_TIMEOUT => "请求超时",
+                diagnostic_codes::STREAM_INCOMPLETE => "流式响应提前结束，缺少终止事件",
+                diagnostic_codes::STREAM_FORMAT => "流式响应格式无效",
+                diagnostic_codes::STREAM_ERROR => "服务商返回流式错误",
+                diagnostic_codes::OUTPUT_TOKEN_LIMIT => {
+                    "模型输出达到长度上限，结果被截断，可减少每批文本数"
+                }
+                diagnostic_codes::TRANSLATION_MISSING_IDS => "返回格式不正确：遗漏了部分文本",
+                diagnostic_codes::TRANSLATION_UNKNOWN_ID => "返回格式不正确：文本 ID 与请求不符",
+                diagnostic_codes::TRANSLATION_VALUE_TYPE => "返回格式不正确：译文不是文本",
+                diagnostic_codes::EMPTY_CONTENT => "模型返回了空内容",
+                diagnostic_codes::CHAT_CHOICES
+                | diagnostic_codes::RESPONSES_STATUS
+                | diagnostic_codes::RESPONSES_OUTPUT => &self.message,
+                diagnostic_codes::TOOL_CALL | diagnostic_codes::AGENT_TOOL_FORMAT => {
                     "工具调用格式不正确，请检查模型及接口是否支持工具调用"
                 }
-                "model-refusal" => "模型拒绝处理这批内容（服务商内容限制）",
-                "chat-incomplete" | "responses-incomplete" => "模型未返回完整结果",
-                "request-size-limit" => "请求内容过大，可减少每批文本数",
-                "response-size-limit" => "返回内容超过大小限制",
-                "cancelled" => "任务已取消",
-                "configuration" => "API 配置无效",
+                diagnostic_codes::MODEL_REFUSAL => "模型拒绝处理这批内容（服务商内容限制）",
+                diagnostic_codes::CHAT_INCOMPLETE | diagnostic_codes::RESPONSES_INCOMPLETE => {
+                    "模型未返回完整结果"
+                }
+                diagnostic_codes::REQUEST_SIZE_LIMIT => "请求内容过大，可减少每批文本数",
+                diagnostic_codes::RESPONSE_SIZE_LIMIT => "返回内容超过大小限制",
+                diagnostic_codes::CANCELLED => "任务已取消",
+                diagnostic_codes::CONFIGURATION => "API 配置无效",
                 _ => "返回格式不正确",
             }
             .into(),
@@ -244,10 +331,11 @@ impl ProviderError {
         let safe = if key.is_empty() {
             text.to_owned()
         } else {
-            text.replace(key, "[redacted]")
+            text.replace(key, REDACTED_MARKER)
         };
-        self.diagnostic.response_truncated = safe.chars().count() > 4096;
-        self.diagnostic.response_preview = Some(safe.chars().take(4096).collect());
+        self.diagnostic.response_truncated = safe.chars().count() > MAX_RESPONSE_PREVIEW_CHARS;
+        self.diagnostic.response_preview =
+            Some(safe.chars().take(MAX_RESPONSE_PREVIEW_CHARS).collect());
         self
     }
 }
@@ -279,6 +367,10 @@ pub struct AnalysisStreamTiming {
     pub timeout_stage: Option<&'static str>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub ignored_events: Vec<String>,
+}
+impl AnalysisStreamTiming {
+    pub const TIMEOUT_STAGE_FIRST_RESPONSE: &str = "first-response";
+    pub const TIMEOUT_STAGE_STREAM_IDLE: &str = "stream-idle";
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -384,7 +476,7 @@ fn build_json_batch_request<U: Borrow<TranslationUnit>>(
             .filter(|s| !s.is_empty());
         let kind = {
             let value = unit.kind.trim();
-            (!value.is_empty() && !value.eq_ignore_ascii_case("dialogue")).then_some(value)
+            (!value.is_empty() && !value.eq_ignore_ascii_case(DEFAULT_UNIT_KIND)).then_some(value)
         };
         let unit_feedback = feedback
             .get(&unit.id)
@@ -444,8 +536,8 @@ fn parse_extracted_terms(raw: &str) -> Result<Vec<ExtractedTerm>, String> {
             || source == target
             || source.contains(['\r', '\n', '='])
             || target.contains(['\r', '\n'])
-            || source.chars().count() > 64
-            || target.chars().count() > 64
+            || source.chars().count() > MAX_EXTRACTED_TERM_CHARS
+            || target.chars().count() > MAX_EXTRACTED_TERM_CHARS
             || !seen.insert(source.to_owned())
         {
             return;
@@ -627,7 +719,7 @@ impl AccountLimiter {
         if delay.is_zero() {
             return;
         }
-        let deadline = std::time::Instant::now() + delay.min(Duration::from_secs(30));
+        let deadline = std::time::Instant::now() + delay.min(MAX_RATE_LIMIT_DELAY);
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         if state.cooldown_until.is_none_or(|existing| deadline > existing) {
             state.cooldown_until = Some(deadline);
@@ -641,7 +733,10 @@ impl AccountLimiter {
     ) -> Result<AccountPermit, ProviderError> {
         loop {
             if cancellation.is_cancelled() {
-                return Err(ProviderError::new("cancelled", "任务已取消。"));
+                return Err(ProviderError::new(
+                    diagnostic_codes::CANCELLED,
+                    "任务已取消。",
+                ));
             }
             let notified = self.changed.notified();
             tokio::pin!(notified);
@@ -690,7 +785,10 @@ impl AccountLimiter {
                 .unwrap_or_else(|error| error.into_inner())
                 .waiting_ms += milliseconds(waiting.elapsed());
             if cancelled {
-                return Err(ProviderError::new("cancelled", "任务已取消。"));
+                return Err(ProviderError::new(
+                    diagnostic_codes::CANCELLED,
+                    "任务已取消。",
+                ));
             }
         }
     }
@@ -714,12 +812,15 @@ impl OpenAiProvider {
             .unwrap_or(Self::DEFAULT_MAX_CONCURRENCY);
         if !(1..=Self::MAX_CONCURRENCY).contains(&max_concurrency) {
             return Err(ProviderError::new(
-                "configuration",
+                diagnostic_codes::CONFIGURATION,
                 &format!("API 最大并行请求数应为 1–{}。", Self::MAX_CONCURRENCY),
             ));
         }
         let mut endpoint = reqwest::Url::parse(&settings.endpoint).map_err(|_| {
-            ProviderError::new("configuration", "API 地址必须是完整 HTTP(S) 地址。")
+            ProviderError::new(
+                diagnostic_codes::CONFIGURATION,
+                "API 地址必须是完整 HTTP(S) 地址。",
+            )
         })?;
         if !matches!(endpoint.scheme(), "http" | "https")
             || !endpoint.username().is_empty()
@@ -728,12 +829,12 @@ impl OpenAiProvider {
             || endpoint.fragment().is_some()
         {
             return Err(ProviderError::new(
-                "configuration",
+                diagnostic_codes::CONFIGURATION,
                 "API 地址不能包含认证信息、查询参数或片段。",
             ));
         }
         if settings.model.trim().is_empty()
-            || settings.model.len() > 256
+            || settings.model.len() > MAX_SETTING_IDENTIFIER_LEN
             || settings.model.chars().any(char::is_control)
             || settings
                 .api_key
@@ -741,7 +842,7 @@ impl OpenAiProvider {
                 .any(|c| c.is_control() || c.is_whitespace())
         {
             return Err(ProviderError::new(
-                "configuration",
+                diagnostic_codes::CONFIGURATION,
                 "模型标识或 API 密钥格式无效。",
             ));
         }
@@ -750,20 +851,23 @@ impl OpenAiProvider {
             .as_deref()
             .is_some_and(|effort| {
                 effort.trim().is_empty()
-                    || effort.len() > 256
+                    || effort.len() > MAX_SETTING_IDENTIFIER_LEN
                     || effort.chars().any(char::is_control)
             })
         {
-            return Err(ProviderError::new("configuration", "分析思考等级无效。"));
+            return Err(ProviderError::new(
+                diagnostic_codes::CONFIGURATION,
+                "分析思考等级无效。",
+            ));
         }
         let (route, other) = match settings.protocol {
-            ApiProtocol::ChatCompletions => ("/chat/completions", "/responses"),
-            ApiProtocol::Responses => ("/responses", "/chat/completions"),
+            ApiProtocol::ChatCompletions => (CHAT_COMPLETIONS_ROUTE, RESPONSES_ROUTE),
+            ApiProtocol::Responses => (RESPONSES_ROUTE, CHAT_COMPLETIONS_ROUTE),
         };
         let base = endpoint.path().trim_end_matches('/');
         if base.to_ascii_lowercase().ends_with(other) {
             return Err(ProviderError::new(
-                "configuration",
+                diagnostic_codes::CONFIGURATION,
                 "API 地址与所选协议不一致。",
             ));
         }
@@ -880,12 +984,12 @@ impl OpenAiProvider {
             && (error.is_response_format_error()
                 || matches!(
                     error.diagnostic.code.as_str(),
-                    "empty-content"
-                        | "output-token-limit"
-                        | "chat-incomplete"
-                        | "responses-incomplete"
-                        | "tool-call"
-                        | "response-size-limit"
+                    diagnostic_codes::EMPTY_CONTENT
+                        | diagnostic_codes::OUTPUT_TOKEN_LIMIT
+                        | diagnostic_codes::CHAT_INCOMPLETE
+                        | diagnostic_codes::RESPONSES_INCOMPLETE
+                        | diagnostic_codes::TOOL_CALL
+                        | diagnostic_codes::RESPONSE_SIZE_LIMIT
                 ))
     }
 
@@ -1022,7 +1126,7 @@ impl OpenAiProvider {
             let delay = error
                 .retry_after
                 .unwrap_or(Duration::from_secs(retries + 1));
-            if error.status_code == Some(429) {
+            if error.status_code == Some(HTTP_TOO_MANY_REQUESTS) {
                 self.account_limiter.record_rate_limit(delay);
             }
             drop(account_permit);
@@ -1041,7 +1145,10 @@ impl OpenAiProvider {
                 .unwrap_or_else(|error| error.into_inner())
                 .waiting_ms += milliseconds(waiting.elapsed());
             if cancelled {
-                return Err(ProviderError::new("cancelled", "任务已取消。"));
+                return Err(ProviderError::new(
+                    diagnostic_codes::CANCELLED,
+                    "任务已取消。",
+                ));
             }
         }
     }
@@ -1147,7 +1254,7 @@ impl OpenAiProvider {
             }
         {
             return Err(ProviderError::new(
-                "request-size-limit",
+                diagnostic_codes::REQUEST_SIZE_LIMIT,
                 "API 请求超过大小限制。",
             ));
         }
@@ -1205,17 +1312,17 @@ impl OpenAiProvider {
     ) -> Result<Completion, ProviderError> {
         let response = tokio::select! {
             biased;
-            _=cancellation.cancelled()=>return Err(ProviderError::new("cancelled","任务已取消。")),
+            _=cancellation.cancelled()=>return Err(ProviderError::new(diagnostic_codes::CANCELLED,"任务已取消。")),
             result=async {
                 self.request_count.fetch_add(1, Ordering::Relaxed);
                 *attempted = true;
                 request.send().await
-            }=>result.map_err(|error| ProviderError::transport(error,"network-error","发送 API 请求或等待响应头失败",&self.settings.api_key))?,
+            }=>result.map_err(|error| ProviderError::transport(error,diagnostic_codes::NETWORK_ERROR,"发送 API 请求或等待响应头失败",&self.settings.api_key))?,
         };
         let status = response.status();
         if !status.is_success() {
             let mut error = ProviderError::new(
-                "http-error",
+                diagnostic_codes::HTTP_ERROR,
                 &format!("API 请求失败（HTTP {}）。", status.as_u16()),
             );
             error.status_code = Some(status.as_u16());
@@ -1227,24 +1334,30 @@ impl OpenAiProvider {
                 .and_then(retry_after);
             if known_tool_names.is_none()
                 && self.settings.translation_format == TranslationFormat::JsonBatch
-                && matches!(status.as_u16(), 400 | 403 | 422 | 451)
+                && matches!(
+                    status.as_u16(),
+                    HTTP_BAD_REQUEST
+                        | HTTP_FORBIDDEN
+                        | HTTP_UNPROCESSABLE_ENTITY
+                        | HTTP_UNAVAILABLE_FOR_LEGAL_REASONS
+                )
                 && tokio::select! {
                     biased;
-                    _ = cancellation.cancelled() => return Err(ProviderError::new("cancelled", "任务已取消。")),
+                    _ = cancellation.cancelled() => return Err(ProviderError::new(diagnostic_codes::CANCELLED, "任务已取消。")),
                     blocked = content_filter_error_body(response) => blocked,
                 }
             {
-                error.diagnostic.code = "model-refusal".into();
+                error.diagnostic.code = diagnostic_codes::MODEL_REFUSAL.into();
                 error.message = format!("服务商内容过滤拒绝了这批文本（HTTP {}）", status.as_u16());
             }
             return Err(error);
         }
         if response
             .content_length()
-            .is_some_and(|length| length > 2 * 1024 * 1024)
+            .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
         {
             return Err(ProviderError::new(
-                "response-size-limit",
+                diagnostic_codes::RESPONSE_SIZE_LIMIT,
                 "API 响应超过大小限制。",
             ));
         }
@@ -1253,22 +1366,26 @@ impl OpenAiProvider {
         loop {
             let chunk = tokio::select! {
                 biased;
-                _=cancellation.cancelled()=>return Err(ProviderError::new("cancelled","任务已取消。")),
-                result=response.chunk()=>result.map_err(|error| ProviderError::transport(error,"network-interrupted","读取 HTTP 响应体失败",&self.settings.api_key))?,
+                _=cancellation.cancelled()=>return Err(ProviderError::new(diagnostic_codes::CANCELLED,"任务已取消。")),
+                result=response.chunk()=>result.map_err(|error| ProviderError::transport(error,diagnostic_codes::NETWORK_INTERRUPTED,"读取 HTTP 响应体失败",&self.settings.api_key))?,
             };
             let Some(chunk) = chunk else {
                 break;
             };
-            if bytes.len() + chunk.len() > 2 * 1024 * 1024 {
+            if bytes.len() + chunk.len() > MAX_RESPONSE_BYTES {
                 return Err(ProviderError::new(
-                    "response-size-limit",
+                    diagnostic_codes::RESPONSE_SIZE_LIMIT,
                     "API 响应超过大小限制。",
                 ));
             }
             bytes.extend_from_slice(&chunk);
         }
-        let root: Value = serde_json::from_slice(&bytes)
-            .map_err(|_| ProviderError::new("api-json-syntax", "API 响应不是有效 JSON。"))?;
+        let root: Value = serde_json::from_slice(&bytes).map_err(|_| {
+            ProviderError::new(
+                diagnostic_codes::API_JSON_SYNTAX,
+                "API 响应不是有效 JSON。",
+            )
+        })?;
         self.completion_from_root(&root, payload_len, bytes.len(), known_tool_names)
     }
 
@@ -1304,7 +1421,7 @@ impl OpenAiProvider {
             .get("id")
             .and_then(Value::as_str)
             .filter(|id| {
-                id.len() <= 256
+                id.len() <= MAX_REQUEST_ID_LEN
                     && !id.chars().any(char::is_control)
                     && (self.settings.api_key.is_empty() || !id.contains(&self.settings.api_key))
             })
@@ -1322,11 +1439,12 @@ impl OpenAiProvider {
             }
             error
         })?;
-        if completion.text.len() > 512 * 1024 {
-            return Err(
-                ProviderError::new("response-size-limit", "模型文本超过大小限制。")
-                    .with_usage(&completion.usage),
-            );
+        if completion.text.len() > MAX_COMPLETION_TEXT_BYTES {
+            return Err(ProviderError::new(
+                diagnostic_codes::RESPONSE_SIZE_LIMIT,
+                "模型文本超过大小限制。",
+            )
+            .with_usage(&completion.usage));
         }
         completion.request_id = request_id;
         Ok(completion)
@@ -1363,7 +1481,10 @@ impl OpenAiProvider {
         maximum_output_tokens: Option<u32>,
     ) -> Result<TranslationResponse, ProviderError> {
         if units.is_empty() || units.len() > self.maximum_batch_size() {
-            return Err(ProviderError::new("configuration", "翻译批次大小无效。"));
+            return Err(ProviderError::new(
+                diagnostic_codes::CONFIGURATION,
+                "翻译批次大小无效。",
+            ));
         }
         let mut prefix = "{v".to_owned();
         while units
@@ -1430,11 +1551,14 @@ impl OpenAiProvider {
                     .preview(&completion.text, &self.settings.api_key)
             };
             if refusal_text(text) {
-                return Err(fail("model-refusal", "模型拒绝处理这批内容。"));
+                return Err(fail(
+                    diagnostic_codes::MODEL_REFUSAL,
+                    "模型拒绝处理这批内容。",
+                ));
             }
             let values: UniqueObject = serde_json::from_str(text).map_err(|_| {
                 fail(
-                    "translation-json-syntax",
+                    diagnostic_codes::TRANSLATION_JSON_SYNTAX,
                     "模型返回的译文不是有效 JSON 对象，或包含重复 ID。",
                 )
             })?;
@@ -1445,7 +1569,10 @@ impl OpenAiProvider {
                     .or_else(|| value.get("message").and_then(Value::as_str))
                     .is_some_and(refusal_text)
             {
-                return Err(fail("model-refusal", "模型拒绝处理这批内容。"));
+                return Err(fail(
+                    diagnostic_codes::MODEL_REFUSAL,
+                    "模型拒绝处理这批内容。",
+                ));
             }
             for (id, value) in values.0 {
                 let index = id
@@ -1453,7 +1580,10 @@ impl OpenAiProvider {
                     .ok()
                     .filter(|index| index.to_string() == id && *index < units.len())
                     .ok_or_else(|| {
-                        fail("translation-unknown-id", "模型返回了请求之外的文本 ID。")
+                        fail(
+                            diagnostic_codes::TRANSLATION_UNKNOWN_ID,
+                            "模型返回了请求之外的文本 ID。",
+                        )
                     })?;
                 match value {
                     Value::String(text) => {
@@ -1467,14 +1597,17 @@ impl OpenAiProvider {
                     }
                     _ => {
                         return Err(fail(
-                            "translation-value-type",
+                            diagnostic_codes::TRANSLATION_VALUE_TYPE,
                             "译文必须是字符串，拒译条目须返回 null。",
                         ));
                     }
                 }
             }
             if translations.len() + refused_ids.len() != units.len() {
-                return Err(fail("translation-missing-ids", "模型遗漏了请求中的文本。"));
+                return Err(fail(
+                    diagnostic_codes::TRANSLATION_MISSING_IDS,
+                    "模型遗漏了请求中的文本。",
+                ));
             }
         }
         Ok(TranslationResponse {
@@ -1497,7 +1630,7 @@ impl OpenAiProvider {
     ) -> Result<TerminologyExtractionResult, ProviderError> {
         if self.settings.translation_format == TranslationFormat::PlainText {
             return Err(ProviderError::new(
-                "configuration",
+                diagnostic_codes::CONFIGURATION,
                 "术语提取需要批量 JSON 格式的翻译 API。",
             ));
         }
@@ -1547,7 +1680,7 @@ impl OpenAiProvider {
                 }
                 Err(error)
                     if !retried
-                        && error.diagnostic.code == "output-token-limit"
+                        && error.diagnostic.code == diagnostic_codes::OUTPUT_TOKEN_LIMIT
                         && active_samples.len() > 20 =>
                 {
                     retried = true;
@@ -1592,7 +1725,7 @@ impl OpenAiProvider {
                 source_text: "Hello.".into(),
                 context: String::new(),
                 speaker: None,
-                kind: "dialogue".into(),
+                kind: DEFAULT_UNIT_KIND.into(),
                 protected_tokens: None,
             };
             let response = self
@@ -1606,7 +1739,7 @@ impl OpenAiProvider {
                 .await?;
             if !response.refused_ids.is_empty() {
                 return Err(
-                    ProviderError::new("model-refusal", "模型拒绝翻译测试文本。")
+                    ProviderError::new(diagnostic_codes::MODEL_REFUSAL, "模型拒绝翻译测试文本。")
                         .with_usage(&response.usage),
                 );
             }
@@ -1627,7 +1760,7 @@ impl OpenAiProvider {
                 != Some(json!({"value":"ok"}))
         {
             return Err(ProviderError::new(
-                "connection-tool-call",
+                diagnostic_codes::CONNECTION_TOOL_CALL,
                 "接口已响应，但未返回预期的工具调用。请检查模型和协议的工具调用支持。",
             )
             .with_usage(&completion.usage));
@@ -1663,7 +1796,7 @@ async fn content_filter_error_body(mut response: reqwest::Response) -> bool {
 
 fn retry_after(value: &str) -> Option<Duration> {
     if let Ok(seconds) = value.trim().parse::<u64>() {
-        return Some(Duration::from_secs(seconds.min(30)));
+        return Some(Duration::from_secs(seconds).min(MAX_RATE_LIMIT_DELAY));
     }
     chrono::DateTime::parse_from_rfc2822(value)
         .ok()
@@ -1671,7 +1804,7 @@ fn retry_after(value: &str) -> Option<Duration> {
             (time.with_timezone(&chrono::Utc) - chrono::Utc::now())
                 .to_std()
                 .unwrap_or_default()
-                .min(Duration::from_secs(30))
+                .min(MAX_RATE_LIMIT_DELAY)
         })
 }
 
@@ -1694,11 +1827,11 @@ fn valid_tool_id(id: &str) -> bool {
 fn agent_tool_names(tools: &[Value], known: &[String]) -> Result<HashSet<String>, ProviderError> {
     let invalid = || {
         ProviderError::new(
-            "configuration",
+            diagnostic_codes::CONFIGURATION,
             "智能适配工具需要唯一有效的名称、描述和 JSON 对象参数模式。",
         )
     };
-    if tools.is_empty() || tools.len() > 128 {
+    if tools.is_empty() || tools.len() > MAX_TOOL_CALLS {
         return Err(invalid());
     }
     let mut names = HashSet::new();
@@ -1738,7 +1871,10 @@ fn valid_tool_arguments(arguments: &str) -> bool {
     impl<'de> serde::de::Visitor<'de> for ArgumentVisitor {
         type Value = ();
         fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            formatter.write_str("JSON with unique object properties and depth at most 32")
+            write!(
+                formatter,
+                "JSON with unique object properties and depth at most {MAX_TOOL_ARGUMENT_JSON_DEPTH}"
+            )
         }
         fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<(), E> {
             Ok(())
@@ -1759,8 +1895,10 @@ fn valid_tool_arguments(arguments: &str) -> bool {
             Ok(())
         }
         fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut sequence: A) -> Result<(), A::Error> {
-            if self.depth > 32 {
-                return Err(serde::de::Error::custom("JSON depth exceeds 32"));
+            if self.depth > MAX_TOOL_ARGUMENT_JSON_DEPTH {
+                return Err(serde::de::Error::custom(format!(
+                    "JSON depth exceeds {MAX_TOOL_ARGUMENT_JSON_DEPTH}"
+                )));
             }
             while sequence
                 .next_element_seed(ArgumentSeed {
@@ -1771,8 +1909,10 @@ fn valid_tool_arguments(arguments: &str) -> bool {
             Ok(())
         }
         fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
-            if self.depth > 32 {
-                return Err(serde::de::Error::custom("JSON depth exceeds 32"));
+            if self.depth > MAX_TOOL_ARGUMENT_JSON_DEPTH {
+                return Err(serde::de::Error::custom(format!(
+                    "JSON depth exceeds {MAX_TOOL_ARGUMENT_JSON_DEPTH}"
+                )));
             }
             let mut properties = HashSet::new();
             while let Some(name) = map.next_key::<String>()? {
@@ -1786,7 +1926,7 @@ fn valid_tool_arguments(arguments: &str) -> bool {
             Ok(())
         }
     }
-    if arguments.trim().is_empty() || arguments.len() > 512 * 1024 {
+    if arguments.trim().is_empty() || arguments.len() > MAX_TOOL_ARGUMENTS_BYTES {
         return false;
     }
     let mut deserializer = serde_json::Deserializer::from_str(arguments);
@@ -1802,7 +1942,7 @@ fn validate_agent_messages(
 ) -> Result<(), ProviderError> {
     let invalid = || {
         ProviderError::new(
-            "configuration",
+            diagnostic_codes::CONFIGURATION,
             "智能适配指令、消息、工具引用或输出预算无效。",
         )
     };
@@ -1859,7 +1999,7 @@ fn validate_agent_messages(
 
 fn agent_failure(detail: &str, usage: &TokenUsage) -> ProviderError {
     let mut error = ProviderError::new(
-        "agent-tool-format",
+        diagnostic_codes::AGENT_TOOL_FORMAT,
         "服务商返回的工具调用响应无效，请检查模型和接口是否支持函数工具。",
     )
     .with_usage(usage);
@@ -1904,9 +2044,10 @@ fn complete_agent_turn(
     original: &Value,
     usage: &TokenUsage,
 ) -> Result<Completion, ProviderError> {
-    if text.len() > 512 * 1024 || calls.len() > 128 {
+    if text.len() > MAX_COMPLETION_TEXT_BYTES || calls.len() > MAX_TOOL_CALLS {
         return Err(
-            ProviderError::new("response-size-limit", "模型响应超过大小限制。").with_usage(usage),
+            ProviderError::new(diagnostic_codes::RESPONSE_SIZE_LIMIT, "模型响应超过大小限制。")
+                .with_usage(usage),
         );
     }
     let mut ids = HashSet::new();
@@ -1918,13 +2059,16 @@ fn complete_agent_turn(
     }
     if calls.is_empty() && text.trim().is_empty() {
         return Err(
-            ProviderError::new("empty-content", "模型未返回文本或工具调用。").with_usage(usage),
+            ProviderError::new(diagnostic_codes::EMPTY_CONTENT, "模型未返回文本或工具调用。")
+                .with_usage(usage),
         );
     }
     if refusal_text(&text) {
-        return Err(ProviderError::new("model-refusal", "模型拒绝处理请求。")
-            .with_usage(usage)
-            .preview(&text, ""));
+        return Err(
+            ProviderError::new(diagnostic_codes::MODEL_REFUSAL, "模型拒绝处理请求。")
+                .with_usage(usage)
+                .preview(&text, ""),
+        );
     }
     Ok(Completion {
         text,
@@ -1946,7 +2090,7 @@ fn read_agent_chat(
     let choices = root["choices"]
         .as_array()
         .filter(|choices| choices.len() == 1)
-        .ok_or_else(|| fail("chat-choices", "API 必须返回一个完整响应。"))?;
+        .ok_or_else(|| fail(diagnostic_codes::CHAT_CHOICES, "API 必须返回一个完整响应。"))?;
     let choice = &choices[0];
     let message = &choice["message"];
     if !message.is_object() || message["role"] != "assistant" {
@@ -1959,7 +2103,7 @@ fn read_agent_chat(
         .as_str()
         .filter(|text| !text.trim().is_empty())
     {
-        return Err(fail("model-refusal", "模型拒绝处理请求。").preview(refusal, ""));
+        return Err(fail(diagnostic_codes::MODEL_REFUSAL, "模型拒绝处理请求。").preview(refusal, ""));
     }
     let text = if message["content"].is_null() {
         ""
@@ -1972,9 +2116,9 @@ fn read_agent_chat(
     if matches!(finish, Some("length" | "content_filter")) {
         return Err(fail(
             if finish == Some("length") {
-                "output-token-limit"
+                diagnostic_codes::OUTPUT_TOKEN_LIMIT
             } else {
-                "model-refusal"
+                diagnostic_codes::MODEL_REFUSAL
             },
             "模型未返回完整响应。",
         )
@@ -2003,7 +2147,7 @@ fn read_agent_chat(
     if (calls.is_empty() && finish != Some("stop"))
         || (!calls.is_empty() && finish != Some("tool_calls"))
     {
-        return Err(fail("chat-incomplete", "模型未完成响应。"));
+        return Err(fail(diagnostic_codes::CHAT_INCOMPLETE, "模型未完成响应。"));
     }
     complete_agent_turn(text.into(), calls, message, usage)
 }
@@ -2016,14 +2160,14 @@ fn read_agent_responses(
     let fail = |code, message| ProviderError::new(code, message).with_usage(usage);
     let status = root["status"]
         .as_str()
-        .ok_or_else(|| fail("responses-status", "Responses 状态无效。"))?;
+        .ok_or_else(|| fail(diagnostic_codes::RESPONSES_STATUS, "Responses 状态无效。"))?;
     if status != "completed" || root.get("error").is_some_and(|error| !error.is_null()) {
         let reason = root["incomplete_details"]["reason"].as_str();
         let mut error = fail(
             match reason {
-                Some("content_filter") => "model-refusal",
-                Some("max_output_tokens") => "output-token-limit",
-                _ => "responses-incomplete",
+                Some("content_filter") => diagnostic_codes::MODEL_REFUSAL,
+                Some("max_output_tokens") => diagnostic_codes::OUTPUT_TOKEN_LIMIT,
+                _ => diagnostic_codes::RESPONSES_INCOMPLETE,
             },
             "Responses API 未返回完整结果。",
         );
@@ -2032,7 +2176,7 @@ fn read_agent_responses(
     }
     let output = root["output"]
         .as_array()
-        .ok_or_else(|| fail("responses-output", "Responses API 缺少输出。"))?;
+        .ok_or_else(|| fail(diagnostic_codes::RESPONSES_OUTPUT, "Responses API 缺少输出。"))?;
     let mut text = String::new();
     let mut calls = Vec::new();
     for item in output {
@@ -2061,7 +2205,7 @@ fn read_agent_responses(
                     agent_failure("Responses contains invalid assistant content.", usage)
                 })? {
                     if part["type"] == "refusal" {
-                        return Err(fail("model-refusal", "模型拒绝处理请求。")
+                        return Err(fail(diagnostic_codes::MODEL_REFUSAL, "模型拒绝处理请求。")
                             .preview(part["refusal"].as_str().unwrap_or_default(), ""));
                     }
                     if part["type"] != "output_text" || !part["text"].is_string() {
@@ -2087,11 +2231,12 @@ fn read_agent_responses(
 }
 
 fn unwrap_json(text: &str) -> &str {
+    const CODE_FENCE: &str = "```";
     let text = text.trim().trim_start_matches('\u{feff}').trim_start();
-    if text.starts_with("```")
-        && text.ends_with("```")
-        && let Some((header, body)) = text[..text.len() - 3].split_once('\n')
-        && (header.trim_end() == "```" || header.trim_end().eq_ignore_ascii_case("```json"))
+    if text.starts_with(CODE_FENCE)
+        && let Some(without_end) = text.strip_suffix(CODE_FENCE)
+        && let Some((header, body)) = without_end.split_once('\n')
+        && (header.trim_end() == CODE_FENCE || header.trim_end().eq_ignore_ascii_case("```json"))
     {
         return body.trim();
     }
@@ -2259,8 +2404,10 @@ pub fn read_usage(
         .or_else(|| usage["prompt_cache_hit_tokens"].as_u64())
         .filter(|cached| input.is_none_or(|input| *cached <= input));
     TokenUsage {
-        input_tokens: input.unwrap_or((input_bytes as u64).div_ceil(3).max(1)),
-        output_tokens: output.unwrap_or((output_bytes as u64).div_ceil(3).max(1)),
+        input_tokens: input
+            .unwrap_or((input_bytes as u64).div_ceil(ESTIMATED_BYTES_PER_TOKEN).max(1)),
+        output_tokens: output
+            .unwrap_or((output_bytes as u64).div_ceil(ESTIMATED_BYTES_PER_TOKEN).max(1)),
         estimated: input.is_none() || output.is_none(),
         cached_tokens: cached,
     }
@@ -2271,7 +2418,7 @@ fn read_chat(root: &Value, usage: &TokenUsage) -> Result<Completion, ProviderErr
     let choices = root["choices"]
         .as_array()
         .filter(|choices| choices.len() == 1)
-        .ok_or_else(|| fail("chat-choices", "API 必须返回一个完整响应。"))?;
+        .ok_or_else(|| fail(diagnostic_codes::CHAT_CHOICES, "API 必须返回一个完整响应。"))?;
     let choice = &choices[0];
     let message = &choice["message"];
     if message["refusal"]
@@ -2279,23 +2426,25 @@ fn read_chat(root: &Value, usage: &TokenUsage) -> Result<Completion, ProviderErr
         .is_some_and(|value| !value.trim().is_empty())
         || choice["finish_reason"] == "content_filter"
     {
-        return Err(fail("model-refusal", "服务商拒绝处理这批内容。").preview(
-            message["refusal"]
-                .as_str()
-                .or_else(|| message["content"].as_str())
-                .unwrap_or_default(),
-            "",
-        ));
+        return Err(
+            fail(diagnostic_codes::MODEL_REFUSAL, "服务商拒绝处理这批内容。").preview(
+                message["refusal"]
+                    .as_str()
+                    .or_else(|| message["content"].as_str())
+                    .unwrap_or_default(),
+                "",
+            ),
+        );
     }
     let finish = choice["finish_reason"].as_str().unwrap_or("");
     if finish == "length" {
         return Err(fail(
-            "output-token-limit",
+            diagnostic_codes::OUTPUT_TOKEN_LIMIT,
             "模型达到输出长度限制，请减小翻译批次。",
         ));
     }
     if !matches!(finish, "stop" | "tool_calls") {
-        return Err(fail("chat-incomplete", "模型未完成响应。"));
+        return Err(fail(diagnostic_codes::CHAT_INCOMPLETE, "模型未完成响应。"));
     }
     let text = message["content"].as_str().unwrap_or_default().to_owned();
     let mut calls = Vec::new();
@@ -2308,20 +2457,23 @@ fn read_chat(root: &Value, usage: &TokenUsage) -> Result<Completion, ProviderErr
         calls.push(ToolCall {
             id: call["id"]
                 .as_str()
-                .ok_or_else(|| fail("tool-call", "工具调用缺少 ID。"))?
+                .ok_or_else(|| fail(diagnostic_codes::TOOL_CALL, "工具调用缺少 ID。"))?
                 .into(),
             name: call["function"]["name"]
                 .as_str()
-                .ok_or_else(|| fail("tool-call", "工具调用缺少名称。"))?
+                .ok_or_else(|| fail(diagnostic_codes::TOOL_CALL, "工具调用缺少名称。"))?
                 .into(),
             arguments: call["function"]["arguments"]
                 .as_str()
-                .ok_or_else(|| fail("tool-call", "工具调用参数不是字符串。"))?
+                .ok_or_else(|| fail(diagnostic_codes::TOOL_CALL, "工具调用参数不是字符串。"))?
                 .into(),
         });
     }
     if text.trim().is_empty() && calls.is_empty() {
-        return Err(fail("empty-content", "模型未返回文本或工具调用。"));
+        return Err(fail(
+            diagnostic_codes::EMPTY_CONTENT,
+            "模型未返回文本或工具调用。",
+        ));
     }
     Ok(Completion {
         text,
@@ -2340,11 +2492,11 @@ fn read_responses(root: &Value, usage: &TokenUsage) -> Result<Completion, Provid
         let reason = root["incomplete_details"]["reason"].as_str().unwrap_or("");
         return Err(fail(
             if reason == "content_filter" {
-                "model-refusal"
+                diagnostic_codes::MODEL_REFUSAL
             } else if reason == "max_output_tokens" {
-                "output-token-limit"
+                diagnostic_codes::OUTPUT_TOKEN_LIMIT
             } else {
-                "responses-incomplete"
+                diagnostic_codes::RESPONSES_INCOMPLETE
             },
             "Responses API 未返回完整结果。",
         ));
@@ -2353,51 +2505,65 @@ fn read_responses(root: &Value, usage: &TokenUsage) -> Result<Completion, Provid
     let mut calls = Vec::new();
     let output = root["output"]
         .as_array()
-        .ok_or_else(|| fail("responses-output", "Responses API 缺少输出。"))?;
+        .ok_or_else(|| fail(diagnostic_codes::RESPONSES_OUTPUT, "Responses API 缺少输出。"))?;
     for item in output {
         match item["type"].as_str() {
             Some("reasoning") => {}
             Some("function_call") => calls.push(ToolCall {
                 id: item["call_id"]
                     .as_str()
-                    .ok_or_else(|| fail("tool-call", "工具调用缺少 ID。"))?
+                    .ok_or_else(|| fail(diagnostic_codes::TOOL_CALL, "工具调用缺少 ID。"))?
                     .into(),
                 name: item["name"]
                     .as_str()
-                    .ok_or_else(|| fail("tool-call", "工具调用缺少名称。"))?
+                    .ok_or_else(|| fail(diagnostic_codes::TOOL_CALL, "工具调用缺少名称。"))?
                     .into(),
                 arguments: item["arguments"]
                     .as_str()
-                    .ok_or_else(|| fail("tool-call", "工具调用参数无效。"))?
+                    .ok_or_else(|| fail(diagnostic_codes::TOOL_CALL, "工具调用参数无效。"))?
                     .into(),
             }),
             Some("message") => {
                 if item["role"] != "assistant" || item["status"] != "completed" {
-                    return Err(fail("responses-output", "Responses 消息未完成。"));
+                    return Err(fail(
+                        diagnostic_codes::RESPONSES_OUTPUT,
+                        "Responses 消息未完成。",
+                    ));
                 }
                 for part in item["content"]
                     .as_array()
-                    .ok_or_else(|| fail("responses-output", "Responses 内容无效。"))?
+                    .ok_or_else(|| fail(diagnostic_codes::RESPONSES_OUTPUT, "Responses 内容无效。"))?
                 {
                     if part["type"] == "refusal" {
-                        return Err(fail("model-refusal", "服务商拒绝处理这批内容。")
-                            .preview(part["refusal"].as_str().unwrap_or_default(), ""));
+                        return Err(
+                            fail(diagnostic_codes::MODEL_REFUSAL, "服务商拒绝处理这批内容。")
+                                .preview(part["refusal"].as_str().unwrap_or_default(), ""),
+                        );
                     }
                     if part["type"] != "output_text" {
-                        return Err(fail("responses-output", "Responses 包含未知内容类型。"));
+                        return Err(fail(
+                            diagnostic_codes::RESPONSES_OUTPUT,
+                            "Responses 包含未知内容类型。",
+                        ));
                     }
-                    text.push_str(
-                        part["text"]
-                            .as_str()
-                            .ok_or_else(|| fail("responses-output", "Responses 文本无效。"))?,
-                    );
+                    text.push_str(part["text"].as_str().ok_or_else(|| {
+                        fail(diagnostic_codes::RESPONSES_OUTPUT, "Responses 文本无效。")
+                    })?);
                 }
             }
-            _ => return Err(fail("responses-output", "Responses 包含未知输出类型。")),
+            _ => {
+                return Err(fail(
+                    diagnostic_codes::RESPONSES_OUTPUT,
+                    "Responses 包含未知输出类型。",
+                ));
+            }
         }
     }
     if text.trim().is_empty() && calls.is_empty() {
-        return Err(fail("empty-content", "模型未返回文本或工具调用。"));
+        return Err(fail(
+            diagnostic_codes::EMPTY_CONTENT,
+            "模型未返回文本或工具调用。",
+        ));
     }
     Ok(Completion {
         text,

@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use crate::{
     Application, CoreError,
     catalog::{AdapterVersion, EngineCatalog, VersionFeedback},
-    patching::PatchInstaller,
+    patching::{PatchInstaller, TEST_STATUS_FAILED, TEST_STATUS_PASSED},
 };
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -64,10 +64,10 @@ impl Application {
             return Err(CoreError::ProjectBusy);
         }
         self.ensure_writable().await?;
-        if !matches!(status, "passed" | "failed") {
+        if !matches!(status, TEST_STATUS_PASSED | TEST_STATUS_FAILED) {
             return Err(CoreError::InvalidData("请选择效果正常或存在问题。".into()));
         }
-        if status == "failed" && notes.trim().is_empty() {
+        if status == TEST_STATUS_FAILED && notes.trim().is_empty() {
             return Err(CoreError::InvalidData(
                 "请先填写遇到的问题，例如乱码、字体重叠或遗漏文字。".into(),
             ));
@@ -113,7 +113,7 @@ impl Application {
             },
         )?;
         if is_current {
-            if status == "failed" {
+            if status == TEST_STATUS_FAILED {
                 project.extra.insert("adapterRepair".into(), json!(adapter));
                 project
                     .extra
@@ -128,7 +128,7 @@ impl Application {
                 project.extra.remove("adapterRepairNotes");
             }
             if registered
-                && status == "passed"
+                && status == TEST_STATUS_PASSED
                 && let Some(lifecycle) = catalog.version_lifecycle(&adapter)?
                 && let Some(predecessors) = lifecycle.replaces.get(id)
                 && !predecessors.is_empty()
@@ -154,7 +154,7 @@ impl Application {
             "已保存运行反馈；此版本不在全局引擎库中，未重新创建记录。"
         } else if !is_current {
             "已记录这份补丁对应旧版本的运行反馈。项目已切换版本，请生成并试用当前版本的补丁。"
-        } else if status == "passed" {
+        } else if status == TEST_STATUS_PASSED {
             if !project.extra.contains_key("adapterRetirements") {
                 "已记录当前游戏效果正常，此版本可供其他项目匹配复用。"
             } else if self.has_running_tasks().await {
@@ -171,7 +171,7 @@ impl Application {
         drop(_project);
         if registered
             && is_current
-            && status == "passed"
+            && status == TEST_STATUS_PASSED
             && let Err(error) = self.clean_replaced_adapters().await
         {
             self.log_task_message(

@@ -7,16 +7,20 @@ use gamel10n_translation::files::{hash_file, hash_text};
 use serde_json::json;
 
 use super::{
-    BuiltinAdapterProbeObservation, DiscoveryResult, DiscoveryVerification, EngineService,
-    GeneratedAdapterReuseFailure, ProgressCallback,
+    BOUNDED_PROBE_BUDGET, BuiltinAdapterProbeObservation, DiscoveryResult, DiscoveryVerification,
+    EngineService, GeneratedAdapterReuseFailure, ProgressCallback, SFA16_ARCHIVE, SFA16_EXE,
+    SFA16_LE_CONFIG, SIGLUS_GAMEEXE, SIGLUS_SCENE_PACK,
 };
 use crate::{
     AdapterHandle, CancellationToken, EngineError, PackageManifest,
-    discovery::{Inventory, RecognitionStatus, native_candidates},
-    protocol::{AdapterRequest, ProbeResult},
+    discovery::{
+        ADAPTER_SRC_DIR, BUILTIN_KIRIKIRI_SMIL_ID, Inventory, RecognitionStatus, native_candidates,
+    },
+    protocol::{AdapterRequest, EXE_EXTENSION, OP_EXTRACT, OP_PROBE, ProbeResult, STAGE_PROBE},
 };
 
-const PACKAGE_PROBE_BUDGET: Duration = Duration::from_secs(45);
+const MAX_REUSE_FAILURES: usize = 6;
+const MAX_FAILURE_EVIDENCE_CHARS: usize = 2000;
 
 struct Discovery<'a> {
     service: &'a EngineService,
@@ -118,7 +122,7 @@ impl EngineService {
             .zip(result.probe)
             .filter(|(_, probe)| probe.adapter_version == version.1)
             .ok_or_else(|| EngineError::Incompatible {
-                stage: "probe",
+                stage: STAGE_PROBE,
                 message: result.diagnostics.into_iter().next().unwrap_or_else(|| {
                     format!(
                         "{} {} 未匹配此游戏的资源。请核对适配器版本和游戏目录。",
@@ -136,7 +140,7 @@ impl Discovery<'_> {
         resources: &[String],
     ) -> Result<Option<ProbeResult>, EngineError> {
         let budget = crate::process::ProcessBudget::new(
-            PACKAGE_PROBE_BUDGET.saturating_sub(self.probe_elapsed),
+            BOUNDED_PROBE_BUDGET.saturating_sub(self.probe_elapsed),
         );
         let result = self
             .service
@@ -154,15 +158,15 @@ impl Discovery<'_> {
     }
 
     async fn probe_smil(&mut self) -> Result<Option<(AdapterHandle, ProbeResult)>, EngineError> {
-        const ID: &str = "engine.kirikiri-smil-smile";
+        let id = BUILTIN_KIRIKIRI_SMIL_ID;
         if self.service.ordered_packages_only
-            || self.selected.is_some_and(|version| version != (ID, "1"))
+            || self.selected.is_some_and(|version| version != (id, "1"))
             || self
                 .service
                 .preferred_adapter
                 .as_deref()
-                .is_some_and(|id| id != ID)
-            || self.service.disabled_families.contains(ID)
+                .is_some_and(|preferred| preferred != id)
+            || self.service.disabled_families.contains(id)
         {
             return Ok(None);
         }
@@ -172,7 +176,7 @@ impl Discovery<'_> {
             || self
                 .service
                 .excluded_adapters
-                .contains(&(ID.into(), "1".into()))
+                .contains(&(id.into(), "1".into()))
         {
             return Ok(None);
         }
@@ -211,7 +215,7 @@ impl Discovery<'_> {
         if self.verification == DiscoveryVerification::ProbeOnly {
             return Ok(Some((adapter, probe)));
         }
-        let mut request = AdapterRequest::new("extract", self.source);
+        let mut request = AdapterRequest::new(OP_EXTRACT, self.source);
         request.resource_files = Some(probe.required_files.clone());
         match self
             .service
@@ -304,7 +308,7 @@ impl Discovery<'_> {
             if self.cancellation.is_cancelled() {
                 return Err(EngineError::Cancelled);
             }
-            if self.probe_elapsed >= PACKAGE_PROBE_BUDGET {
+            if self.probe_elapsed >= BOUNDED_PROBE_BUDGET {
                 if self.verification == DiscoveryVerification::ProbeOnly {
                     return Err(EngineError::Timeout);
                 }
@@ -322,12 +326,12 @@ impl Discovery<'_> {
             let mut recognized = false;
             let source_directory = candidate
                 .directory
-                .join("src")
+                .join(ADAPTER_SRC_DIR)
                 .is_dir()
-                .then(|| candidate.directory.join("src"));
+                .then(|| candidate.directory.join(ADAPTER_SRC_DIR));
             let attempt = async {
                 let handle = manifest.handle(&candidate.directory)?;
-                phase = "probe";
+                phase = STAGE_PROBE;
                 let probe = self
                     .probe_with_remaining_budget(&handle, &candidate.resources)
                     .await?;
@@ -379,12 +383,12 @@ impl Discovery<'_> {
                 ) if self.verification == DiscoveryVerification::ProbeOnly => {
                     return Err(error);
                 }
-                Err(EngineError::Timeout) if phase == "probe" => {
+                Err(EngineError::Timeout) if phase == STAGE_PROBE => {
                     let message = format!(
                         "适配器 {} {} 在资源探测阶段超时，可使用智能适配继续分析。",
                         manifest.id, manifest.version
                     );
-                    if candidate.evidence > 0 && self.reuse_failures.len() < 6 {
+                    if candidate.evidence > 0 && self.reuse_failures.len() < MAX_REUSE_FAILURES {
                         self.reuse_failures.push(GeneratedAdapterReuseFailure {
                             id: manifest.id.clone(),
                             version: manifest.version.clone(),
@@ -400,12 +404,20 @@ impl Discovery<'_> {
                     break;
                 }
                 Err(error) => {
-                    if (recognized || candidate.evidence > 0) && self.reuse_failures.len() < 6 {
+                    if (recognized || candidate.evidence > 0)
+                        && self.reuse_failures.len() < MAX_REUSE_FAILURES
+                    {
                         self.reuse_failures.push(GeneratedAdapterReuseFailure {
                             id: manifest.id.clone(),
                             version: manifest.version.clone(),
                             failed_stage: phase.into(),
-                            evidence: vec![error.to_string().chars().take(2000).collect()],
+                            evidence: vec![
+                                error
+                                    .to_string()
+                                    .chars()
+                                    .take(MAX_FAILURE_EVIDENCE_CHARS)
+                                    .collect(),
+                            ],
                             source_directory,
                             original_roundtrip_passed: false,
                             input_fingerprint: None,
@@ -515,7 +527,7 @@ impl Discovery<'_> {
                 .diagnostics
                 .iter()
                 .skip(verified.diagnostics.len().saturating_sub(3))
-                .map(|item| item.chars().take(2000).collect())
+                .map(|item| item.chars().take(MAX_FAILURE_EVIDENCE_CHARS).collect())
                 .collect(),
             source_directory: source_directory.map(Path::to_owned),
             original_roundtrip_passed: verified.original_roundtrip_passed,
@@ -532,7 +544,7 @@ impl Discovery<'_> {
             EngineService::report(self.progress, "适配器检查未通过", &message);
             self.diagnostics.push(message);
         }
-        if self.reuse_failures.len() < 6 {
+        if self.reuse_failures.len() < MAX_REUSE_FAILURES {
             self.reuse_failures.push(failure);
         }
     }
@@ -564,7 +576,7 @@ impl Discovery<'_> {
                 "检查内置解析器",
                 format!("正在检查 {}。", adapter.id()),
             );
-            let mut request = AdapterRequest::new("probe", self.source);
+            let mut request = AdapterRequest::new(OP_PROBE, self.source);
             if let Some(resources) = native_resources {
                 if let Err(error) = inventory.require_complete_native_inventory() {
                     if !recorded_incomplete_native {
@@ -621,7 +633,7 @@ impl Discovery<'_> {
                 return Ok(Some((adapter, probe)));
             }
 
-            let mut extract = AdapterRequest::new("extract", self.source);
+            let mut extract = AdapterRequest::new(OP_EXTRACT, self.source);
             extract.resource_files = Some(probe.required_files.clone());
             EngineService::report(
                 self.progress,
@@ -672,12 +684,13 @@ impl Discovery<'_> {
                     match adapter {
                         AdapterHandle::BuiltinSfa16 => matches!(
                             path.as_str(),
-                            "scr.aos" | "sfa16.exe" | "sfa16.exe.le.config"
+                            SFA16_ARCHIVE | SFA16_EXE | SFA16_LE_CONFIG
                         ),
                         AdapterHandle::BuiltinSiglus => {
-                            matches!(path.as_str(), "scene.pck" | "gameexe.dat")
+                            matches!(path.as_str(), SIGLUS_SCENE_PACK | SIGLUS_GAMEEXE)
                                 || (!path.contains('/')
-                                    && (path.ends_with(".exe") || path.ends_with(".exe.le.config")))
+                                    && (path.ends_with(EXE_EXTENSION)
+                                        || path.ends_with(".exe.le.config")))
                                 || (path.starts_with("g00/_moji_") && path.ends_with(".g00"))
                         }
                         _ => false,
@@ -712,7 +725,13 @@ impl Discovery<'_> {
                 format,
                 "failed",
                 vec![],
-                Some(error.to_string().chars().take(2000).collect()),
+                Some(
+                    error
+                        .to_string()
+                        .chars()
+                        .take(MAX_FAILURE_EVIDENCE_CHARS)
+                        .collect(),
+                ),
             );
         }
         let message = format!("内置解析器 {} {stage}失败：{error}", adapter.id());
@@ -731,10 +750,10 @@ fn builtin_candidates(
             .any(|file| file.path.eq_ignore_ascii_case(name))
     };
     let mut builtins = Vec::new();
-    if has_file("scr.aos") && has_file("sfa16.exe") {
+    if has_file(SFA16_ARCHIVE) && has_file(SFA16_EXE) {
         builtins.push(AdapterHandle::BuiltinSfa16);
     }
-    if has_file("scene.pck") && has_file("gameexe.dat") {
+    if has_file(SIGLUS_SCENE_PACK) && has_file(SIGLUS_GAMEEXE) {
         builtins.push(AdapterHandle::BuiltinSiglus);
     }
     let native = native_candidates(inventory).map(|(format, resources)| {

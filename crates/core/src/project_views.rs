@@ -5,7 +5,11 @@ use gamel10n_translation::files::{FileError, io_error, read_json};
 use serde::de::{DeserializeSeed, IgnoredAny, MapAccess, Visitor};
 use serde_json::Value;
 
-use crate::{Application, CoreError, GameProject, TaskState};
+use crate::{
+    Application, CoreError, DEFAULT_PAGE_SIZE, GameProject, TaskState,
+    engine_review::ENGINE_REVIEW_RESULT_FILE,
+    engine_tasks::{ADAPTATION_PROGRESS_FILE, ADAPTATION_RESULT_FILE, PATCH_TEXTS_SUFFIX},
+};
 
 pub struct ProjectSnapshot {
     pub project: GameProject,
@@ -63,7 +67,7 @@ impl<'de> Visitor<'de> for PatchTextPageReader {
                 while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
                 return Ok(page);
             }
-            if page.total >= self.offset && page.texts.len() < 100 {
+            if page.total >= self.offset && page.texts.len() < DEFAULT_PAGE_SIZE {
                 page.texts.insert(id, map.next_value()?);
             } else {
                 map.next_value::<IgnoredAny>()?;
@@ -100,9 +104,9 @@ impl Application {
                 }
             };
             let progress =
-                live_progress.unwrap_or_else(|| optional("adaptation-progress.json", "适配进度"));
-            let adaptation = optional("adaptation-result.json", "适配详情");
-            let review = optional("engine-review-result.json", "经验总结");
+                live_progress.unwrap_or_else(|| optional(ADAPTATION_PROGRESS_FILE, "适配进度"));
+            let adaptation = optional(ADAPTATION_RESULT_FILE, "适配详情");
+            let review = optional(ENGINE_REVIEW_RESULT_FILE, "经验总结");
             let can_resume_adaptation = if task.as_ref().is_some_and(|task| task.running) {
                 false
             } else {
@@ -168,7 +172,7 @@ impl Application {
     ) -> Result<PatchTextPage, CoreError> {
         tokio::task::spawn_blocking(move || {
             let name = directory.file_name().unwrap_or_default().to_string_lossy();
-            let path = directory.with_file_name(format!("{name}.texts.json"));
+            let path = directory.with_file_name(format!("{name}{PATCH_TEXTS_SUFFIX}"));
             let (path, legacy) = if path.try_exists()? {
                 (path, false)
             } else {

@@ -1,8 +1,26 @@
 use crate::view::App;
-use gamel10n_core::TaskState;
+use gamel10n_core::{TaskState, engine_tasks::ADAPTATION_RESULT_FILE, task_op};
 use gamel10n_engines::EngineProgress;
 use serde_json::Value;
 use std::collections::BTreeMap;
+
+pub(crate) const PREVIOUS_ADAPTATION_RESULT_TITLE: &str = "上次适配结果";
+
+const MAX_STAGE_STATUS_CHARS: usize = 48;
+const DIAGNOSTIC_PREVIEW_MAX_CHARS: usize = 800;
+const DIAGNOSTIC_PREVIEW_MAX_LINES: usize = 8;
+
+mod adaptation_status {
+    pub const ACTIVATED: &str = "Activated";
+    pub const REUSED: &str = "Reused";
+    pub const WAITING_FOR_USER: &str = "WaitingForUser";
+    pub const UNSUPPORTED: &str = "Unsupported";
+    pub const CANCELLED: &str = "Cancelled";
+    pub const BUDGET_EXHAUSTED: &str = "BudgetExhausted";
+    pub const FAILED: &str = "Failed";
+    pub const UNAVAILABLE: &str = "Unavailable";
+    pub const INCOMPLETE: &str = "Incomplete";
+}
 
 pub fn concise_text(text: &str) -> String {
     const LIMIT: usize = 100;
@@ -28,19 +46,23 @@ pub fn project_failed(state: Option<&TaskState>, extra: &BTreeMap<String, Value>
     let saved = extra.get("taskSummary").unwrap_or(&Value::Null);
     let failed_adaptation = matches!(
         saved.get("adaptationStatus").and_then(Value::as_str),
-        Some("Failed" | "Unavailable" | "Unsupported")
+        Some(
+            adaptation_status::FAILED
+                | adaptation_status::UNAVAILABLE
+                | adaptation_status::UNSUPPORTED
+        )
     );
     if let Some(state) = state {
         if state.running {
             return false;
         }
         return state.succeeded == Some(false)
-            || (state.operation == "adapt"
+            || (state.operation == task_op::ADAPT
                 && state.succeeded == Some(true)
                 && failed_adaptation);
     }
     saved.get("succeeded").and_then(Value::as_bool) == Some(false)
-        || (saved.get("operation").and_then(Value::as_str) == Some("adapt")
+        || (saved.get("operation").and_then(Value::as_str) == Some(task_op::ADAPT)
             && saved.get("succeeded").and_then(Value::as_bool) == Some(true)
             && failed_adaptation)
 }
@@ -70,7 +92,7 @@ fn saved_project_status(state: Option<&TaskState>, extra: &BTreeMap<String, Valu
     if let Some(stage) = saved.get("stage").and_then(Value::as_str).map(str::trim)
         && !stage.is_empty()
         && !stage.contains(['\r', '\n'])
-        && stage.chars().count() <= 48
+        && stage.chars().count() <= MAX_STAGE_STATUS_CHARS
     {
         return stage.into();
     }
@@ -91,7 +113,7 @@ pub fn task_state_status(
     partial: bool,
 ) -> String {
     if !state.running
-        && state.operation == "workflow"
+        && state.operation == task_op::WORKFLOW
         && let Some(workflow) = &state.workflow
         && workflow.status == gamel10n_core::workflow::WorkflowStatus::WaitingForInput
     {
@@ -118,19 +140,19 @@ pub fn task_status(
     partial: bool,
 ) -> String {
     let operation_name = match operation {
-        "recognize" => "常规适配",
-        "extract" => "提取文本",
-        "adapt" => "智能适配",
-        "review" => "总结经验",
-        "translate" => "翻译",
-        "retranslate" => "重新翻译",
-        "candidate" => "生成候选译文",
-        "build" => "生成补丁",
-        "install" => "安装补丁",
-        "restore" => "恢复原版",
-        "verify" => "验证适配器",
-        "cleanup" => "清理项目文件",
-        "workflow" => "全自动汉化",
+        task_op::RECOGNIZE => "常规适配",
+        task_op::EXTRACT => "提取文本",
+        task_op::ADAPT => "智能适配",
+        task_op::REVIEW => "总结经验",
+        task_op::TRANSLATE => "翻译",
+        task_op::RETRANSLATE => "重新翻译",
+        task_op::CANDIDATE => "生成候选译文",
+        task_op::BUILD => "生成补丁",
+        task_op::INSTALL => "安装补丁",
+        task_op::RESTORE => "恢复原版",
+        task_op::VERIFY => "验证适配器",
+        task_op::CLEANUP => "清理项目文件",
+        task_op::WORKFLOW => "全自动汉化",
         _ => "任务",
     };
     if running {
@@ -139,19 +161,24 @@ pub fn task_status(
     match succeeded {
         Some(false) => format!("{operation_name}失败"),
         None => format!("{operation_name}已暂停"),
-        Some(true) if operation == "adapt" => adaptation_stage(adaptation_status, partial).into(),
+        Some(true) if operation == task_op::ADAPT => {
+            adaptation_stage(adaptation_status, partial).into()
+        }
         Some(true) => format!("{operation_name}完成"),
     }
 }
 
 pub fn recognition_task(operation: &str) -> bool {
-    matches!(operation, "recognize" | "adapt" | "extract")
+    matches!(
+        operation,
+        task_op::RECOGNIZE | task_op::ADAPT | task_op::EXTRACT
+    )
 }
 
 pub fn task_api<'a>(operation: &str, summary: &'a str) -> &'a str {
     let prefix = match operation {
-        "adapt" | "review" => "分析 API：",
-        "translate" | "retranslate" | "candidate" => "翻译 API 链：",
+        task_op::ADAPT | task_op::REVIEW => "分析 API：",
+        task_op::TRANSLATE | task_op::RETRANSLATE | task_op::CANDIDATE => "翻译 API 链：",
         _ => return "",
     };
     summary
@@ -162,13 +189,17 @@ pub fn task_api<'a>(operation: &str, summary: &'a str) -> &'a str {
 
 fn adaptation_stage(status: Option<&str>, partial: bool) -> &'static str {
     match status {
-        Some("Activated" | "Reused") if partial => "部分文字可试译",
-        Some("Activated" | "Reused") => "适配完成，可以试译",
-        Some("WaitingForUser") => "适配需要补充信息或操作",
-        Some("Unsupported") => "当前方案无法完成适配",
-        Some("Cancelled" | "BudgetExhausted") => "适配已暂停，可继续",
-        Some("Failed" | "Unavailable") => "适配遇到错误",
-        Some("Incomplete") => "适配尚未完成，可继续",
+        Some(adaptation_status::ACTIVATED | adaptation_status::REUSED) if partial => {
+            "部分文字可试译"
+        }
+        Some(adaptation_status::ACTIVATED | adaptation_status::REUSED) => "适配完成，可以试译",
+        Some(adaptation_status::WAITING_FOR_USER) => "适配需要补充信息或操作",
+        Some(adaptation_status::UNSUPPORTED) => "当前方案无法完成适配",
+        Some(adaptation_status::CANCELLED | adaptation_status::BUDGET_EXHAUSTED) => {
+            "适配已暂停，可继续"
+        }
+        Some(adaptation_status::FAILED | adaptation_status::UNAVAILABLE) => "适配遇到错误",
+        Some(adaptation_status::INCOMPLETE) => "适配尚未完成，可继续",
         _ => "智能适配完成",
     }
 }
@@ -200,8 +231,12 @@ fn diagnostic_summary(value: &Value) -> String {
     let mut summary = String::new();
     let mut line_count = 1;
     for (index, character) in chars.enumerate() {
-        if index == 800 || (character == '\n' && line_count == 8) {
-            summary.push_str("…\n完整内容见项目目录中的 adaptation-result.json。");
+        if index == DIAGNOSTIC_PREVIEW_MAX_CHARS
+            || (character == '\n' && line_count == DIAGNOSTIC_PREVIEW_MAX_LINES)
+        {
+            summary.push_str(&format!(
+                "…\n完整内容见项目目录中的 {ADAPTATION_RESULT_FILE}。"
+            ));
             break;
         }
         summary.push(character);
@@ -317,9 +352,14 @@ impl RecognitionFailure {
         if state.is_some_and(|state| state.running) {
             return Self::default();
         }
-        let current_result =
-            state.is_none_or(|state| state.operation == "adapt" && state.succeeded.is_some());
-        if current_result && matches!(text(result, "status"), "Failed" | "Unavailable") {
+        let current_result = state
+            .is_none_or(|state| state.operation == task_op::ADAPT && state.succeeded.is_some());
+        if current_result
+            && matches!(
+                text(result, "status"),
+                adaptation_status::FAILED | adaptation_status::UNAVAILABLE
+            )
+        {
             let failure = &result["failure"];
             let mut message = text(failure, "message").to_owned();
             if message.is_empty() {
@@ -387,14 +427,16 @@ impl RecognitionView {
         let count = analysis["unitCount"].as_u64().unwrap_or(0);
         let coverage_pending = gamel10n_core::projects::extraction_coverage_pending(extra);
         let ready = count > 0 && !coverage_pending;
-        let running = state.is_some_and(|s| s.running && s.operation == "adapt");
+        let running = state.is_some_and(|s| s.running && s.operation == task_op::ADAPT);
         let recognition_running =
             state.is_some_and(|s| s.running && recognition_task(&s.operation));
         let same_operation = state.is_some_and(|s| {
             progress
                 .get("operation")
                 .and_then(Value::as_str)
-                .map_or(s.operation == "adapt", |operation| operation == s.operation)
+                .map_or(s.operation == task_op::ADAPT, |operation| {
+                    operation == s.operation
+                })
         });
         let current_progress = same_operation
             && state.is_some_and(|s| s.running && s.message == text(progress, "message"));
@@ -406,8 +448,9 @@ impl RecognitionView {
         );
         let mut status = project_status(state, extra);
         if !coverage_pending
-            && state
-                .is_none_or(|s| !s.running && s.operation == "adapt" && s.succeeded == Some(true))
+            && state.is_none_or(|s| {
+                !s.running && s.operation == task_op::ADAPT && s.succeeded == Some(true)
+            })
             && result_status.is_some()
         {
             status = adaptation_stage(result_status, !coverage.is_empty()).into();
@@ -440,28 +483,39 @@ impl RecognitionView {
             .map(str::to_owned)
             .or_else(|| {
                 state
-                    .filter(|s| !s.running && s.operation == "adapt" && s.succeeded == Some(true))
+                    .filter(|s| {
+                        !s.running && s.operation == task_op::ADAPT && s.succeeded == Some(true)
+                    })
                     .map(|s| s.message.clone())
             })
             .unwrap_or_default();
         let result_title = if summary.is_empty() {
             String::new()
-        } else if (coverage_pending && matches!(result_status, Some("Activated" | "Reused")))
+        } else if (coverage_pending
+            && matches!(
+                result_status,
+                Some(adaptation_status::ACTIVATED | adaptation_status::REUSED)
+            ))
             || (state.is_some_and(|s| {
-                s.operation == "adapt" && (s.running || s.succeeded != Some(true))
+                s.operation == task_op::ADAPT && (s.running || s.succeeded != Some(true))
             }) && !failure.from_result
                 && !text(result, "summary").is_empty())
         {
-            "上次适配结果".into()
-        } else if matches!(result_status, Some("Activated" | "Reused")) {
+            PREVIOUS_ADAPTATION_RESULT_TITLE.into()
+        } else if matches!(
+            result_status,
+            Some(adaptation_status::ACTIVATED | adaptation_status::REUSED)
+        ) {
             "适配结果".into()
         } else {
             "适配未完成".into()
         };
         let warnings = lines(&analysis["warnings"]);
         // Older failed results stored the fatal cause in diagnostics.
-        let diagnostics = if matches!(result_status, Some("Failed" | "Unavailable"))
-            && result["failure"].is_null()
+        let diagnostics = if matches!(
+            result_status,
+            Some(adaptation_status::FAILED | adaptation_status::UNAVAILABLE)
+        ) && result["failure"].is_null()
         {
             String::new()
         } else {

@@ -1,5 +1,7 @@
 //! Local window preferences, independent of the selected game data directory.
 
+use gamel10n_core::projects::{APP_DATA_DIR_NAME, ENV_LOCAL_APP_DATA};
+use gamel10n_engines::protocol::GAME_ROOT_DIR;
 use gamel10n_translation::files::{FileError, read_json, write_json};
 use serde::{Deserialize, Serialize};
 use slint::winit_030::{WinitWindowAccessor, winit::event::WindowEvent};
@@ -8,6 +10,8 @@ use std::{
     path::{Path, PathBuf},
     rc::Rc,
 };
+
+const UI_STATE_FILENAME: &str = "ui-state.json";
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -118,10 +122,11 @@ pub struct WindowState {
 
 impl WindowState {
     pub fn install(window: &slint::Window) -> Self {
-        let path = std::env::var_os("LOCALAPPDATA")
+        let path = std::env::var_os(ENV_LOCAL_APP_DATA)
             .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("GameL10n/ui-state.json");
+            .unwrap_or_else(|| PathBuf::from(GAME_ROOT_DIR))
+            .join(APP_DATA_DIR_NAME)
+            .join(UI_STATE_FILENAME);
         Self::at(window, path)
     }
 

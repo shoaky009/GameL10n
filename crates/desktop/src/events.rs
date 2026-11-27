@@ -1,12 +1,20 @@
 use std::sync::atomic::Ordering;
 
-use gamel10n_core::{AppEvent, TaskState};
+use gamel10n_core::{
+    AppEvent, TaskState,
+    task_op::{self, locks_editor},
+};
 use gamel10n_engines::EngineProgress;
 use gamel10n_translation::execution::TranslationProgress;
 use slint::{ComponentHandle, Model};
 use tokio::sync::broadcast::error::RecvError;
 
-use crate::{App, Context, recognition_ui, token_ui};
+use crate::{
+    App, Context,
+    recognition_ui::{self, PREVIOUS_ADAPTATION_RESULT_TITLE},
+    token_ui,
+    ui_contract::{page, page_arg, project_tab},
+};
 
 pub(super) async fn connect(ctx: Context) {
     let app = ctx.app().await;
@@ -45,7 +53,7 @@ fn dispatch(ctx: &Context, event: AppEvent) {
                 .unwrap_or_else(|error| error.into_inner()) = None;
             ctx.update(|ui| {
                 let app = ui.global::<App>();
-                if app.get_page() == 2 {
+                if app.get_page() == page::CATALOG {
                     app.invoke_action("catalog-refresh".into(), "".into());
                 }
             });
@@ -55,8 +63,8 @@ fn dispatch(ctx: &Context, event: AppEvent) {
                 .invoke_action("projects".into(), "".into());
         }),
         AppEvent::TaskChanged(state) => {
-            let catalog_changed =
-                !state.running && matches!(state.operation.as_str(), "adapt" | "recognize");
+            let catalog_changed = !state.running
+                && matches!(state.operation.as_str(), task_op::ADAPT | task_op::RECOGNIZE);
             if catalog_changed {
                 *ctx.catalog
                     .lock()
@@ -131,7 +139,7 @@ fn dispatch(ctx: &Context, event: AppEvent) {
 
 fn update_task(app: &App, state: TaskState, catalog_changed: bool) {
     let running_changed = update_project_row(app, &state);
-    if catalog_changed && app.get_page() == 2 {
+    if catalog_changed && app.get_page() == page::CATALOG {
         app.invoke_action("catalog-refresh".into(), "".into());
     }
     if app.get_project_id().as_str() == state.project_id {
@@ -174,22 +182,19 @@ fn update_current_task(app: &App, state: TaskState) {
     }
     app.set_busy(state.running);
     app.set_task_operation(state.operation.clone().into());
-    app.set_editor_editable(
-        !state.running
-            || !matches!(
-                state.operation.as_str(),
-                "retranslate" | "extract" | "recognize" | "adapt" | "workflow"
-            ),
-    );
+    app.set_editor_editable(!state.running || !locks_editor(&state.operation));
     app.set_status(recognition_ui::task_state_status(&state, None, false).into());
     app.set_task_message(state.message.clone().into());
-    app.set_adaptation_running(state.running && state.operation == "adapt");
+    app.set_adaptation_running(state.running && state.operation == task_op::ADAPT);
     app.set_recognition_running(state.running && recognition);
     if app.get_recognition_running() {
         app.set_adaptation_progress(state.message.clone().into());
     }
-    if state.running && state.operation == "adapt" && !app.get_adaptation_summary().is_empty() {
-        app.set_adaptation_result_title("上次适配结果".into());
+    if state.running
+        && state.operation == task_op::ADAPT
+        && !app.get_adaptation_summary().is_empty()
+    {
+        app.set_adaptation_result_title(PREVIOUS_ADAPTATION_RESULT_TITLE.into());
     }
     if state.running {
         return;
@@ -232,9 +237,10 @@ pub(super) fn update_review(app: &App, state: &gamel10n_core::ReviewState) {
 }
 
 fn update_translation(app: &App, progress: TranslationProgress, parallel: bool) {
-    if app.get_tab() == 1 && (!progress.updates.is_empty() || !progress.failure_updates.is_empty())
+    if app.get_tab() == project_tab::WORKBENCH
+        && (!progress.updates.is_empty() || !progress.failure_updates.is_empty())
     {
-        app.invoke_action("texts".into(), "refresh".into());
+        app.invoke_action("texts".into(), page_arg::REFRESH.into());
     }
     let fraction = if progress.total == 0 {
         0.0
@@ -249,7 +255,7 @@ fn update_translation(app: &App, progress: TranslationProgress, parallel: bool) 
             progress.usage.output_tokens,
             progress.usage.cached_tokens.unwrap_or(0),
         ));
-        if app.get_task_operation() != "translate" {
+        if app.get_task_operation() != task_op::TRANSLATE {
             return;
         }
     }

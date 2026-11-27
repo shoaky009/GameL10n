@@ -9,20 +9,65 @@ use gamel10n_core::{
     CoreError,
     metrics::{
         ConsumptionDimension, ConsumptionFilter, ConsumptionGroup, ConsumptionRecord,
-        ConsumptionTotals, consumption_groups, status_label, task_label,
+        ConsumptionTotals, STATUS_COMPLETED, STATUS_FAILED, STATUS_INTERRUPTED, STATUS_PAUSED,
+        STATUS_RUNNING, STATUS_UNSUPPORTED, consumption_groups, status_label, task_label,
     },
+    task_op,
 };
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
 use crate::{
     Context, UiInput,
     token_ui::{compact, exact},
+    ui_contract::page,
     view::{App, ConsumptionRow, MetricGroupRow, MetricTick, TokenPoint, TokenSegment},
 };
 
 const LIST_PAGE_SIZE: usize = 20;
 const TREND_PAGE_SIZE: usize = 30;
 const TASKS: [&str; 5] = ["", "translation", "adaptation", "terminology", "review"];
+
+const DATE_RANGE_TODAY: i32 = 1;
+const DATE_RANGE_7_DAYS: i32 = 2;
+const DATE_RANGE_30_DAYS: i32 = 3;
+const DATE_RANGE_CUSTOM: i32 = 4;
+const LOOKBACK_7_DAYS: i64 = 6;
+const LOOKBACK_30_DAYS: i64 = 29;
+const TAB_BREAKDOWN: i32 = 0;
+const TAB_TREND: i32 = 1;
+const DIMENSION_MODEL: i32 = 1;
+const DIMENSION_TASK: i32 = 2;
+const MEASURE_TOTAL_TOKENS: i32 = 0;
+const MEASURE_UNCACHED_INPUT: i32 = 1;
+const MEASURE_OUTPUT: i32 = 2;
+const MEASURE_CACHE_HIT_RATE: i32 = 3;
+const MEASURE_ELAPSED: i32 = 4;
+const CHART_MODE_TOTAL: i32 = 1;
+const CHART_MODE_OUTPUT: i32 = 2;
+const SERIES_PRIMARY: i32 = 0;
+const SERIES_SECONDARY: i32 = 1;
+const SERIES_TERTIARY: i32 = 2;
+const TONE_NEUTRAL: i32 = 0;
+const TONE_ACCENT: i32 = 1;
+const TONE_ADAPTATION: i32 = 2;
+const TONE_TERMINOLOGY: i32 = 3;
+const TONE_WARNING: i32 = 4;
+const TONE_ERROR: i32 = 5;
+const EMPTY_METRIC: &str = "—";
+const UNKNOWN_METRIC: &str = "未知";
+const NO_CACHE_STATS_LABEL: &str = "服务商未返回缓存计数";
+const ZERO_HIT_RATE_LABEL: &str = "命中率 0.0%";
+const MS_PER_SECOND: f64 = 1000.0;
+const SECS_PER_MINUTE: u64 = 60;
+const SECS_PER_HOUR: u64 = 3600;
+const PERCENT_SCALE: f64 = 100.0;
+const MAX_X_TICKS: usize = 6;
+const Y_TICK_INTERVALS: usize = 4;
+const NICE_SCALE_STEPS: [f64; 4] = [1.0, 2.0, 5.0, 10.0];
+const SMALL_TICK_DECIMAL_THRESHOLD: f64 = 10.0;
+const DATE_MONTH_DAY_OFFSET: usize = 5;
+const DATE_FORMAT: &str = "%Y-%m-%d";
+const TIMESTAMP_FORMAT: &str = "%Y-%m-%d %H:%M";
 
 #[derive(Clone, Default)]
 pub struct MetricsInput {
@@ -80,21 +125,27 @@ impl MetricsInput {
         filter.only_with_api = true;
         let today = Local::now().date_naive();
         match self.date_range {
-            1 => {
+            DATE_RANGE_TODAY => {
                 filter.from = Some(today);
                 filter.through = Some(today);
             }
-            2 | 3 => {
-                filter.from =
-                    Some(today - Duration::days(if self.date_range == 2 { 6 } else { 29 }));
+            DATE_RANGE_7_DAYS | DATE_RANGE_30_DAYS => {
+                filter.from = Some(
+                    today
+                        - Duration::days(if self.date_range == DATE_RANGE_7_DAYS {
+                            LOOKBACK_7_DAYS
+                        } else {
+                            LOOKBACK_30_DAYS
+                        }),
+                );
                 filter.through = Some(today);
             }
-            4 => {
+            DATE_RANGE_CUSTOM => {
                 let parse = |value: &str| -> Result<Option<NaiveDate>, CoreError> {
                     if value.trim().is_empty() {
                         return Ok(None);
                     }
-                    NaiveDate::parse_from_str(value.trim(), "%Y-%m-%d")
+                    NaiveDate::parse_from_str(value.trim(), DATE_FORMAT)
                         .map(Some)
                         .map_err(|_| CoreError::InvalidData("日期请填写为 YYYY-MM-DD。".into()))
                 };
@@ -115,17 +166,21 @@ impl MetricsInput {
 }
 
 fn duration(ms: f64) -> String {
-    let seconds = (ms / 1000.0).round() as u64;
-    if seconds >= 3600 {
+    let seconds = (ms / MS_PER_SECOND).round() as u64;
+    if seconds >= SECS_PER_HOUR {
         format!(
             "{}时{:02}分{:02}秒",
-            seconds / 3600,
-            seconds / 60 % 60,
-            seconds % 60
+            seconds / SECS_PER_HOUR,
+            seconds / SECS_PER_MINUTE % SECS_PER_MINUTE,
+            seconds % SECS_PER_MINUTE
         )
-    } else if seconds >= 60 {
-        format!("{}分{:02}秒", seconds / 60, seconds % 60)
-    } else if ms > 0.0 && ms < 1000.0 {
+    } else if seconds >= SECS_PER_MINUTE {
+        format!(
+            "{}分{:02}秒",
+            seconds / SECS_PER_MINUTE,
+            seconds % SECS_PER_MINUTE
+        )
+    } else if ms > 0.0 && ms < MS_PER_SECOND {
         format!("{ms:.0}毫秒")
     } else {
         format!("{seconds}秒")
@@ -172,7 +227,7 @@ fn token_breakdown_line(totals: &ConsumptionTotals) -> String {
     if has_cache_stats(totals) {
         let rate = totals
             .cache_hit_rate()
-            .map(|r| format!("（命中率 {:.1}%）", r * 100.0))
+            .map(|r| format!("（命中率 {:.1}%）", r * PERCENT_SCALE))
             .unwrap_or_default();
         format!(
             "未缓存 {} · 缓存 {}{} · 输出 {}",
@@ -212,7 +267,7 @@ fn exact_breakdown_tooltip(title: &str, totals: &ConsumptionTotals) -> String {
             ));
             let hit = totals
                 .cache_hit_rate()
-                .map(|r| format!("（命中率 {:.1}%）", r * 100.0))
+                .map(|r| format!("（命中率 {:.1}%）", r * PERCENT_SCALE))
                 .unwrap_or_default();
             lines.push(format!(
                 "缓存输入：{}{}",
@@ -260,16 +315,16 @@ struct SummaryDisplay {
 fn build_summary(totals: &ConsumptionTotals) -> SummaryDisplay {
     if totals.runs == 0 {
         return SummaryDisplay {
-            total_value: "—".into(),
+            total_value: EMPTY_METRIC.into(),
             total_sub: "暂无调用记录".into(),
             total_exact: String::new(),
-            uncached_value: "—".into(),
+            uncached_value: EMPTY_METRIC.into(),
             uncached_sub: String::new(),
             uncached_exact: String::new(),
-            cached_value: "—".into(),
+            cached_value: EMPTY_METRIC.into(),
             cached_sub: String::new(),
             cached_exact: String::new(),
-            output_value: "—".into(),
+            output_value: EMPTY_METRIC.into(),
             output_sub: String::new(),
             output_exact: String::new(),
         };
@@ -280,7 +335,7 @@ fn build_summary(totals: &ConsumptionTotals) -> SummaryDisplay {
     let total_value = if known {
         format_tokens(totals.total_tokens(), partial)
     } else {
-        "未知".into()
+        UNKNOWN_METRIC.into()
     };
     let total_sub = if known {
         format!(
@@ -297,14 +352,14 @@ fn build_summary(totals: &ConsumptionTotals) -> SummaryDisplay {
     let uncached_value = if known {
         format_tokens(uncached, partial)
     } else {
-        "未知".into()
+        UNKNOWN_METRIC.into()
     };
     let uncached_sub = if !known {
         String::new()
     } else if totals.cache_requests == 0 {
-        "服务商未返回缓存计数".into()
+        NO_CACHE_STATS_LABEL.into()
     } else if totals.input_tokens > 0 {
-        let ratio = uncached as f64 * 100.0 / totals.input_tokens as f64;
+        let ratio = uncached as f64 * PERCENT_SCALE / totals.input_tokens as f64;
         if cache_partial(totals) {
             format!("占总输入 {ratio:.1}% · 部分无缓存计数")
         } else {
@@ -332,8 +387,8 @@ fn build_summary(totals: &ConsumptionTotals) -> SummaryDisplay {
     let (cached_value, cached_sub, cached_exact) = if has_cache_stats(totals) {
         let rate = totals
             .cache_hit_rate()
-            .map(|r| format!("命中率 {:.1}%", r * 100.0))
-            .unwrap_or_else(|| "命中率 0.0%".into());
+            .map(|r| format!("命中率 {:.1}%", r * PERCENT_SCALE))
+            .unwrap_or_else(|| ZERO_HIT_RATE_LABEL.into());
         let sub = if cache_partial(totals) {
             format!(
                 "{rate}（{}/{} 次请求）",
@@ -356,11 +411,11 @@ fn build_summary(totals: &ConsumptionTotals) -> SummaryDisplay {
         )
     } else {
         (
-            "—".into(),
+            EMPTY_METRIC.into(),
             if totals.cache_requests == 0 {
-                "服务商未返回缓存计数".into()
+                NO_CACHE_STATS_LABEL.into()
             } else {
-                "命中率 0.0%".into()
+                ZERO_HIT_RATE_LABEL.into()
             },
             String::new(),
         )
@@ -369,7 +424,7 @@ fn build_summary(totals: &ConsumptionTotals) -> SummaryDisplay {
     let output_value = if known {
         format_tokens(totals.output_tokens, partial)
     } else {
-        "未知".into()
+        UNKNOWN_METRIC.into()
     };
     let failed = if totals.failed_requests > 0 {
         format!(" · {} 失败", totals.failed_requests)
@@ -418,26 +473,28 @@ fn build_summary(totals: &ConsumptionTotals) -> SummaryDisplay {
 
 fn measure_value(totals: &ConsumptionTotals, measure: i32) -> Option<f64> {
     match measure {
-        0 => usage_known(totals).then_some(totals.total_tokens() as f64),
-        1 => usage_known(totals).then_some(totals.non_cached_input_tokens() as f64),
-        2 => usage_known(totals).then_some(totals.output_tokens as f64),
-        3 => totals.cache_hit_rate(),
-        4 => Some(totals.elapsed_ms as f64),
+        MEASURE_TOTAL_TOKENS => usage_known(totals).then_some(totals.total_tokens() as f64),
+        MEASURE_UNCACHED_INPUT => {
+            usage_known(totals).then_some(totals.non_cached_input_tokens() as f64)
+        }
+        MEASURE_OUTPUT => usage_known(totals).then_some(totals.output_tokens as f64),
+        MEASURE_CACHE_HIT_RATE => totals.cache_hit_rate(),
+        MEASURE_ELAPSED => Some(totals.elapsed_ms as f64),
         _ => None,
     }
 }
 
 fn measure_display(totals: &ConsumptionTotals, measure: i32) -> String {
     let Some(value) = measure_value(totals, measure) else {
-        return "未知".into();
+        return UNKNOWN_METRIC.into();
     };
     match measure {
-        0..=2 => format!(
+        MEASURE_TOTAL_TOKENS..=MEASURE_OUTPUT => format!(
             "{} Token",
             format_tokens(value.round() as u64, usage_partial(totals))
         ),
-        3 => format!("{:.1}%", value * 100.0),
-        4 => duration(value),
+        MEASURE_CACHE_HIT_RATE => format!("{:.1}%", value * PERCENT_SCALE),
+        MEASURE_ELAPSED => duration(value),
         _ => String::new(),
     }
 }
@@ -480,7 +537,7 @@ fn breakdown_rows(
         .iter()
         .filter_map(|group| measure_value(&group.totals, measure))
         .fold(0.0, f64::max);
-    let grand = if measure == 3 {
+    let grand = if measure == MEASURE_CACHE_HIT_RATE {
         None
     } else {
         measure_value(grand_totals, measure).filter(|&v| v > 0.0)
@@ -498,7 +555,12 @@ fn breakdown_rows(
                 .map_or(0.0, |v| (v / maximum).clamp(0.0, 1.0) as f32);
             let share = current
                 .zip(grand)
-                .map(|(v, g)| format!("{:.1}%", (v * 100.0 / g).clamp(0.0, 100.0)))
+                .map(|(v, g)| {
+                    format!(
+                        "{:.1}%",
+                        (v * PERCENT_SCALE / g).clamp(0.0, PERCENT_SCALE)
+                    )
+                })
                 .unwrap_or_default();
             let (uncached_fraction, cached_fraction, output_fraction) =
                 stacked_fractions(&group.totals);
@@ -550,8 +612,8 @@ fn daily_trend_chart(groups: &[ConsumptionGroup], mode: i32, offset: usize) -> T
     let series_values = |totals: &ConsumptionTotals| -> [Option<f64>; 3] {
         let known = usage_known(totals);
         match mode {
-            1 => [known.then_some(totals.total_tokens() as f64), None, None],
-            2 => [known.then_some(totals.output_tokens as f64), None, None],
+            CHART_MODE_TOTAL => [known.then_some(totals.total_tokens() as f64), None, None],
+            CHART_MODE_OUTPUT => [known.then_some(totals.output_tokens as f64), None, None],
             _ => [
                 known.then_some(totals.input_tokens as f64),
                 known.then_some(totals.non_cached_input_tokens() as f64),
@@ -570,14 +632,14 @@ fn daily_trend_chart(groups: &[ConsumptionGroup], mode: i32, offset: usize) -> T
     } else {
         1.0
     };
-    let top = [1.0, 2.0, 5.0, 10.0]
+    let top = NICE_SCALE_STEPS
         .into_iter()
         .find(|step| step * magnitude >= maximum)
-        .unwrap_or(10.0)
+        .unwrap_or(NICE_SCALE_STEPS[NICE_SCALE_STEPS.len() - 1])
         * magnitude;
 
     let count = visible.len();
-    let tick_count = count.min(6);
+    let tick_count = count.min(MAX_X_TICKS);
     let x_ticks: Vec<usize> = (0..tick_count)
         .map(|index| {
             if tick_count <= 1 {
@@ -596,7 +658,11 @@ fn daily_trend_chart(groups: &[ConsumptionGroup], mode: i32, offset: usize) -> T
         chart.known |= values.iter().any(Option::is_some);
 
         let axis_label = if x_ticks.contains(&index) {
-            group.label.get(5..).unwrap_or(&group.label).to_owned()
+            group
+                .label
+                .get(DATE_MONTH_DAY_OFFSET..)
+                .unwrap_or(&group.label)
+                .to_owned()
         } else {
             String::new()
         };
@@ -608,18 +674,18 @@ fn daily_trend_chart(groups: &[ConsumptionGroup], mode: i32, offset: usize) -> T
                 format_tokens(group.totals.total_tokens(), partial)
             )
         } else {
-            "未知".into()
+            UNKNOWN_METRIC.into()
         };
         let uncached = if known {
             format_tokens(group.totals.non_cached_input_tokens(), partial)
         } else {
-            "未知".into()
+            UNKNOWN_METRIC.into()
         };
         let cached = if has_cache_stats(&group.totals) {
             let hit = group
                 .totals
                 .cache_hit_rate()
-                .map(|r| format!("（{:.1}%）", r * 100.0))
+                .map(|r| format!("（{:.1}%）", r * PERCENT_SCALE))
                 .unwrap_or_default();
             format!(
                 "{}{}",
@@ -627,12 +693,12 @@ fn daily_trend_chart(groups: &[ConsumptionGroup], mode: i32, offset: usize) -> T
                 hit
             )
         } else {
-            "—".into()
+            EMPTY_METRIC.into()
         };
         let output = if known {
             format_tokens(group.totals.output_tokens, partial)
         } else {
-            "未知".into()
+            UNKNOWN_METRIC.into()
         };
         let detail = format!(
             "{} 次任务 · {} 次请求 · {}",
@@ -669,19 +735,19 @@ fn daily_trend_chart(groups: &[ConsumptionGroup], mode: i32, offset: usize) -> T
         let (left, right) = (&pair[0], &pair[1]);
         for (series, known, y1, y2) in [
             (
-                0,
+                SERIES_PRIMARY,
                 left.primary_known && right.primary_known,
                 left.primary_y,
                 right.primary_y,
             ),
             (
-                1,
+                SERIES_SECONDARY,
                 left.secondary_known && right.secondary_known,
                 left.secondary_y,
                 right.secondary_y,
             ),
             (
-                2,
+                SERIES_TERTIARY,
                 left.tertiary_known && right.tertiary_known,
                 left.tertiary_y,
                 right.tertiary_y,
@@ -700,13 +766,13 @@ fn daily_trend_chart(groups: &[ConsumptionGroup], mode: i32, offset: usize) -> T
     }
 
     if chart.known {
-        chart.ticks = (0..=4)
+        chart.ticks = (0..=Y_TICK_INTERVALS)
             .map(|index| {
-                let fraction = index as f32 / 4.0;
+                let fraction = index as f32 / Y_TICK_INTERVALS as f32;
                 let amount = top * (1.0 - f64::from(fraction));
                 MetricTick {
                     fraction,
-                    label: if amount > 0.0 && amount < 10.0 {
+                    label: if amount > 0.0 && amount < SMALL_TICK_DECIMAL_THRESHOLD {
                         format!("{amount:.1}").into()
                     } else {
                         compact(amount.round() as u64).into()
@@ -720,20 +786,25 @@ fn daily_trend_chart(groups: &[ConsumptionGroup], mode: i32, offset: usize) -> T
 
 fn task_tone(task: &str) -> i32 {
     match task {
-        "translate" | "preview-translate" | "retranslate" | "candidate" => 1,
-        "adapt" | "repair" | "expand" | "recognize" => 2,
-        "terminology" => 3,
-        _ => 0,
+        task_op::TRANSLATE
+        | task_op::PREVIEW_TRANSLATE
+        | task_op::RETRANSLATE
+        | task_op::CANDIDATE => TONE_ACCENT,
+        task_op::ADAPT | task_op::REPAIR | task_op::EXPAND | task_op::RECOGNIZE => TONE_ADAPTATION,
+        task_op::TERMINOLOGY => TONE_TERMINOLOGY,
+        _ => TONE_NEUTRAL,
     }
 }
 
 fn status_badge(status: &str) -> (&str, i32) {
     match status {
-        "completed" => ("", 0),
-        "running" => (status_label(status), 1),
-        "failed" => (status_label(status), 5),
-        "paused" | "interrupted" | "unsupported" => (status_label(status), 4),
-        _ => (status_label(status), 0),
+        STATUS_COMPLETED => ("", TONE_NEUTRAL),
+        STATUS_RUNNING => (status_label(status), TONE_ACCENT),
+        STATUS_FAILED => (status_label(status), TONE_ERROR),
+        STATUS_PAUSED | STATUS_INTERRUPTED | STATUS_UNSUPPORTED => {
+            (status_label(status), TONE_WARNING)
+        }
+        _ => (status_label(status), TONE_NEUTRAL),
     }
 }
 
@@ -772,7 +843,7 @@ fn record_rows(
                 timestamp: record
                     .started_at
                     .with_timezone(&Local)
-                    .format("%Y-%m-%d %H:%M")
+                    .format(TIMESTAMP_FORMAT)
                     .to_string()
                     .into(),
                 project_name: record.project_name.clone().into(),
@@ -787,7 +858,7 @@ fn record_rows(
                 status_label: status_text.into(),
                 status_tone,
                 configuration: configuration.into(),
-                tokens_summary: measure_display(&totals, 0).into(),
+                tokens_summary: measure_display(&totals, MEASURE_TOTAL_TOKENS).into(),
                 tokens_detail: token_breakdown_line(&totals).into(),
                 tokens_exact: exact_breakdown_tooltip(&record.project_name, &totals).into(),
             }
@@ -848,7 +919,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
     let generation = ctx.generation.clone();
     ctx.update(move |ui| {
         let app = ui.global::<App>();
-        if app.get_page() != 5 || generation.load(Ordering::SeqCst) != revision {
+        if app.get_page() != page::METRICS || generation.load(Ordering::SeqCst) != revision {
             return;
         }
         app.set_metrics_loading(false);
@@ -910,8 +981,8 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
         app.set_metrics_model_keys(strings(model_keys));
 
         let breakdown_dimension = match selection.dimension {
-            1 => ConsumptionDimension::Model,
-            2 => ConsumptionDimension::Task,
+            DIMENSION_MODEL => ConsumptionDimension::Model,
+            DIMENSION_TASK => ConsumptionDimension::Task,
             _ => ConsumptionDimension::Project,
         };
         let (totals, mut breakdown_groups) =
@@ -920,14 +991,14 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
         let (_, date_groups) =
             consumption_groups(&history.records, &filter, ConsumptionDimension::Date);
 
-        let page_size = if selection.tab == 1 {
+        let page_size = if selection.tab == TAB_TREND {
             TREND_PAGE_SIZE
         } else {
             LIST_PAGE_SIZE
         };
         let count = match selection.tab {
-            0 => breakdown_groups.len(),
-            1 => date_groups.len(),
+            TAB_BREAKDOWN => breakdown_groups.len(),
+            TAB_TREND => date_groups.len(),
             _ => totals.runs,
         };
         let offset = selection

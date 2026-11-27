@@ -257,8 +257,12 @@ fn add(
         .add(path, kind, detail, container, compiled);
 }
 
+pub(crate) const QLIE_FILEPACK_FOOTER_BYTES: usize = 28;
+
 pub(crate) fn filepack_version(tail: &[u8]) -> Option<&str> {
-    let signature = tail.get(tail.len().checked_sub(28)?..)?.get(..16)?;
+    let signature = tail
+        .get(tail.len().checked_sub(QLIE_FILEPACK_FOOTER_BYTES)?..)?
+        .get(..16)?;
     let version = signature
         .strip_prefix(b"FilePackVer")?
         .strip_suffix(b"\0\0")?;
@@ -875,10 +879,11 @@ fn inspect_builtin_files(
             "missingCapabilities":["NEKOPACK4A 脚本可用 nekopack4a-advscript2 模板按记录读写。选项、界面资源和中文显示须分别确认。"]}));
     }
     if !flash_movies.is_empty() {
-        result.push(json!({"format":"FlashAvm1","adapterId":"template.flash-avm1-pool","name":"Flash SWF",
+        let template = crate::adaptation_assets::FLASH_POOL_TEMPLATE;
+        result.push(json!({"format":"FlashAvm1","adapterId":format!("template.{template}"),"name":"Flash SWF",
             "evidenceKind":"movie-container","sampleFiles":flash_movies,"scriptComponent":"flash-avm1",
             "evidence":["FWS/CWS 文件头，仅为容器线索。按顶层动作及常量池确认 AVM1 文本。"],
-            "template":"flash-avm1-pool","missingCapabilities":["嵌套影片、独立界面和中文运行显示需核对。"]}));
+            "template":template,"missingCapabilities":["嵌套影片、独立界面和中文运行显示需核对。"]}));
     }
     if !ain_scripts.is_empty() {
         let template = crate::adaptation_assets::SYSTEM4_AIN_TEMPLATE;
@@ -902,10 +907,12 @@ fn inspect_builtin_files(
     if selected.is_none() && root.join("Scene.pck").is_file() && root.join("Gameexe.dat").is_file()
     {
         let read = || -> Result<bool, EngineError> {
+            const SIGLUS_SCENE_HEADER_BYTES: usize = 92;
             let mut input = File::open(resolve_relative(root, "Scene.pck")?)?;
-            let mut header = [0; 92];
+            let mut header = [0; SIGLUS_SCENE_HEADER_BYTES];
             let count = input.read(&mut header)?;
-            Ok(count == 92 && header[..4] == 92_u32.to_le_bytes())
+            Ok(count == SIGLUS_SCENE_HEADER_BYTES
+                && header[..4] == (SIGLUS_SCENE_HEADER_BYTES as u32).to_le_bytes())
         };
         match read() {
             Ok(true)=>result.insert(0,json!({"format":"Siglus","adapterId":"engine.siglus","name":"Siglus / Scene.pck","evidenceKind":"container-header",

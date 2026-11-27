@@ -416,22 +416,25 @@ fn snapshot(
             }
             bounded(&report, 4000)
         });
+    const DECISION_SUMMARY_FIELD_CHARS: usize = 2048;
+    const DECISION_STANDARD_BLOCK_CHARS: usize = 3000;
+    const DECISION_LARGE_BLOCK_CHARS: usize = 6000;
     let probes = (!has_recent_turns)
         .then(|| state.extra.get("successfulProbes"))
         .flatten()
-        .map(|value| bounded(value, 6000));
+        .map(|value| bounded(value, DECISION_LARGE_BLOCK_CHARS));
     let notes_turn = state.extra.get("notesTurn").and_then(Value::as_u64);
     let release_files = super::components::visible_release_files(&state.release_files);
     let host_state = json!({
-            "recognition":bounded(&json!(state.recognition),2048),"family":bounded(&state.family,2048),
-            "verification":verification_summary(state,"verificationCache"),
-            "recordedVerification":state.verification.as_ref().filter(|_|!state.extra.contains_key("verificationCache")).map(|v| json!({"passed":v.passed,"originalRoundtripPassed":v.original_roundtrip_passed,"diagnostics":v.diagnostics,"units":v.units,"runtimeTested":v.runtime_tested})),
-            "discovery":verification_summary(state,"discoveryVerificationCache"),
-            "trial":verification_summary(state,"trialVerificationCache"),
+            "recognition":bounded(&json!(state.recognition),DECISION_SUMMARY_FIELD_CHARS),"family":bounded(&state.family,DECISION_SUMMARY_FIELD_CHARS),
+            "verification":verification_summary(state,VERIFICATION_CACHE_KEY),
+            "recordedVerification":state.verification.as_ref().filter(|_|!state.extra.contains_key(VERIFICATION_CACHE_KEY)).map(|v| json!({"passed":v.passed,"originalRoundtripPassed":v.original_roundtrip_passed,"diagnostics":v.diagnostics,"units":v.units,"runtimeTested":v.runtime_tested})),
+            "discovery":verification_summary(state,DISCOVERY_VERIFICATION_CACHE_KEY),
+            "trial":verification_summary(state,TRIAL_VERIFICATION_CACHE_KEY),
             "verificationUse":"Cached results describe their recorded inputs. Only the existing verifier can reuse them after checking current fingerprints; script reports and model claims cannot activate support.",
             "verifiedPackage":state.verified_package.as_ref().map(|p| json!({"id":p["id"],"version":p["version"]})),
             "verifiedFingerprint":state.verified_fingerprint,
-            "textCoverage":bounded(&state.text_coverage,6000),
+            "textCoverage":bounded(&state.text_coverage,DECISION_LARGE_BLOCK_CHARS),
             "inputBinding":state.extra.get("inputBinding"),"resourceChanges":state.extra.get("resourceChanges"),
             "stagedInputFingerprint":input_fingerprint(state),
             "stagedResources":state.extra.get("resourceHashes").and_then(Value::as_object).map(|h| json!({"count":h.len(),"paths":h.keys().take(24).collect::<Vec<_>>()})),
@@ -441,18 +444,18 @@ fn snapshot(
             "releaseFileCount":release_files.count(),"resourcePatterns":state.resource_patterns,
             "engineReference":state.extra.get("engineReference"),
             "builtinDiscovery":discovery,
-            "builtinProbes":state.extra.get("builtinProbes").map(|v| bounded(v,3000)),
+            "builtinProbes":state.extra.get("builtinProbes").map(|v| bounded(v,DECISION_STANDARD_BLOCK_CHARS)),
             "builtinTrials":crate::adaptation_context::builtin_trial_summaries(state),
-            "workspaceSamples":state.extra.get("workspaceSamples").map(|v|bounded(v,3000)),
-            "automaticTrials":state.extra.get("automaticTrials").map(|v| bounded(v,3000)),
+            "workspaceSamples":state.extra.get("workspaceSamples").map(|v|bounded(v,DECISION_STANDARD_BLOCK_CHARS)),
+            "automaticTrials":state.extra.get("automaticTrials").map(|v| bounded(v,DECISION_STANDARD_BLOCK_CHARS)),
             "automaticArchiveTrials":state.extra.get("automaticArchiveTrials").map(|v| bounded(v,7000)),
-            "publishedReuse":state.extra.get("publishedReuse").map(|v| bounded(v,3000)),
-            "automaticTemplate":state.extra.get("automaticTemplate").map(|v| bounded(v,3000)),
+            "publishedReuse":state.extra.get("publishedReuse").map(|v| bounded(v,DECISION_STANDARD_BLOCK_CHARS)),
+            "automaticTemplate":state.extra.get("automaticTemplate").map(|v| bounded(v,DECISION_STANDARD_BLOCK_CHARS)),
             "successfulProbes":probes,
-            "launchInspection":state.extra.get("launchInspection").map(|v| bounded(v,3000)),
-            "reuseFailures":state.extra.get("reuseFailures").map(|v| bounded(v,3000)),
-            "previousFailures":state.extra.get("contextFailures").map(|v| bounded(v,6000)),
-            "recentEvidence":state.extra.get("recoveryEvidenceIndex").map(|v| bounded(v,6000))
+            "launchInspection":state.extra.get("launchInspection").map(|v| bounded(v,DECISION_STANDARD_BLOCK_CHARS)),
+            "reuseFailures":state.extra.get("reuseFailures").map(|v| bounded(v,DECISION_STANDARD_BLOCK_CHARS)),
+            "previousFailures":state.extra.get("contextFailures").map(|v| bounded(v,DECISION_LARGE_BLOCK_CHARS)),
+            "recentEvidence":state.extra.get("recoveryEvidenceIndex").map(|v| bounded(v,DECISION_LARGE_BLOCK_CHARS))
     });
     let mut result = json!({
         "objective":state.objective,"userInstruction":state.user_instruction,

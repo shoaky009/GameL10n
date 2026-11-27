@@ -5,14 +5,19 @@ pub(crate) mod page_file;
 pub(crate) mod paged;
 mod query;
 
-use crate::{Application, CoreError, application::CachedAnalysis};
+use crate::{
+    Application, CoreError, MAX_PAGE_SIZE,
+    application::{CachedAnalysis, MAX_CACHE_BYTES, MAX_CACHED_PROJECTS},
+    settings::{DEFAULT_TRANSLATION_STYLE, project_settings_keys},
+    task_op::locks_editor,
+};
 use gamel10n_translation::{
     TranslationUnit, ValidationIssue,
     edits::EditChanges,
-    execution::load_issues,
+    execution::{MEMORY_DIR, load_issues},
     storage::{
-        TranslationEdit, TranslationEdits, TranslationMemory, TranslationOrigin, TranslationPolicy,
-        memory_key,
+        DEFAULT_TARGET_LANGUAGE, TranslationEdit, TranslationEdits, TranslationMemory,
+        TranslationOrigin, TranslationPolicy, memory_key,
     },
     text,
 };
@@ -24,6 +29,11 @@ use std::{
     sync::{Arc, LazyLock, Weak},
 };
 use tokio::sync::Mutex;
+
+pub const FILTER_ALL: &str = "all";
+const TRIAL_SELECTION_FILE: &str = "trial-selection.json";
+const POLICY_VERSION: &str = "1";
+const EDIT_ENTRY_OVERHEAD_BYTES: usize = 64;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", default)]
@@ -238,7 +248,7 @@ impl Workbench {
         policy: TranslationPolicy,
     ) -> Result<Self, CoreError> {
         let units = &analysis.extraction().units;
-        let mut memory = TranslationMemory::load(directory.join("memory"), Some(&legacy_memory))
+        let mut memory = TranslationMemory::load(directory.join(MEMORY_DIR), Some(&legacy_memory))
             .map_err(storage_error)?;
         let edits =
             gamel10n_translation::edits::EditStore::open(&directory).map_err(storage_error)?;
@@ -359,7 +369,7 @@ impl Workbench {
                         .entries
                         .iter()
                         .chain(&edits.candidates)
-                        .map(|(id, edit)| id.len() + edit_bytes(edit) + 64)
+                        .map(|(id, edit)| id.len() + edit_bytes(edit) + EDIT_ENTRY_OVERHEAD_BYTES)
                         .sum::<usize>()
                 })
                 .unwrap_or_default()
@@ -388,7 +398,7 @@ impl Workbench {
         let mut total = 0;
         let mut rows = Vec::new();
         let mut summary = WorkbenchSummary::default();
-        let limit = limit.clamp(1, 500);
+        let limit = limit.clamp(1, MAX_PAGE_SIZE);
         for (index, unit) in units.iter().enumerate() {
             if index.is_multiple_of(page_file::SIZE) && !current() {
                 return Err(gamel10n_engines::EngineError::Cancelled.into());
@@ -515,7 +525,7 @@ fn matches_filter(
         .resource_path
         .as_ref()
         .is_some_and(|path| *path != unit.resource_path)
-        || !matches!(filter.kind.as_str(), "" | "all") && filter.kind != unit.kind
+        || !matches!(filter.kind.as_str(), "" | FILTER_ALL) && filter.kind != unit.kind
         || selected.is_some_and(|ids| !ids.contains(unit.id.as_str()))
     {
         return false;
@@ -544,27 +554,30 @@ fn matches_filter(
 
 pub(crate) fn policy(settings: &Value) -> TranslationPolicy {
     let terminology = settings
-        .get("terminology")
+        .get(project_settings_keys::TERMINOLOGY)
         .map(parse_terminology)
         .unwrap_or_default();
     TranslationPolicy {
         target_language: settings
-            .get("targetLanguage")
+            .get(project_settings_keys::TARGET_LANGUAGE)
             .and_then(Value::as_str)
             .filter(|text| !text.trim().is_empty())
-            .unwrap_or("简体中文")
+            .unwrap_or(DEFAULT_TARGET_LANGUAGE)
             .into(),
         style: settings
-            .get("style")
+            .get(project_settings_keys::STYLE)
             .and_then(Value::as_str)
-            .unwrap_or("自然流畅，保留人物语气、情绪和原文含义。")
+            .unwrap_or(DEFAULT_TRANSLATION_STYLE)
             .into(),
         terminology,
-        version: "1".into(),
+        version: POLICY_VERSION.into(),
     }
 }
 pub(crate) fn validated_policy(settings: &Value) -> Result<TranslationPolicy, CoreError> {
-    if let Some(terminology) = settings.get("terminology").and_then(Value::as_str) {
+    if let Some(terminology) = settings
+        .get(project_settings_keys::TERMINOLOGY)
+        .and_then(Value::as_str)
+    {
         let mut seen = HashSet::new();
         for line in terminology
             .lines()
@@ -636,7 +649,7 @@ impl Application {
             }
         }
         let directory = self.store.directory(id)?;
-        let legacy = self.data_directory().join("memory").join(id);
+        let legacy = self.data_directory().join(MEMORY_DIR).join(id);
         let revision = self
             .workbench_revision
             .load(std::sync::atomic::Ordering::Relaxed);
@@ -674,7 +687,7 @@ impl Application {
         cached.sort_by_key(|(_, access, _)| *access);
         let mut retained = incoming + cached.iter().map(|(_, _, bytes)| *bytes).sum::<usize>();
         for (key, _, bytes) in cached {
-            if cache.len() < 4 && retained <= 128 * 1024 * 1024 {
+            if cache.len() < MAX_CACHED_PROJECTS && retained <= MAX_CACHE_BYTES {
                 break;
             }
             cache.remove(&key);
@@ -851,7 +864,7 @@ impl Application {
     pub async fn load_text_selection(&self, id: &str) -> Result<Vec<String>, CoreError> {
         let directory = self.store.directory(id)?;
         let selection: Vec<String> = gamel10n_translation::storage::read_recoverable(
-            &directory.join("trial-selection.json"),
+            &directory.join(TRIAL_SELECTION_FILE),
         )
         .map_err(storage_error)?
         .unwrap_or_default();
@@ -912,18 +925,16 @@ impl Application {
             }
         }
         Ok(gamel10n_translation::files::write_json(
-            &self.store.directory(id)?.join("trial-selection.json"),
+            &self.store.directory(id)?.join(TRIAL_SELECTION_FILE),
             &selection,
         )?)
     }
     async fn ensure_editable(&self, id: &str) -> Result<(), CoreError> {
-        if self.task_state(id).await.is_some_and(|task| {
-            task.running
-                && matches!(
-                    task.operation.as_str(),
-                    "retranslate" | "extract" | "recognize" | "adapt" | "workflow"
-                )
-        }) {
+        if self
+            .task_state(id)
+            .await
+            .is_some_and(|task| task.running && locks_editor(&task.operation))
+        {
             return Err(CoreError::ProjectBusy);
         }
         self.ensure_writable().await

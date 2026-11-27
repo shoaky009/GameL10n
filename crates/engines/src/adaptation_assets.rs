@@ -28,6 +28,26 @@ pub(crate) const QLIE_PACK_TEMPLATE: &str = "qlie-pack3-imos";
 pub(crate) const QLIE_PACK31_TEMPLATE: &str = "qlie-pack31-imos";
 pub(crate) const FLASH_POOL_TEMPLATE: &str = "flash-avm1-pool";
 pub(crate) const SYSTEM4_AIN_TEMPLATE: &str = "system4-ain-msg1";
+pub(crate) const LOOSE_RENPY_TEMPLATE: &str = "loose-renpy";
+pub(crate) const LOOSE_RENPY_RPYC_TEMPLATE: &str = "loose-renpy-rpyc";
+pub(crate) const LOOSE_KIRIKIRI_KS_TEMPLATE: &str = "loose-kirikiri-ks";
+pub(crate) const RPA3_RENPY_TEMPLATE: &str = "rpa3-renpy";
+pub(crate) const RPA3_RENPY_RPYC_TEMPLATE: &str = "rpa3-renpy-rpyc";
+pub(crate) const RENPY_MIXED_TEMPLATE: &str = "renpy-mixed";
+pub(crate) const XP3_KIRIKIRI_KS_TEMPLATE: &str = "xp3-kirikiri-ks";
+pub(crate) const ARCHIVE_RPA3_COMPONENT: &str = "archive.rpa3";
+pub(crate) const ARCHIVE_XP3_COMPONENT: &str = "archive.xp3";
+pub(crate) const ARCHIVE_PFS8_COMPONENT: &str = "archive.pfs8";
+pub(crate) const ARCHIVE_NEKOPACK4A_COMPONENT: &str = "archive.nekopack4a";
+pub(crate) const QLIE_KEY_FILE: &str = "DLL/key.fkey";
+pub(crate) const QLIE_LAUNCHER_COMPONENT: &str = "qlie-japanese-font-launcher";
+pub(crate) const ENGINE_ARCHIVE_COMPONENT_FILE: &str = "engine_archive.py";
+pub(crate) const DEFAULT_TEMPLATE_CANDIDATE_LIMIT: usize = 64;
+pub(crate) const MAX_XP3_ARCHIVE_BYTES: u64 = 512 << 20;
+pub(crate) const MAX_ARCHIVE_MANIFEST_BYTES: u64 = 8 * 1024 * 1024;
+pub(crate) const MAX_ARCHIVE_ENTRIES: u64 = 10_000;
+pub(crate) const MAX_TEMPLATE_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
+pub(crate) const MAX_MEMBER_NAMES_BYTES: u64 = 2 << 20;
 const DEFAULT_TEMPLATE_LIMITATIONS: &str = "只连接已声明的脚本与封包组件。RPYC2 保留非文本对象及源码摘要；其他脚本编码沿用解析器。不生成未经当前游戏验证的字体、转区或运行时补丁。";
 const DEFAULT_PREPARED_NEXT_ACTION: &str = "沿用宿主已验收的资源和源码，核对独立文字覆盖、卷加载顺序及游戏显示";
 const QLIE_TEMPLATE_SOURCES: &[&str] = &[
@@ -263,15 +283,15 @@ const WHALE_OUTPUT_FIELDS: &[(&str, &str)] = &[("filenameManifest", "filenames.j
 
 pub(crate) const ARCHIVE_COMPONENT_SPECS: &[ArchiveComponentSpec] = &[
     ArchiveComponentSpec {
-        id: "archive.rpa3",
+        id: ARCHIVE_RPA3_COMPONENT,
         max_input_bytes: None,
         required_filter: None,
         extra_inputs: &[],
         output_path_fields: &[],
     },
     ArchiveComponentSpec {
-        id: "archive.xp3",
-        max_input_bytes: Some(512 << 20),
+        id: ARCHIVE_XP3_COMPONENT,
+        max_input_bytes: Some(MAX_XP3_ARCHIVE_BYTES),
         required_filter: Some(("none", "请先确认 XP3 未使用过滤器，再明确指定 filter=none。")),
         extra_inputs: &[],
         output_path_fields: &[],
@@ -312,14 +332,14 @@ pub(crate) const ARCHIVE_COMPONENT_SPECS: &[ArchiveComponentSpec] = &[
         output_path_fields: &[],
     },
     ArchiveComponentSpec {
-        id: "archive.pfs8",
+        id: ARCHIVE_PFS8_COMPONENT,
         max_input_bytes: None,
         required_filter: None,
         extra_inputs: &[],
         output_path_fields: &[],
     },
     ArchiveComponentSpec {
-        id: "archive.nekopack4a",
+        id: ARCHIVE_NEKOPACK4A_COMPONENT,
         max_input_bytes: None,
         required_filter: None,
         extra_inputs: &[],
@@ -388,7 +408,7 @@ pub(crate) const ARCHIVE_TEMPLATES: &[ArchiveTemplate] = &[
         sample_component: None,
         prepare_for_model: true,
         exclusive_format_candidate: false,
-        candidate_limit: 64,
+        candidate_limit: DEFAULT_TEMPLATE_CANDIDATE_LIMIT,
         allow_uncovered_resources: true,
         filter_qlie_ancillary: false,
         probe_report_kind: ProbeReportKind::Ain,
@@ -425,7 +445,7 @@ pub(crate) const ARCHIVE_TEMPLATES: &[ArchiveTemplate] = &[
     ArchiveTemplate {
         id: ARTEMIS_PFS_TEMPLATE,
         format: "ArtemisAst",
-        archive_component: Some("archive.pfs8"),
+        archive_component: Some(ARCHIVE_PFS8_COMPONENT),
         extensions: &[".ast"],
         patterns: &["**/*.pfs", "**/*.pfs.*"],
         name: "Artemis PFS v8 + AST 2.0",
@@ -438,7 +458,7 @@ pub(crate) const ARCHIVE_TEMPLATES: &[ArchiveTemplate] = &[
         sample_component: None,
         prepare_for_model: false,
         exclusive_format_candidate: false,
-        candidate_limit: 64,
+        candidate_limit: DEFAULT_TEMPLATE_CANDIDATE_LIMIT,
         allow_uncovered_resources: false,
         filter_qlie_ancillary: false,
         probe_report_kind: ProbeReportKind::Archive,
@@ -450,7 +470,7 @@ pub(crate) const ARCHIVE_TEMPLATES: &[ArchiveTemplate] = &[
     ArchiveTemplate {
         id: "nekopack4a-advscript2",
         format: "NekoSDK",
-        archive_component: Some("archive.nekopack4a"),
+        archive_component: Some(ARCHIVE_NEKOPACK4A_COMPONENT),
         extensions: &[".txt"],
         patterns: &["**/*.pak"],
         name: "NEKOPACK4A + NekoSDK ADVSCRIPT2",
@@ -463,7 +483,7 @@ pub(crate) const ARCHIVE_TEMPLATES: &[ArchiveTemplate] = &[
         sample_component: Some("nekosdk-script"),
         prepare_for_model: true,
         exclusive_format_candidate: false,
-        candidate_limit: 64,
+        candidate_limit: DEFAULT_TEMPLATE_CANDIDATE_LIMIT,
         allow_uncovered_resources: false,
         filter_qlie_ancillary: false,
         probe_report_kind: ProbeReportKind::Archive,
@@ -479,7 +499,7 @@ pub(crate) const ARCHIVE_TEMPLATES: &[ArchiveTemplate] = &[
         extensions: &[".s"],
         patterns: &[
             "GameData/*.pack",
-            "DLL/key.fkey",
+            QLIE_KEY_FILE,
             "*.exe",
             "*.exe.le.config",
             "GameData/System/config.txt",
@@ -490,12 +510,12 @@ pub(crate) const ARCHIVE_TEMPLATES: &[ArchiveTemplate] = &[
         pass_template_id_to_main: true,
         bind_vntextpatch_reference: true,
         extra_sources: QLIE_TEMPLATE_SOURCES,
-        optional_components: &["qlie-japanese-font-launcher"],
+        optional_components: &[QLIE_LAUNCHER_COMPONENT],
         discovery_key: None,
         sample_component: None,
         prepare_for_model: true,
         exclusive_format_candidate: false,
-        candidate_limit: 64,
+        candidate_limit: DEFAULT_TEMPLATE_CANDIDATE_LIMIT,
         allow_uncovered_resources: false,
         filter_qlie_ancillary: false,
         probe_report_kind: ProbeReportKind::Archive,
@@ -521,12 +541,12 @@ pub(crate) const ARCHIVE_TEMPLATES: &[ArchiveTemplate] = &[
         pass_template_id_to_main: true,
         bind_vntextpatch_reference: true,
         extra_sources: QLIE_TEMPLATE_SOURCES,
-        optional_components: &["qlie-japanese-font-launcher"],
+        optional_components: &[QLIE_LAUNCHER_COMPONENT],
         discovery_key: None,
         sample_component: None,
         prepare_for_model: true,
         exclusive_format_candidate: false,
-        candidate_limit: 64,
+        candidate_limit: DEFAULT_TEMPLATE_CANDIDATE_LIMIT,
         allow_uncovered_resources: false,
         filter_qlie_ancillary: true,
         probe_report_kind: ProbeReportKind::Archive,
@@ -549,9 +569,9 @@ pub(crate) struct BundledTemplate {
     pub(crate) required_filter: Option<(&'static str, &'static str)>,
 }
 
-const SCRIPT_TEMPLATE_COMPONENTS: &[&str] = &["engine_archive.py"];
+const SCRIPT_TEMPLATE_COMPONENTS: &[&str] = &[ENGINE_ARCHIVE_COMPONENT_FILE];
 const RENPY_COMPILED_COMPONENTS: &[&str] = &[
-    "engine_archive.py",
+    ENGINE_ARCHIVE_COMPONENT_FILE,
     "renpy_font.py",
     "renpy_rpyc_adapter.py",
     "renpy_mixed_adapter.py",
@@ -559,7 +579,7 @@ const RENPY_COMPILED_COMPONENTS: &[&str] = &[
 
 const BUNDLED_TEMPLATES: &[BundledTemplate] = &[
     BundledTemplate {
-        id: "loose-renpy",
+        id: LOOSE_RENPY_TEMPLATE,
         format: "Renpy",
         archive_component: None,
         extensions: &[".rpy"],
@@ -570,7 +590,7 @@ const BUNDLED_TEMPLATES: &[BundledTemplate] = &[
         required_filter: None,
     },
     BundledTemplate {
-        id: "loose-kirikiri-ks",
+        id: LOOSE_KIRIKIRI_KS_TEMPLATE,
         format: "KirikiriKs",
         archive_component: None,
         extensions: &[".ks"],
@@ -581,9 +601,9 @@ const BUNDLED_TEMPLATES: &[BundledTemplate] = &[
         required_filter: None,
     },
     BundledTemplate {
-        id: "rpa3-renpy",
+        id: RPA3_RENPY_TEMPLATE,
         format: "Renpy",
-        archive_component: Some("archive.rpa3"),
+        archive_component: Some(ARCHIVE_RPA3_COMPONENT),
         extensions: &[".rpy"],
         patterns: &["**/*.rpa"],
         name: "RPA3 + Ren’Py 源脚本",
@@ -592,7 +612,7 @@ const BUNDLED_TEMPLATES: &[BundledTemplate] = &[
         required_filter: None,
     },
     BundledTemplate {
-        id: "loose-renpy-rpyc",
+        id: LOOSE_RENPY_RPYC_TEMPLATE,
         format: "Renpy",
         archive_component: None,
         extensions: &[".rpyc"],
@@ -603,9 +623,9 @@ const BUNDLED_TEMPLATES: &[BundledTemplate] = &[
         required_filter: None,
     },
     BundledTemplate {
-        id: "rpa3-renpy-rpyc",
+        id: RPA3_RENPY_RPYC_TEMPLATE,
         format: "Renpy",
-        archive_component: Some("archive.rpa3"),
+        archive_component: Some(ARCHIVE_RPA3_COMPONENT),
         extensions: &[".rpyc"],
         patterns: &["**/*.rpa"],
         name: "RPA3 + Ren’Py RPYC2 编译脚本",
@@ -614,9 +634,9 @@ const BUNDLED_TEMPLATES: &[BundledTemplate] = &[
         required_filter: None,
     },
     BundledTemplate {
-        id: "renpy-mixed",
+        id: RENPY_MIXED_TEMPLATE,
         format: "Renpy",
-        archive_component: Some("archive.rpa3"),
+        archive_component: Some(ARCHIVE_RPA3_COMPONENT),
         extensions: &[".rpy", ".rpyc"],
         patterns: &["**/*.rpy", "**/*.rpyc", "**/*.rpa"],
         name: "Ren’Py 无冲突混合资源",
@@ -625,9 +645,9 @@ const BUNDLED_TEMPLATES: &[BundledTemplate] = &[
         required_filter: None,
     },
     BundledTemplate {
-        id: "xp3-kirikiri-ks",
+        id: XP3_KIRIKIRI_KS_TEMPLATE,
         format: "KirikiriKs",
-        archive_component: Some("archive.xp3"),
+        archive_component: Some(ARCHIVE_XP3_COMPONENT),
         extensions: &[".ks"],
         patterns: &["**/*.xp3"],
         name: "无过滤器 XP3 + Kirikiri KS",
@@ -653,7 +673,7 @@ pub(crate) fn template_composition(id: &str) -> Option<TemplateComposition> {
     if let Some(template) = ARCHIVE_TEMPLATES.iter().find(|template| template.id == id) {
         let mut component_files = Vec::new();
         if template.archive_component.is_some() {
-            component_files.push("engine_archive.py".to_owned());
+            component_files.push(ENGINE_ARCHIVE_COMPONENT_FILE.to_owned());
         }
         component_files.push(format!("{}.py", template.module));
         component_files.extend(template.extra_sources.iter().map(|source| (*source).to_owned()));

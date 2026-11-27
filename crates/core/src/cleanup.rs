@@ -7,7 +7,13 @@ use std::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::{Application, CancellationToken, CoreError, patching::check_path};
+use crate::{
+    Application, CancellationToken, CoreError,
+    engine_tasks::{SOURCES_DIR, VALIDATION_DIR},
+    logs::LOGS_DIR,
+    patching::{PATCHES_DIR, check_path},
+    task_op,
+};
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -119,7 +125,7 @@ impl Application {
         let cancellation = self
             .begin_with_review_evidence(
                 id,
-                "cleanup",
+                task_op::CLEANUP,
                 "正在清理所选项目文件。",
                 categories.iter().any(|category| {
                     matches!(
@@ -134,7 +140,7 @@ impl Application {
             .await;
         self.finish(
             id,
-            "cleanup",
+            task_op::CLEANUP,
             result
                 .as_ref()
                 .map(|_| "所选项目文件已清理，项目、译文和当前补丁已保留。".into())
@@ -174,12 +180,12 @@ impl Application {
             if cancellation.is_cancelled() {
                 return Err(gamel10n_engines::EngineError::Cancelled.into());
             }
-            self.progress(id, "cleanup", &format!("正在清理{}。", category.title()))
+            self.progress(id, task_op::CLEANUP, &format!("正在清理{}。", category.title()))
                 .await;
             let paths = category_paths(&root, category, retained.as_deref())?;
             for path in paths {
                 // Only log deletion excludes log readers/writers; resource and response deletion must not block other projects' logs.
-                let _log_guard = if path == root.join("logs") {
+                let _log_guard = if path == root.join(LOGS_DIR) {
                     Some(self.lock_log(id).await)
                 } else {
                     None
@@ -236,7 +242,7 @@ fn retained_patch(root: &Path, patch: Option<&Path>) -> Result<Option<PathBuf>, 
         return Ok(None);
     };
     check_path(patch)?;
-    if patch.parent() != Some(root.join("patches").as_path()) {
+    if patch.parent() != Some(root.join(PATCHES_DIR).as_path()) {
         return Err(CoreError::InvalidData(
             "当前补丁不在项目的补丁目录中，未清理任何补丁。".into(),
         ));
@@ -250,15 +256,15 @@ fn category_paths(
     retained: Option<&Path>,
 ) -> Result<Vec<PathBuf>, CoreError> {
     let names: &[&str] = match category {
-        CleanupCategory::Adaptation => &["adaptation", "validation"],
-        CleanupCategory::SourceResources => &["sources"],
-        CleanupCategory::Diagnostics => &["logs", "responses"],
+        CleanupCategory::Adaptation => &["adaptation", VALIDATION_DIR],
+        CleanupCategory::SourceResources => &[SOURCES_DIR],
+        CleanupCategory::Diagnostics => &[LOGS_DIR, "responses"],
         CleanupCategory::HistoricalPatches => {
             // Without an identified final result, there is no basis for deleting old patches.
             let Some(retained) = retained else {
                 return Ok(Vec::new());
             };
-            let directory = root.join("patches");
+            let directory = root.join(PATCHES_DIR);
             check_path(&directory)?;
             let name = retained.file_name().unwrap_or_default().to_string_lossy();
             let companion_prefix = format!("{name}.").to_lowercase();
@@ -309,7 +315,7 @@ fn process_tree(
     #[cfg(windows)]
     let linked = {
         use std::os::windows::fs::MetadataExt;
-        linked || metadata.file_attributes() & 0x400 != 0
+        linked || metadata.file_attributes() & crate::WIN32_FILE_ATTRIBUTE_REPARSE_POINT != 0
     };
     if linked {
         return Err(CoreError::InvalidData(format!(

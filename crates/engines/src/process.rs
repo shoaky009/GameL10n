@@ -16,7 +16,16 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::EngineError;
+use crate::{EngineError, protocol::PROTOCOL_VERSION};
+
+const DEFAULT_PROCESS_TIMEOUT: Duration = Duration::from_secs(300);
+const ISOLATION_SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
+const MAX_RESPONSE_BYTES: u64 = 256 * 1024 * 1024;
+const DEFAULT_STDERR_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_STDERR_DIAGNOSTIC_CHARS: usize = 4000;
+const WINDOWS_ABNORMAL_EXIT_MIN: u32 = 0x8000_0000;
+#[cfg(windows)]
+const WIN32_CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 fn process_slots() -> &'static Semaphore {
     static SLOTS: OnceLock<Semaphore> = OnceLock::new();
@@ -168,7 +177,7 @@ impl ToolProcess {
         Self {
             executable: executable.into(),
             arguments: Vec::new(),
-            timeout: Duration::from_secs(300),
+            timeout: DEFAULT_PROCESS_TIMEOUT,
             directory: None,
             response_file: None,
             maximum_output_bytes: None,
@@ -263,7 +272,7 @@ impl ToolProcess {
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             let input = serde_json::to_vec(&serde_json::json!({
-                "protocolVersion": 1,
+                "protocolVersion": PROTOCOL_VERSION,
                 "executable": self.executable,
                 "arguments": arguments,
                 "directory": self.directory,
@@ -294,7 +303,7 @@ impl ToolProcess {
             command.current_dir(directory);
         }
         #[cfg(windows)]
-        command.creation_flags(0x08000000); // CREATE_NO_WINDOW: CLI helpers must not open consoles.
+        command.creation_flags(WIN32_CREATE_NO_WINDOW); // CLI helpers must not open consoles.
         #[cfg(unix)]
         command.process_group(0);
         let budget_pause = pause_current_budget();
@@ -342,8 +351,8 @@ impl ToolProcess {
             };
             let (written, stdout, stderr, status) = tokio::try_join!(
                 async { Ok::<_, EngineError>(write.await) },
-                read_limited(stdout, maximum_output_bytes.unwrap_or(256 * 1024 * 1024)),
-                read_limited(stderr, maximum_output_bytes.unwrap_or(2 * 1024 * 1024)),
+                read_limited(stdout, maximum_output_bytes.unwrap_or(MAX_RESPONSE_BYTES)),
+                read_limited(stderr, maximum_output_bytes.unwrap_or(DEFAULT_STDERR_BYTES)),
                 async { Ok::<_, EngineError>(child.wait().await?) },
             )?;
             process_finished = true;
@@ -360,7 +369,9 @@ impl ToolProcess {
                     return Err(EngineError::Isolation(reason.trim().to_owned()));
                 }
                 if isolated
-                    && let Some(code) = status.code().filter(|code| *code as u32 >= 0x8000_0000)
+                    && let Some(code) = status
+                        .code()
+                        .filter(|code| *code as u32 >= WINDOWS_ABNORMAL_EXIT_MIN)
                 {
                     return Err(EngineError::Isolation(format!(
                         "原生隔离工具无法正常启动或运行，Windows 退出码为 0x{:08X}。请恢复完整运行工具并检查 Windows 环境，或在程序设置中关闭执行隔离后重试。",
@@ -382,7 +393,7 @@ impl ToolProcess {
                     .unwrap_or_else(|| {
                         String::from_utf8_lossy(&stderr)
                             .chars()
-                            .take(4000)
+                            .take(MAX_STDERR_DIAGNOSTIC_CHARS)
                             .collect()
                     });
                 return Err(EngineError::Rejected(if message.is_empty() {
@@ -409,7 +420,7 @@ impl ToolProcess {
             // EOF lets the runner stop its job and revoke its ACLs before forced termination.
             if isolated
                 && matches!(
-                    tokio::time::timeout(Duration::from_secs(30), child.wait()).await,
+                    tokio::time::timeout(ISOLATION_SHUTDOWN_GRACE, child.wait()).await,
                     Ok(Ok(_))
                 )
             {
@@ -434,7 +445,7 @@ async fn read_response<T: DeserializeOwned + Send + 'static>(
     };
     tokio::task::spawn_blocking(move || {
         use std::io::Read;
-        const LIMIT: u64 = 256 * 1024 * 1024;
+        let max_mib = MAX_RESPONSE_BYTES / (1024 * 1024);
         let metadata = match path.symlink_metadata() {
             Ok(metadata) => metadata,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -444,13 +455,17 @@ async fn read_response<T: DeserializeOwned + Send + 'static>(
             return Err(EngineError::Protocol("适配器响应必须为普通文件。".into()));
         }
         let file = std::fs::File::open(path)?;
-        if file.metadata()?.len() > LIMIT {
-            return Err(EngineError::Protocol("适配器文件响应超过 256 MiB。".into()));
+        if file.metadata()?.len() > MAX_RESPONSE_BYTES {
+            return Err(EngineError::Protocol(format!(
+                "适配器文件响应超过 {max_mib} MiB。"
+            )));
         }
-        let mut reader = BufReader::new(file).take(LIMIT + 1);
+        let mut reader = BufReader::new(file).take(MAX_RESPONSE_BYTES + 1);
         let response = serde_json::from_reader(&mut reader)?;
         if reader.limit() == 0 {
-            return Err(EngineError::Protocol("适配器文件响应超过 256 MiB。".into()));
+            return Err(EngineError::Protocol(format!(
+                "适配器文件响应超过 {max_mib} MiB。"
+            )));
         }
         Ok(Some(response))
     })
@@ -464,7 +479,7 @@ async fn terminate_process_tree(process_id: u32) {
         let mut command = Command::new("taskkill.exe");
         command
             .args(["/PID", &process_id.to_string(), "/T", "/F"])
-            .creation_flags(0x08000000)
+            .creation_flags(WIN32_CREATE_NO_WINDOW)
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         let _ = tokio::time::timeout(Duration::from_secs(5), command.status()).await;

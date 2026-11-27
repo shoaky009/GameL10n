@@ -2,13 +2,18 @@
 
 use crate::{
     Context, UiInput, show_dialog,
+    ui_contract::{modal, page, page_arg, project_tab},
     view::{App, TermRow, TextRow},
 };
 use gamel10n_core::{
-    Application, CoreError,
-    workbench::{WorkbenchFilter, WorkbenchRow, parse_terminology},
+    Application, CoreError, DEFAULT_PAGE_SIZE as PAGE_SIZE,
+    settings::project_settings_keys,
+    workbench::{FILTER_ALL, WorkbenchFilter, WorkbenchRow, parse_terminology},
 };
-use gamel10n_translation::{execution::TranslationOptions, files::hash_text};
+use gamel10n_translation::{
+    execution::{RETRANSLATION_ID_HEX_LEN, TranslationOptions},
+    files::hash_text,
+};
 use serde_json::Value;
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use std::{
@@ -17,7 +22,29 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-const PAGE_SIZE: usize = 100;
+pub(crate) const KIND_FILTERS: [&str; 8] = [
+    FILTER_ALL, "dialogue", "name", "choice", "ui", "item", "skill", "system",
+];
+pub(crate) const STATUS_FILTERS: [&str; 11] = [
+    FILTER_ALL,
+    "missing",
+    "pending",
+    "reviewed",
+    "edited",
+    "invalid",
+    "failed",
+    "candidate",
+    "automatic",
+    "manual",
+    "unknown",
+];
+const ALL_RESOURCES_LABEL: &str = "全部资源";
+const EDITOR_STATUS_SAVED: &str = "已保存";
+const ORIGIN_UNKNOWN: i32 = 0;
+const ORIGIN_AUTOMATIC: i32 = 1;
+const ORIGIN_MANUAL: i32 = 2;
+const AUTOSAVE_DEBOUNCE: Duration = Duration::from_millis(400);
+
 static EDIT_WRITES: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 static SELECTION_WRITES: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 // Only the visible workbench needs a read; queued, superseded views must not load another snapshot.
@@ -82,35 +109,21 @@ pub fn restore_view(app: &App<'_>, view: &WorkbenchView) {
     app.set_only_selected(view.only_selected);
     app.set_offset(view.offset as i32);
     app.set_kind_filter(
-        [
-            "all", "dialogue", "name", "choice", "ui", "item", "skill", "system",
-        ]
-        .iter()
-        .position(|kind| *kind == view.kind)
-        .unwrap_or(0) as i32,
+        KIND_FILTERS
+            .iter()
+            .position(|kind| *kind == view.kind)
+            .unwrap_or(0) as i32,
     );
     app.set_status_filter(
-        [
-            "all",
-            "missing",
-            "pending",
-            "reviewed",
-            "edited",
-            "invalid",
-            "failed",
-            "candidate",
-            "automatic",
-            "manual",
-            "unknown",
-        ]
-        .iter()
-        .position(|status| *status == view.status)
-        .unwrap_or(0) as i32,
+        STATUS_FILTERS
+            .iter()
+            .position(|status| *status == view.status)
+            .unwrap_or(0) as i32,
     );
     let resources = if view.resource.is_empty() {
-        vec!["全部资源".into()]
+        vec![ALL_RESOURCES_LABEL.into()]
     } else {
-        vec!["全部资源".into(), view.resource.clone().into()]
+        vec![ALL_RESOURCES_LABEL.into(), view.resource.clone().into()]
     };
     app.set_resources(ModelRc::new(VecModel::from(resources)));
     app.set_resource_filter(i32::from(!view.resource.is_empty()));
@@ -131,7 +144,7 @@ pub(crate) fn clear_editor(app: &App<'_>) {
     app.set_editor_has_issues(false);
     app.set_candidate("".into());
     app.set_editor_status("".into());
-    app.set_editor_origin(0);
+    app.set_editor_origin(ORIGIN_UNKNOWN);
     app.set_editor_invalid(false);
     app.set_editor_reviewed(false);
     app.set_terms(ModelRc::default());
@@ -240,14 +253,14 @@ fn refresh_selection(ctx: &Context, id: &str) {
         drop(saved);
         app.set_selection_busy(false);
         if app.get_only_selected() {
-            let page = if app.get_selected_texts() == 0 {
+            let page_target = if app.get_selected_texts() == 0 {
                 app.set_only_selected(false);
-                "0"
+                page_arg::FIRST
             } else {
-                "current"
+                page_arg::CURRENT
             };
-            if app.get_page() == 0 && app.get_tab() == 1 {
-                app.invoke_action("texts".into(), page.into());
+            if app.get_page() == page::PROJECT && app.get_tab() == project_tab::WORKBENCH {
+                app.invoke_action("texts".into(), page_target.into());
             }
         }
     });
@@ -306,7 +319,7 @@ async fn save_locked(ctx: &Context, input: &UiInput, reviewed: bool) -> Result<(
             a.set_editor_has_issues(has_issues);
             a.set_editor_origin(origin);
             a.set_editor_invalid(invalid);
-            a.set_editor_status("已保存".into());
+            a.set_editor_status(EDITOR_STATUS_SAVED.into());
         }
     });
     Ok(())
@@ -323,9 +336,9 @@ pub async fn flush_editor(ctx: &Context, input: &UiInput) -> Result<bool, CoreEr
 fn origin_code(row: &WorkbenchRow) -> i32 {
     use gamel10n_translation::storage::TranslationOrigin;
     match row.origin {
-        TranslationOrigin::Automatic => 1,
-        TranslationOrigin::Manual => 2,
-        TranslationOrigin::Unknown => 0,
+        TranslationOrigin::Automatic => ORIGIN_AUTOMATIC,
+        TranslationOrigin::Manual => ORIGIN_MANUAL,
+        TranslationOrigin::Unknown => ORIGIN_UNKNOWN,
     }
 }
 
@@ -385,8 +398,12 @@ async fn render_editor(ctx: &Context, input: &UiInput, editor_id: &str) -> Resul
             "\n\n原文、上下文或目标语言已变化，旧校对未自动采用：\n{previous}"
         ));
     }
-    let terminology =
-        parse_terminology(project.settings.get("terminology").unwrap_or(&Value::Null));
+    let terminology = parse_terminology(
+        project
+            .settings
+            .get(project_settings_keys::TERMINOLOGY)
+            .unwrap_or(&Value::Null),
+    );
     let terms: Vec<_> = terminology
         .into_iter()
         .filter(|(source, _)| {
@@ -409,8 +426,8 @@ async fn render_editor(ctx: &Context, input: &UiInput, editor_id: &str) -> Resul
         if a.get_project_id().as_str() != id
             || generation.load(Ordering::SeqCst) != revision
             || view_generation.load(Ordering::SeqCst) != view_revision
-            || a.get_page() != 0
-            || a.get_tab() != 1
+            || a.get_page() != page::PROJECT
+            || a.get_tab() != project_tab::WORKBENCH
             || a.get_editor_id().as_str() != previous_editor
                 && a.get_editor_id().as_str() != row.unit.id
             || a.get_editor_dirty()
@@ -419,7 +436,11 @@ async fn render_editor(ctx: &Context, input: &UiInput, editor_id: &str) -> Resul
         }
         let validation = validation_message(&row);
         let has_issues = row.failure.is_some() || !row.issues.is_empty();
-        let status = if row.text.is_some() { "已保存" } else { "" };
+        let status = if row.text.is_some() {
+            EDITOR_STATUS_SAVED
+        } else {
+            ""
+        };
         a.set_editor_location(
             format!(
                 "{}\n位置：{} · {}",
@@ -481,7 +502,11 @@ async fn texts(ctx: &Context, input: &UiInput) -> Result<(), CoreError> {
         ctx.generation.load(Ordering::SeqCst) == revision
             && ctx.is_requested_project(&input.project_id)
     };
-    if input.project_id.is_empty() || input.page != 0 || input.tab != 1 || !is_current() {
+    if input.project_id.is_empty()
+        || input.page != page::PROJECT
+        || input.tab != project_tab::WORKBENCH
+        || !is_current()
+    {
         return Ok(());
     }
     let _read = TEXT_READS.lock().await;
@@ -489,7 +514,10 @@ async fn texts(ctx: &Context, input: &UiInput) -> Result<(), CoreError> {
         return Ok(());
     }
     let editor_revision = input.editor_revision;
-    if matches!(input.argument.as_str(), "0" | "next" | "previous") {
+    if matches!(
+        input.argument.as_str(),
+        page_arg::FIRST | page_arg::NEXT | page_arg::PREVIOUS
+    ) {
         if !flush_editor(ctx, input).await? {
             finish_loading(ctx, input);
             return Ok(());
@@ -506,9 +534,9 @@ async fn texts(ctx: &Context, input: &UiInput) -> Result<(), CoreError> {
     }
     selection?;
     let offset = match input.argument.as_str() {
-        "next" => input.offset.saturating_add(PAGE_SIZE),
-        "previous" => input.offset.saturating_sub(PAGE_SIZE),
-        "0" => 0,
+        page_arg::NEXT => input.offset.saturating_add(PAGE_SIZE),
+        page_arg::PREVIOUS => input.offset.saturating_sub(PAGE_SIZE),
+        page_arg::FIRST => 0,
         _ => input.offset,
     };
     let app = ctx.app().await;
@@ -559,8 +587,10 @@ async fn texts(ctx: &Context, input: &UiInput) -> Result<(), CoreError> {
     let generation = ctx.generation.clone();
     let session = ctx.session.clone();
     let resource = input.resource_filter.clone();
-    let scroll = if matches!(input.argument.as_str(), "0" | "next" | "previous")
-        || input.offset != page.offset
+    let scroll = if matches!(
+        input.argument.as_str(),
+        page_arg::FIRST | page_arg::NEXT | page_arg::PREVIOUS
+    ) || input.offset != page.offset
     {
         0.0
     } else {
@@ -570,8 +600,8 @@ async fn texts(ctx: &Context, input: &UiInput) -> Result<(), CoreError> {
     ctx.update(move |ui| {
         let a = ui.global::<App>();
         if a.get_project_id().as_str() != id
-            || a.get_page() != 0
-            || a.get_tab() != 1
+            || a.get_page() != page::PROJECT
+            || a.get_tab() != project_tab::WORKBENCH
             || generation.load(Ordering::SeqCst) != revision
         {
             return;
@@ -614,7 +644,7 @@ async fn texts(ctx: &Context, input: &UiInput) -> Result<(), CoreError> {
             .iter()
             .position(|path| *path == resource)
             .map_or(0, |index| index + 1);
-        let mut resources = vec!["全部资源".into()];
+        let mut resources = vec![ALL_RESOURCES_LABEL.into()];
         resources.extend(page.resources.into_iter().map(Into::into));
         a.set_resources(ModelRc::new(VecModel::from(resources)));
         a.set_resource_filter(resource_index as i32);
@@ -669,7 +699,7 @@ async fn retranslation_id(
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    Ok(hash_text(&format!("{project}{timestamp}"))[..32].to_owned())
+    Ok(hash_text(&format!("{project}{timestamp}"))[..RETRANSLATION_ID_HEX_LEN].to_owned())
 }
 
 pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool, CoreError> {
@@ -724,7 +754,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                     a.set_editor_reviewed(false);
                 }
             });
-            tokio::time::sleep(Duration::from_millis(400)).await;
+            tokio::time::sleep(AUTOSAVE_DEBOUNCE).await;
             if save_editor(ctx, input, false).await? {
                 ctx.refresh_texts(&input.project_id);
             }
@@ -745,7 +775,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                 input.argument.parse::<i32>().unwrap_or(1)
             };
             let mut page = input.clone();
-            page.argument = "current".into();
+            page.argument = page_arg::CURRENT.into();
             if let Some((next, index)) = ctx
                 .app()
                 .await
@@ -783,7 +813,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
         "bulk-review" => {
             show_dialog(
                 ctx,
-                "bulk-review",
+                modal::BULK_REVIEW,
                 "确认所选译文已校对",
                 format!(
                     "请确认已检查所选 {} 条译文的含义和表达。未翻译、有格式问题或已校对的文本会跳过。",
@@ -868,7 +898,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
         }
         "retranslate-dialog" => show_dialog(
             ctx,
-            "retranslate",
+            modal::RETRANSLATE,
             "重新翻译所选文本",
             format!(
                 "将重新翻译所选 {} 条文本，包括已编辑和已校对的文本。新译文通过检查后替换当前译文并标为待校对；失败文本保留原译文。",
@@ -880,7 +910,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                 return Ok(true);
             }
             let app = ctx.app().await;
-            if input.argument == "all"
+            if input.argument == FILTER_ALL
                 && let Some(scope) = app.translation_scope(&input.project_id).await?
                 && !scope.completed
                 && (scope.unit_ids.is_some() || scope.preview_slot.is_some())
@@ -891,7 +921,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                 );
                 show_dialog(
                     ctx,
-                    "resume-translation",
+                    modal::RESUME_TRANSLATION,
                     "继续上次翻译",
                     format!("上次翻译范围为{range}。继续时会复用已保存的有效译文。"),
                 );
@@ -909,7 +939,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                 collect_translations: false,
                 ..Default::default()
             };
-            if !matches!(input.argument.as_str(), "all" | "force-all") {
+            if !matches!(input.argument.as_str(), FILTER_ALL | "force-all") {
                 let selection = ensure_selection(ctx, &input.project_id).await?;
                 if selection.is_empty() {
                     return Err(CoreError::InvalidData("请先选择要翻译的文本。".into()));

@@ -4,19 +4,35 @@ use std::{
 };
 
 use gamel10n_core::{
-    CoreError,
+    CoreError, DEFAULT_PAGE_SIZE,
     catalog::{
-        EngineCatalog, EngineLibraryFamily, EngineLibrarySource, EngineLibraryVersion,
-        GameCompatibility, LibraryFilter, LibrarySort,
+        EXTENSIONS_DIR, EngineCatalog, EngineLibraryFamily, EngineLibrarySource,
+        EngineLibraryVersion, GameCompatibility, LibraryFilter, LibrarySort,
     },
+    patching::TEST_STATUS_PASSED,
 };
 use serde_json::Value;
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 
 use crate::{
     Context, UiInput,
+    ui_contract::{NO_SELECTION, modal, page, page_arg},
     view::{App, EngineRow, MainWindow, NamedRow},
 };
+
+const ENGINE_TAB_VERSIONS: i32 = 1;
+const ENGINE_TAB_KNOWLEDGE: i32 = 3;
+const FILTER_BUILT_IN: i32 = 1;
+const FILTER_EXTERNAL: i32 = 2;
+const FILTER_HISTORY: i32 = 3;
+const ENABLED_FILTER_ON: i32 = 1;
+const ENABLED_FILTER_OFF: i32 = 2;
+const SORT_UPDATED: i32 = 1;
+const SORT_COMPATIBLE_GAMES: i32 = 2;
+const MAX_STATUS_DIAGNOSTICS: usize = 4;
+const SELECTION_LOCK_ERROR: &str = "引擎选择状态不可用。";
+const LABEL_ENABLED: &str = "已启用";
+const LABEL_DISABLED: &str = "已停用";
 
 static LIST_GENERATION: AtomicU64 = AtomicU64::new(0);
 
@@ -55,16 +71,18 @@ pub async fn open_family(
                 ctx.show_error("", "对应引擎版本已删除或不在全局引擎库中。".into());
                 return Ok(());
             }
-            (1, "version", version.to_owned())
+            (ENGINE_TAB_VERSIONS, "version", version.to_owned())
         }
-        LibraryTarget::Knowledge(Some(knowledge)) => (3, "knowledge", knowledge.to_owned()),
-        LibraryTarget::Knowledge(None) => (3, "", String::new()),
+        LibraryTarget::Knowledge(Some(knowledge)) => {
+            (ENGINE_TAB_KNOWLEDGE, "knowledge", knowledge.to_owned())
+        }
+        LibraryTarget::Knowledge(None) => (ENGINE_TAB_KNOWLEDGE, "", String::new()),
     };
     {
         let mut session = ctx
             .session
             .lock()
-            .map_err(|_| CoreError::InvalidData("引擎选择状态不可用。".into()))?;
+            .map_err(|_| CoreError::InvalidData(SELECTION_LOCK_ERROR.into()))?;
         session.engine_selection.clear();
         session.engine_selection.insert(id.clone());
         session.engine_selection_anchor = Some(id.clone());
@@ -75,7 +93,7 @@ pub async fn open_family(
             return;
         }
         let app = ui.global::<App>();
-        app.set_page(2);
+        app.set_page(page::CATALOG);
         app.set_engine_id(selected.into());
         app.set_engine_tab(tab);
         app.set_catalog_query("".into());
@@ -91,15 +109,17 @@ pub async fn open_family(
         apply_family(&app, &family, "");
     });
     let input = UiInput {
-        catalog_offset: (position / 100 * 100) as i32,
+        catalog_offset: (position / DEFAULT_PAGE_SIZE * DEFAULT_PAGE_SIZE) as i32,
         engine_id: id.clone(),
         ..UiInput::default()
     };
     refresh(ctx, &input, false).await?;
     ctx.update(move |ui| {
         let app = ui.global::<App>();
-        if app.get_page() == 2 && app.get_engine_id().as_str() == id {
-            app.set_catalog_scroll_y(-((position % 100) as f32) * app.get_catalog_row_height());
+        if app.get_page() == page::CATALOG && app.get_engine_id().as_str() == id {
+            app.set_catalog_scroll_y(
+                -((position % DEFAULT_PAGE_SIZE) as f32) * app.get_catalog_row_height(),
+            );
             if !action.is_empty() {
                 app.invoke_action(action.into(), selection.into());
             }
@@ -166,7 +186,7 @@ pub(super) fn show_adapter_picker(
         let query = query.trim().to_lowercase();
         let mut keys = Vec::new();
         let mut items = Vec::new();
-        let mut index = -1;
+        let mut index = NO_SELECTION;
         for (key, label, search) in &rows {
             if !search.contains(&query) {
                 continue;
@@ -181,7 +201,7 @@ pub(super) fn show_adapter_picker(
         app.set_adapter_keys(ModelRc::new(VecModel::from(keys)));
         app.set_adapter_index(index);
     });
-    app.set_adapter_index(-1);
+    app.set_adapter_index(NO_SELECTION);
     app.invoke_search_adapters("".into());
     if current {
         app.set_adapter_index(0);
@@ -189,7 +209,7 @@ pub(super) fn show_adapter_picker(
     app.set_error("".into());
     app.set_modal_title("手动执行适配器".into());
     app.set_modal_message("".into());
-    app.set_modal("project-adapter".into());
+    app.set_modal(modal::PROJECT_ADAPTER.into());
 }
 
 pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool, CoreError> {
@@ -227,7 +247,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                 let mut session = ctx
                     .session
                     .lock()
-                    .map_err(|_| CoreError::InvalidData("引擎选择状态不可用。".into()))?;
+                    .map_err(|_| CoreError::InvalidData(SELECTION_LOCK_ERROR.into()))?;
                 match action {
                     "engine-toggle" => {
                         if !session.engine_selection.remove(&id) {
@@ -356,7 +376,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
             let mut ids: Vec<_> = ctx
                 .session
                 .lock()
-                .map_err(|_| CoreError::InvalidData("引擎选择状态不可用。".into()))?
+                .map_err(|_| CoreError::InvalidData(SELECTION_LOCK_ERROR.into()))?
                 .engine_selection
                 .iter()
                 .cloned()
@@ -415,7 +435,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                     app.set_engine_delete_target(id.into());
                     app.set_modal_title("删除引擎？".into());
                     app.set_modal_message(message.into());
-                    app.set_modal("engine-delete".into());
+                    app.set_modal(modal::ENGINE_DELETE.into());
                 }
             });
         }
@@ -440,7 +460,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                 let mut session = ctx
                     .session
                     .lock()
-                    .map_err(|_| CoreError::InvalidData("引擎选择状态不可用。".into()))?;
+                    .map_err(|_| CoreError::InvalidData(SELECTION_LOCK_ERROR.into()))?;
                 session.engine_selection.remove(&id);
                 if session.engine_selection_anchor.as_ref() == Some(&id) {
                     session.engine_selection_anchor = None;
@@ -484,7 +504,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                     app.set_version_delete_target(detail.version.into());
                     app.set_modal_title("删除引擎版本？".into());
                     app.set_modal_message(message.into());
-                    app.set_modal("version-delete".into());
+                    app.set_modal(modal::VERSION_DELETE.into());
                 }
             });
         }
@@ -530,7 +550,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
             });
             crate::show_dialog(
                 ctx,
-                "verify-version",
+                modal::VERIFY_VERSION,
                 "验证发布包",
                 format!(
                     "{} · {}\n\n将使用所选游戏资源验证发布包与原文回填。实机运行状态单独记录。",
@@ -637,7 +657,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
         "open"
             if input.argument == "version"
                 || (input.argument == "knowledge"
-                    && input.page == 2
+                    && input.page == page::CATALOG
                     && !input.knowledge_id.is_empty()) =>
         {
             let catalog = catalog(ctx, false).await?;
@@ -654,7 +674,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
 }
 
 async fn catalog(ctx: &Context, refresh: bool) -> Result<EngineCatalog, CoreError> {
-    let root = ctx.app().await.data_directory().join("extensions");
+    let root = ctx.app().await.data_directory().join(EXTENSIONS_DIR);
     let cache = ctx.catalog.clone();
     tokio::task::spawn_blocking(move || {
         let mut cached = cache
@@ -682,32 +702,42 @@ async fn refresh(ctx: &Context, input: &UiInput, force: bool) -> Result<(), Core
     let catalog = catalog(ctx, force).await?;
     let query = input.catalog_query.clone();
     let offset = match input.argument.as_str() {
-        "next" => (input.catalog_offset.max(0) as usize).saturating_add(100),
-        "previous" => (input.catalog_offset.max(0) as usize).saturating_sub(100),
-        "0" => 0,
+        page_arg::NEXT => (input.catalog_offset.max(0) as usize).saturating_add(DEFAULT_PAGE_SIZE),
+        page_arg::PREVIOUS => {
+            (input.catalog_offset.max(0) as usize).saturating_sub(DEFAULT_PAGE_SIZE)
+        }
+        page_arg::FIRST => 0,
         _ => input.catalog_offset.max(0) as usize,
     };
     let filter = match input.catalog_filter {
-        1 => LibraryFilter::BuiltIn,
-        2 => LibraryFilter::External,
-        3 => LibraryFilter::History,
+        FILTER_BUILT_IN => LibraryFilter::BuiltIn,
+        FILTER_EXTERNAL => LibraryFilter::External,
+        FILTER_HISTORY => LibraryFilter::History,
         _ => LibraryFilter::All,
     };
     let enabled = match input.catalog_enabled_filter {
-        1 => Some(true),
-        2 => Some(false),
+        ENABLED_FILTER_ON => Some(true),
+        ENABLED_FILTER_OFF => Some(false),
         _ => None,
     };
     let sort = match input.catalog_sort {
-        1 => LibrarySort::Updated,
-        2 => LibrarySort::CompatibleGames,
+        SORT_UPDATED => LibrarySort::Updated,
+        SORT_COMPATIBLE_GAMES => LibrarySort::CompatibleGames,
         _ => LibrarySort::Name,
     };
     let page = tokio::task::spawn_blocking(move || {
-        let page = catalog.snapshot_filtered(&query, filter, enabled, sort, offset, 100)?;
+        let page =
+            catalog.snapshot_filtered(&query, filter, enabled, sort, offset, DEFAULT_PAGE_SIZE)?;
         if page.families.is_empty() && page.total > 0 {
-            let last_offset = (page.total - 1) / 100 * 100;
-            return catalog.snapshot_filtered(&query, filter, enabled, sort, last_offset, 100);
+            let last_offset = (page.total - 1) / DEFAULT_PAGE_SIZE * DEFAULT_PAGE_SIZE;
+            return catalog.snapshot_filtered(
+                &query,
+                filter,
+                enabled,
+                sort,
+                last_offset,
+                DEFAULT_PAGE_SIZE,
+            );
         }
         Ok(page)
     })
@@ -716,7 +746,7 @@ async fn refresh(ctx: &Context, input: &UiInput, force: bool) -> Result<(), Core
         let mut session = ctx
             .session
             .lock()
-            .map_err(|_| CoreError::InvalidData("引擎选择状态不可用。".into()))?;
+            .map_err(|_| CoreError::InvalidData(SELECTION_LOCK_ERROR.into()))?;
         session.engine_visible_ids = page
             .families
             .iter()
@@ -742,9 +772,9 @@ async fn refresh(ctx: &Context, input: &UiInput, force: bool) -> Result<(), Core
                     detail: format!(
                         "{} · {} 个版本 · {} 个兼容游戏",
                         if family.enabled {
-                            "已启用"
+                            LABEL_ENABLED
                         } else {
-                            "已停用"
+                            LABEL_DISABLED
                         },
                         family.versions.len(),
                         family.games.len()
@@ -765,7 +795,7 @@ async fn refresh(ctx: &Context, input: &UiInput, force: bool) -> Result<(), Core
                     page.diagnostics.len(),
                     page.diagnostics
                         .into_iter()
-                        .take(4)
+                        .take(MAX_STATUS_DIAGNOSTICS)
                         .collect::<Vec<_>>()
                         .join("\n")
                 )
@@ -839,15 +869,15 @@ fn apply_family(app: &App<'_>, family: &EngineLibraryFamily, query: &str) {
             .map(|entry| NamedRow {
                 id: entry.id.clone().into(),
                 name: entry.summary.clone().into(),
-                detail: format!(
-                    "{} · {} 个工具",
-                    if entry.enabled {
-                        "已启用"
-                    } else {
-                        "已停用"
-                    },
-                    entry.tool_count
-                )
+                    detail: format!(
+                        "{} · {} 个工具",
+                        if entry.enabled {
+                            LABEL_ENABLED
+                        } else {
+                            LABEL_DISABLED
+                        },
+                        entry.tool_count
+                    )
                 .into(),
                 enabled: entry.enabled,
             })
@@ -908,9 +938,9 @@ fn family_text(family: &EngineLibraryFamily) -> String {
             "资源模板"
         },
         if family.enabled {
-            "已启用"
+            LABEL_ENABLED
         } else {
-            "已停用"
+            LABEL_DISABLED
         },
         family.versions.len(),
         family.games.len(),
@@ -954,7 +984,7 @@ fn version_text(version: &EngineLibraryVersion) -> String {
             text.push_str(&format!(
                 "\n{}：{}{}",
                 title,
-                if feedback.status == "passed" {
+                if feedback.status == TEST_STATUS_PASSED {
                     "效果正常"
                 } else {
                     "存在问题"

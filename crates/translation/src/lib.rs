@@ -14,6 +14,8 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub const DEFAULT_UNIT_KIND: &str = "dialogue";
+
 /// Text identity and context shared by extraction, translation, and proofreading.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -32,7 +34,7 @@ pub struct TranslationUnit {
 }
 
 fn dialogue() -> String {
-    "dialogue".into()
+    DEFAULT_UNIT_KIND.into()
 }
 
 /// Provider-reported cache tokens are part of input tokens, never additional usage.
@@ -90,14 +92,14 @@ impl ValidationResult {
             })
             .collect::<Vec<_>>()
             .join("；");
+        let truncated = if self.issues.len() > SAMPLE_COUNT {
+            format!("（仅列前 {SAMPLE_COUNT} 项）")
+        } else {
+            String::new()
+        };
         format!(
-            "共 {} 项问题{}：{samples}",
+            "共 {} 项问题{truncated}：{samples}",
             self.issues.len(),
-            if self.issues.len() > SAMPLE_COUNT {
-                "（仅列前 3 项）"
-            } else {
-                ""
-            }
         )
     }
 }

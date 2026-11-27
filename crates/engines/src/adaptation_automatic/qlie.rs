@@ -1,8 +1,16 @@
-use super::{Budget, extension, limit, preparation_skip};
-use crate::adaptation::{AdaptationRequest, Session};
-use crate::adaptation_assets::{QLIE_PACK_TEMPLATE, QLIE_PACK31_TEMPLATE};
-use crate::adaptation_context::filepack_version;
+use super::{
+    ARCHIVE_ERROR_PREVIEW_CHARS, Budget, MAX_AUTOMATIC_ARCHIVES, MAX_PROBE_EXECUTABLES, extension,
+    limit, preparation_skip,
+};
+use crate::adaptation::{
+    ARCHIVE_SAMPLE_HELPER_TIMEOUT_SECS, AdaptationRequest, COMPONENT_PROBE_TIMEOUT, Session,
+};
+use crate::adaptation_assets::{
+    ENGINE_ARCHIVE_COMPONENT_FILE, QLIE_KEY_FILE, QLIE_PACK_TEMPLATE, QLIE_PACK31_TEMPLATE,
+};
+use crate::adaptation_context::{QLIE_FILEPACK_FOOTER_BYTES, filepack_version};
 use crate::discovery::Inventory;
+use crate::service::ADAPTER_COMPONENTS_DIR;
 use crate::{CancellationToken, EngineError, EngineService};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -11,11 +19,9 @@ use std::{
     fs::{self, File},
     io::{Read, Seek, SeekFrom},
     path::Path,
-    time::Duration,
 };
 
 pub(super) const FORMAT: &str = "Qlie";
-const KEY_FILE: &str = "DLL/key.fkey";
 
 fn record_trial_skip(state: &mut Session, code: &str, mut details: Value) {
     if state
@@ -37,11 +43,11 @@ fn record_trial_skip(state: &mut Session, code: &str, mut details: Value) {
 
 fn version(path: &Path) -> Result<Option<String>, EngineError> {
     let mut file = File::open(path)?;
-    if file.metadata()?.len() < 28 {
+    if file.metadata()?.len() < QLIE_FILEPACK_FOOTER_BYTES as u64 {
         return Ok(None);
     }
-    file.seek(SeekFrom::End(-28))?;
-    let mut footer = [0; 28];
+    file.seek(SeekFrom::End(-(QLIE_FILEPACK_FOOTER_BYTES as i64)))?;
+    let mut footer = [0; QLIE_FILEPACK_FOOTER_BYTES];
     file.read_exact(&mut footer)?;
     Ok(filepack_version(&footer).map(str::to_owned))
 }
@@ -49,7 +55,7 @@ fn version(path: &Path) -> Result<Option<String>, EngineError> {
 fn probe_revision(components: &Path) -> Result<String, EngineError> {
     let mut hash = Sha256::new();
     for name in [
-        "engine_archive.py",
+        ENGINE_ARCHIVE_COMPONENT_FILE,
         "qlie_archive.py",
         "qlie_pack31.py",
         "qlie_samples.py",
@@ -161,18 +167,18 @@ pub(super) async fn inspect(
                 parent.eq_ignore_ascii_case("GameData") && extension(file) == "pack"
             })
         })
-        .take(17)
+        .take(MAX_AUTOMATIC_ARCHIVES + 1)
         .collect();
-    if !(1..=16).contains(&archives.len()) {
+    if !(1..=MAX_AUTOMATIC_ARCHIVES).contains(&archives.len()) {
         record_trial_skip(
             state,
             "launch-layout-out-of-range",
-            json!({"archiveCandidates":archives.len(),"archiveLimit":16}),
+            json!({"archiveCandidates":archives.len(),"archiveLimit":MAX_AUTOMATIC_ARCHIVES}),
         );
         return Ok(None);
     }
 
-    let budget = Budget::new(cancellation, Duration::from_secs(20));
+    let budget = Budget::new(cancellation, COMPONENT_PROBE_TIMEOUT);
     let token = &budget.token;
     let mut template_id = None;
     let result = async {
@@ -210,23 +216,35 @@ pub(super) async fn inspect(
         let mut key_file = None;
         let mut companions = BTreeMap::new();
         if template_id == Some(QLIE_PACK_TEMPLATE) {
-            let keys: Vec<_> = files().filter(|path| path.eq_ignore_ascii_case(KEY_FILE)).take(2).collect();
+            let keys: Vec<_> = files()
+                .filter(|path| path.eq_ignore_ascii_case(QLIE_KEY_FILE))
+                .take(2)
+                .collect();
             if keys.len() != 1 {
                 let code = if keys.len() == 2 {
                     "ambiguous-key-file"
-                } else if request.inputs.excludes(KEY_FILE) {
+                } else if request.inputs.excludes(QLIE_KEY_FILE) {
                     "key-file-excluded"
                 } else {
                     "missing-key-file"
                 };
-                record_trial_skip(state, code, json!({"requiredFile":KEY_FILE,"version":"3.0"}));
+                record_trial_skip(
+                    state,
+                    code,
+                    json!({"requiredFile":QLIE_KEY_FILE,"version":"3.0"}),
+                );
                 return Ok(None);
             }
-            executables = files().filter(|path| !path.contains('/') && extension(path) == "exe")
-                .take(9).collect();
-            if !(1..=8).contains(&executables.len()) {
-                record_trial_skip(state, "launch-layout-out-of-range",
-                    json!({"version":"3.0","executableCandidates":executables.len(),"executableLimit":8}));
+            executables = files()
+                .filter(|path| !path.contains('/') && extension(path) == "exe")
+                .take(MAX_PROBE_EXECUTABLES + 1)
+                .collect();
+            if !(1..=MAX_PROBE_EXECUTABLES).contains(&executables.len()) {
+                record_trial_skip(
+                    state,
+                    "launch-layout-out-of-range",
+                    json!({"version":"3.0","executableCandidates":executables.len(),"executableLimit":MAX_PROBE_EXECUTABLES}),
+                );
                 return Ok(None);
             }
             key_file = Some(keys[0]);
@@ -237,7 +255,7 @@ pub(super) async fn inspect(
         resolved.extend(companions);
         let reference = service.adaptation_reference(workspace, state)?;
         let library = service.reference_library(&reference)?;
-        let components = service.asset_root.join("adapters/components");
+        let components = service.asset_root.join(ADAPTER_COMPONENTS_DIR);
         let revision = probe_revision(&components)?;
         let previous = state.extra.get("automaticArchiveTrials").and_then(Value::as_array)
             .into_iter().flatten().find(|report| report["format"] == FORMAT
@@ -248,7 +266,7 @@ pub(super) async fn inspect(
             .helper(
                 &json!({"operation":"archive_samples","format":FORMAT,"files":resolved,
                     "archives":archives,"executables":executables,"keyFile":key_file,"library":library,
-                    "components":components,"previous":previous,"timeoutSeconds":10}),
+                    "components":components,"previous":previous,"timeoutSeconds":ARCHIVE_SAMPLE_HELPER_TIMEOUT_SECS}),
                 token,
             )
             .await?;
@@ -265,7 +283,7 @@ pub(super) async fn inspect(
         }
         Err(error @ EngineError::Isolation(_)) => return Err(error),
         Err(EngineError::Cancelled | EngineError::Timeout) => json!({"status":"timed-out"}),
-        Err(error) => json!({"status":"unavailable","error":limit(&error.to_string(),240)}),
+        Err(error) => json!({"status":"unavailable","error":limit(&error.to_string(),ARCHIVE_ERROR_PREVIEW_CHARS)}),
     };
     report["format"] = json!(FORMAT);
     report["runtimeStatus"] = json!("not-tested");

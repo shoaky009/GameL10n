@@ -89,11 +89,35 @@ pub const SMALL_EXTRACTION_THRESHOLD: usize = 1_000;
 use crate::{
     AdapterHandle, CancellationToken, EngineError, EngineProgress, EngineService, PackageManifest,
     ProgressCallback, VerificationResult, VerifiedExtraction,
-    discovery::{Inventory, resolve_relative, validate_pattern},
+    discovery::{
+        ADAPTER_SRC_DIR, Inventory, PYTHON_MANIFEST_VERSION, resolve_relative, validate_pattern,
+    },
     native_tools,
-    protocol::AdapterRequest,
-    service::hashes,
+    protocol::{AdapterRequest, OP_BUILD, OP_EXTRACT},
+    service::{ADAPTER_COMPONENTS_DIR, hashes},
 };
+use gamel10n_translation::provider::ESTIMATED_BYTES_PER_TOKEN;
+
+pub(super) const MAX_TRIAL_FILES: usize = 12;
+pub(super) const MAX_TRIAL_SAMPLE_BYTES: u64 = 64 * 1024 * 1024;
+pub(super) const COMPONENT_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+pub(super) const ARCHIVE_SAMPLE_HELPER_TIMEOUT_SECS: u64 = 10;
+pub(super) const DEFAULT_READBACK_CHARS: i64 = 12_000;
+pub(super) const MAX_READBACK_CHARS: i64 = 24_000;
+pub(super) const VERIFICATION_CACHE_KEY: &str = "verificationCache";
+pub(super) const TRIAL_VERIFICATION_CACHE_KEY: &str = "trialVerificationCache";
+pub(super) const DISCOVERY_VERIFICATION_CACHE_KEY: &str = "discoveryVerificationCache";
+pub(super) const VERIFICATION_CACHE_KEYS: [&str; 3] = [
+    VERIFICATION_CACHE_KEY,
+    TRIAL_VERIFICATION_CACHE_KEY,
+    DISCOVERY_VERIFICATION_CACHE_KEY,
+];
+
+const MAX_COVERAGE_CHECK_ITEMS: usize = 24;
+const MAX_COVERAGE_SAMPLES: usize = 64;
+const MAX_COVERAGE_CORRECTION_HISTORY: usize = 8;
+const MAX_SHORT_TEXT_FIELD_LEN: usize = 600;
+const MAX_COVERAGE_LIST_TOTAL_UTF16: usize = 6_000;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -104,20 +128,29 @@ pub struct AdaptationLimits {
 impl Default for AdaptationLimits {
     fn default() -> Self {
         Self {
-            maximum_tokens: 1_000_000,
+            maximum_tokens: Self::DEFAULT_TOKEN_BUDGET,
             maximum_output_tokens: Self::DEFAULT_OUTPUT_TOKENS,
         }
     }
 }
 impl AdaptationLimits {
+    /// Default total token budget for intelligent adaptation.
+    pub const DEFAULT_TOKEN_BUDGET: u64 = 1_000_000;
+    /// Smallest configurable total token budget.
+    pub const MIN_TOKEN_BUDGET: u64 = 1_000;
+    /// Largest configurable total token budget.
+    pub const MAX_TOKEN_BUDGET: u64 = 20_000_000;
+    /// Smallest configurable single-turn response budget.
+    pub const MIN_OUTPUT_TOKENS: u32 = 128;
     /// Default response budget for intelligent adaptation.
     pub const DEFAULT_OUTPUT_TOKENS: u32 = 64_000;
     /// Largest configurable response budget.
     pub const MAX_OUTPUT_TOKENS: u32 = 128_000;
 
     pub(crate) fn validate(&self) -> Result<(), EngineError> {
-        if !(1_000..=20_000_000).contains(&self.maximum_tokens)
-            || !(128..=Self::MAX_OUTPUT_TOKENS).contains(&self.maximum_output_tokens)
+        if !(Self::MIN_TOKEN_BUDGET..=Self::MAX_TOKEN_BUDGET).contains(&self.maximum_tokens)
+            || !(Self::MIN_OUTPUT_TOKENS..=Self::MAX_OUTPUT_TOKENS)
+                .contains(&self.maximum_output_tokens)
         {
             return Err(EngineError::Protocol("智能适配预算无效。".into()));
         }
@@ -492,7 +525,7 @@ pub(crate) fn completion_usage(
                 .iter()
                 .map(|call| call.arguments.len())
                 .sum::<usize>()) as u64
-            / 3
+            / ESTIMATED_BYTES_PER_TOKEN
             + 1;
         usage.estimated = true;
     }
@@ -1203,14 +1236,14 @@ impl EngineService {
         let mut sample_bytes = 0_u64;
         let outcome=async {
             if files.is_empty() { return Err(EngineError::Rejected("请明确选择要试提取的样本文件。".into())); }
-            if files.len()>12 { result["status"]=json!("limit-exceeded"); return Err(EngineError::Rejected("单次试提取最多 12 个完整资源；这不是引擎不受支持的结论。".into())); }
+            if files.len() > MAX_TRIAL_FILES { result["status"]=json!("limit-exceeded"); return Err(EngineError::Rejected(format!("单次试提取最多 {MAX_TRIAL_FILES} 个完整资源；这不是引擎不受支持的结论。"))); }
             let selected:BTreeSet<_>=files.iter().map(|file|file.to_lowercase()).collect();
             if selected.len()!=files.len() { return Err(EngineError::Rejected("样本文件列表包含重复路径。".into())); }
             for file in &files {
                 if cancellation.is_cancelled(){return Err(EngineError::Cancelled);}
                 let path=resources::file(workspace,state,&format!("{directory}/{file}"))?;
                 sample_bytes=sample_bytes.saturating_add(path.metadata()?.len());
-                if sample_bytes>64*1024*1024 { result["status"]=json!("limit-exceeded"); return Err(EngineError::Rejected("所选样本合计超过单次 64 MiB；这不是引擎不受支持的结论。".into())); }
+                if sample_bytes > MAX_TRIAL_SAMPLE_BYTES { result["status"]=json!("limit-exceeded"); return Err(EngineError::Rejected(format!("所选样本合计超过单次 {} MiB；这不是引擎不受支持的结论。", MAX_TRIAL_SAMPLE_BYTES / (1024 * 1024)))); }
             }
             let source = source_input.insert(resources::source(workspace,state,&directory,&files,cancellation)?).directory();
             require_builtin_companions(format,source,&files)?;
@@ -1219,7 +1252,7 @@ impl EngineService {
             result["status"]=json!("failed");
             result["stage"]=json!("parse");
             result["parseStatus"]=json!("failed");
-            let mut extract=AdapterRequest::new("extract",source);
+            let mut extract=AdapterRequest::new(OP_EXTRACT,source);
             extract.resource_files=Some(files.clone());
             let extraction=automatic::trial_response(self,&extract,format,&mut result,cancellation).await?.extraction
                 .ok_or_else(||EngineError::Protocol("内置解析器未返回提取结果。".into()))?;
@@ -1239,7 +1272,7 @@ impl EngineService {
                 result["stage"]=json!("original-roundtrip");
                 result["roundtripStatus"]=json!("failed");
                 let temporary=tempfile::tempdir()?;
-                let mut build=AdapterRequest::new("build",source);
+                let mut build=AdapterRequest::new(OP_BUILD,source);
                 build.resource_files=Some(files.clone());
                 build.output_directory=Some(temporary.path().into());
                 build.translations=Some(BTreeMap::new().into());
@@ -1755,14 +1788,14 @@ impl EngineService {
                 if let Some(arguments) = &mut test_arguments {
                     arguments["resourcePatterns"] = json!(resource_patterns);
                 }
-                let source = workspace.join("src");
+                let source = workspace.join(ADAPTER_SRC_DIR);
                 if source.exists() && (!source.is_dir() || fs::read_dir(&source)?.next().is_some())
                 {
                     return Err(EngineError::Rejected(
                         "src 已包含代码。请先检查现有文件，避免覆盖已有开发成果。".into(),
                     ));
                 }
-                if manifest.manifest_version == 4 {
+                if manifest.manifest_version == PYTHON_MANIFEST_VERSION {
                     manifest.handle(directory)?;
                     let native_pin = directory.join(native_tools::PIN_PATH);
                     if native_pin.is_file() {
@@ -1773,7 +1806,7 @@ impl EngineService {
                 let mut files = Vec::new();
                 for relative in manifest.package_files.keys() {
                     if relative.starts_with("src/") || relative.starts_with("tools/") {
-                        let target = if manifest.manifest_version == 4 {
+                        let target = if manifest.manifest_version == PYTHON_MANIFEST_VERSION {
                             resolve_relative(workspace, &workspace_file(relative))?
                         } else {
                             resolve_relative(&workspace.join("work/legacy"), relative)?
@@ -1795,7 +1828,7 @@ impl EngineService {
                             .write_all(&content)?;
                     }
                 }
-                if manifest.manifest_version == 4 {
+                if manifest.manifest_version == PYTHON_MANIFEST_VERSION {
                     if let Some(selection) = manifest.metadata.get("releaseFiles") {
                         state.release_files = serde_json::from_value(selection.clone())?;
                     } else {
@@ -1810,7 +1843,7 @@ impl EngineService {
                     state.family = manifest.family;
                 }
                 return Ok(
-                    json!({"success":true,"legacyReferenceOnly":manifest.manifest_version!=4,"testArguments":test_arguments,"currentGameAccepted":false,"nextAction":if test_arguments.is_some(){"已复用代码、固定依赖和验收配方；宿主将对已暂存的当前资源验收，失败后只处理能力缺口。来源游戏的验证不授予当前游戏资格。"}else if manifest.manifest_version==4{"保留既有文本身份与回填方案，修改后重新验收。"}else{"旧 C# 源码保存在 work/legacy，仅供移植参考；实现 src/adapter.py 后完整验收。"}}),
+                    json!({"success":true,"legacyReferenceOnly":manifest.manifest_version!=PYTHON_MANIFEST_VERSION,"testArguments":test_arguments,"currentGameAccepted":false,"nextAction":if test_arguments.is_some(){"已复用代码、固定依赖和验收配方；宿主将对已暂存的当前资源验收，失败后只处理能力缺口。来源游戏的验证不授予当前游戏资格。"}else if manifest.manifest_version==PYTHON_MANIFEST_VERSION{"保留既有文本身份与回填方案，修改后重新验收。"}else{"旧 C# 源码保存在 work/legacy，仅供移植参考；实现 src/adapter.py 后完整验收。"}}),
                 );
             }
         }
@@ -1964,7 +1997,7 @@ impl EngineService {
         let _input_handles = crate::source::lock_inputs(&component_inputs, cancellation)?;
         let reference = self.adaptation_reference(workspace, state)?;
         let library = self.reference_library(&reference)?;
-        let mut response=self.helper(&json!({"operation":"archive_component","request":payload,"components":self.asset_root.join("adapters/components"),"library":library}),cancellation).await?;
+        let mut response=self.helper(&json!({"operation":"archive_component","request":payload,"components":self.asset_root.join(ADAPTER_COMPONENTS_DIR),"library":library}),cancellation).await?;
         response["status"] = json!(if response["success"] == true {
             "passed"
         } else {
@@ -2060,7 +2093,7 @@ impl EngineService {
             )?;
         }
         for file in composition.component_files {
-            let source = self.asset_root.join("adapters/components").join(&file);
+            let source = self.asset_root.join(ADAPTER_COMPONENTS_DIR).join(&file);
             let target = workspace.join("src/tools").join(&file);
             if refresh && target.is_file() && fs::read(&source)? != fs::read(&target)? {
                 let hash = gamel10n_translation::files::hash_file(&target).map_err(file_error)?;
@@ -2146,13 +2179,7 @@ impl EngineService {
             }
             Err(error @ (EngineError::Cancelled | EngineError::Isolation(_))) => Err(error),
             Err(error) => {
-                let stage = if [
-                    "verificationCache",
-                    "trialVerificationCache",
-                    "discoveryVerificationCache",
-                ]
-                .iter()
-                .any(|key| {
+                let stage = if VERIFICATION_CACHE_KEYS.iter().any(|key| {
                     state
                         .extra
                         .get(*key)
@@ -2868,10 +2895,18 @@ fn describe_engine_components(args: &Value) -> Result<Value, EngineError> {
             return Err(EngineError::Rejected(format!("未知引擎组件：{id}")));
         }
     }
+    const BYTES_PER_MIB: u64 = 1024 * 1024;
     Ok(json!({
         "components":components,
         "dependencies":["Shared Python 3.14.10","Hash-pinned shared GalTransl library; standard library only, no pip or runtime downloads."],
-        "limits":{"xp3ArchiveMiB":512,"indexedArchiveIndexMiB":8,"selectedMemberMiB":64,"selectedTotalMiB":256,"entries":10000,"memberNamesMiB":2},
+        "limits":{
+            "xp3ArchiveMiB":crate::adaptation_assets::MAX_XP3_ARCHIVE_BYTES / BYTES_PER_MIB,
+            "indexedArchiveIndexMiB":crate::adaptation_assets::MAX_ARCHIVE_MANIFEST_BYTES / BYTES_PER_MIB,
+            "selectedMemberMiB":MAX_TRIAL_SAMPLE_BYTES / BYTES_PER_MIB,
+            "selectedTotalMiB":crate::adaptation_assets::MAX_TEMPLATE_TOTAL_BYTES / BYTES_PER_MIB,
+            "entries":crate::adaptation_assets::MAX_ARCHIVE_ENTRIES,
+            "memberNamesMiB":crate::adaptation_assets::MAX_MEMBER_NAMES_BYTES / BYTES_PER_MIB,
+        },
         "input":"run_engine_component: id, operation, archive (resources/ or work/), output (new work/ directory). Optional members or lowercase extensions select extraction. Rebuild replacements map exact member names to work/ files. XP3 requires filter=none. Encrypted KIF uses a staged keyExecutable. Whale DAT v2 accepts gameTitle for scripts and filenameManifest under work/ for assets.",
         "output":"Bounded summary plus work/<output>/manifest.json with resolved member names and lengths. Inspection reads the index, plus a few member prefixes when verifying an encrypted KIF filename key. Unread member SHA256 is null. verifyContents=true hashes members within the component's limits. readBytes records actual source reads. Extract writes files/. Supported rebuilds write rebuilt/<original filename> and verify member contents.",
         "usage":"Stage a real archive, then call the component directly; no Python wrapper or model-generated parser is needed. Use try_builtin_adapter on extracted scripts. Component success is structural evidence, not runtime or adapter acceptance."
@@ -3372,8 +3407,8 @@ fn apply_coverage(state: &mut Session, args: &Value) -> Result<(), EngineError> 
             let history = coverage["corrections"]
                 .as_array_mut()
                 .ok_or_else(|| EngineError::Protocol("样本纠正历史无效。".into()))?;
-            if history.len() >= 8 {
-                history.drain(..history.len() - 7);
+            if history.len() >= MAX_COVERAGE_CORRECTION_HISTORY {
+                history.drain(..history.len() - (MAX_COVERAGE_CORRECTION_HISTORY - 1));
             }
             history.push(correction.clone());
         }
@@ -3384,17 +3419,20 @@ fn apply_coverage(state: &mut Session, args: &Value) -> Result<(), EngineError> 
     ] {
         if let Some(value) = args.get(arg) {
             let list: Vec<String> = serde_json::from_value(value.clone())?;
-            if list.len() > 24
-                || list
-                    .iter()
-                    .any(|item| item.trim().is_empty() || item.encode_utf16().count() > 600)
+            if list.len() > MAX_COVERAGE_CHECK_ITEMS
+                || list.iter().any(|item| {
+                    item.trim().is_empty()
+                        || item.encode_utf16().count() > MAX_SHORT_TEXT_FIELD_LEN
+                })
                 || list
                     .iter()
                     .map(|item| item.encode_utf16().count())
                     .sum::<usize>()
-                    > 6000
+                    > MAX_COVERAGE_LIST_TOTAL_UTF16
             {
-                return Err(EngineError::Protocol("覆盖或运行检查最多 24 项。".into()));
+                return Err(EngineError::Protocol(format!(
+                    "覆盖或运行检查最多 {MAX_COVERAGE_CHECK_ITEMS} 项。"
+                )));
             }
             coverage[key] = json!(list);
         }
@@ -3414,8 +3452,10 @@ fn apply_coverage(state: &mut Session, args: &Value) -> Result<(), EngineError> 
             {
                 *existing = sample.clone();
             } else {
-                if stored.len() >= 64 {
-                    return Err(EngineError::Protocol("覆盖锚点最多 64 项。".into()));
+                if stored.len() >= MAX_COVERAGE_SAMPLES {
+                    return Err(EngineError::Protocol(format!(
+                        "覆盖锚点最多 {MAX_COVERAGE_SAMPLES} 项。"
+                    )));
                 }
                 stored.push(sample.clone());
             }
@@ -3440,22 +3480,22 @@ fn apply_coverage(state: &mut Session, args: &Value) -> Result<(), EngineError> 
             })
             .sum::<usize>();
     }
-    if samples.len() > 64 || total > 16000 {
+    if samples.len() > MAX_COVERAGE_SAMPLES || total > 16000 {
         return Err(EngineError::Protocol(
             "覆盖锚点超过数量或总长度限制。".into(),
         ));
     }
     for key in ["pending", "runtimeChecks"] {
         let list: Vec<String> = serde_json::from_value(coverage[key].clone())?;
-        if list.len() > 24
-            || list
-                .iter()
-                .any(|item| item.trim().is_empty() || item.encode_utf16().count() > 600)
+        if list.len() > MAX_COVERAGE_CHECK_ITEMS
+            || list.iter().any(|item| {
+                item.trim().is_empty() || item.encode_utf16().count() > MAX_SHORT_TEXT_FIELD_LEN
+            })
             || list
                 .iter()
                 .map(|item| item.encode_utf16().count())
                 .sum::<usize>()
-                > 6000
+                > MAX_COVERAGE_LIST_TOTAL_UTF16
         {
             return Err(EngineError::Protocol(
                 "覆盖或运行检查超过数量或长度限制。".into(),
@@ -3465,13 +3505,13 @@ fn apply_coverage(state: &mut Session, args: &Value) -> Result<(), EngineError> 
     let corrections = coverage["corrections"]
         .as_array()
         .ok_or_else(|| EngineError::Protocol("样本纠正历史无效。".into()))?;
-    if corrections.len() > 8 {
+    if corrections.len() > MAX_COVERAGE_CORRECTION_HISTORY {
         return Err(EngineError::Protocol("样本纠正历史超过数量限制。".into()));
     }
     for correction in corrections {
         coverage_sample_key(&correction["original"])?;
         coverage_sample_key(&correction["replacement"])?;
-        for (key, maximum) in [("reason", 600), ("evidence", 2000)] {
+        for (key, maximum) in [("reason", MAX_SHORT_TEXT_FIELD_LEN), ("evidence", 2000)] {
             let value = text(correction, key)?;
             if value.trim().is_empty() || value.encode_utf16().count() > maximum {
                 return Err(EngineError::Protocol("样本纠正原因或证据无效。".into()));

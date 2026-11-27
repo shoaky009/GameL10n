@@ -7,6 +7,11 @@ use std::{
 };
 use tokio::sync::mpsc;
 
+pub const LOGS_DIR: &str = "logs";
+
+const FILE_PROGRESS_CHANNEL_CAPACITY: usize = 32;
+const LOG_TAIL_MAX_BYTES: u64 = 50_000;
+
 #[derive(Clone, Copy)]
 pub(crate) enum LogSource {
     Application,
@@ -65,7 +70,7 @@ impl Application {
         task: impl FnOnce(FileProgress) -> Result<T, CoreError> + Send + 'static,
     ) -> Result<T, CoreError> {
         // Bound pending messages so processing many small files cannot accumulate UI work.
-        let (sender, mut receiver) = mpsc::channel(32);
+        let (sender, mut receiver) = mpsc::channel(FILE_PROGRESS_CHANNEL_CAPACITY);
         let mut worker = tokio::task::spawn_blocking(move || task(FileProgress { sender }));
         let result = loop {
             tokio::select! {
@@ -114,9 +119,9 @@ impl Application {
             LogSource::Model => message,
         };
         let directory = if id.is_empty() {
-            self.data_directory().join("logs")
+            self.data_directory().join(LOGS_DIR)
         } else {
-            self.project_directory(id)?.join("logs")
+            self.project_directory(id)?.join(LOGS_DIR)
         };
         let now = chrono::Local::now();
         let line = format!("[{}] {}", now.format("%H:%M:%S"), message);
@@ -145,9 +150,9 @@ impl Application {
 
     pub async fn log_tail(&self, id: &str) -> Result<String, CoreError> {
         let directory = if id.is_empty() {
-            self.data_directory().join("logs")
+            self.data_directory().join(LOGS_DIR)
         } else {
-            self.project_directory(id)?.join("logs")
+            self.project_directory(id)?.join(LOGS_DIR)
         };
         let _guard = self.lock_log(id).await;
         tokio::task::spawn_blocking(move || -> Result<String, CoreError> {
@@ -170,7 +175,7 @@ impl Application {
             };
             let mut file = fs::File::open(path)?;
             let length = file.metadata()?.len();
-            file.seek(SeekFrom::Start(length.saturating_sub(50_000)))?;
+            file.seek(SeekFrom::Start(length.saturating_sub(LOG_TAIL_MAX_BYTES)))?;
             let mut bytes = Vec::new();
             file.read_to_end(&mut bytes)?;
             let text = String::from_utf8_lossy(&bytes);

@@ -9,19 +9,41 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use gamel10n_translation::files::{hash_file, read_json};
+use gamel10n_translation::{
+    files::{hash_file, read_json},
+    storage::SHA256_HEX_LEN,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
     EngineError,
+    protocol::PROTOCOL_VERSION,
     vntextpatch::{BUILTIN_FORMATS, FORMATS},
 };
 
 mod filter;
 pub use filter::DiscoveryFilter;
 
+pub const PYTHON_MANIFEST_VERSION: u32 = 4;
+pub const PACKAGE_MANIFEST_FILE: &str = "package.json";
+pub const ADAPTER_ENTRY_PATH: &str = "src/adapter.py";
+pub const ADAPTER_SRC_DIR: &str = "src";
+pub const BUILTIN_SIGLUS_ID: &str = "engine.siglus";
+pub const BUILTIN_SFA16_ID: &str = "engine.sfa16.aos-v2";
+pub const BUILTIN_KIRIKIRI_SMIL_ID: &str = "engine.kirikiri-smil-smile";
+
 const RULE_FILE_LIMIT: usize = 128;
+const RECOGNITION_SCHEMA_VERSION: u32 = 1;
+const MAX_RECOGNITION_RULES: usize = 32;
+const MAX_RULE_PATTERNS: usize = 16;
+const MAX_RULE_SIGNATURES: usize = 8;
+const MAX_SIGNATURE_READS: usize = 512;
+const MAX_PATTERN_BYTES: usize = 1024;
+const ORIGIN_START: &str = "start";
+const ORIGIN_END: &str = "end";
+#[cfg(windows)]
+const WIN32_FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "runtime", rename_all = "camelCase")]
@@ -45,9 +67,9 @@ impl AdapterHandle {
         match self {
             Self::Native { format } => format,
             Self::Python { id, .. } => id,
-            Self::BuiltinSiglus => "engine.siglus",
-            Self::BuiltinSfa16 => "engine.sfa16.aos-v2",
-            Self::BuiltinKirikiriSmil => "engine.kirikiri-smil-smile",
+            Self::BuiltinSiglus => BUILTIN_SIGLUS_ID,
+            Self::BuiltinSfa16 => BUILTIN_SFA16_ID,
+            Self::BuiltinKirikiriSmil => BUILTIN_KIRIKIRI_SMIL_ID,
         }
     }
 }
@@ -78,12 +100,12 @@ pub struct PackageManifest {
 }
 
 fn protocol_one() -> u32 {
-    1
+    PROTOCOL_VERSION
 }
 
 impl PackageManifest {
     pub fn load(directory: &Path) -> Result<Self, EngineError> {
-        read_json(&directory.join("package.json"))
+        read_json(&directory.join(PACKAGE_MANIFEST_FILE))
             .map_err(|error| EngineError::Protocol(error.to_string()))
     }
 
@@ -117,15 +139,17 @@ impl PackageManifest {
         let replacement = resolve_relative(packages, &mapping.target)?;
         let hash =
             |path: &Path| hash_file(path).map_err(|error| EngineError::Protocol(error.to_string()));
-        if hash(&directory.join("package.json"))? != mapping.source_manifest_sha256
-            || hash(&replacement.join("package.json"))? != mapping.target_manifest_sha256
+        if hash(&directory.join(PACKAGE_MANIFEST_FILE))? != mapping.source_manifest_sha256
+            || hash(&replacement.join(PACKAGE_MANIFEST_FILE))? != mapping.target_manifest_sha256
         {
             return Err(EngineError::Rejected(
                 "适配器运行包映射的来源或目标已变化，请重新验证。".into(),
             ));
         }
         let runtime_manifest = Self::load(&replacement)?;
-        if runtime_manifest.manifest_version != 4 || runtime_manifest.id != manifest.id {
+        if runtime_manifest.manifest_version != PYTHON_MANIFEST_VERSION
+            || runtime_manifest.id != manifest.id
+        {
             return Err(EngineError::Rejected(
                 "映射目标必须是同一引擎的 Python 发布包。".into(),
             ));
@@ -149,20 +173,22 @@ impl PackageManifest {
 
     /// Verifies the Python package and resolves its entry point.
     pub fn handle(&self, directory: &Path) -> Result<AdapterHandle, EngineError> {
-        if self.manifest_version != 4 || self.protocol_version != 1 {
+        if self.manifest_version != PYTHON_MANIFEST_VERSION
+            || self.protocol_version != PROTOCOL_VERSION
+        {
             return Err(EngineError::Rejected(format!(
                 "适配器 {} {} 使用不支持的运行格式或清单版本；请使用 Python 适配器并重新验收发布。",
                 self.id, self.version
             )));
         }
-        if self.package_files.is_empty() || !self.package_files.contains_key("src/adapter.py") {
-            return Err(EngineError::Protocol(
-                "Python 发布包缺少完整文件哈希或 src/adapter.py。".into(),
-            ));
+        if self.package_files.is_empty() || !self.package_files.contains_key(ADAPTER_ENTRY_PATH) {
+            return Err(EngineError::Protocol(format!(
+                "Python 发布包缺少完整文件哈希或 {ADAPTER_ENTRY_PATH}。"
+            )));
         }
         for (relative, expected) in &self.package_files {
             let path = resolve_relative(directory, relative)?;
-            if expected.len() != 64
+            if expected.len() != SHA256_HEX_LEN
                 || hash_file(&path).map_err(|error| EngineError::Protocol(error.to_string()))?
                     != *expected
             {
@@ -172,7 +198,7 @@ impl PackageManifest {
             }
         }
         Ok(AdapterHandle::Python {
-            entry: resolve_relative(directory, "src/adapter.py")?,
+            entry: resolve_relative(directory, ADAPTER_ENTRY_PATH)?,
             package_directory: Some(directory.into()),
             id: self.id.clone(),
             version: self.version.clone(),
@@ -239,13 +265,15 @@ pub struct Recognition {
 
 impl Recognition {
     pub fn validate(&self) -> Result<(), EngineError> {
-        if self.schema_version != 1 || self.required.len() + self.hints.len() > 32 {
+        if self.schema_version != RECOGNITION_SCHEMA_VERSION
+            || self.required.len() + self.hints.len() > MAX_RECOGNITION_RULES
+        {
             return Err(EngineError::Protocol("识别声明版本或规则数量无效。".into()));
         }
         for rule in self.required.iter().chain(&self.hints) {
             if rule.patterns.is_empty()
-                || rule.patterns.len() > 16
-                || rule.signatures.len() > 8
+                || rule.patterns.len() > MAX_RULE_PATTERNS
+                || rule.signatures.len() > MAX_RULE_SIGNATURES
                 || rule
                     .minimum_size
                     .zip(rule.maximum_size)
@@ -258,7 +286,7 @@ impl Recognition {
             }
             for signature in &rule.signatures {
                 if decode_hex(&signature.hex).is_none()
-                    || !matches!(signature.origin.as_str(), "start" | "end")
+                    || !matches!(signature.origin.as_str(), ORIGIN_START | ORIGIN_END)
                 {
                     return Err(EngineError::Protocol(
                         "识别签名必须是 1–64 字节的十六进制，origin 为 start/end。".into(),
@@ -295,7 +323,7 @@ pub struct Signature {
     pub origin: String,
 }
 fn start_origin() -> String {
-    "start".into()
+    ORIGIN_START.into()
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -421,8 +449,8 @@ impl Inventory {
         let Some(recognition) = recognition else {
             return (RecognitionStatus::Unknown, 0);
         };
-        if recognition.schema_version != 1
-            || recognition.required.len() + recognition.hints.len() > 32
+        if recognition.schema_version != RECOGNITION_SCHEMA_VERSION
+            || recognition.required.len() + recognition.hints.len() > MAX_RECOGNITION_RULES
         {
             return (RecognitionStatus::Unknown, 0);
         }
@@ -458,8 +486,8 @@ impl Inventory {
         resolve: &impl Fn(&str) -> Option<PathBuf>,
     ) -> RecognitionStatus {
         if rule.patterns.is_empty()
-            || rule.patterns.len() > 16
-            || rule.signatures.len() > 8
+            || rule.patterns.len() > MAX_RULE_PATTERNS
+            || rule.signatures.len() > MAX_RULE_SIGNATURES
             || rule
                 .patterns
                 .iter()
@@ -505,8 +533,8 @@ impl Inventory {
                     break;
                 };
                 let offset = match signature.origin.as_str() {
-                    "start" => signature.offset,
-                    "end" => match file
+                    ORIGIN_START => signature.offset,
+                    ORIGIN_END => match file
                         .length
                         .checked_sub(signature.offset)
                         .and_then(|end| end.checked_sub(expected.len() as u64))
@@ -523,7 +551,7 @@ impl Inventory {
                         break;
                     }
                 };
-                if *reads >= 512 {
+                if *reads >= MAX_SIGNATURE_READS {
                     unknown = true;
                     matched = false;
                     break;
@@ -561,7 +589,7 @@ impl Inventory {
         if let Some(value) = cache.ranges.get(&key) {
             return value.clone();
         }
-        if cache.reads >= 512 {
+        if cache.reads >= MAX_SIGNATURE_READS {
             return None;
         }
         cache.reads += 1;
@@ -582,7 +610,7 @@ pub(crate) fn is_link(metadata: &fs::Metadata) -> bool {
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
-        metadata.file_attributes() & 0x400 != 0
+        metadata.file_attributes() & WIN32_FILE_ATTRIBUTE_REPARSE_POINT != 0
     }
     #[cfg(not(windows))]
     {
@@ -628,7 +656,7 @@ pub fn validate_pattern(pattern: &str) -> Result<(), EngineError> {
 
 fn validate_segments(value: &str, pattern: bool) -> Result<(), EngineError> {
     if value.is_empty()
-        || value.len() > 1024
+        || value.len() > MAX_PATTERN_BYTES
         || value.starts_with('/')
         || value.contains(':')
         || value.chars().any(|value| {
@@ -699,7 +727,7 @@ fn glob_match_ascii_single(pattern: &[u8], path: &[u8]) -> bool {
 }
 
 pub fn glob_match(pattern: &str, path: &str) -> bool {
-    if pattern.len() > 1024 || path.len() > 4096 {
+    if pattern.len() > MAX_PATTERN_BYTES || path.len() > 4096 {
         return false;
     }
     if pattern.is_ascii() && path.is_ascii() {

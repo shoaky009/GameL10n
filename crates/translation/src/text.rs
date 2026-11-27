@@ -7,6 +7,11 @@ use std::{
     sync::LazyLock,
 };
 
+pub(crate) const DOUBLE_BRACKET_OPEN: &str = "[[";
+pub(crate) const DOUBLE_BRACKET_CLOSE: &str = "]]";
+pub const ISSUE_PLACEHOLDER_MISMATCH: &str = "placeholder-mismatch";
+const HEAVENLY_STEMS: [char; 10] = ['甲', '乙', '丙', '丁', '戊', '己', '庚', '辛', '壬', '癸'];
+
 static MARKERS: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"\((?:\*|#?[+-]?xx?\d+(?:%?x\d+)?%?)\)|\{[^{}\r\n]+\}|</?[A-Za-z][A-Za-z0-9_-]*(?:[^<>"'\r\n]|"[^"\r\n]*"|'[^'\r\n]*')*>|%%|%(?:\d+\$)?[-+0 #]*\d*(?:\.\d+)?[sdifuxX]|\\[nrt]"#).expect("constant marker regex")
 });
@@ -89,21 +94,25 @@ pub fn verification_text(unit: &TranslationUnit, index: usize, trial: bool) -> S
     mutate(position, source.len()).unwrap_or_else(|| source.clone())
 }
 fn chinese_index(mut index: usize) -> String {
-    let digits = ['甲', '乙', '丙', '丁', '戊', '己', '庚', '辛', '壬', '癸'];
+    let base = HEAVENLY_STEMS.len();
     let mut result = Vec::new();
     loop {
-        result.push(digits[index % 10]);
-        if index < 10 {
+        result.push(HEAVENLY_STEMS[index % base]);
+        if index < base {
             break;
         }
-        index = index / 10 - 1;
+        index = index / base - 1;
     }
     result.into_iter().rev().collect()
 }
 
 fn prose(group: &str) -> bool {
-    let doubled = group.starts_with("[[") && group.ends_with("]]");
-    let width = if doubled { 2 } else { 1 };
+    let doubled = group.starts_with(DOUBLE_BRACKET_OPEN) && group.ends_with(DOUBLE_BRACKET_CLOSE);
+    let width = if doubled {
+        DOUBLE_BRACKET_OPEN.len()
+    } else {
+        1
+    };
     let stripped = TAGS.replace_all(&group[width..group.len() - width], "");
     let content = stripped.trim();
     !EXPRESSIONS.is_match(content)
@@ -169,8 +178,8 @@ fn protected_spans(unit: &TranslationUnit) -> Vec<(usize, usize)> {
         if !prose(group.as_str()) {
             spans.push((group.start(), group.end()));
         } else {
-            let width = if group.as_str().starts_with("[[") {
-                2
+            let width = if group.as_str().starts_with(DOUBLE_BRACKET_OPEN) {
+                DOUBLE_BRACKET_OPEN.len()
             } else {
                 1
             };
@@ -301,7 +310,7 @@ pub fn validate(unit: &TranslationUnit, translated: &str) -> Vec<ValidationIssue
             })
             .collect();
         issue(
-            "placeholder-mismatch",
+            ISSUE_PLACEHOLDER_MISMATCH,
             format!("占位符或控制标记与原文不一致：{}。", differences.join("；")),
         );
     } else {
@@ -315,7 +324,7 @@ pub fn validate(unit: &TranslationUnit, translated: &str) -> Vec<ValidationIssue
         };
         if brackets(&unit.source_text) != brackets(translated) {
             issue(
-                "placeholder-mismatch",
+                ISSUE_PLACEHOLDER_MISMATCH,
                 "方括号结构与原文不一致，请保留每组括号的单双层数。".into(),
             );
         }

@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::EngineError;
 
+const MAX_EXCERPT_CHARS: usize = 256;
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum VerificationIssueCode {
@@ -68,8 +70,8 @@ impl VerificationIssue {
     }
 
     pub(crate) fn difference(mut self, expected: &str, actual: &str) -> Self {
-        self.expected = expected.chars().take(256).collect();
-        self.actual = actual.chars().take(256).collect();
+        self.expected = expected.chars().take(MAX_EXCERPT_CHARS).collect();
+        self.actual = actual.chars().take(MAX_EXCERPT_CHARS).collect();
         self
     }
 
@@ -87,13 +89,13 @@ impl VerificationIssue {
         let mut record = |field: &str, left: String, right: String| {
             if left != right {
                 if self.field_differences.is_empty() {
-                    self.expected = left.chars().take(256).collect();
-                    self.actual = right.chars().take(256).collect();
+                    self.expected = left.chars().take(MAX_EXCERPT_CHARS).collect();
+                    self.actual = right.chars().take(MAX_EXCERPT_CHARS).collect();
                 }
                 self.field_differences.push(VerificationFieldDifference {
                     field: field.into(),
-                    expected: left.chars().take(256).collect(),
-                    actual: right.chars().take(256).collect(),
+                    expected: left.chars().take(MAX_EXCERPT_CHARS).collect(),
+                    actual: right.chars().take(MAX_EXCERPT_CHARS).collect(),
                 });
             }
         };

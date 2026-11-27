@@ -1,14 +1,28 @@
 use crate::{
     Context, UiInput, show_dialog,
+    ui_contract::{NO_SELECTION, modal, page},
     view::{App, NamedRow},
 };
 use gamel10n_core::{
     CoreError,
-    settings::{ApiProfile, GlobalSettings},
+    settings::{
+        ApiProfile, DEFAULT_TRANSLATION_STYLE, FORMAT_JSON_BATCH, FORMAT_PLAIN_TEXT,
+        GlobalSettings, PROTOCOL_CHAT_COMPLETIONS, PROTOCOL_RESPONSES, project_settings_keys,
+    },
 };
-use gamel10n_translation::provider::ConnectionTestKind;
+use gamel10n_engines::adaptation::AdaptationLimits;
+use gamel10n_translation::{
+    execution::TranslationOptions, provider::ConnectionTestKind, storage::DEFAULT_TARGET_LANGUAGE,
+};
 use serde_json::{Value, json};
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
+
+const PROTOCOL_INDEX_CHAT_COMPLETIONS: i32 = 0;
+const PROTOCOL_INDEX_RESPONSES: i32 = 1;
+const FORMAT_INDEX_JSON_BATCH: i32 = 0;
+const FORMAT_INDEX_PLAIN_TEXT: i32 = 1;
+const REASONING_INDEX_DEFAULT: i32 = 0;
+const MS_PER_SECOND: f64 = 1000.0;
 
 pub struct PendingApiTest(Context);
 
@@ -104,16 +118,16 @@ fn update_api_profile(profile: &mut ApiProfile, input: &UiInput) -> Result<(), C
     profile.name = input.api_name.trim().into();
     profile.endpoint = input.api_endpoint.trim().trim_end_matches('/').into();
     profile.model = input.api_model.trim().into();
-    profile.protocol = if input.api_protocol == 1 {
-        "Responses"
+    profile.protocol = if input.api_protocol == PROTOCOL_INDEX_RESPONSES {
+        PROTOCOL_RESPONSES
     } else {
-        "ChatCompletions"
+        PROTOCOL_CHAT_COMPLETIONS
     }
     .into();
-    profile.translation_format = if input.api_format == 1 {
-        "PlainText"
+    profile.translation_format = if input.api_format == FORMAT_INDEX_PLAIN_TEXT {
+        FORMAT_PLAIN_TEXT
     } else {
-        "JsonBatch"
+        FORMAT_JSON_BATCH
     }
     .into();
     let effort = REASONING_PRESETS
@@ -156,7 +170,7 @@ pub async fn refresh(ctx: &Context, project_id: Option<&str>) -> Result<(), Core
     let ps = project.map(|p| p.settings).unwrap_or_default();
     let config = &settings.api_configuration;
     let analysis = ps
-        .get("analysisProfileId")
+        .get(project_settings_keys::ANALYSIS_PROFILE_ID)
         .and_then(Value::as_str)
         .or(config.analysis_profile_id.as_deref());
     let index = config
@@ -164,14 +178,14 @@ pub async fn refresh(ctx: &Context, project_id: Option<&str>) -> Result<(), Core
         .iter()
         .position(|p| Some(p.id.as_str()) == analysis)
         .map(|i| i as i32)
-        .unwrap_or(-1);
+        .unwrap_or(NO_SELECTION);
     let ids = config.project_translation_chain(&ps);
     let has_json_batch_api = ids.iter().any(|profile_id| {
         config
             .profiles
             .iter()
             .find(|profile| profile.id == *profile_id)
-            .is_some_and(|profile| profile.translation_format != "PlainText")
+            .is_some_and(|profile| profile.translation_format != FORMAT_PLAIN_TEXT)
     });
     let chain = chain_rows(&settings, &ids);
     let apis = config
@@ -184,7 +198,7 @@ pub async fn refresh(ctx: &Context, project_id: Option<&str>) -> Result<(), Core
                 "{} · {}{}{}",
                 p.protocol,
                 p.model,
-                if p.translation_format == "PlainText" {
+                if p.translation_format == FORMAT_PLAIN_TEXT {
                     " · 逐条纯文本"
                 } else {
                     ""
@@ -212,7 +226,10 @@ pub async fn refresh(ctx: &Context, project_id: Option<&str>) -> Result<(), Core
         {
             return;
         }
-        if project_id.is_none() && a.get_page() == 0 && !a.get_project_id().is_empty() {
+        if project_id.is_none()
+            && a.get_page() == page::PROJECT
+            && !a.get_project_id().is_empty()
+        {
             return;
         }
         a.set_apis(ModelRc::new(VecModel::from(apis)));
@@ -232,12 +249,12 @@ pub async fn refresh(ctx: &Context, project_id: Option<&str>) -> Result<(), Core
             a.set_task_api_summary(api_summary.into());
         }
         a.set_candidate_api_index(if settings.api_configuration.profiles.is_empty() {
-            -1
+            NO_SELECTION
         } else {
             0
         });
         a.set_budget(
-            ps.get("adaptationTokenBudget")
+            ps.get(project_settings_keys::ADAPTATION_TOKEN_BUDGET)
                 .and_then(Value::as_u64)
                 .unwrap_or(settings.adaptation_token_budget)
                 .to_string()
@@ -248,25 +265,32 @@ pub async fn refresh(ctx: &Context, project_id: Option<&str>) -> Result<(), Core
         a.set_isolation_supported(cfg!(windows));
         a.set_isolate_llm_execution(cfg!(windows) && settings.isolate_llm_execution);
         a.set_language(
-            ps.get("targetLanguage")
+            ps.get(project_settings_keys::TARGET_LANGUAGE)
                 .and_then(Value::as_str)
-                .unwrap_or("简体中文")
+                .unwrap_or(DEFAULT_TARGET_LANGUAGE)
                 .into(),
         );
         a.set_style(
-            ps.get("style")
+            ps.get(project_settings_keys::STYLE)
                 .and_then(Value::as_str)
-                .unwrap_or("自然流畅，保留人物语气、情绪和原文含义。")
+                .unwrap_or(DEFAULT_TRANSLATION_STYLE)
                 .into(),
         );
-        let terminology = ps.get("terminology").and_then(Value::as_str).unwrap_or("");
+        let terminology = ps
+            .get(project_settings_keys::TERMINOLOGY)
+            .and_then(Value::as_str)
+            .unwrap_or("");
         let terminology_count =
             gamel10n_core::workbench::parse_terminology(&Value::String(terminology.to_owned()))
                 .len() as i32;
         a.set_terminology(terminology.into());
         a.set_terminology_count(terminology_count);
         a.set_has_json_batch_api(has_json_batch_api);
-        a.set_batch_size(ps.get("batchSize").and_then(Value::as_i64).unwrap_or(50) as i32);
+        a.set_batch_size(
+            ps.get(project_settings_keys::BATCH_SIZE)
+                .and_then(Value::as_i64)
+                .unwrap_or(TranslationOptions::DEFAULT_BATCH_SIZE as i64) as i32,
+        );
     });
     Ok(())
 }
@@ -277,7 +301,8 @@ pub fn adaptation_budget_updates(input: &UiInput) -> Result<Value, CoreError> {
         .trim()
         .parse::<u64>()
         .map_err(|_| CoreError::InvalidData("Token 预算应为整数。".into()))?;
-    if !(1_000..=20_000_000).contains(&budget) {
+    if !(AdaptationLimits::MIN_TOKEN_BUDGET..=AdaptationLimits::MAX_TOKEN_BUDGET).contains(&budget)
+    {
         return Err(CoreError::InvalidData(
             "Token 预算应为 1,000–20,000,000。".into(),
         ));
@@ -285,7 +310,7 @@ pub fn adaptation_budget_updates(input: &UiInput) -> Result<Value, CoreError> {
     // Only an edited budget becomes a project override.
     let mut updates = json!({});
     if input.loaded_budget.trim().parse::<u64>().ok() != Some(budget) {
-        updates["adaptationTokenBudget"] = json!(budget);
+        updates[project_settings_keys::ADAPTATION_TOKEN_BUDGET] = json!(budget);
     }
     Ok(updates)
 }
@@ -299,17 +324,17 @@ fn project_settings_updates(
     let mut updates = json!({});
     match action {
         "analysis-api" if input.analysis_index != input.loaded_analysis_index => {
-            updates["analysisProfileId"] = json!(analysis);
+            updates[project_settings_keys::ANALYSIS_PROFILE_ID] = json!(analysis);
         }
         "chain-add" | "chain-remove" | "chain-up" | "chain-down" if chain != input.chain => {
-            updates["translationProfileIds"] = json!(chain);
+            updates[project_settings_keys::TRANSLATION_PROFILE_IDS] = json!(chain);
         }
         "save-project-settings" => {
             updates = adaptation_budget_updates(input)?;
-            updates["targetLanguage"] = json!(input.language);
-            updates["style"] = json!(input.style);
-            updates["terminology"] = json!(input.terminology);
-            updates["batchSize"] = json!(input.batch_size);
+            updates[project_settings_keys::TARGET_LANGUAGE] = json!(input.language);
+            updates[project_settings_keys::STYLE] = json!(input.style);
+            updates[project_settings_keys::TERMINOLOGY] = json!(input.terminology);
+            updates[project_settings_keys::BATCH_SIZE] = json!(input.batch_size);
         }
         _ => {}
     }
@@ -405,7 +430,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                         format!(
                             "{label}\n{}\n{:.1} 秒 · {usage}",
                             report.message,
-                            report.elapsed_ms as f64 / 1000.0
+                            report.elapsed_ms as f64 / MS_PER_SECOND
                         ),
                     )
                 }
@@ -415,10 +440,11 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
             ctx.update(move |ui| {
                 let app = ui.global::<App>();
                 if input.api_test_draft {
-                    if app.get_modal() != "api" || !draft_matches(&ui, &input) {
+                    if app.get_modal() != modal::API || !draft_matches(&ui, &input) {
                         return;
                     }
-                } else if app.get_page() != 1 || app.get_api_id().as_str() != input.api_id {
+                } else if app.get_page() != page::APIS || app.get_api_id().as_str() != input.api_id
+                {
                     return;
                 }
                 app.set_api_test_failed(failed);
@@ -435,15 +461,15 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                 a.set_api_endpoint("".into());
                 a.set_api_model("".into());
                 a.set_api_key("".into());
-                a.set_api_protocol(0);
-                a.set_api_format(0);
-                a.set_api_reasoning(0);
+                a.set_api_protocol(PROTOCOL_INDEX_CHAT_COMPLETIONS);
+                a.set_api_format(FORMAT_INDEX_JSON_BATCH);
+                a.set_api_reasoning(REASONING_INDEX_DEFAULT);
                 a.set_api_reasoning_custom("".into());
                 a.set_api_output_tokens("".into());
                 a.set_api_concurrency(ApiProfile::DEFAULT_MAX_CONCURRENCY as i32);
                 a.set_api_remember_key(true);
                 a.set_error("".into());
-                a.set_modal("api".into());
+                a.set_modal(modal::API.into());
             });
         }
         "api-edit" | "api-copy" => {
@@ -478,8 +504,16 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                     }
                 }
                 a.set_api_remember_key(!p.requires_session_key);
-                a.set_api_protocol(i32::from(p.protocol == "Responses"));
-                a.set_api_format(i32::from(p.translation_format == "PlainText"));
+                a.set_api_protocol(if p.protocol == PROTOCOL_RESPONSES {
+                    PROTOCOL_INDEX_RESPONSES
+                } else {
+                    PROTOCOL_INDEX_CHAT_COMPLETIONS
+                });
+                a.set_api_format(if p.translation_format == FORMAT_PLAIN_TEXT {
+                    FORMAT_INDEX_PLAIN_TEXT
+                } else {
+                    FORMAT_INDEX_JSON_BATCH
+                });
                 let effort = p.analysis_reasoning_effort.as_deref().unwrap_or("");
                 a.set_api_reasoning(
                     REASONING_PRESETS
@@ -498,7 +532,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                     p.max_concurrency
                         .unwrap_or(ApiProfile::DEFAULT_MAX_CONCURRENCY) as i32,
                 );
-                a.set_modal("api".into());
+                a.set_modal(modal::API.into());
             });
         }
         "api-save" => {
@@ -511,7 +545,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                 .find(|p| p.id == input.api_id);
             let mut p = old.unwrap_or_else(ApiProfile::default);
             if let Err(error) = update_api_profile(&mut p, input) {
-                ctx.update(|ui| ui.global::<App>().set_modal("api".into()));
+                ctx.update(|ui| ui.global::<App>().set_modal(modal::API.into()));
                 return Err(error);
             }
             let id = match host
@@ -520,7 +554,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
             {
                 Ok(id) => id,
                 Err(error) => {
-                    ctx.update(|ui| ui.global::<App>().set_modal("api".into()));
+                    ctx.update(|ui| ui.global::<App>().set_modal(modal::API.into()));
                     return Err(error);
                 }
             };
@@ -535,7 +569,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
         }
         "api-delete-dialog" => show_dialog(
             ctx,
-            "api-delete",
+            modal::API_DELETE,
             "删除模型配置",
             "项目中对此配置的独立引用会显示为不可用，可重新选择其他 API。".into(),
         ),
@@ -587,7 +621,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                 .get(input.analysis_index as usize)
                 .map(|p| p.id.clone());
             let edits_budget = action == "save-defaults" || action == "save-project-settings";
-            let budget = if edits_budget && input.page == 1 {
+            let budget = if edits_budget && input.page == page::APIS {
                 input
                     .budget
                     .trim()
@@ -596,7 +630,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
             } else {
                 settings.adaptation_token_budget
             };
-            if input.page == 1 {
+            if input.page == page::APIS {
                 host.save_defaults(analysis, chain, budget).await?;
                 refresh(ctx, None).await?;
             } else {

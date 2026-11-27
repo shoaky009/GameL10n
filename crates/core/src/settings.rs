@@ -1,11 +1,49 @@
 //! Settings shared by the desktop and command line; unknown fields survive updates.
-use crate::{AppEvent, Application, CoreError};
-use gamel10n_engines::{CancellationToken, ToolProcess};
-use gamel10n_translation::files::{hash_text, read_json, write_json};
-use gamel10n_translation::provider::{ConnectionTestKind, RequestMetrics};
+use crate::{AppEvent, Application, CoreError, projects::SHORT_ID_LEN};
+use gamel10n_engines::{CancellationToken, ToolProcess, adaptation::AdaptationLimits};
+use gamel10n_translation::{
+    execution::TranslationOptions,
+    files::{hash_text, read_json, write_json},
+    provider::{ConnectionTestKind, RequestMetrics, diagnostic_codes},
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, time::Duration};
+
+pub const SETTINGS_FILENAME: &str = "settings.json";
+pub const PROTOCOL_CHAT_COMPLETIONS: &str = "ChatCompletions";
+pub const PROTOCOL_RESPONSES: &str = "Responses";
+pub const FORMAT_JSON_BATCH: &str = "JsonBatch";
+pub const FORMAT_PLAIN_TEXT: &str = "PlainText";
+pub const DEFAULT_CONCURRENT_TRANSLATIONS: usize = 2;
+pub const MAX_CONCURRENT_TRANSLATIONS: usize = 8;
+pub const DEFAULT_TRANSLATION_STYLE: &str = "自然流畅，保留人物语气、情绪和原文含义。";
+
+/// JSON property names stored under `GameProject.settings`.
+pub mod project_settings_keys {
+    pub const ANALYSIS_PROFILE_ID: &str = "analysisProfileId";
+    pub const TRANSLATION_PROFILE_ID: &str = "translationProfileId";
+    pub const TRANSLATION_PROFILE_IDS: &str = "translationProfileIds";
+    pub const TARGET_LANGUAGE: &str = "targetLanguage";
+    pub const STYLE: &str = "style";
+    pub const TERMINOLOGY: &str = "terminology";
+    pub const BATCH_SIZE: &str = "batchSize";
+    pub const ADAPTATION_TOKEN_BUDGET: &str = "adaptationTokenBudget";
+    pub const RECOGNITION_GOAL: &str = "recognitionGoal";
+
+    pub const INDEXED_API_SETTINGS: [&str; 3] = [
+        ANALYSIS_PROFILE_ID,
+        TRANSLATION_PROFILE_IDS,
+        TRANSLATION_PROFILE_ID,
+    ];
+}
+
+const SETTINGS_SCHEMA_VERSION: u32 = 2;
+const API_TEST_TIMEOUT: Duration = Duration::from_secs(45);
+const KEY_TRANSFORM_TIMEOUT: Duration = Duration::from_secs(10);
+const CREDENTIALS_HELPER_PATH: &str = "host/credentials.py";
+const KEY_OP_PROTECT: &str = "protect";
+const KEY_OP_UNPROTECT: &str = "unprotect";
 
 #[derive(Clone, Debug)]
 pub struct ApiConnectionTest {
@@ -56,13 +94,15 @@ impl ApiProfile {
 
     /// Maximum output tokens for each intelligent adaptation request.
     pub fn analysis_output_limit(&self) -> Result<u32, CoreError> {
-        use gamel10n_engines::adaptation::AdaptationLimits;
         let limit = self
             .analysis_max_output_tokens
             .unwrap_or(AdaptationLimits::DEFAULT_OUTPUT_TOKENS);
-        if !(128..=AdaptationLimits::MAX_OUTPUT_TOKENS).contains(&limit) {
+        if !(AdaptationLimits::MIN_OUTPUT_TOKENS..=AdaptationLimits::MAX_OUTPUT_TOKENS)
+            .contains(&limit)
+        {
             return Err(CoreError::InvalidData(format!(
-                "分析输出上限应为 128–{} Token。",
+                "分析输出上限应为 {}–{} Token。",
+                AdaptationLimits::MIN_OUTPUT_TOKENS,
                 AdaptationLimits::MAX_OUTPUT_TOKENS
             )));
         }
@@ -89,14 +129,14 @@ impl ApiConfiguration {
 
     /// An explicit empty project chain disables translation. Only an absent override inherits the global chain.
     pub fn project_translation_chain(&self, settings: &Value) -> Vec<String> {
-        if let Some(ids) = settings["translationProfileIds"].as_array() {
+        if let Some(ids) = settings[project_settings_keys::TRANSLATION_PROFILE_IDS].as_array() {
             return ids
                 .iter()
                 .filter_map(Value::as_str)
                 .map(str::to_owned)
                 .collect();
         }
-        match settings["translationProfileId"].as_str() {
+        match settings[project_settings_keys::TRANSLATION_PROFILE_ID].as_str() {
             Some(id) => vec![id.to_owned()],
             None => self.chain(),
         }
@@ -118,10 +158,10 @@ pub struct GlobalSettings {
 impl Default for GlobalSettings {
     fn default() -> Self {
         Self {
-            schema_version: 2,
+            schema_version: SETTINGS_SCHEMA_VERSION,
             last_game_id: None,
-            maximum_translations: 2,
-            adaptation_token_budget: 1_000_000,
+            maximum_translations: DEFAULT_CONCURRENT_TRANSLATIONS,
+            adaptation_token_budget: AdaptationLimits::DEFAULT_TOKEN_BUDGET,
             isolate_llm_execution: cfg!(windows),
             api_configuration: ApiConfiguration::default(),
             extra: BTreeMap::new(),
@@ -150,11 +190,11 @@ impl Application {
             api_key: key,
             model: profile.model.clone(),
             protocol: match profile.protocol.as_str() {
-                "ChatCompletions" => ApiProtocol::ChatCompletions,
-                "Responses" => ApiProtocol::Responses,
+                PROTOCOL_CHAT_COMPLETIONS => ApiProtocol::ChatCompletions,
+                PROTOCOL_RESPONSES => ApiProtocol::Responses,
                 _ => return Err(CoreError::InvalidData("API 协议无效。".into())),
             },
-            translation_format: if profile.translation_format == "PlainText" {
+            translation_format: if profile.translation_format == FORMAT_PLAIN_TEXT {
                 TranslationFormat::PlainText
             } else {
                 TranslationFormat::JsonBatch
@@ -165,7 +205,7 @@ impl Application {
         .map_err(|error| CoreError::InvalidData(error.to_string()))?;
         let started = std::time::Instant::now();
         let result = tokio::time::timeout(
-            Duration::from_secs(45),
+            API_TEST_TIMEOUT,
             provider.test_connection(kind, cancellation),
         )
         .await;
@@ -181,10 +221,10 @@ impl Application {
                 false,
                 if matches!(
                     error.diagnostic.code.as_str(),
-                    "connection-tool-call" | "configuration"
+                    diagnostic_codes::CONNECTION_TOOL_CALL | diagnostic_codes::CONFIGURATION
                 ) {
                     error.to_string()
-                } else if error.diagnostic.code == "output-token-limit" {
+                } else if error.diagnostic.code == diagnostic_codes::OUTPUT_TOKEN_LIMIT {
                     "响应达到测试长度上限，未能确认测试结果。".into()
                 } else {
                     error.failure_summary()
@@ -224,7 +264,7 @@ impl Application {
     }
 
     pub(crate) fn read_settings(&self) -> Result<GlobalSettings, CoreError> {
-        let path = self.data_directory().join("settings.json");
+        let path = self.data_directory().join(SETTINGS_FILENAME);
         if !path.is_file() {
             return Ok(GlobalSettings::default());
         }
@@ -235,7 +275,7 @@ impl Application {
             value["apiConfiguration"] = if endpoint.is_empty() && model.is_empty() {
                 json!({})
             } else {
-                json!({"profiles":[{"id":"default","name":"默认 API","endpoint":endpoint,"model":model,"protocol":value.get("protocol").cloned().unwrap_or(json!("ChatCompletions"))}],"analysisProfileId":"default","translationProfileId":"default"})
+                json!({"profiles":[{"id":"default","name":"默认 API","endpoint":endpoint,"model":model,"protocol":value.get("protocol").cloned().unwrap_or(json!(PROTOCOL_CHAT_COMPLETIONS))}],"analysisProfileId":"default","translationProfileId":"default"})
             };
         }
         serde_json::from_value(value).map_err(|e| CoreError::InvalidData(e.to_string()))
@@ -249,7 +289,7 @@ impl Application {
         let _guard = self.settings_gate.lock().await;
         let mut settings = self.read_settings()?;
         change(&mut settings)?;
-        write_json(&self.data_directory().join("settings.json"), &settings)?;
+        write_json(&self.data_directory().join(SETTINGS_FILENAME), &settings)?;
         Ok(settings)
     }
 
@@ -273,8 +313,10 @@ impl Application {
     }
 
     pub async fn save_concurrency(&self, count: usize) -> Result<(), CoreError> {
-        if !(1..=8).contains(&count) {
-            return Err(CoreError::InvalidData("并行项目数应为 1–8。".into()));
+        if !(1..=MAX_CONCURRENT_TRANSLATIONS).contains(&count) {
+            return Err(CoreError::InvalidData(format!(
+                "并行项目数应为 1–{MAX_CONCURRENT_TRANSLATIONS}。"
+            )));
         }
         self.update_settings(|s| {
             s.maximum_translations = count;
@@ -313,7 +355,10 @@ impl Application {
                 "API 地址应以 http:// 或 https:// 开头。".into(),
             ));
         }
-        if !matches!(profile.protocol.as_str(), "ChatCompletions" | "Responses") {
+        if !matches!(
+            profile.protocol.as_str(),
+            PROTOCOL_CHAT_COMPLETIONS | PROTOCOL_RESPONSES
+        ) {
             return Err(CoreError::InvalidData("API 协议无效。".into()));
         }
         profile.analysis_output_limit()?;
@@ -324,12 +369,12 @@ impl Application {
             endpoint: profile.endpoint.clone(),
             api_key: new_key.clone().unwrap_or_default(),
             model: profile.model.clone(),
-            protocol: if profile.protocol == "Responses" {
+            protocol: if profile.protocol == PROTOCOL_RESPONSES {
                 ApiProtocol::Responses
             } else {
                 ApiProtocol::ChatCompletions
             },
-            translation_format: if profile.translation_format == "PlainText" {
+            translation_format: if profile.translation_format == FORMAT_PLAIN_TEXT {
                 TranslationFormat::PlainText
             } else {
                 TranslationFormat::JsonBatch
@@ -343,7 +388,7 @@ impl Application {
                 "{}{}",
                 profile.name,
                 chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
-            ))[..24]
+            ))[..SHORT_ID_LEN]
                 .to_string();
         }
         let profile_id = profile.id.clone();
@@ -352,7 +397,7 @@ impl Application {
             profile.encrypted_api_key = if key.is_empty() || !remember_key {
                 None
             } else {
-                Some(self.transform_key("protect", key).await?)
+                Some(self.transform_key(KEY_OP_PROTECT, key).await?)
             };
             profile.requires_session_key = !remember_key && !key.is_empty();
             if profile.requires_session_key {
@@ -429,15 +474,15 @@ impl Application {
                 });
         }
         match profile.encrypted_api_key.as_deref() {
-            Some(value) if !value.is_empty() => self.transform_key("unprotect", value).await,
+            Some(value) if !value.is_empty() => self.transform_key(KEY_OP_UNPROTECT, value).await,
             _ => Ok(String::new()),
         }
     }
     async fn transform_key(&self, operation: &str, value: &str) -> Result<String, CoreError> {
-        let script = self.tools.root.join("host/credentials.py");
+        let script = self.tools.root.join(CREDENTIALS_HELPER_PATH);
         let response: Value = ToolProcess::new(self.tools.python())
             .with_arguments([script.into_os_string()])
-            .with_timeout(Duration::from_secs(10))
+            .with_timeout(KEY_TRANSFORM_TIMEOUT)
             .execute(
                 &json!({"operation":operation,"value":value}),
                 &CancellationToken::new(),
@@ -471,20 +516,23 @@ impl Application {
             }
         }
         let s = &project.settings;
-        if s.get("targetLanguage")
+        if s.get(project_settings_keys::TARGET_LANGUAGE)
             .and_then(Value::as_str)
             .is_some_and(|v| v.trim().is_empty())
         {
             return Err(CoreError::InvalidData("目标语言不能为空。".into()));
         }
-        if let Some(batch) = s.get("batchSize").and_then(Value::as_u64)
-            && !(1..=80).contains(&batch)
+        if let Some(batch) = s.get(project_settings_keys::BATCH_SIZE).and_then(Value::as_u64)
+            && !(1..=TranslationOptions::MAX_BATCH_SIZE as u64).contains(&batch)
         {
-            return Err(CoreError::InvalidData("每批文本数应为 1–80。".into()));
+            return Err(CoreError::InvalidData(format!(
+                "每批文本数应为 1–{}。",
+                TranslationOptions::MAX_BATCH_SIZE
+            )));
         }
         let defaults = self.settings().await?;
         validate_token_budget(
-            s.get("adaptationTokenBudget")
+            s.get(project_settings_keys::ADAPTATION_TOKEN_BUDGET)
                 .and_then(Value::as_u64)
                 .unwrap_or(defaults.adaptation_token_budget),
         )?;
@@ -555,7 +603,8 @@ impl Application {
 }
 
 fn validate_token_budget(budget: u64) -> Result<(), CoreError> {
-    if !(1_000..=20_000_000).contains(&budget) {
+    if !(AdaptationLimits::MIN_TOKEN_BUDGET..=AdaptationLimits::MAX_TOKEN_BUDGET).contains(&budget)
+    {
         return Err(CoreError::InvalidData(
             "Token 预算应为 1,000–20,000,000。".into(),
         ));

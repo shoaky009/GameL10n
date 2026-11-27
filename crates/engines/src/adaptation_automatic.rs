@@ -1,7 +1,11 @@
 //! Bounded parser trials and first-turn composition of complete resource templates.
 use super::*;
-use crate::adaptation_assets::{ARCHIVE_TEMPLATES, ArchiveTemplate, ProbeReportKind};
-use crate::discovery::{glob_match, is_link};
+use crate::adaptation_assets::{
+    ARCHIVE_TEMPLATES, ArchiveTemplate, DEFAULT_TEMPLATE_CANDIDATE_LIMIT, MAX_TEMPLATE_TOTAL_BYTES,
+    ProbeReportKind,
+};
+use crate::discovery::{ADAPTER_ENTRY_PATH, glob_match, is_link};
+use crate::protocol::RESPONSE_FILE_KEY;
 use sha2::{Digest, Sha256};
 use std::{io::Read, time::Duration};
 
@@ -10,9 +14,20 @@ mod qlie;
 #[path = "adaptation_automatic/script_bundles.rs"]
 mod script_bundles;
 
-const TRIAL_BYTES: u64 = 64 * 1024 * 1024;
-const TEMPLATE_BYTES: u64 = 256 * 1024 * 1024;
 const RUNTIME_CHECK: &str = "游戏启动、中文显示、字体及排版尚未实机验证。";
+const AUTOMATIC_PHASE_BUDGET: Duration = Duration::from_secs(60);
+const AUTOMATIC_TEMPLATE_BUDGET: Duration = Duration::from_secs(300);
+const SAMPLE_HASH_BUFFER_BYTES: usize = 128 * 1024;
+const MAX_RETAINED_TRIALS: usize = 6;
+const MAX_AUTOMATIC_TRIALS_PER_PASS: usize = 3;
+const MAX_SKIPPED_TRIAL_NOTES: usize = 6;
+const TRIAL_ERROR_PREVIEW_CHARS: usize = 500;
+pub(super) const ARCHIVE_ERROR_PREVIEW_CHARS: usize = 240;
+pub(super) const MAX_AUTOMATIC_ARCHIVES: usize = 16;
+pub(super) const MAX_PROBE_EXECUTABLES: usize = 8;
+const MAX_AUTOMATIC_TEMPLATE_RESOURCES: usize = 1_024;
+const MAX_SCAN_ENTRIES: usize = 20_000;
+const MAX_DIAGNOSTICS_RETAINED: usize = 12;
 
 #[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -200,7 +215,7 @@ fn checked_hash(
         return Err(reject("自动试用样本大小发生变化。"));
     }
     let mut digest = Sha256::new();
-    let mut buffer = vec![0_u8; 128 * 1024];
+    let mut buffer = vec![0_u8; SAMPLE_HASH_BUFFER_BYTES];
     let mut total = 0_u64;
     loop {
         cancelled(token)?;
@@ -369,7 +384,7 @@ pub(super) async fn trial_response(
     let mut request = request.clone();
     request.format = Some(format.into());
     request.extra.insert(
-        "responseFile".into(),
+        RESPONSE_FILE_KEY.into(),
         json!(temporary.path().join("response.json")),
     );
     let response: Value = crate::ToolProcess::new(service.tools.vntextpatch())
@@ -403,7 +418,7 @@ pub(super) async fn check_translation(
     let output = tempfile::tempdir()?;
     result["stage"] = json!("translation-build");
     result["translationStatus"] = json!("failed");
-    let mut build = AdapterRequest::new("build", source);
+    let mut build = AdapterRequest::new(OP_BUILD, source);
     build.resource_files = Some(files.to_vec());
     build.output_directory = Some(output.path().into());
     build.translations = Some(BTreeMap::from([(unit.id.clone(), text.clone())]).into());
@@ -433,7 +448,7 @@ pub(super) async fn check_translation(
         return Err(reject("小样中文回填的文件集合与所选样本不一致。"));
     }
     result["stage"] = json!("translation-readback");
-    let mut extract = AdapterRequest::new("extract", output.path());
+    let mut extract = AdapterRequest::new(OP_EXTRACT, output.path());
     extract.resource_files = Some(files.to_vec());
     let extracted = trial_response(service, &extract, format, result, cancellation)
         .await?
@@ -540,8 +555,10 @@ pub(super) fn sample_files(workspace: &Path, args: &Value) -> Result<Vec<String>
         .into_iter()
         .map(|file| file.replace('\\', "/"))
         .collect();
-    if files.len() > 12 {
-        return Err(EngineError::Protocol("单次最多提交 12 个样本文件。".into()));
+    if files.len() > MAX_TRIAL_FILES {
+        return Err(EngineError::Protocol(format!(
+            "单次最多提交 {MAX_TRIAL_FILES} 个样本文件。"
+        )));
     }
     let mut known = BTreeSet::new();
     for file in &files {
@@ -575,7 +592,7 @@ pub(super) fn sample_result(outcome: Result<Value, EngineError>) -> Value {
     outcome.unwrap_or_else(|error| {
         json!({
             "status":if matches!(error, EngineError::Cancelled) {"cancelled"} else {"incomplete"},
-            "error":limit(&error.to_string(),500),"runtimeStatus":"not-tested"
+            "error":limit(&error.to_string(),TRIAL_ERROR_PREVIEW_CHARS),"runtimeStatus":"not-tested"
         })
     })
 }
@@ -592,7 +609,7 @@ fn parser_reuse(workspace: &Path, format: &str, result: &mut Value) {
         );
         return;
     }
-    if workspace.join("src/adapter.py").exists() {
+    if workspace.join(ADAPTER_ENTRY_PATH).exists() {
         if let Some(result) = result.as_object_mut() {
             result.remove("reuseCall");
         }
@@ -626,7 +643,7 @@ pub(super) fn remember_trial(
     observation["files"] = json!(files);
     observation["observedAt"] = json!(chrono::Utc::now().to_rfc3339());
     trials.push(observation);
-    if trials.len() > 6 {
+    if trials.len() > MAX_RETAINED_TRIALS {
         trials.remove(0);
     }
     state.extra.insert("builtinTrials".into(), json!(trials));
@@ -647,7 +664,7 @@ async fn try_component_sample(
     let _input_handles =
         crate::source::lock_inputs(&BTreeMap::from([(file.to_string(), input.clone())]), token)?;
     let size = input.metadata()?.len();
-    if size > TRIAL_BYTES {
+    if size > MAX_TRIAL_SAMPLE_BYTES {
         return Err(reject("小样超过 64 MiB 预算。"));
     }
     let started = Instant::now();
@@ -742,14 +759,14 @@ pub(super) async fn component_trials(
             sum.saturating_add(resources::file(workspace, state, file)?.metadata()?.len()),
         )
     })?;
-    if total > TRIAL_BYTES {
+    if total > MAX_TRIAL_SAMPLE_BYTES {
         return Err(reject("小样合计超过 64 MiB 预算。"));
     }
     let checks = (
         boolean(args, "checkRoundtrip", true)?,
         boolean(args, "checkTranslation", true)?,
     );
-    let budget = Budget::new(cancellation, Duration::from_secs(60));
+    let budget = Budget::new(cancellation, AUTOMATIC_PHASE_BUDGET);
     let mut trials = Vec::new();
     for file in files {
         trials.push(
@@ -817,11 +834,11 @@ async fn try_cached_sample(
         .map(|file| Ok((file.clone(), paths[file].metadata()?.len())))
         .collect::<Result<_, EngineError>>()?;
     if files.is_empty()
-        || files.len() > 12
+        || files.len() > MAX_TRIAL_FILES
         || lengths
             .values()
             .try_fold(0_u64, |sum, length| sum.checked_add(*length))
-            .is_none_or(|bytes| bytes > TRIAL_BYTES)
+            .is_none_or(|bytes| bytes > MAX_TRIAL_SAMPLE_BYTES)
     {
         return Err(reject("试用样本超过 12 文件／64 MiB 预算。"));
     }
@@ -928,7 +945,7 @@ pub(super) async fn inspect_samples(
 ) -> Result<Value, EngineError> {
     let started = Instant::now();
     let before = state.sample_checks.clone();
-    let budget = Budget::new(cancellation, Duration::from_secs(60));
+    let budget = Budget::new(cancellation, AUTOMATIC_PHASE_BUDGET);
     let token = &budget.token;
     let mut result = json!({"status":"incomplete","trials":[],"runtimeStatus":"not-tested"});
     let outcome = async {
@@ -1016,11 +1033,11 @@ pub(super) async fn inspect_samples(
             let bytes = lengths
                 .iter()
                 .try_fold(selected_bytes, |sum, bytes| sum.checked_add(*bytes));
-            if selected.len() > 12 || bytes.is_none_or(|bytes| bytes > TRIAL_BYTES) {
+            if selected.len() > MAX_TRIAL_FILES || bytes.is_none_or(|bytes| bytes > MAX_TRIAL_SAMPLE_BYTES) {
                 continue;
             }
             selected_bytes = bytes.unwrap_or(0);
-            let trial_budget = Budget::new(token, Duration::from_secs(20));
+            let trial_budget = Budget::new(token, COMPONENT_PROBE_TIMEOUT);
             let trial = try_cached_sample(
                 service,
                 workspace,
@@ -1037,7 +1054,7 @@ pub(super) async fn inspect_samples(
                 .push(trial);
             if result["trials"]
                 .as_array()
-                .is_some_and(|trials| trials.len() >= 3)
+                .is_some_and(|trials| trials.len() >= MAX_AUTOMATIC_TRIALS_PER_PASS)
             {
                 break;
             }
@@ -1056,12 +1073,12 @@ pub(super) async fn inspect_samples(
             {
                 if result["trials"]
                     .as_array()
-                    .is_some_and(|trials| trials.len() >= 3)
+                    .is_some_and(|trials| trials.len() >= MAX_AUTOMATIC_TRIALS_PER_PASS)
                 {
                     break;
                 }
                 let size = bindings.file(workspace, file)?.metadata()?.len();
-                if selected_bytes.saturating_add(size) > TRIAL_BYTES {
+                if selected_bytes.saturating_add(size) > MAX_TRIAL_SAMPLE_BYTES {
                     continue;
                 }
                 selected_bytes += size;
@@ -1087,7 +1104,7 @@ pub(super) async fn inspect_samples(
             if matches!(error, EngineError::ToolMissing(_)) {
                 result["status"] = json!("unavailable");
             }
-            result["error"] = json!(limit(&error.to_string(), 500));
+            result["error"] = json!(limit(&error.to_string(), TRIAL_ERROR_PREVIEW_CHARS));
             result["nextAction"] = json!(
                 "检查所选样本、伴随文件和本地解析工具；超时或工具故障不代表脚本格式不兼容。已有实验输出仍可复用。"
             );
@@ -1114,7 +1131,7 @@ pub(super) async fn inspect_directory(
             .flat_map(|candidate| candidate["sampleFiles"].as_array().into_iter().flatten())
             .filter_map(Value::as_str)
             .map(|file| format!("{directory}/{file}"))
-            .take(12)
+            .take(MAX_TRIAL_FILES)
             .collect();
         sample_files(workspace, &json!({"sampleFiles":files}))
     })();
@@ -1122,7 +1139,7 @@ pub(super) async fn inspect_directory(
         Ok(files) => inspect_samples(service, workspace, state, &files, cancellation).await,
         Err(EngineError::Cancelled) => Err(EngineError::Cancelled),
         Err(error) => Ok(
-            json!({"status":"incomplete","error":limit(&error.to_string(),500),"runtimeStatus":"not-tested"}),
+            json!({"status":"incomplete","error":limit(&error.to_string(),TRIAL_ERROR_PREVIEW_CHARS),"runtimeStatus":"not-tested"}),
         ),
     };
     state.sample_checks.include_elapsed(started, &before);
@@ -1138,7 +1155,7 @@ pub(super) async fn inspect_workspace(
     let mut components = Vec::new();
     let mut issues = Vec::new();
     let mut trials = 0;
-    let budget = Budget::new(cancellation, Duration::from_secs(60));
+    let budget = Budget::new(cancellation, AUTOMATIC_PHASE_BUDGET);
     for directory in ["work", "resources"] {
         if !workspace.join(directory).is_dir() {
             continue;
@@ -1161,7 +1178,7 @@ pub(super) async fn inspect_workspace(
                 .cloned(),
         );
         if let Some(error) = result["error"].as_str() {
-            issues.push(format!("{directory}：{}", limit(error, 500)));
+            issues.push(format!("{directory}：{}", limit(error, TRIAL_ERROR_PREVIEW_CHARS)));
         }
     }
     if trials > 0 || !components.is_empty() || !issues.is_empty() {
@@ -1263,7 +1280,7 @@ async fn inspect_archive_samples(
             ));
             false
         })
-        .take(3)
+        .take(MAX_AUTOMATIC_TRIALS_PER_PASS)
         .map(|(format, archive, index)| {
             (
                 format.to_owned(),
@@ -1275,7 +1292,7 @@ async fn inspect_archive_samples(
     if archives.is_empty() {
         return Ok(Vec::new());
     }
-    let budget = Budget::new(cancellation, Duration::from_secs(20));
+    let budget = Budget::new(cancellation, COMPONENT_PROBE_TIMEOUT);
     let token = &budget.token;
     let mut reports = Vec::new();
     for (format, archive, index) in archives {
@@ -1321,8 +1338,8 @@ async fn inspect_archive_samples(
             let mut report = service.helper(
                 &json!({"operation":"archive_samples","format":format,"archive":paths["archive"],
                     "index":paths.get("index"),"executables":executables,"directory":scratch.path(),"library":library,
-                    "components":service.asset_root.join("adapters/components"),
-                    "timeoutSeconds":10}),
+                    "components":service.asset_root.join(ADAPTER_COMPONENTS_DIR),
+                    "timeoutSeconds":ARCHIVE_SAMPLE_HELPER_TIMEOUT_SECS}),
                 token,
             ).await?;
             let samples: Vec<Value> = serde_json::from_value(
@@ -1389,7 +1406,7 @@ async fn inspect_archive_samples(
                     "files":files.iter().skip(1).map(|file|format!("{directory}/{file}")).collect::<Vec<_>>(),
                     "parseStatus":outcome["parseStatus"],"roundtripStatus":outcome["roundtripStatus"],
                     "translationStatus":outcome["translationStatus"],"unitCount":outcome["unitCount"],
-                    "errorType":outcome["diagnostic"]["errorType"],"error":outcome["error"].as_str().map(|error|limit(error,240)),
+                    "errorType":outcome["diagnostic"]["errorType"],"error":outcome["error"].as_str().map(|error|limit(error,ARCHIVE_ERROR_PREVIEW_CHARS)),
                 }));
                 if has_text {
                     if outcome["roundtripStatus"] == "passed"
@@ -1426,7 +1443,7 @@ async fn inspect_archive_samples(
             }
             Err(EngineError::Isolation(error)) => return Err(EngineError::Isolation(error)),
             Err(EngineError::Cancelled | EngineError::Timeout) => json!({"status":"timed-out"}),
-            Err(error) => json!({"status":"unavailable","error":limit(&error.to_string(),240)}),
+            Err(error) => json!({"status":"unavailable","error":limit(&error.to_string(),ARCHIVE_ERROR_PREVIEW_CHARS)}),
         };
         report["format"] = json!(format);
         report["archive"] = json!(archive);
@@ -1472,7 +1489,7 @@ pub(super) async fn run_trials(
     }
     candidates
         .sort_by_key(|candidate| usize::from(candidate["evidenceKind"] != "script-signature"));
-    let budget = Budget::new(cancellation, Duration::from_secs(60));
+    let budget = Budget::new(cancellation, AUTOMATIC_PHASE_BUDGET);
     let token = &budget.token;
     let mut skipped = Vec::<String>::new();
     let mut reused = 0_u32;
@@ -1487,7 +1504,7 @@ pub(super) async fn run_trials(
     .await?;
     let outcome=async{
         for candidate in candidates{
-            if attempted>=3{break;}cancelled(token)?;
+            if attempted>=MAX_AUTOMATIC_TRIALS_PER_PASS{break;}cancelled(token)?;
             let catalog=crate::adaptation_context::builtin_catalog();let Some(definition)=catalog.iter().find(|definition|definition["format"]==candidate["format"])else{continue;};
             if service.disabled_families.contains(definition["id"].as_str().unwrap_or("")) {
                 state.preparation_skips.push(preparation_skip("script-trial", "family-disabled", json!({"format":definition["format"],"adapterId":definition["id"]})));
@@ -1500,10 +1517,10 @@ pub(super) async fn run_trials(
                 if !definition["extensions"].as_array().into_iter().flatten().any(|extension|extension.as_str().is_some_and(|extension|extension.trim_start_matches('.').eq_ignore_ascii_case(&ext)))
                     ||definition["companions"].as_array().into_iter().flatten().any(|name|name.as_str().is_some_and(|name|name.eq_ignore_ascii_case(&filename))){continue;}
                 let extra=(||->Result<BTreeMap<String,u64>,EngineError>{sample_group(definition,&request.game_directory,script,&request.inputs)?.into_iter().filter(|file|!lengths.keys().any(|known:&String|known.eq_ignore_ascii_case(file))).map(|file|{let length=resolve_relative(&request.game_directory,&file)?.metadata()?.len();Ok((file,length))}).collect()})();
-                let extra=match extra{Ok(extra)=>extra,Err(error)=>{if skipped.len()<6{skipped.push(format!("{format}：{}",limit(&error.to_string(),240)));}continue;}};
+                let extra=match extra{Ok(extra)=>extra,Err(error)=>{if skipped.len()<MAX_SKIPPED_TRIAL_NOTES{skipped.push(format!("{format}：{}",limit(&error.to_string(),ARCHIVE_ERROR_PREVIEW_CHARS)));}continue;}};
                 let bytes=extra.values().try_fold(0_u64,|sum,length|sum.checked_add(*length));
-                if lengths.len()+extra.len()>12||bytes.is_none_or(|bytes|bytes>TRIAL_BYTES.saturating_sub(selected_bytes)){
-                    if skipped.len()<6{skipped.push(format!("{format}：{} 及伴随文件超过自动试用的 64 MiB／12 文件预算。",limit(script,80)));}continue;}
+                if lengths.len()+extra.len()>MAX_TRIAL_FILES||bytes.is_none_or(|bytes|bytes>MAX_TRIAL_SAMPLE_BYTES.saturating_sub(selected_bytes)){
+                    if skipped.len()<MAX_SKIPPED_TRIAL_NOTES{skipped.push(format!("{format}：{} 及伴随文件超过自动试用的 64 MiB／12 文件预算。",limit(script,80)));}continue;}
                 selected_bytes+=bytes.unwrap_or(0);lengths.extend(extra);scripts+=1;
             }
             if scripts == 0 {
@@ -1511,18 +1528,18 @@ pub(super) async fn run_trials(
                     .and_then(Value::as_array).into_iter().flatten().any(|report| {
                         report["format"] == format && crate::adaptation_context::archive_sample_passed(report)
                     });
-                if !archive_sample_passed && skipped.len() < 6 {
+                if !archive_sample_passed && skipped.len() < MAX_SKIPPED_TRIAL_NOTES {
                     skipped.push(format!("{format}：没有可直接试用的裸脚本样本；封包、编译脚本和私有过滤器需要另行确认"));
                 }
                 continue;
             }
             attempted+=1;EngineService::report(progress,"自动试用内置解析器",format!("正在用 {} 个原始资源检查 {format} 的提取与原文回填。",lengths.len()));
-            let candidate_budget=Budget::new(token,Duration::from_secs(20));let token=&candidate_budget.token;
+            let candidate_budget=Budget::new(token,COMPONENT_PROBE_TIMEOUT);let token=&candidate_budget.token;
             let hashes=sample_hashes_async(&request.game_directory,&lengths,token).await?;
             let conflict=lengths.iter().find(|(file,length)|{
                 resolve_relative(&workspace.join("resources"),file).is_ok_and(|copy|copy.exists()&&!checked_hash(&copy,**length,token).is_ok_and(|hash|hash==hashes[*file]))
             });
-            if let Some((file,_))=conflict {if skipped.len()<6{skipped.push(format!("{format}：已有工作副本与游戏文件不同，未替换 {file}；可直接提交工作区样本试用。"));}continue;}
+            if let Some((file,_))=conflict {if skipped.len()<MAX_SKIPPED_TRIAL_NOTES{skipped.push(format!("{format}：已有工作副本与游戏文件不同，未替换 {file}；可直接提交工作区样本试用。"));}continue;}
             stage(&request.game_directory,workspace,state,&lengths,&hashes,token)?;
             let files:Vec<_>=lengths.keys().cloned().collect();
             let result=try_cached_sample(service,workspace,state,format,"resources",&files,token).await?;
@@ -1550,7 +1567,7 @@ pub(super) async fn run_trials(
             state,
             path,
             "automaticTrials",
-            json!({"revision":1,"status":"incomplete","reused":reused,"skipped":skipped,"error":limit(&error.to_string(),500)}),
+            json!({"revision":1,"status":"incomplete","reused":reused,"skipped":skipped,"error":limit(&error.to_string(),TRIAL_ERROR_PREVIEW_CHARS)}),
         ).await,
     }
 }
@@ -1568,7 +1585,7 @@ fn scan(root: &Path, token: &CancellationToken) -> Result<BTreeMap<String, u64>,
         for entry in fs::read_dir(directory)? {
             cancelled(token)?;
             entries += 1;
-            if entries > 20000 {
+            if entries > MAX_SCAN_ENTRIES {
                 return Err(reject("目录扫描达到 20,000 项上限，资源列表不完整。"));
             }
             let entry = entry?;
@@ -1668,8 +1685,8 @@ async fn probe_archive_template(
         .helper(
             &json!({
                 "operation":"archive_template_probe","root":request.game_directory,"module":template.module,"templateId":template.id,
-                "files":files,"library":library,"components":service.asset_root.join("adapters/components"),
-                "timeoutSeconds":10
+                "files":files,"library":library,"components":service.asset_root.join(ADAPTER_COMPONENTS_DIR),
+                "timeoutSeconds":ARCHIVE_SAMPLE_HELPER_TIMEOUT_SECS
             }),
             cancellation,
         )
@@ -1758,7 +1775,7 @@ pub(super) async fn run_template(
         ));
         return Ok(None);
     }
-    let budget = Budget::new(cancellation, Duration::from_secs(300));
+    let budget = Budget::new(cancellation, AUTOMATIC_TEMPLATE_BUDGET);
     let token = &budget.token;
     let mut report = json!({"revision":3,"status":"running","templateId":null,"stage":"resources","diagnostics":[],"evidenceFiles":[],"resourceBytes":null,"selectedBytes":null,"archiveReadBytes":null,"looseScripts":null,"archivedScripts":null,"mediaOnlyArchives":null});
     let outcome = async {
@@ -1802,7 +1819,10 @@ pub(super) async fn run_template(
             .collect();
         let loose_template =
             archive_template.is_some_and(|template| template.archive_component.is_none());
-        let candidate_limit = archive_template.map_or(64, |template| template.candidate_limit);
+        let candidate_limit = archive_template
+            .map_or(DEFAULT_TEMPLATE_CANDIDATE_LIMIT, |template| {
+                template.candidate_limit
+            });
         if candidate_files.len() > candidate_limit {
             return Err(reject(format!("自动组合的待检查资源超过 {candidate_limit} 项")));
         }
@@ -1913,7 +1933,10 @@ pub(super) async fn run_template(
         let archive_count = bundle
             .as_ref()
             .map_or(0, script_bundles::BundlePlan::archive_count);
-        if lengths.is_empty() || lengths.len() > 1024 || archive_count > 16 {
+        if lengths.is_empty()
+            || lengths.len() > MAX_AUTOMATIC_TEMPLATE_RESOURCES
+            || archive_count > MAX_AUTOMATIC_ARCHIVES
+        {
             return Err(reject(
                 "自动组合需要 1～1,024 个资源，且最多 16 个封包；当前资源数量超出范围。",
             ));
@@ -1970,19 +1993,19 @@ pub(super) async fn run_template(
             report["archivedScripts"] = json!(0);
             report["mediaOnlyArchives"] = json!(0);
         }
-        if selected_bytes > TEMPLATE_BYTES {
+        if selected_bytes > MAX_TEMPLATE_TOTAL_BYTES {
             return Err(reject("松散脚本合计超过自动组合的 256 MiB 脚本预算。"));
         }
         // Only bound loose text-script bundles by total file size; streaming archive templates
         // bound index, entry count, and selected script bytes instead of media payload size.
         if archive_template.is_none()
             && !has_bundle_archives
-            && (resource_bytes > TEMPLATE_BYTES
-                || lengths.values().any(|length| *length > TEMPLATE_BYTES))
+            && (resource_bytes > MAX_TEMPLATE_TOTAL_BYTES
+                || lengths.values().any(|length| *length > MAX_TEMPLATE_TOTAL_BYTES))
         {
             return Err(reject(format!(
                 "完整资源超过自动组合的 {} MiB 输入预算，未缩小为少量样本发布。",
-                TEMPLATE_BYTES / (1024 * 1024)
+                MAX_TEMPLATE_TOTAL_BYTES / (1024 * 1024)
             )));
         }
         let hashes = sample_hashes_async(&request.game_directory, &lengths, token).await?;
@@ -2105,8 +2128,8 @@ pub(super) async fn run_template(
                 .as_array_mut()
                 .ok_or_else(|| reject("自动组合诊断无效。"))?;
             diagnostics.push(json!(if matches!(error,EngineError::Cancelled)&&!cancellation.is_cancelled(){"自动组合达到 5 分钟预算；保留现有文件与证据，未完成的步骤交给模型继续，不代表格式不受支持。".into()}else{limit(&error.to_string(),2000)}));
-            if diagnostics.len() > 12 {
-                diagnostics.drain(..diagnostics.len() - 12);
+            if diagnostics.len() > MAX_DIAGNOSTICS_RETAINED {
+                diagnostics.drain(..diagnostics.len() - MAX_DIAGNOSTICS_RETAINED);
             }
             record(state, path, "automaticTemplate", report).await?;
             if matches!(&error, EngineError::Isolation(_)) {

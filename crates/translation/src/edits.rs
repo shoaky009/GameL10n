@@ -1,7 +1,10 @@
 //! Shared proofreading state with a bounded incremental file, independent of project/UI types.
 use crate::{
     files::{JsonLines, append_json_line, write_json_compact},
-    storage::{StorageError, TranslationEdit, TranslationEdits, valid_edit},
+    storage::{
+        EDITS_JOURNAL_FILE, EDITS_SNAPSHOT_FILE, StorageError, TranslationEdit, TranslationEdits,
+        valid_edit,
+    },
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -13,6 +16,9 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
+
+const MIN_COMPACTION_JOURNAL_BYTES: u64 = 4 * 1024 * 1024;
+const EDIT_STORE_UNAVAILABLE: &str = "校对存储不可用";
 
 type StoreSlot = Mutex<Weak<EditStore>>;
 static STORES: Mutex<BTreeMap<PathBuf, Weak<StoreSlot>>> = Mutex::new(BTreeMap::new());
@@ -35,9 +41,9 @@ impl EditChanges {
                 id.trim().is_empty() || edit.as_ref().is_some_and(|edit| !valid_edit(id, edit))
             })
         {
-            return Err(StorageError::Invalid(
-                "校对增量记录格式无效，请保留 translation-edits.jsonl 检查".into(),
-            ));
+            return Err(StorageError::Invalid(format!(
+                "校对增量记录格式无效，请保留 {EDITS_JOURNAL_FILE} 检查"
+            )));
         }
         Ok(())
     }
@@ -74,7 +80,7 @@ pub struct EditStore {
 
 pub(crate) fn load_edits(directory: &Path) -> Result<(TranslationEdits, u64), StorageError> {
     let mut edits = TranslationEdits::load_snapshot(directory)?;
-    let journal = directory.join("translation-edits.jsonl");
+    let journal = directory.join(EDITS_JOURNAL_FILE);
     let mut bytes = 0;
     if journal.try_exists()? {
         let mut lines = JsonLines::<Commit>::open(&journal)?;
@@ -103,7 +109,7 @@ impl EditStore {
         let slot = {
             let mut stores = STORES
                 .lock()
-                .map_err(|_| StorageError::Invalid("校对存储不可用".into()))?;
+                .map_err(|_| StorageError::Invalid(EDIT_STORE_UNAVAILABLE.into()))?;
             stores.retain(|_, slot| slot.strong_count() > 0);
             let entry = stores.entry(directory.clone()).or_default();
             entry.upgrade().unwrap_or_else(|| {
@@ -114,7 +120,7 @@ impl EditStore {
         };
         let mut current = slot
             .lock()
-            .map_err(|_| StorageError::Invalid("校对存储不可用".into()))?;
+            .map_err(|_| StorageError::Invalid(EDIT_STORE_UNAVAILABLE.into()))?;
         if let Some(store) = current.upgrade() {
             return Ok(store);
         }
@@ -133,7 +139,7 @@ impl EditStore {
         let root = root.canonicalize()?;
         let slots: Vec<_> = STORES
             .lock()
-            .map_err(|_| StorageError::Invalid("校对存储不可用".into()))?
+            .map_err(|_| StorageError::Invalid(EDIT_STORE_UNAVAILABLE.into()))?
             .iter()
             .filter(|(path, _)| path.starts_with(&root))
             .filter_map(|(_, slot)| slot.upgrade())
@@ -141,7 +147,7 @@ impl EditStore {
         for slot in slots {
             if let Some(store) = slot
                 .lock()
-                .map_err(|_| StorageError::Invalid("校对存储不可用".into()))?
+                .map_err(|_| StorageError::Invalid(EDIT_STORE_UNAVAILABLE.into()))?
                 .upgrade()
             {
                 store.needs_reload.store(true, Ordering::Release);
@@ -154,7 +160,7 @@ impl EditStore {
         let mut state = self
             .state
             .lock()
-            .map_err(|_| StorageError::Invalid("校对存储不可用".into()))?;
+            .map_err(|_| StorageError::Invalid(EDIT_STORE_UNAVAILABLE.into()))?;
         if self.needs_reload.load(Ordering::Acquire) {
             let (edits, bytes) = load_edits(&self.directory)?;
             *state = State { edits, bytes };
@@ -185,23 +191,23 @@ impl EditStore {
                 })?,
                 changes,
             };
-        let path = self.directory.join("translation-edits.jsonl");
+        let path = self.directory.join(EDITS_JOURNAL_FILE);
         state.bytes = append_json_line(&path, state.bytes, &commit).map_err(StorageError::from)?;
         commit.changes.apply(&mut state.edits);
         state.edits.revision = commit.revision;
         // Compact geometrically rather than rewriting a growing snapshot every fixed batch count.
-        let snapshot_bytes = fs::metadata(self.directory.join("translation-edits.json"))
+        let snapshot_bytes = fs::metadata(self.directory.join(EDITS_SNAPSHOT_FILE))
             .map(|m| m.len())
             .unwrap_or(0);
-        if state.bytes >= (4 * 1024 * 1024).max(snapshot_bytes.saturating_mul(2)) {
+        if state.bytes >= MIN_COMPACTION_JOURNAL_BYTES.max(snapshot_bytes.saturating_mul(2)) {
             // The delta is already durable; a failed compaction is retried on the next commit.
             let _ = self.compact_locked(&mut state);
         }
         Ok(result)
     }
     fn compact_locked(&self, state: &mut State) -> Result<(), StorageError> {
-        write_json_compact(&self.directory.join("translation-edits.json"), &state.edits)?;
-        let journal = self.directory.join("translation-edits.jsonl");
+        write_json_compact(&self.directory.join(EDITS_SNAPSHOT_FILE), &state.edits)?;
+        let journal = self.directory.join(EDITS_JOURNAL_FILE);
         if journal.try_exists()? {
             fs::OpenOptions::new()
                 .write(true)

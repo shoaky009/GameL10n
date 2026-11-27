@@ -1,6 +1,13 @@
-use crate::{Context, UiInput, view::App};
-use gamel10n_core::{CoreError, launch::LaunchView};
-use gamel10n_engines::protocol::LaunchConfiguration;
+use crate::{
+    Context, UiInput,
+    ui_contract::{NO_SELECTION, modal},
+    view::App,
+};
+use gamel10n_core::{
+    CoreError,
+    launch::{LaunchView, SOURCE_UNSET},
+};
+use gamel10n_engines::protocol::{EXE_EXTENSION, GAME_ROOT_DIR, LaunchConfiguration};
 use slint::{ComponentHandle, ModelRc, VecModel};
 
 pub async fn refresh(ctx: &Context, id: &str, edit: bool) -> Result<(), CoreError> {
@@ -12,7 +19,7 @@ pub async fn refresh(ctx: &Context, id: &str, edit: bool) -> Result<(), CoreErro
         .unwrap_or_else(|error| LaunchView {
             revision: String::new(),
             configuration: None,
-            source: "未设置".into(),
+            source: SOURCE_UNSET.into(),
             reason: error.to_string(),
             candidates: vec![],
             can_launch: false,
@@ -30,14 +37,14 @@ pub async fn refresh(ctx: &Context, id: &str, edit: bool) -> Result<(), CoreErro
             .unwrap_or_else(|| "尚未设置启动程序".into());
         app.set_launch_summary(summary.into());
         app.set_launch_can_run(view.can_launch);
-        if edit || app.get_modal() != "launch" {
+        if edit || app.get_modal() != modal::LAUNCH {
             app.set_launch_revision(view.revision.into());
             app.set_launch_conflict_revision("".into());
             app.set_launch_conflict_action("".into());
             let configuration = view.configuration.unwrap_or_default();
             app.set_launch_executable(configuration.executable.into());
             app.set_launch_arguments(configuration.arguments.into());
-            app.set_launch_directory(if configuration.working_directory == "." {
+            app.set_launch_directory(if configuration.working_directory == GAME_ROOT_DIR {
                 "".into()
             } else {
                 configuration.working_directory.into()
@@ -49,7 +56,7 @@ pub async fn refresh(ctx: &Context, id: &str, edit: bool) -> Result<(), CoreErro
                     .map(Into::into)
                     .collect::<Vec<_>>(),
             )));
-            app.set_launch_candidate_index(-1);
+            app.set_launch_candidate_index(NO_SELECTION);
         }
     });
     Ok(())
@@ -63,7 +70,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
             ctx.update(move |ui| {
                 let app = ui.global::<App>();
                 if app.get_project_id().as_str() == id {
-                    app.set_modal("launch".into());
+                    app.set_modal(modal::LAUNCH.into());
                     app.set_error("".into());
                 }
             });
@@ -73,7 +80,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
             let selected = rfd::AsyncFileDialog::new()
                 .set_title("选择游戏或启动器")
                 .set_directory(&project.game_directory)
-                .add_filter("可执行程序", &["exe"])
+                .add_filter("可执行程序", &[EXE_EXTENSION])
                 .pick_file()
                 .await;
             if let Some(selected) = selected {
@@ -85,9 +92,9 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                 let id = input.project_id.clone();
                 ctx.update(move |ui| {
                     let app = ui.global::<App>();
-                    if app.get_project_id().as_str() == id && app.get_modal() == "launch" {
+                    if app.get_project_id().as_str() == id && app.get_modal() == modal::LAUNCH {
                         app.set_launch_executable(path.into());
-                        app.set_launch_candidate_index(-1);
+                        app.set_launch_candidate_index(NO_SELECTION);
                     }
                 });
             }
@@ -97,7 +104,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                 executable: input.launch_executable.trim().into(),
                 arguments: input.launch_arguments.clone(),
                 working_directory: if input.launch_directory.trim().is_empty() {
-                    ".".into()
+                    GAME_ROOT_DIR.into()
                 } else {
                     input.launch_directory.trim().into()
                 },
@@ -119,7 +126,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                 ctx.update(move |ui| {
                     let app = ui.global::<App>();
                     if app.get_project_id().as_str() == id {
-                        app.set_modal("launch".into());
+                        app.set_modal(modal::LAUNCH.into());
                         app.set_launch_reason(message.into());
                         app.set_launch_conflict_revision(
                             conflict_revision.unwrap_or_default().into(),
@@ -144,7 +151,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                 let id = input.project_id.clone();
                 ctx.update(move |ui| {
                     let app = ui.global::<App>();
-                    if app.get_project_id().as_str() == id && app.get_modal() == "launch" {
+                    if app.get_project_id().as_str() == id && app.get_modal() == modal::LAUNCH {
                         app.set_modal("".into());
                     }
                 });

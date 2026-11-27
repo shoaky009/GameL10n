@@ -3,10 +3,13 @@
 use crate::{
     Application, CoreError, GameProject,
     patching::{InstallationJournal, PatchInstaller},
+    task_op,
 };
 use gamel10n_engines::{
     discovery::Inventory,
-    protocol::{LaunchConfiguration, ProbeResult},
+    protocol::{
+        EXE_EXTENSION, GAME_ROOT_DIR, LaunchConfiguration, MAX_LAUNCH_ARGUMENTS_BYTES, ProbeResult,
+    },
 };
 use gamel10n_translation::files::hash_text;
 use serde::{Deserialize, Serialize};
@@ -14,6 +17,9 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
+
+pub const SOURCE_UNSET: &str = "未设置";
+const MAX_LAUNCH_CANDIDATES: usize = 32;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -70,7 +76,7 @@ fn path_from(root: &Path, value: &str) -> Result<PathBuf, CoreError> {
     if value.chars().any(char::is_control) {
         return Err(CoreError::InvalidData("启动路径含无效字符。".into()));
     }
-    Ok(if value.is_empty() || value == "." {
+    Ok(if value.is_empty() || value == GAME_ROOT_DIR {
         root.to_owned()
     } else if Path::new(value).is_absolute() {
         PathBuf::from(value)
@@ -92,7 +98,7 @@ pub(crate) fn validate_configuration(
         || !configuration
             .executable
             .to_ascii_lowercase()
-            .ends_with(".exe")
+            .ends_with(EXE_EXTENSION)
     {
         return Err(CoreError::InvalidData(format!(
             "启动程序不存在或不是 EXE：{}",
@@ -105,7 +111,7 @@ pub(crate) fn validate_configuration(
             directory.display()
         )));
     }
-    if configuration.arguments.len() > 30000
+    if configuration.arguments.len() > MAX_LAUNCH_ARGUMENTS_BYTES
         || configuration
             .arguments
             .chars()
@@ -129,7 +135,7 @@ pub(crate) fn discover(
                 .map(|executable| LaunchConfiguration {
                     executable: executable.clone(),
                     arguments: String::new(),
-                    working_directory: ".".into(),
+                    working_directory: GAME_ROOT_DIR.into(),
                 })
         })
     });
@@ -138,7 +144,7 @@ pub(crate) fn discover(
         saved.candidates = vec![configuration.executable.clone()];
         let valid = crate::patching::safe_path(&project.game_directory, &configuration.executable)
             .and_then(|_| {
-                if configuration.working_directory != "." {
+                if configuration.working_directory != GAME_ROOT_DIR {
                     crate::patching::safe_path(
                         &project.game_directory,
                         &configuration.working_directory,
@@ -161,10 +167,14 @@ pub(crate) fn discover(
         let executables: Vec<_> = inventory
             .files
             .iter()
-            .filter(|file| file.path.to_ascii_lowercase().ends_with(".exe"))
+            .filter(|file| file.path.to_ascii_lowercase().ends_with(EXE_EXTENSION))
             .map(|file| file.path.clone())
             .collect();
-        saved.candidates = executables.iter().take(32).cloned().collect();
+        saved.candidates = executables
+            .iter()
+            .take(MAX_LAUNCH_CANDIDATES)
+            .cloned()
+            .collect();
         // Resource pairs establish an entry independently of executable order or file size.
         let paired: Vec<_> = executables
             .iter()
@@ -211,7 +221,7 @@ pub(crate) fn discover(
         saved.detected = selected.map(|executable| LaunchConfiguration {
             executable: executable.clone(),
             arguments: String::new(),
-            working_directory: ".".into(),
+            working_directory: GAME_ROOT_DIR.into(),
         });
         saved.reason = if saved.detected.is_some() {
             if paired.len() == 1 {
@@ -329,7 +339,7 @@ impl Application {
         let source = if configuration.is_some() {
             source
         } else {
-            "未设置"
+            SOURCE_UNSET
         };
         Ok(LaunchView {
             revision,
@@ -346,7 +356,7 @@ impl Application {
         let _lifecycle = self.project_lifecycle.lock().await;
         if self.task_state(id).await.is_some_and(|state| {
             state.running
-                && (matches!(state.operation.as_str(), "install" | "restore")
+                && (matches!(state.operation.as_str(), task_op::INSTALL | task_op::RESTORE)
                     || state.workflow.as_ref().is_some_and(|workflow| {
                         matches!(
                             workflow.action,
@@ -385,7 +395,7 @@ impl Application {
         let _lifecycle = self.project_lifecycle.lock().await;
         if self.task_state(id).await.is_some_and(|state| {
             state.running
-                && (matches!(state.operation.as_str(), "install" | "restore")
+                && (matches!(state.operation.as_str(), task_op::INSTALL | task_op::RESTORE)
                     || state.workflow.as_ref().is_some_and(|workflow| {
                         matches!(
                             workflow.action,

@@ -25,11 +25,39 @@ use serde_json::{Value, json};
 
 use crate::{
     AdapterHandle, CancellationToken, EngineError, PackageManifest, ToolPaths, ToolProcess,
-    discovery::{Inventory, resolve_relative},
-    protocol::{AdapterRequest, AdapterResponse, BuildMode, ExtractionResult, ProbeResult},
-    python::PythonAdapter,
+    discovery::{Inventory, PACKAGE_MANIFEST_FILE, resolve_relative},
+    native_tools::RUNTIME_MANIFEST,
+    protocol::{
+        AdapterRequest, AdapterResponse, BuildMode, EXE_EXTENSION, ExtractionResult, OP_EXTRACT,
+        OP_PROBE, OP_VALIDATE, PROTOCOL_VERSION, ProbeResult, STAGE_EXTRACTION,
+    },
+    python::{ISOLATED_FLAG, MAX_PYTHON_TIMEOUT_SECS, PYTHON_BASE_ARGS, PythonAdapter},
+    research::GIT_SHA1_HEX_LEN,
     vntextpatch::VnTextPatch,
 };
+
+pub(crate) const ADAPTER_COMPONENTS_DIR: &str = "adapters/components";
+pub(super) const BOUNDED_PROBE_BUDGET: Duration = Duration::from_secs(45);
+pub(super) const LE_CONFIG_SUFFIX: &str = ".le.config";
+pub(super) const SFA16_ARCHIVE: &str = "scr.aos";
+pub(super) const SFA16_EXE: &str = "sfa16.exe";
+pub(super) const SFA16_PATCHED_EXE: &str = "sfa16.zh.exe";
+pub(super) const SFA16_LE_CONFIG: &str = "sfa16.exe.le.config";
+pub(super) const SIGLUS_SCENE_PACK: &str = "scene.pck";
+pub(super) const SIGLUS_GAMEEXE: &str = "gameexe.dat";
+
+const HOST_HELPER_FILE: &str = "rust-host-v1.py";
+const READONLY_INPUTS_FILE: &str = "readonly_inputs.py";
+const ISOLATION_FILE: &str = "isolation.py";
+const ENGINE_TOOLS_DIR: &str = "engine-tools";
+const ADAPTER_ENTRY_FILE: &str = "adapter.py";
+const WORK_DIR: &str = "work";
+const HELPER_TIMEOUT_GRACE_SECS: u64 = 10;
+const PROBE_HEADER_BYTES: u64 = 65_536;
+const PROBE_MAX_ROUNDS: usize = 4;
+const PROBE_MAX_RANGES: usize = 64;
+const PROBE_MAX_RANGE_BYTES: u64 = 1024 * 1024;
+const PROBE_MAX_TOTAL_BYTES: u64 = 8 * 1024 * 1024;
 
 fn canonical_output(path: &Path) -> Result<PathBuf, EngineError> {
     let path = std::path::absolute(path)?;
@@ -237,7 +265,7 @@ fn verified_adapter_fingerprint(
     else {
         return Ok(None);
     };
-    if !directory.join("package.json").is_file() {
+    if !directory.join(PACKAGE_MANIFEST_FILE).is_file() {
         return Ok(None);
     }
     let manifest = PackageManifest::load(directory)?;
@@ -294,13 +322,13 @@ impl SharedHelperDir {
             .lock()
             .map_err(|_| EngineError::Protocol("辅助脚本缓存不可用。".into()))?;
         let needs_init = guard.as_ref().is_none_or(|dir| {
-            !dir.path().join("rust-host-v1.py").is_file()
-                || !dir.path().join("readonly_inputs.py").is_file()
+            !dir.path().join(HOST_HELPER_FILE).is_file()
+                || !dir.path().join(READONLY_INPUTS_FILE).is_file()
         });
         if needs_init {
             let directory = tempfile::tempdir()?;
-            fs::write(directory.path().join("rust-host-v1.py"), source)?;
-            fs::write(directory.path().join("readonly_inputs.py"), readonly_inputs)?;
+            fs::write(directory.path().join(HOST_HELPER_FILE), source)?;
+            fs::write(directory.path().join(READONLY_INPUTS_FILE), readonly_inputs)?;
             *guard = Some(directory);
         }
         let dir_path = guard
@@ -308,7 +336,7 @@ impl SharedHelperDir {
             .expect("shared helper initialized")
             .path()
             .to_path_buf();
-        let helper = dir_path.join("rust-host-v1.py");
+        let helper = dir_path.join(HOST_HELPER_FILE);
         Ok((dir_path, helper))
     }
 }
@@ -336,7 +364,7 @@ enum DiscoveryVerification {
 
 impl EngineService {
     pub fn new(asset_root: impl Into<PathBuf>, tools: ToolPaths) -> Self {
-        let shared_directory = tools.root.join("engine-tools");
+        let shared_directory = tools.root.join(ENGINE_TOOLS_DIR);
         Self {
             asset_root: asset_root.into(),
             tools,
@@ -470,9 +498,9 @@ impl EngineService {
         let (_fresh_dir, helper_dir, helper) = if isolated {
             // Fresh files inherit grantable ACLs instead of retaining permissions from an old install.
             let directory = tempfile::tempdir()?;
-            let helper = directory.path().join("rust-host-v1.py");
+            let helper = directory.path().join(HOST_HELPER_FILE);
             fs::write(&helper, SOURCE)?;
-            fs::write(directory.path().join("readonly_inputs.py"), READONLY_INPUTS)?;
+            fs::write(directory.path().join(READONLY_INPUTS_FILE), READONLY_INPUTS)?;
             let dir_path = directory.path().to_path_buf();
             (Some(directory), dir_path, helper)
         } else {
@@ -482,26 +510,26 @@ impl EngineService {
             (None, dir_path, helper)
         };
         let mut process = ToolProcess::new(self.tools.python())
-            .with_arguments([
-                OsString::from("-I"),
-                OsString::from("-X"),
-                OsString::from("utf8"),
-                helper.into_os_string(),
-            ])
+            .with_arguments(
+                PYTHON_BASE_ARGS
+                    .into_iter()
+                    .map(OsString::from)
+                    .chain([helper.into_os_string()]),
+            )
             .with_timeout(Duration::from_secs(
                 request
                     .get("timeoutSeconds")
                     .and_then(Value::as_u64)
-                    .unwrap_or(600)
-                    .clamp(1, 600)
-                    + 10,
+                    .unwrap_or(MAX_PYTHON_TIMEOUT_SECS)
+                    .clamp(1, MAX_PYTHON_TIMEOUT_SECS)
+                    + HELPER_TIMEOUT_GRACE_SECS,
             ));
         if isolated {
             fs::write(
-                helper_dir.join("isolation.py"),
+                helper_dir.join(ISOLATION_FILE),
                 include_str!("../python/isolation.py"),
             )?;
-            process = process.with_arguments([OsString::from("--isolated")]);
+            process = process.with_arguments([OsString::from(ISOLATED_FLAG)]);
             let workspace = PathBuf::from(
                 request["workspace"]
                     .as_str()
@@ -536,7 +564,7 @@ impl EngineService {
                     }
                 }
             }
-            let work = resolve_relative(&workspace, "work")?;
+            let work = resolve_relative(&workspace, WORK_DIR)?;
             fs::create_dir_all(&work)?;
             read_paths.push(workspace.clone());
             process = process
@@ -567,7 +595,7 @@ impl EngineService {
         cancellation: &CancellationToken,
     ) -> Result<Value, EngineError> {
         let mut request = request.clone();
-        request["protocolVersion"] = json!(1);
+        request["protocolVersion"] = json!(PROTOCOL_VERSION);
         let response: Value = ToolProcess::new(self.tools.vntextpatch())
             .with_arguments([OsString::from("inspect")])
             .execute(&request, cancellation)
@@ -595,7 +623,7 @@ impl EngineService {
         force_rehash: bool,
         cancellation: &CancellationToken,
     ) -> Result<Value, EngineError> {
-        let pin = self.tools.root.join("engine-tools/siglus.json");
+        let pin = self.tools.root.join(ENGINE_TOOLS_DIR).join("siglus.json");
         if pin.is_file() {
             let reference: Value =
                 read_json(&pin).map_err(|error| EngineError::Protocol(error.to_string()))?;
@@ -610,7 +638,7 @@ impl EngineService {
     pub(crate) fn sfa16_entry(&self) -> Result<PathBuf, EngineError> {
         let root = self.shared_directory.join("builtins/sfa16-v2");
         fs::create_dir_all(&root)?;
-        let entry = root.join("adapter.py");
+        let entry = root.join(ADAPTER_ENTRY_FILE);
         let source = include_str!("../python/sfa16.py");
         if fs::read_to_string(&entry).ok().as_deref() != Some(source) {
             fs::write(&entry, source)?;
@@ -623,7 +651,7 @@ impl EngineService {
         fs::create_dir_all(&root)?;
         let files: &[(&str, &[u8])] = &[
             (
-                "adapter.py",
+                ADAPTER_ENTRY_FILE,
                 include_bytes!("../../../adapters/kirikiri/smil_adapter.py"),
             ),
             (
@@ -653,13 +681,13 @@ impl EngineService {
                 fs::write(path, source)?;
             }
         }
-        Ok(root.join("adapter.py"))
+        Ok(root.join(ADAPTER_ENTRY_FILE))
     }
 
     pub(crate) fn current_reference(&self) -> Result<Value, EngineError> {
         for root in [
             &self.shared_directory,
-            &self.tools.root.join("engine-tools"),
+            &self.tools.root.join(ENGINE_TOOLS_DIR),
         ] {
             let current = root.join("current.json");
             if current.is_file() {
@@ -700,7 +728,9 @@ impl EngineService {
             .get("revision")
             .and_then(Value::as_str)
             .ok_or_else(|| EngineError::Protocol("引擎依赖缺少 revision。".into()))?;
-        if revision.len() != 40 || !revision.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        if revision.len() != GIT_SHA1_HEX_LEN
+            || !revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
             return Err(EngineError::Protocol("引擎依赖版本无效。".into()));
         }
         let relative = format!("references/{revision}/library.zip");
@@ -710,7 +740,7 @@ impl EngineService {
             .ok_or_else(|| EngineError::Protocol("引擎依赖缺少文件哈希。".into()))?;
         for root in [
             &self.shared_directory,
-            &self.tools.root.join("engine-tools"),
+            &self.tools.root.join(ENGINE_TOOLS_DIR),
         ] {
             let path = resolve_relative(root, &relative)?;
             if path.is_file() {
@@ -758,8 +788,9 @@ impl EngineService {
                 if pin["nativePinRequired"] == true && !has_native_pin {
                     native = None;
                 }
-                let runtime: Value = read_json(&self.tools.root.join("python/runtime.json"))
-                    .map_err(|error| EngineError::Protocol(error.to_string()))?;
+                let runtime: Value =
+                    read_json(&self.tools.root.join("python").join(RUNTIME_MANIFEST))
+                        .map_err(|error| EngineError::Protocol(error.to_string()))?;
                 if pin.get("pythonSha256").and_then(Value::as_str)
                     != runtime.get("archiveSha256").and_then(Value::as_str)
                     || pin.get("pythonVersion").and_then(Value::as_str) != Some("3.14.10")
@@ -859,7 +890,7 @@ impl EngineService {
         if let Some(output) = request
             .output_directory
             .as_ref()
-            .filter(|_| request.operation == "extract")
+            .filter(|_| request.operation == OP_EXTRACT)
         {
             if request.extra.get("buildMode").and_then(Value::as_str) != Some("overlay")
                 || !matches!(adapter, AdapterHandle::Python { .. })
@@ -886,7 +917,7 @@ impl EngineService {
         let source_hashes = if matches!(
             adapter,
             AdapterHandle::Python { .. } | AdapterHandle::BuiltinKirikiriSmil
-        ) && request.operation != "probe"
+        ) && request.operation != OP_PROBE
         {
             match request.resource_files.as_ref() {
                 Some(files) => Some(match expected_source_hashes {
@@ -904,7 +935,7 @@ impl EngineService {
         } else {
             None
         };
-        let patch_hashes = if matches!(request.operation.as_str(), "validate" | "extract") {
+        let patch_hashes = if matches!(request.operation.as_str(), OP_VALIDATE | OP_EXTRACT) {
             match request.output_directory.as_ref() {
                 Some(output) => Some(match expected_patch_hashes {
                     Some(expected) => expected.clone(),
@@ -933,7 +964,7 @@ impl EngineService {
                 ..
             } => {
                 if let Some(package) = package_directory {
-                    if package.join("package.json").is_file() {
+                    if package.join(PACKAGE_MANIFEST_FILE).is_file() {
                         PackageManifest::load(package)?.handle(package)?;
                     }
                     request
@@ -995,7 +1026,7 @@ impl EngineService {
             return response;
         }
         let validated_sources = expected_source_hashes.filter(|_| {
-            request.operation == "validate"
+            request.operation == OP_VALIDATE
                 && response.as_ref().is_ok_and(|response| {
                     response
                         .validation
@@ -1037,7 +1068,7 @@ impl EngineService {
             },
             Some(probe),
         ) = (adapter, response.probe.as_mut())
-            && package.join("package.json").is_file()
+            && package.join(PACKAGE_MANIFEST_FILE).is_file()
         {
             probe.adapter_id.clone_from(id);
             probe.adapter_version.clone_from(version);
@@ -1097,13 +1128,13 @@ impl EngineService {
                 for unit in &extraction.units {
                     if unit.id.encode_utf16().count() > 512 {
                         return Err(EngineError::Incompatible {
-                            stage: "extraction",
+                            stage: STAGE_EXTRACTION,
                             message: "提取的文本 ID 超过 512 字符。".into(),
                         });
                     }
                     if !allowed.contains(&unit.resource_path.replace('\\', "/").to_lowercase()) {
                         return Err(EngineError::Incompatible {
-                            stage: "extraction",
+                            stage: STAGE_EXTRACTION,
                             message: format!("提取的文字不属于所选资源：{}", unit.resource_path),
                         });
                     }
@@ -1114,7 +1145,7 @@ impl EngineService {
                     .any(|unit| !unit.source_text.trim().is_empty())
                 {
                     return Err(EngineError::Incompatible {
-                        stage: "extraction",
+                        stage: STAGE_EXTRACTION,
                         message: "适配器返回的提取记录为空或全部为纯空白，没有可翻译内容。".into(),
                     });
                 }
@@ -1172,7 +1203,7 @@ impl EngineService {
             }
             if let Some(executable) = &build.launch_executable
                 && (!declared.contains(&executable.to_lowercase())
-                    || !executable.to_lowercase().ends_with(".exe"))
+                    || !executable.to_lowercase().ends_with(EXE_EXTENSION))
             {
                 return Err(EngineError::Protocol(
                     "补丁启动程序必须是声明输出中的 EXE。".into(),
@@ -1208,9 +1239,9 @@ impl EngineService {
                         .is_file()
                         .then(|| request.source_directory.join(&file.path));
                     let original = if matches!(adapter, AdapterHandle::BuiltinSfa16)
-                        && file.path.eq_ignore_ascii_case("sfa16.zh.exe")
+                        && file.path.eq_ignore_ascii_case(SFA16_PATCHED_EXE)
                     {
-                        Some(request.source_directory.join("sfa16.exe"))
+                        Some(request.source_directory.join(SFA16_EXE))
                     } else {
                         original
                     };
@@ -1308,7 +1339,7 @@ impl EngineService {
             resources,
             &crate::adaptation::AdaptationInputs::default(),
             cancellation,
-            Duration::from_secs(45),
+            BOUNDED_PROBE_BUDGET,
         )
         .await
     }
@@ -1340,7 +1371,7 @@ impl EngineService {
             resources,
             inputs,
             cancellation,
-            Duration::from_secs(45),
+            BOUNDED_PROBE_BUDGET,
         )
         .await
     }
@@ -1404,9 +1435,10 @@ impl EngineService {
             if let Some(parent) = target.parent() {
                 fs::create_dir_all(parent)?;
             }
-            let allowance = 65_536;
             let mut bytes = Vec::new();
-            File::open(path)?.take(allowance).read_to_end(&mut bytes)?;
+            File::open(path)?
+                .take(PROBE_HEADER_BYTES)
+                .read_to_end(&mut bytes)?;
             fs::write(target, &bytes)?;
             files.push(json!({"path":relative,"length":length,"headerBytes":bytes.len()}));
         }
@@ -1431,16 +1463,24 @@ impl EngineService {
                 ))
             })
             .collect();
-        let mut request = AdapterRequest::new("probe", staged.path());
+        let mut request = AdapterRequest::new(OP_PROBE, staged.path());
         request.resource_files = Some(resources.to_vec());
         request.extra.insert("probeFiles".into(), json!(files));
-        request.extra.insert("probeReadLimits".into(),json!({"maximumRounds":4,"maximumRanges":64,"maximumRangeBytes":1_048_576,"maximumTotalBytes":8_388_608}));
+        request.extra.insert(
+            "probeReadLimits".into(),
+            json!({
+                "maximumRounds": PROBE_MAX_ROUNDS,
+                "maximumRanges": PROBE_MAX_RANGES,
+                "maximumRangeBytes": PROBE_MAX_RANGE_BYTES,
+                "maximumTotalBytes": PROBE_MAX_TOTAL_BYTES,
+            }),
+        );
         let ranges_directory = tempfile::tempdir()?;
         let mut ranges = Vec::new();
         let mut seen = BTreeSet::new();
         let mut total = 0_u64;
         let mut range_hashes: BTreeMap<PathBuf, String> = BTreeMap::new();
-        for round in 0..=4 {
+        for round in 0..=PROBE_MAX_ROUNDS {
             let response = self.execute(adapter, &request, cancellation).await?;
             if hashes(
                 staged.path(),
@@ -1468,7 +1508,7 @@ impl EngineService {
                     json!({"ranges": ranges, "readFiles": files.len(), "readBytes": header_bytes + total}),
                 ));
             }
-            if round == 4 || response.probe.is_some() {
+            if round == PROBE_MAX_ROUNDS || response.probe.is_some() {
                 return Err(EngineError::Protocol(
                     "适配器探测读取轮数或结果冲突。".into(),
                 ));
@@ -1476,9 +1516,9 @@ impl EngineService {
             for range in response.probe_reads {
                 if !resources.contains(&range.path)
                     || range.length == 0
-                    || range.length > 1_048_576
-                    || ranges.len() >= 64
-                    || total + range.length > 8_388_608
+                    || range.length > PROBE_MAX_RANGE_BYTES
+                    || ranges.len() >= PROBE_MAX_RANGES
+                    || total + range.length > PROBE_MAX_TOTAL_BYTES
                     || !seen.insert((range.path.clone(), range.offset, range.length))
                 {
                     return Err(EngineError::Protocol(

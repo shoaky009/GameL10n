@@ -26,8 +26,14 @@ pub struct VersionLifecycle {
 
 impl VersionLifecycle {
     pub fn status_label(&self) -> &'static str {
-        let passed = self.feedback.values().any(|item| item.status == "passed");
-        let failed = self.feedback.values().any(|item| item.status == "failed");
+        let passed = self
+            .feedback
+            .values()
+            .any(|item| item.status == TEST_STATUS_PASSED);
+        let failed = self
+            .feedback
+            .values()
+            .any(|item| item.status == TEST_STATUS_FAILED);
         match (passed, failed, self.requires_confirmation) {
             (true, true, _) => "部分游戏存在问题，另有验证通过",
             (_, true, _) => "存在问题",
@@ -40,19 +46,24 @@ impl VersionLifecycle {
     pub fn failed_for(&self, game_id: &str) -> bool {
         self.feedback
             .get(game_id)
-            .is_some_and(|item| item.status == "failed")
+            .is_some_and(|item| item.status == TEST_STATUS_FAILED)
     }
 
     pub fn passed_for(&self, game_id: &str) -> bool {
         self.feedback
             .get(game_id)
-            .is_some_and(|item| item.status == "passed")
+            .is_some_and(|item| item.status == TEST_STATUS_PASSED)
     }
 
     pub(super) fn can_reuse(&self) -> bool {
-        self.feedback.values().any(|item| item.status == "passed")
+        self.feedback
+            .values()
+            .any(|item| item.status == TEST_STATUS_PASSED)
             || (!self.requires_confirmation
-                && !self.feedback.values().any(|item| item.status == "failed"))
+                && !self
+                    .feedback
+                    .values()
+                    .any(|item| item.status == TEST_STATUS_FAILED))
     }
 
     pub fn replaces_for(&self, game_id: &str, previous: &AdapterVersion) -> bool {
@@ -113,7 +124,9 @@ impl EngineCatalog {
                 if !family
                     .versions
                     .get(version)
-                    .is_some_and(|entry| entry.source == 1 && entry.exists && !entry.is_candidate)
+                    .is_some_and(|entry| {
+                        entry.source == SOURCE_EXTERNAL && entry.exists && !entry.is_candidate
+                    })
                     || excluded.is_some_and(|versions| versions.iter().any(|item| item == version))
                 {
                     continue;
@@ -170,14 +183,14 @@ impl EngineCatalog {
         for (id, family) in cached.index.matching_families(matching) {
             for game in family.games.iter().filter(|game| {
                 game.game_id == game_id
-                    && game.structure_status == "passed"
-                    && game.runtime_status != "failed"
+                    && game.structure_status == TEST_STATUS_PASSED
+                    && game.runtime_status != TEST_STATUS_FAILED
                     && matching.is_none_or(|m| m[id].contains(&game.adapter_version))
             }) {
                 let Some(entry) = family.versions.get(&game.adapter_version) else {
                     continue;
                 };
-                if entry.source != 1 || !entry.exists {
+                if entry.source != SOURCE_EXTERNAL || !entry.exists {
                     continue;
                 }
                 let version_lifecycle = entry
@@ -204,7 +217,7 @@ impl EngineCatalog {
                     if !excluded || candidate.is_pinned {
                         candidate.is_known_game = true;
                         candidate.coverage_confirmed =
-                            game.coverage_confirmed || game.runtime_status == "passed";
+                            game.coverage_confirmed || game.runtime_status == TEST_STATUS_PASSED;
                     }
                 } else if family.enabled && !excluded {
                     candidates.push(EngineDiscoveryCandidate {
@@ -212,7 +225,7 @@ impl EngineCatalog {
                         version: game.adapter_version.clone(),
                         directory: self
                             .root
-                            .join("packages")
+                            .join(PACKAGES_DIR)
                             .join(id)
                             .join(&game.adapter_version),
                         published_at: entry.published_at.clone(),
@@ -224,7 +237,7 @@ impl EngineCatalog {
                         is_pinned: false,
                         is_known_game: true,
                         coverage_confirmed: game.coverage_confirmed
-                            || game.runtime_status == "passed",
+                            || game.runtime_status == TEST_STATUS_PASSED,
                     });
                 }
                 known_updates.insert(
@@ -269,7 +282,7 @@ impl EngineCatalog {
                     family.games.iter().any(|game| {
                         game.game_id == game_id
                             && game.adapter_version == candidate.version
-                            && game.runtime_status == "failed"
+                            && game.runtime_status == TEST_STATUS_FAILED
                     })
                 })
         });
@@ -305,7 +318,10 @@ impl EngineCatalog {
     ) -> Result<bool, CoreError> {
         validate_family_id(&adapter.adapter_id)?;
         validate_part(&adapter.version)?;
-        if !matches!(feedback.status.as_str(), "passed" | "failed") {
+        if !matches!(
+            feedback.status.as_str(),
+            TEST_STATUS_PASSED | TEST_STATUS_FAILED
+        ) {
             return Err(invalid("请选择效果正常或存在问题。"));
         }
         let _write = write_gate()?;
@@ -317,7 +333,7 @@ impl EngineCatalog {
         if !family
             .versions
             .get(&adapter.version)
-            .is_some_and(|entry| entry.source == 1)
+            .is_some_and(|entry| entry.source == SOURCE_EXTERNAL)
         {
             return Ok(false);
         }
@@ -331,7 +347,7 @@ impl EngineCatalog {
         lifecycle.feedback.insert(game_id.into(), feedback.clone());
         // Release order is shared by every game in the family. Only this game's
         // earlier publications can be inferred as predecessors of its confirmed release.
-        if feedback.status == "passed"
+        if feedback.status == TEST_STATUS_PASSED
             && lifecycle.requires_confirmation
             && let Some(releases) = setting["releases"].as_array()
             && let Some(position) = releases
@@ -349,7 +365,7 @@ impl EngineCatalog {
                         && family
                             .versions
                             .get(*version)
-                            .is_some_and(|entry| entry.source == 1)
+                            .is_some_and(|entry| entry.source == SOURCE_EXTERNAL)
                 }) else {
                     continue;
                 };
@@ -387,10 +403,10 @@ impl EngineCatalog {
                 game.updated_at = Some(feedback.updated_at.clone());
             }
         }
-        write_json(&safe_path(&self.root, "library-state.json")?, &state)?;
+        write_json(&safe_path(&self.root, LIBRARY_STATE_FILE)?, &state)?;
         let compatibility = safe_path(
             &self.root,
-            &format!("catalog/{}/games.json", adapter.adapter_id),
+            &format!("{CATALOG_DIR}/{}/{GAMES_COMPAT_FILE}", adapter.adapter_id),
         )?;
         write_json(
             &compatibility,

@@ -8,6 +8,8 @@ use crate::{
     discovery::InventoryFile,
 };
 
+use super::{ADAPTATION_SESSION_PATH, ADAPTATION_WORKSPACE_DIR};
+
 const INLINE_HISTORY_BYTES: usize = 2048;
 const EXCERPT_BYTES: usize = 512;
 
@@ -32,7 +34,7 @@ pub(super) fn overview(state: &Session, files: &[InventoryFile]) -> Value {
         .release_files
         .iter()
         .map(|file| {
-            let path = format!("adaptation/current/{}", workspace_file(&file.path));
+            let path = format!("{ADAPTATION_WORKSPACE_DIR}/{}", workspace_file(&file.path));
             json!({"evidencePath":path,"role":file.role,"purpose":excerpt(&file.purpose)})
         })
         .collect::<Vec<_>>();
@@ -90,8 +92,6 @@ pub(super) fn request_messages(messages: &[Value], latest_exchange: usize) -> Co
     request
 }
 
-pub(super) const ADAPTATION_RESULT_PATH: &str = "adaptation/current/session.json";
-
 pub(super) fn tool_result(
     workspace: &Path,
     state: &Session,
@@ -113,7 +113,7 @@ pub(super) fn tool_result(
         _ => return Err(EngineError::Protocol("无效的工具结果来源".into())),
     }
     let mut page = read_tool_result(workspace, state, args)?;
-    page["evidencePath"] = json!(ADAPTATION_RESULT_PATH);
+    page["evidencePath"] = json!(ADAPTATION_SESSION_PATH);
     Ok(page)
 }
 

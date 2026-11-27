@@ -109,7 +109,8 @@ impl<'a> Query<'a> {
             .resource_path
             .as_deref()
             .is_none_or(|p| p == r.path.raw)
-            && (matches!(self.filter.kind.as_str(), "" | "all") || self.filter.kind == r.kind)
+            && (matches!(self.filter.kind.as_str(), "" | super::FILTER_ALL)
+                || self.filter.kind == r.kind)
             && self.selected.as_ref().is_none_or(|ids| ids.contains(r.id))
             && status.matches(&self.filter.status)
             && self

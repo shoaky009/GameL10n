@@ -7,18 +7,19 @@ pub(super) fn select_units<'units, 'options>(
     options: &'options TranslationOptions,
 ) -> Result<Selection<'units, 'options>, ExecutionError> {
     if providers.is_empty()
-        || !(1..=80).contains(&options.batch_size)
+        || !(1..=TranslationOptions::MAX_BATCH_SIZE).contains(&options.batch_size)
         || policy.target_language.trim().is_empty()
     {
-        return Err(ExecutionError::Invalid(
-            "请配置翻译 API 链、目标语言和每批文本数（1–80）。".into(),
-        ));
+        return Err(ExecutionError::Invalid(format!(
+            "请配置翻译 API 链、目标语言和每批文本数（1–{}）。",
+            TranslationOptions::MAX_BATCH_SIZE
+        )));
     }
     if options.candidate_only && options.retranslation_id.is_some()
-        || options
-            .retranslation_id
-            .as_deref()
-            .is_some_and(|id| id.len() != 32 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        || options.retranslation_id.as_deref().is_some_and(|id| {
+            id.len() != RETRANSLATION_ID_HEX_LEN
+                || !id.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
         || options.retranslation_id.is_some() && options.unit_ids.is_none()
     {
         return Err(ExecutionError::Invalid(
@@ -128,8 +129,8 @@ impl<F: FnMut(TranslationProgress)> TranslationRun<'_, F> {
             if self
                 .engine
                 .directory
-                .join("responses")
-                .join(format!("{key}.request.json"))
+                .join(LEGACY_RESPONSES_DIR)
+                .join(format!("{key}{LEGACY_REQUEST_SUFFIX}"))
                 .is_file()
             {
                 self.journal.legacy_receipts.insert(key);
@@ -253,7 +254,7 @@ impl<F: FnMut(TranslationProgress)> TranslationRun<'_, F> {
             mark_failed(
                 &blocked,
                 policy,
-                "request-outcome-unknown",
+                ISSUE_REQUEST_OUTCOME_UNKNOWN,
                 "上次请求结果未知，未授权重新发送；请确认后重试。",
                 issues,
                 &mut self.failed,

@@ -16,6 +16,25 @@ import traceback
 import unicodedata
 import zipfile
 
+FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+CREATE_NO_WINDOW = 0x08000000
+MAX_TIMEOUT_SECONDS = 600
+MAX_PROCESS_OUTPUT_BYTES = 1 << 20
+MAX_REFERENCE_BYTES = 8 << 20
+MAX_SOURCE_FILE_BYTES = 4 << 20
+SEARCH_BYTE_BUDGET = 4 << 20
+MAX_SEARCH_MATCHES = 20
+MAX_SEARCH_FILES = 64
+MAX_LAUNCH_SCAN_FILES = 20_000
+MAX_QUERY_UTF16 = 256
+MAX_ARGUMENTS = 128
+MAX_ARGUMENTS_UTF16 = 65_536
+MAX_SAMPLE_FILES = 12
+MAX_INT64 = (1 << 63) - 1
+REFERENCE_CATALOG_PATH = 'catalog/engines.json'
+LE_CONFIG_SUFFIX = '.le.config'
+MAX_LE_CONFIG_BYTES = 32 * 1024
+
 ISOLATION_BOOTSTRAP = (Path(__file__).with_name('isolation.py').read_text(encoding='utf-8')
                        if '--isolated' in sys.argv[1:] else '')
 if ISOLATION_BOOTSTRAP:
@@ -34,7 +53,7 @@ def safe(root, relative):
     for part in (path, *path.parents):
         if part == root.parent:
             break
-        if part.is_symlink() or (part.exists() and getattr(part.lstat(), 'st_file_attributes', 0) & 0x400):
+        if part.is_symlink() or (part.exists() and getattr(part.lstat(), 'st_file_attributes', 0) & FILE_ATTRIBUTE_REPARSE_POINT):
             raise ValueError('路径不能使用重解析点。')
     if not path.resolve().is_relative_to(root):
         raise ValueError('路径超出指定目录。')
@@ -48,7 +67,7 @@ def page(text, request):
     offset = reference_number(request, 'offset', 0, 0, total)
     length = reference_number(request, 'length', 3200, 1, 16000)
     query = reference_argument(request, 'query', '')
-    if len(query.encode('utf-16-le')) // 2 > 256:
+    if len(query.encode('utf-16-le')) // 2 > MAX_QUERY_UTF16:
         raise ValueError('检索词过长。')
     found = True
     if query:
@@ -74,10 +93,10 @@ def workspace_text(request, path):
 def iter_files(directory):
     for current, directories, files in os.walk(directory, followlinks=False):
         directories[:] = [name for name in directories if not (Path(current) / name).is_symlink()
-                          and not (getattr((Path(current) / name).lstat(), 'st_file_attributes', 0) & 0x400)]
+                          and not (getattr((Path(current) / name).lstat(), 'st_file_attributes', 0) & FILE_ATTRIBUTE_REPARSE_POINT)]
         for name in files:
             path = Path(current) / name
-            if not path.is_symlink() and not (getattr(path.lstat(), 'st_file_attributes', 0) & 0x400):
+            if not path.is_symlink() and not (getattr(path.lstat(), 'st_file_attributes', 0) & FILE_ATTRIBUTE_REPARSE_POINT):
                 yield path
 
 
@@ -169,7 +188,7 @@ def search_text(request):
     relative = request['path'].replace('\\', '/')
     logical, path = (view.root, view.root) if relative in ('', '.') else view.resolve(relative)
     query = request['query']
-    if not query or len(query.encode('utf-16-le')) // 2 > 256:
+    if not query or len(query.encode('utf-16-le')) // 2 > MAX_QUERY_UTF16:
         raise ValueError('搜索文本长度必须在 1 到 256 之间。')
     def search_file(logical, current, offset, budget, maximum):
         encoding = request.get('encoding') or ('utf8' if workspace_text(request, logical) else 'cp932')
@@ -194,22 +213,22 @@ def search_text(request):
                 break
         return dict(matches=matches, byteOffsets=offsets, encoding=encoding, scannedBytes=len(data),
                     nextOffset=offset + consumed, more=offset + consumed < size)
-    offset = reference_number(request, 'offset', 0, 0, 1_000_000 if path.is_dir() else (1 << 63) - 1)
+    offset = reference_number(request, 'offset', 0, 0, 1_000_000 if path.is_dir() else MAX_INT64)
     if path.is_file():
-        return search_file(logical, path, offset, 4 << 20, 20)
+        return search_file(logical, path, offset, SEARCH_BYTE_BUDGET, MAX_SEARCH_MATCHES)
     import itertools
     extensions = {'.cs','.py','.ps1','.md','.txt','.json','.jsonl','.xml','.csv','.log','.ini','.cfg','.ks','.rpy',
                   '.tjs','.ast','.art','.s','.soc','.ss','.lua','.js','.ts','.html','.css','.scr','.rl',
                   '.csproj','.rsp','.c','.h','.cpp','.hpp','.yaml','.yml','.toml'}
     files = list(itertools.islice(((logical, physical) for logical, physical in view.files(relative)
-                                  if logical.suffix.lower() in extensions and not logical.name.lower().startswith('.env')), offset, offset + 65))
+                                  if logical.suffix.lower() in extensions and not logical.name.lower().startswith('.env')), offset, offset + MAX_SEARCH_FILES + 1))
     results, scanned_bytes, scanned_files, next_offset = [], 0, 0, offset
-    next_byte = reference_number(request, 'fileByteOffset', 0, 0, (1 << 63) - 1)
-    for logical, current in files[:64]:
-        if len(results) >= 20 or scanned_bytes >= 4 << 20:
+    next_byte = reference_number(request, 'fileByteOffset', 0, 0, MAX_INT64)
+    for logical, current in files[:MAX_SEARCH_FILES]:
+        if len(results) >= MAX_SEARCH_MATCHES or scanned_bytes >= SEARCH_BYTE_BUDGET:
             break
         relative = logical.relative_to(view.root).as_posix()
-        found = search_file(logical, current, next_byte, min(256 << 10, (4 << 20) - scanned_bytes), 20 - len(results))
+        found = search_file(logical, current, next_byte, min(256 << 10, SEARCH_BYTE_BUDGET - scanned_bytes), MAX_SEARCH_MATCHES - len(results))
         scanned_files += 1
         scanned_bytes += found['scannedBytes']
         results += [dict(path=relative, byteOffset=at, encoding=found['encoding'], excerpt=excerpt)
@@ -339,13 +358,13 @@ def reference_text(source, path):
         entry = source.getinfo(path)
     except KeyError:
         raise FileNotFoundError('工具库中没有该文件：' + path) from None
-    if entry.file_size > 4 << 20:
+    if entry.file_size > MAX_SOURCE_FILE_BYTES:
         raise ValueError('请读取更具体的参考文件。')
     return source.read(entry).decode('utf-8-sig', errors='replace')
 
 
 def reference_catalog(source):
-    index = json.loads(reference_text(source, 'catalog/engines.json'))
+    index = json.loads(reference_text(source, REFERENCE_CATALOG_PATH))
     engines = index.get('engines') if isinstance(index, dict) else None
     if not isinstance(engines, list) or any(not isinstance(item, dict) for item in engines):
         raise ValueError('引擎参考索引结构已变化。')
@@ -422,7 +441,7 @@ def search_engine_references(request):
     root = REFERENCE_ROOT
     if request.get('revision'):
         root = root.replace('/main/', '/' + request['revision'] + '/')
-    url = root + 'catalog/engines.json'
+    url = root + REFERENCE_CATALOG_PATH
     error, content_hash, retrieved_at, reused, stale = None, None, None, None, None
     matches, total = [], 0
     try:
@@ -431,16 +450,16 @@ def search_engine_references(request):
         if 'referenceIndexContent' in request:
             # Rust owns HTTP/cache/cancellation; both sources use the same catalog ranking.
             content = reference_argument(request, 'referenceIndexContent')
-            if len(content.encode('utf-8')) > 8 << 20:
+            if len(content.encode('utf-8')) > MAX_REFERENCE_BYTES:
                 raise ValueError('引擎参考索引超过 8 MiB 读取上限。')
             metadata = request.get('referenceIndexMetadata') or {}
             root = REFERENCE_ROOT
-            url = metadata.get('url', root + 'catalog/engines.json')
+            url = metadata.get('url', root + REFERENCE_CATALOG_PATH)
             content_hash = metadata.get('contentSha256') or hashlib.sha256(content.encode('utf-8')).hexdigest()
             retrieved_at, reused, stale = (metadata.get(name) for name in ('retrievedAt', 'reused', 'stale'))
         else:
             with zipfile.ZipFile(request['library']) as source:
-                content = reference_text(source, 'catalog/engines.json')
+                content = reference_text(source, REFERENCE_CATALOG_PATH)
             content_hash = hashlib.sha256(content.encode('utf-8')).hexdigest()
             retrieved_at = datetime.now(timezone.utc).isoformat()
             reused, stale = True, False
@@ -549,7 +568,7 @@ def builtin_sources(request):
         entry = next((item for item in entries if item.filename == path), None)
         if entry is None:
             raise ValueError('该路径不在所选解析器的源码索引中，请先读取 inspect_builtin_adapter 返回的 sourceFiles。')
-        if entry.file_size > 4 * 1024 * 1024:
+        if entry.file_size > MAX_SOURCE_FILE_BYTES:
             raise ValueError('内置解析器单个源码文件超过读取上限。')
         content = archive.read(entry).decode('utf-8-sig')
         encoded = content.encode('utf-16-le')
@@ -616,7 +635,7 @@ def prepare_siglus_zip(request):
     name = 'siglus_ssu/native_accel.cp314-win_amd64.pyd'
     with zipfile.ZipFile(library) as archive:
         data = archive.read(name)
-        if len(data) > 8 << 20: raise ValueError('Siglus 原生加速模块大小异常。')
+        if len(data) > MAX_REFERENCE_BYTES: raise ValueError('Siglus 原生加速模块大小异常。')
     native = safe(root / 'native', name)
     native.parent.mkdir(parents=True, exist_ok=True)
     if native.exists() and native.read_bytes() != data:
@@ -814,7 +833,7 @@ def run(request):
             + 'resource_paths={k:Path(v) for k,v in inputs["paths"].items()}\n'
             + 'resource_files=list(resource_paths)\n' + PROBE_RUNNER)
     arguments = request.get('arguments', [])
-    if not isinstance(arguments, list) or len(arguments) > 128 or not all(isinstance(v, str) for v in arguments) or sum(len(v.encode('utf-16-le')) // 2 for v in arguments) > 65536:
+    if not isinstance(arguments, list) or len(arguments) > MAX_ARGUMENTS or not all(isinstance(v, str) for v in arguments) or sum(len(v.encode('utf-16-le')) // 2 for v in arguments) > MAX_ARGUMENTS_UTF16:
         raise ValueError('参数无效。')
     environment = os.environ.copy()
     environment.pop('GAMEL10N_REPORT_FILE', None)
@@ -855,7 +874,7 @@ def run(request):
                                           and safe(workspace, file).is_file()]
                 result['writtenFilesPartial'] = tracked.get('partial') is True
                 samples = tracked.get('samples', [])
-                if not isinstance(samples, list) or len(samples) > 12:
+                if not isinstance(samples, list) or len(samples) > MAX_SAMPLE_FILES:
                     raise ValueError('registered sample list exceeds its budget')
                 result['registeredSamples'] = [file for file in samples
                                                if isinstance(file, str) and file.startswith('work/')
@@ -875,8 +894,8 @@ def run(request):
             if previous_report == (stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size):
                 raise ValueError('脚本未更新 reportFile，不能复用上次实验报告。')
             with report_path.open('rb') as stream:
-                data = stream.read((8 << 20) + 1)
-            if len(data) > 8 << 20:
+                data = stream.read(MAX_REFERENCE_BYTES + 1)
+            if len(data) > MAX_REFERENCE_BYTES:
                 raise ValueError('实验报告超过 8 MiB，请拆分实验或缩小报告。')
             result['report'] = experiment_report(data)
             result['report'].update(file=report, sha256=hashlib.sha256(data).hexdigest(), bytes=len(data),
@@ -909,7 +928,7 @@ def experiment_report(data):
     result = dict(status=value['status'])
     for name in ('tested', 'matched'):
         if name in value:
-            if type(value[name]) is not int or value[name] < 0 or value[name] > (1 << 63) - 1:
+            if type(value[name]) is not int or value[name] < 0 or value[name] > MAX_INT64:
                 raise ValueError(f'报告 {name} 必须是非负整数。')
             result[name] = value[name]
     if 'tested' in result and result.get('matched', 0) > result['tested']:
@@ -930,10 +949,10 @@ def run_process(command, workspace, request, environment=None):
     relative = request.get('workingDirectory', '.')
     directory = workspace if relative == '.' else safe(workspace, relative.replace('\\', '/'))
     directory.mkdir(parents=True, exist_ok=True)
-    timeout = reference_number(request, 'timeoutSeconds', 120, 1, 600)
+    timeout = reference_number(request, 'timeoutSeconds', 120, 1, MAX_TIMEOUT_SECONDS)
     with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
         process = subprocess.Popen(command, cwd=directory, stdin=subprocess.PIPE, stdout=out, stderr=err,
-                                   env=environment, creationflags=0x08000000 if os.name == 'nt' else 0,
+                                   env=environment, creationflags=CREATE_NO_WINDOW if os.name == 'nt' else 0,
                                    start_new_session=os.name != 'nt')
         started = time.monotonic()
         stdin = request.get('stdin', '').encode('utf-8')
@@ -945,7 +964,7 @@ def run_process(command, workspace, request, environment=None):
                     break
                 except subprocess.TimeoutExpired:
                     stdin = None
-                    if os.fstat(out.fileno()).st_size + os.fstat(err.fileno()).st_size > 1 << 20:
+                    if os.fstat(out.fileno()).st_size + os.fstat(err.fileno()).st_size > MAX_PROCESS_OUTPUT_BYTES:
                         failure = '工具输出超过 1 MiB 限制。'
                         break
                     if time.monotonic() - started >= timeout:
@@ -955,17 +974,17 @@ def run_process(command, workspace, request, environment=None):
             if process.poll() is None:
                 if os.name == 'nt':
                     subprocess.run(['taskkill', '/PID', str(process.pid), '/T', '/F'], stdout=subprocess.DEVNULL,
-                                   stderr=subprocess.DEVNULL, creationflags=0x08000000)
+                                   stderr=subprocess.DEVNULL, creationflags=CREATE_NO_WINDOW)
                 else:
                     import signal
                     os.killpg(process.pid, signal.SIGKILL)
                 process.kill()
                 process.wait()
-        if os.fstat(out.fileno()).st_size + os.fstat(err.fileno()).st_size > 1 << 20:
+        if os.fstat(out.fileno()).st_size + os.fstat(err.fileno()).st_size > MAX_PROCESS_OUTPUT_BYTES:
             failure = failure or '工具输出超过 1 MiB 限制。'
         out.seek(0); err.seek(0)
-        stdout = out.read(1 << 20)
-        stderr = err.read((1 << 20) - len(stdout))
+        stdout = out.read(MAX_PROCESS_OUTPUT_BYTES)
+        stderr = err.read(MAX_PROCESS_OUTPUT_BYTES - len(stdout))
     return dict(success=failure is None and process.returncode == 0, exitCode=process.returncode,
                 stdout=stdout.decode('utf-8', errors='replace'), stderr=stderr.decode('utf-8', errors='replace'),
                 phase='run', timedOut=failure is not None and '时间' in failure, error=failure)
@@ -985,7 +1004,7 @@ def run_tool(request):
             raise ValueError('只能运行已准备的工作区 EXE 或 powershell；分析脚本请用 Python。')
         executable = safe(workspace, relative.replace('\\', '/'))
     arguments = request.get('arguments', [])
-    if not isinstance(arguments, list) or len(arguments) > 128 or not all(isinstance(value, str) for value in arguments) or sum(len(value.encode('utf-16-le')) // 2 for value in arguments) > 65536:
+    if not isinstance(arguments, list) or len(arguments) > MAX_ARGUMENTS or not all(isinstance(value, str) for value in arguments) or sum(len(value.encode('utf-16-le')) // 2 for value in arguments) > MAX_ARGUMENTS_UTF16:
         raise ValueError('arguments 必须是最多 128 项的字符串数组。')
     if powershell:
         arguments = ['-NoLogo', '-NoProfile', '-NonInteractive', *arguments]
@@ -1157,21 +1176,21 @@ def inspect_game_launch(request):
     from xml.parsers import expat
     root = Path(request['root']).resolve()
     files = list(islice((path for path in iter_files(root)
-                         if not path.relative_to(root).as_posix().lower().startswith('.avg-translator/')), 20001))
-    partial = len(files) > 20000
-    files = [path.relative_to(root).as_posix() for path in files[:20000]]
+                         if not path.relative_to(root).as_posix().lower().startswith('.avg-translator/')), MAX_LAUNCH_SCAN_FILES + 1))
+    partial = len(files) > MAX_LAUNCH_SCAN_FILES
+    files = [path.relative_to(root).as_posix() for path in files[:MAX_LAUNCH_SCAN_FILES]]
     profiles = []
-    candidates = [path for path in files if path.lower().endswith('.exe.le.config')]
+    candidates = [path for path in files if path.lower().endswith('.exe' + LE_CONFIG_SUFFIX)]
     partial |= len(candidates) > 8
     for relative in candidates[:8]:
-        executable = relative[:-len('.le.config')]
+        executable = relative[:-len(LE_CONFIG_SUFFIX)]
         record = dict(path=relative, executable=executable, executableExists=False,
                       location=None, runAsAdmin=None, runWithSuspend=None, error=None)
         try:
             record['executableExists'] = safe(root, executable).is_file()
             with safe(root, relative).open('rb') as stream:
-                data = stream.read(32769)
-            if len(data) > 32768:
+                data = stream.read(MAX_LE_CONFIG_BYTES + 1)
+            if len(data) > MAX_LE_CONFIG_BYTES:
                 raise ValueError('转区配置超过 32 KB，请单独检查。')
             # Expat rejects DTDs before ElementTree can resolve internal entities.
             parser = expat.ParserCreate()
@@ -1207,7 +1226,7 @@ def inspect_game_launch(request):
 
 def decode_reference_html(request):
     source = Path(request['source'])
-    if source.stat().st_size > 8 * 1024 * 1024:
+    if source.stat().st_size > MAX_REFERENCE_BYTES:
         raise ValueError('资料响应超过 8 MiB。')
     content = source.read_bytes().decode('utf-8', errors='replace')
     content = re.sub(r'<(script|style)\b[^>]*>[\s\S]*?</\1>', '', content, flags=re.I)

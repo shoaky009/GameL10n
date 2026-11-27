@@ -1,4 +1,7 @@
 use super::*;
+use gamel10n_translation::provider::{
+    HTTP_REQUEST_TIMEOUT, HTTP_TOO_MANY_REQUESTS, diagnostic_codes,
+};
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -29,31 +32,37 @@ impl AdaptationFailure {
             EngineError::Api(error) => {
                 let code = error.diagnostic.code.as_str();
                 let reason = match code {
-                    "output-token-limit" => "模型单次输出达到长度上限，响应被截断".into(),
-                    "model-refusal" => "模型拒绝处理本次分析请求".into(),
-                    "request-size-limit" => "分析请求超过接口大小限制".into(),
+                    diagnostic_codes::OUTPUT_TOKEN_LIMIT => {
+                        "模型单次输出达到长度上限，响应被截断".into()
+                    }
+                    diagnostic_codes::MODEL_REFUSAL => "模型拒绝处理本次分析请求".into(),
+                    diagnostic_codes::REQUEST_SIZE_LIMIT => "分析请求超过接口大小限制".into(),
                     _ => error.failure_summary(),
                 };
                 let action = match (error.status_code, code) {
-                    (Some(401 | 403), _) | (_, "configuration" | "http-client" | "scheduler") => {
-                        "检查分析 API 的地址、密钥、模型及访问权限后，点击“继续智能识别”。"
-                    }
-                    (Some(429), _) => {
-                        "稍后点击“继续智能识别”；若持续限流，请检查 API 配额或调整分析 API。"
-                    }
-                    (Some(408 | 500..=599), _)
+                    (Some(401 | 403), _)
                     | (
                         _,
-                        "network-error"
-                        | "network-interrupted"
-                        | "request-timeout"
-                        | "stream-incomplete"
-                        | "stream-error",
+                        diagnostic_codes::CONFIGURATION | "http-client" | "scheduler",
+                    ) => {
+                        "检查分析 API 的地址、密钥、模型及访问权限后，点击“继续智能识别”。"
+                    }
+                    (Some(HTTP_TOO_MANY_REQUESTS), _) => {
+                        "稍后点击“继续智能识别”；若持续限流，请检查 API 配额或调整分析 API。"
+                    }
+                    (Some(HTTP_REQUEST_TIMEOUT | 500..=599), _)
+                    | (
+                        _,
+                        diagnostic_codes::NETWORK_ERROR
+                        | diagnostic_codes::NETWORK_INTERRUPTED
+                        | diagnostic_codes::REQUEST_TIMEOUT
+                        | diagnostic_codes::STREAM_INCOMPLETE
+                        | diagnostic_codes::STREAM_ERROR,
                     ) => "连接或服务恢复后点击“继续智能识别”，也可以更换分析 API。",
-                    (_, "model-refusal") => {
+                    (_, diagnostic_codes::MODEL_REFUSAL) => {
                         "更换能够处理当前分析任务的 API 或模型后，点击“继续智能识别”。"
                     }
-                    (_, "output-token-limit") => {
+                    (_, diagnostic_codes::OUTPUT_TOKEN_LIMIT) => {
                         "点击“继续智能识别”，让模型缩小每次输出；持续截断时可更换分析模型。"
                     }
                     _ => "检查分析 API 的接口配置及模型工具调用支持后，点击“继续智能识别”。",

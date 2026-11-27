@@ -1,7 +1,10 @@
 //! Public reference retrieval with bounded responses and a shared seven-day cache.
 
 use crate::{CancellationToken, EngineError, EngineService, adaptation::file_error};
-use gamel10n_translation::files::{hash_file, hash_text, read_json, write_json};
+use gamel10n_translation::{
+    files::{hash_file, hash_text, read_json, write_json},
+    storage::SHA256_HEX_LEN,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
@@ -11,6 +14,30 @@ use std::{
     time::Duration,
 };
 use tokio_util::task::AbortOnDropHandle;
+
+pub(crate) const GIT_SHA1_HEX_LEN: usize = 40;
+
+const MAX_PUBLIC_DOWNLOAD_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_REFERENCE_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_RECEIPT_BYTES: u64 = 32 * 1024;
+const PUBLIC_HTTP_TIMEOUT: Duration = Duration::from_secs(180);
+const MAX_HTTP_REDIRECTS: usize = 6;
+const DOWNLOADS_DIR: &str = "downloads";
+const DEFAULT_RECEIPT_STEM: &str = "source";
+const GITHUB_API_HOST: &str = "api.github.com";
+const GITHUB_GIT_BLOBS: &str = "blobs";
+const HTTPS_SCHEME: &str = "https";
+
+fn file_too_large_error(maximum_bytes: u64) -> EngineError {
+    EngineError::Rejected(format!(
+        "公开文件超过 {} KiB 读取上限，请选择必要的工具文件或具体资料；未将截断内容当作完整资料。",
+        maximum_bytes / 1024
+    ))
+}
+
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == SHA256_HEX_LEN && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -47,16 +74,15 @@ fn cached_download(
     expected: Option<&str>,
     maximum_bytes: u64,
 ) -> Result<Option<PublicDownload>, EngineError> {
-    let receipt_path = directory.join(format!("{}.json", expected.unwrap_or("source")));
-    if !receipt_path.is_file() || receipt_path.metadata()?.len() > 32768 {
+    let receipt_path = directory.join(format!("{}.json", expected.unwrap_or(DEFAULT_RECEIPT_STEM)));
+    if !receipt_path.is_file() || receipt_path.metadata()?.len() > MAX_RECEIPT_BYTES {
         return Ok(None);
     }
     let Ok(receipt) = read_json::<DownloadReceipt>(&receipt_path) else {
         return Ok(None);
     };
     if receipt.url != url
-        || receipt.sha256.len() != 64
-        || !receipt.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || !is_sha256_hex(&receipt.sha256)
         || expected.is_some_and(|expected| expected != receipt.sha256)
         || receipt.retrieved_at <= chrono::DateTime::UNIX_EPOCH
         || receipt.retrieved_at > chrono::Utc::now() + chrono::Duration::minutes(5)
@@ -64,10 +90,7 @@ fn cached_download(
         return Ok(None);
     }
     if receipt.bytes > maximum_bytes {
-        return Err(EngineError::Rejected(format!(
-            "公开文件超过 {} KiB 读取上限，请选择必要的工具文件或具体资料；未将截断内容当作完整资料。",
-            maximum_bytes / 1024
-        )));
+        return Err(file_too_large_error(maximum_bytes));
     }
     let path = directory.join(format!("{}.bin", receipt.sha256));
     if !path.is_file()
@@ -93,19 +116,16 @@ impl EngineService {
         let Ok(parsed) = reqwest::Url::parse(url) else {
             return Ok(false);
         };
-        if validate_url(&parsed).is_err()
-            || sha256.len() != 64
-            || !sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
-        {
+        if validate_url(&parsed).is_err() || !is_sha256_hex(sha256) {
             return Ok(false);
         }
         let directory = self
             .shared_directory
-            .join("downloads")
+            .join(DOWNLOADS_DIR)
             .join(public_download_cache_key(&parsed));
         // Workspace provenance is editable; only the host's verified download is evidence.
         Ok(
-            cached_download(&directory, parsed.as_str(), Some(sha256), 256 * 1024 * 1024)?
+            cached_download(&directory, parsed.as_str(), Some(sha256), MAX_PUBLIC_DOWNLOAD_BYTES)?
                 .is_some(),
         )
     }
@@ -121,7 +141,7 @@ impl EngineService {
             url,
             refresh,
             expected,
-            256 * 1024 * 1024,
+            MAX_PUBLIC_DOWNLOAD_BYTES,
             None,
             cancellation,
         )
@@ -143,9 +163,7 @@ impl EngineService {
         let parsed =
             reqwest::Url::parse(url).map_err(|_| EngineError::Protocol("资料地址无效。".into()))?;
         validate_url(&parsed)?;
-        if expected.is_some_and(|hash| {
-            hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit())
-        }) {
+        if expected.is_some_and(|hash| !is_sha256_hex(hash)) {
             return Err(EngineError::Protocol(
                 "已登记工具的 SHA256 无效，不能据此恢复固定版本。".into(),
             ));
@@ -153,7 +171,7 @@ impl EngineService {
         let canonical = parsed.to_string();
         let directory = self
             .shared_directory
-            .join("downloads")
+            .join(DOWNLOADS_DIR)
             .join(public_download_cache_key(&parsed));
         let cached = match if refresh {
             None
@@ -180,10 +198,7 @@ impl EngineService {
                 .content_length()
                 .is_some_and(|bytes| bytes > maximum_bytes)
             {
-                return Err(EngineError::Rejected(format!(
-                    "公开文件超过 {} KiB 读取上限，请选择必要的工具文件或具体资料；未将截断内容当作完整资料。",
-                    maximum_bytes / 1024
-                )));
+                return Err(file_too_large_error(maximum_bytes));
             }
             fs::create_dir_all(&directory)?;
             let mut temporary = tempfile::NamedTempFile::new_in(&directory)?;
@@ -195,10 +210,7 @@ impl EngineService {
             {
                 bytes += chunk.len() as u64;
                 if bytes > maximum_bytes {
-                    return Err(EngineError::Rejected(format!(
-                        "公开文件超过 {} KiB 读取上限，请选择必要的工具文件或具体资料；未将截断内容当作完整资料。",
-                        maximum_bytes / 1024
-                    )));
+                    return Err(file_too_large_error(maximum_bytes));
                 }
                 temporary.write_all(&chunk)?;
             }
@@ -226,7 +238,11 @@ impl EngineService {
                 .persist(&path)
                 .map_err(|error| EngineError::Io(error.error))?;
             write_json(&directory.join(format!("{digest}.json")), &receipt).map_err(file_error)?;
-            write_json(&directory.join("source.json"), &receipt).map_err(file_error)?;
+            write_json(
+                &directory.join(format!("{DEFAULT_RECEIPT_STEM}.json")),
+                &receipt,
+            )
+            .map_err(file_error)?;
             Ok(PublicDownload {
                 path,
                 source: receipt,
@@ -258,7 +274,7 @@ impl EngineService {
                 url,
                 refresh,
                 None,
-                8 * 1024 * 1024,
+                MAX_REFERENCE_BYTES,
                 Some(chrono::Duration::days(7)),
                 cancellation,
             )
@@ -282,7 +298,7 @@ fn shared_public_client() -> Result<reqwest::Client, EngineError> {
         .get_or_init(|| {
             reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
-                .timeout(Duration::from_secs(180))
+                .timeout(PUBLIC_HTTP_TIMEOUT)
                 .build()
                 .map_err(|error| error.to_string())
         })
@@ -291,11 +307,11 @@ fn shared_public_client() -> Result<reqwest::Client, EngineError> {
 }
 
 fn public_accept_header(url: &reqwest::Url) -> &'static str {
-    if github_git_repository(url, "blobs").is_some() {
+    if github_git_repository(url, GITHUB_GIT_BLOBS).is_some() {
         "application/vnd.github.raw+json"
     } else if url
         .host_str()
-        .is_some_and(|host| host.eq_ignore_ascii_case("api.github.com"))
+        .is_some_and(|host| host.eq_ignore_ascii_case(GITHUB_API_HOST))
     {
         "application/json"
     } else {
@@ -305,7 +321,7 @@ fn public_accept_header(url: &reqwest::Url) -> &'static str {
 
 async fn public_response(mut current: reqwest::Url) -> Result<reqwest::Response, EngineError> {
     let client = shared_public_client()?;
-    for _ in 0..6 {
+    for _ in 0..MAX_HTTP_REDIRECTS {
         validate_url(&current)?;
         let accept = public_accept_header(&current);
         let response = client
@@ -338,7 +354,7 @@ async fn public_response(mut current: reqwest::Url) -> Result<reqwest::Response,
 }
 
 pub(crate) fn public_download_cache_key(url: &reqwest::Url) -> String {
-    if github_git_repository(url, "blobs").is_some() {
+    if github_git_repository(url, GITHUB_GIT_BLOBS).is_some() {
         // A previous JSON/base64 response must not satisfy a raw blob request.
         hash_text(&format!("github-raw\n{url}"))
     } else {
@@ -350,7 +366,7 @@ pub(crate) fn github_git_repository<'a>(
     url: &'a reqwest::Url,
     object: &str,
 ) -> Option<(&'a str, &'a str)> {
-    if url.scheme() != "https" || url.host_str()? != "api.github.com" {
+    if url.scheme() != HTTPS_SCHEME || url.host_str()? != GITHUB_API_HOST {
         return None;
     }
     let mut segments = url.path_segments()?;
@@ -363,9 +379,9 @@ pub(crate) fn github_git_repository<'a>(
         return None;
     }
     let reference = segments.next().filter(|part| !part.is_empty())?;
-    if object == "blobs" {
+    if object == GITHUB_GIT_BLOBS {
         if segments.next().is_some()
-            || reference.len() != 40
+            || reference.len() != GIT_SHA1_HEX_LEN
             || !reference.bytes().all(|byte| byte.is_ascii_hexdigit())
         {
             return None;
@@ -382,7 +398,7 @@ pub(crate) fn validate_url(url: &reqwest::Url) -> Result<(), EngineError> {
         .unwrap_or("")
         .trim_end_matches('.')
         .to_lowercase();
-    if url.scheme() != "https"
+    if url.scheme() != HTTPS_SCHEME
         || !url.username().is_empty()
         || url.password().is_some()
         || url.fragment().is_some()

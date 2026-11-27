@@ -92,10 +92,12 @@ fn read(directory: &Path, manifest: &PackageManifest) -> Result<Profile, EngineE
     if manifest.package_files.contains_key(FILE) {
         return Err(EngineError::Rejected("能力资料路径属于适配器负载。".into()));
     }
+    const MAX_PROFILE_BYTES: usize = 128 * 1024;
     let file = fs::File::open(resolve_relative(directory, FILE)?)?;
     let mut content = Vec::new();
-    file.take(128 * 1024 + 1).read_to_end(&mut content)?;
-    if content.len() > 128 * 1024 {
+    file.take(MAX_PROFILE_BYTES as u64 + 1)
+        .read_to_end(&mut content)?;
+    if content.len() > MAX_PROFILE_BYTES {
         return Err(EngineError::Rejected("能力资料超出大小限制。".into()));
     }
     let profile: Profile = serde_json::from_slice(&content)?;

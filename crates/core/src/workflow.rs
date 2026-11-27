@@ -4,6 +4,8 @@ use crate::{
     Application, CancellationToken, CoreError, GameProject,
     engine_tasks::{RecognitionMode, RecognitionResult},
     logs::LogSource,
+    patching::TEST_STATUS_PASSED,
+    task_op,
 };
 use gamel10n_translation::{
     execution::TranslationOptions,
@@ -16,7 +18,15 @@ use std::{
 };
 
 const WORKFLOW_KEY: &str = "automaticWorkflow";
+const WORKFLOW_CONFIG_FILE: &str = "workflow.json";
 const WORKFLOW_STATE_FILE: &str = "workflow-state.json";
+const WORKFLOW_SCHEMA_VERSION: u32 = 1;
+const MAX_WORKFLOW_STEPS: usize = 64;
+const MAX_STEP_ID_BYTES: usize = 64;
+const MAX_WORKFLOW_ITERATIONS: usize = 64;
+const MAX_WORKFLOW_FILE_BYTES: u64 = 256 * 1024;
+const MAX_STEP_INSTRUCTION_CHARS: usize = 6_000;
+const MAX_STEP_MESSAGE_CHARS: usize = 2_000;
 const LEGACY_WAIT_MESSAGE: &str = "未能确定开场文本。请在运行检查中选择一条目标文本并设置进入场景的操作，或编辑 workflow.json 的定位步骤，然后重新开始。";
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -160,7 +170,7 @@ impl WorkflowDefinition {
         })
         .collect();
         Self {
-            schema_version: 1,
+            schema_version: WORKFLOW_SCHEMA_VERSION,
             entry: if preset.use_existing_text {
                 "select"
             } else {
@@ -174,15 +184,27 @@ impl WorkflowDefinition {
     pub fn validate(&self) -> Result<(), CoreError> {
         let invalid =
             |message: &str| CoreError::InvalidData(format!("自动流程配置无效：{message}"));
-        if self.schema_version != 1 || self.steps.is_empty() || self.steps.len() > 64 {
-            return Err(invalid("需要 schemaVersion: 1，且步骤数量为 1～64。"));
+        if self.schema_version != WORKFLOW_SCHEMA_VERSION
+            || self.steps.is_empty()
+            || self.steps.len() > MAX_WORKFLOW_STEPS
+        {
+            return Err(invalid(&format!(
+                "需要 schemaVersion: {WORKFLOW_SCHEMA_VERSION}，且步骤数量为 1～{MAX_WORKFLOW_STEPS}。"
+            )));
         }
         let mut ids = BTreeSet::new();
         for step in &self.steps {
-            if step.id.is_empty() || step.id.len() > 64 || !ids.insert(step.id.as_str()) {
-                return Err(invalid("步骤 ID 需非空、唯一且不超过 64 字节。"));
+            if step.id.is_empty()
+                || step.id.len() > MAX_STEP_ID_BYTES
+                || !ids.insert(step.id.as_str())
+            {
+                return Err(invalid(&format!(
+                    "步骤 ID 需非空、唯一且不超过 {MAX_STEP_ID_BYTES} 字节。"
+                )));
             }
-            if step.instruction.chars().count() > 6000 || step.message.chars().count() > 2000 {
+            if step.instruction.chars().count() > MAX_STEP_INSTRUCTION_CHARS
+                || step.message.chars().count() > MAX_STEP_MESSAGE_CHARS
+            {
                 return Err(invalid("步骤指令或提示过长。"));
             }
         }
@@ -281,7 +303,7 @@ pub(crate) fn load_session(directory: &Path) -> Result<Option<WorkflowSession>, 
         return Ok(None);
     }
     let session: WorkflowSession = read_json(&path)?;
-    if session.schema_version != 1 {
+    if session.schema_version != WORKFLOW_SCHEMA_VERSION {
         return Err(CoreError::InvalidData("自动流程进度版本不受支持。".into()));
     }
     session.definition.validate()?;
@@ -325,7 +347,7 @@ fn is_legacy_default_definition(definition: &WorkflowDefinition) -> bool {
         .map(|step| (step.id.as_str(), step.action))
         .collect();
     use WorkflowAction::*;
-    definition.schema_version == 1
+    definition.schema_version == WORKFLOW_SCHEMA_VERSION
         && definition.entry == "recognize"
         && ids
             == [
@@ -348,7 +370,7 @@ fn read_definition(path: &Path) -> Result<WorkflowDefinition, CoreError> {
         .metadata()
         .map_err(|error| io_error(path, error))?
         .len()
-        > 256 * 1024
+        > MAX_WORKFLOW_FILE_BYTES
     {
         return Err(CoreError::InvalidData(
             "自动流程配置不能超过 256 KiB。".into(),
@@ -394,7 +416,7 @@ impl Application {
         id: &str,
     ) -> Result<(WorkflowChoice, bool), CoreError> {
         let project = self.store.get(id).await?;
-        let path = self.project_directory(id)?.join("workflow.json");
+        let path = self.project_directory(id)?.join(WORKFLOW_CONFIG_FILE);
         let has_custom = path.try_exists()?
             && !read_definition(&path).is_ok_and(|definition| {
                 definition == WorkflowDefinition::default()
@@ -431,7 +453,7 @@ impl Application {
         let _project = self.lock_project(id).await?;
         self.ensure_writable().await?;
         self.store.get(id).await?;
-        let path = self.project_directory(id)?.join("workflow.json");
+        let path = self.project_directory(id)?.join(WORKFLOW_CONFIG_FILE);
         if !path.try_exists()? {
             write_json(&path, &WorkflowDefinition::default())?;
         }
@@ -473,7 +495,7 @@ impl Application {
                 (WorkflowDefinition::from_preset(preset), Some(preset.finish))
             }
             WorkflowChoice::Custom => (
-                read_definition(&self.project_directory(id)?.join("workflow.json"))?,
+                read_definition(&self.project_directory(id)?.join(WORKFLOW_CONFIG_FILE))?,
                 None,
             ),
         };
@@ -537,8 +559,13 @@ impl Application {
                     "当前补丁已变化，请重新运行试译或结束当前自动流程。".into(),
                 ));
             }
-            self.record_patch_feedback(id, &trial_patch, "passed", "自动汉化试译实机确认正常")
-                .await?;
+            self.record_patch_feedback(
+                id,
+                &trial_patch,
+                TEST_STATUS_PASSED,
+                "自动汉化试译实机确认正常",
+            )
+            .await?;
             session.trial_verified = true;
             let directory = self.project_directory(id)?;
             let updated = session.clone();
@@ -599,7 +626,12 @@ impl Application {
             "正在开始全自动汉化流程。"
         };
         let cancellation = self
-            .begin_with_review_evidence(id, "workflow", start_message, writes_review_evidence)
+            .begin_with_review_evidence(
+                id,
+                task_op::WORKFLOW,
+                start_message,
+                writes_review_evidence,
+            )
             .await?;
         let directory = self.project_directory(id)?;
         if !preserve_existing_session_on_error {
@@ -610,7 +642,7 @@ impl Application {
         let mut last_step = String::new();
         let mut paused_session: Option<WorkflowSession> = None;
         let result = async {
-            for _ in 0..64 {
+            for _ in 0..MAX_WORKFLOW_ITERATIONS {
                 let step = &definition.steps[position];
                 last_step.clone_from(&step.id);
                 self.set_workflow_progress(
@@ -682,9 +714,9 @@ impl Application {
                     }
                 }
             }
-            Err(CoreError::InvalidData(
-                "自动流程超过 64 次步骤执行，已停止；请检查分支是否循环。".into(),
-            ))
+            Err(CoreError::InvalidData(format!(
+                "自动流程超过 {MAX_WORKFLOW_ITERATIONS} 次步骤执行，已停止；请检查分支是否循环。"
+            )))
         }
         .await;
 
@@ -723,7 +755,7 @@ impl Application {
             .as_ref()
             .err()
             .map_or(LogSource::Application, LogSource::for_error);
-        self.finish_with_log_source(id, "workflow", terminal, source)
+        self.finish_with_log_source(id, task_op::WORKFLOW, terminal, source)
             .await?;
         result
     }
@@ -811,7 +843,7 @@ impl Application {
                         .translate_in_task(
                             id,
                             options.clone(),
-                            "translate",
+                            task_op::TRANSLATE,
                             crate::translation_tasks::TranslationInput::Committed,
                             cancellation,
                         )
@@ -898,7 +930,7 @@ impl Application {
                     ),
                 };
                 Ok(StepOutcome::Paused(WorkflowSession {
-                    schema_version: 1,
+                    schema_version: WORKFLOW_SCHEMA_VERSION,
                     definition: definition.clone(),
                     next_step_id,
                     pause_kind: WorkflowPauseKind::ReviewTrial,
@@ -980,7 +1012,7 @@ impl Application {
                 ));
             }
             return Ok(StepOutcome::Paused(WorkflowSession {
-                schema_version: 1,
+                schema_version: WORKFLOW_SCHEMA_VERSION,
                 definition: definition.clone(),
                 next_step_id: step.id.clone(),
                 pause_kind: WorkflowPauseKind::SelectTrial,

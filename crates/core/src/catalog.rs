@@ -7,11 +7,43 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
 };
 
+use gamel10n_engines::discovery::{
+    ADAPTER_ENTRY_PATH, PACKAGE_MANIFEST_FILE, PYTHON_MANIFEST_VERSION,
+};
 use gamel10n_translation::files::{hash_text, read_json, write_json};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::{CoreError, patching::safe_path};
+use crate::{
+    CoreError, MAX_PAGE_SIZE,
+    patching::{TEST_STATUS_FAILED, TEST_STATUS_NOT_TESTED, TEST_STATUS_PASSED, safe_path},
+};
+
+pub const EXTENSIONS_DIR: &str = "extensions";
+pub const ENGINE_TOOLS_DIR: &str = "extensions/engine-tools";
+pub const ENGINE_KNOWLEDGE_DIR: &str = "extensions/engine-knowledge";
+pub const PACKAGES_DIR: &str = "packages";
+pub(crate) const DISCOVERY_INDEX_VERSION: u32 = 1;
+
+const LIBRARY_STATE_FILE: &str = "library-state.json";
+const LIBRARY_INDEX_FILE: &str = "library-index.json";
+const CATALOG_DIR: &str = "catalog";
+const GAMES_COMPAT_FILE: &str = "games.json";
+const ACTIVE_PIN_FILE: &str = "active.json";
+const PREVIOUS_PIN_FILE: &str = "previous.json";
+const ENGINE_KNOWLEDGE_SUBDIR: &str = "engine-knowledge";
+const RUNTIME_MIGRATIONS_FILE: &str = "runtime-migrations.json";
+const LIBRARY_SCHEMA_VERSION: u32 = 1;
+
+const MAX_METADATA_JSON_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_INDEX_JSON_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_KNOWLEDGE_JSON_BYTES: u64 = 512 * 1024;
+const MAX_PIN_JSON_BYTES: u64 = 4 * 1024;
+const MAX_VERIFICATION_JSON_BYTES: u64 = 1024 * 1024;
+
+const SOURCE_BUILT_IN: u8 = 0;
+const SOURCE_EXTERNAL: u8 = 1;
+const SOURCE_HISTORY: u8 = 2;
 
 mod lifecycle;
 mod routing;
@@ -74,7 +106,7 @@ pub struct GameCompatibility {
 }
 
 fn not_tested() -> String {
-    "not-tested".into()
+    TEST_STATUS_NOT_TESTED.into()
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -109,9 +141,9 @@ pub enum EngineLibrarySource {
 impl EngineLibrarySource {
     fn from_number(value: u8) -> Result<Self, CoreError> {
         match value {
-            0 => Ok(Self::BuiltIn),
-            1 => Ok(Self::External),
-            2 => Ok(Self::History),
+            SOURCE_BUILT_IN => Ok(Self::BuiltIn),
+            SOURCE_EXTERNAL => Ok(Self::External),
+            SOURCE_HISTORY => Ok(Self::History),
             _ => Err(invalid("无效的引擎版本来源。")),
         }
     }
@@ -317,7 +349,7 @@ struct LibraryIndex {
 impl Default for LibraryIndex {
     fn default() -> Self {
         Self {
-            schema_version: 1,
+            schema_version: LIBRARY_SCHEMA_VERSION,
             families: BTreeMap::new(),
             knowledge: BTreeMap::new(),
             diagnostics: Vec::new(),
@@ -421,7 +453,7 @@ impl EngineCatalog {
     }
 
     pub fn open(data_directory: &Path) -> Result<Self, CoreError> {
-        Self::from_extensions_root(&data_directory.join("extensions"))
+        Self::from_extensions_root(&data_directory.join(EXTENSIONS_DIR))
     }
 
     pub fn from_extensions_root(root: &Path) -> Result<Self, CoreError> {
@@ -443,15 +475,18 @@ impl EngineCatalog {
     ) -> Result<BTreeMap<PathBuf, gamel10n_engines::adaptation::IndexedPackage>, CoreError> {
         let cached = self.lock()?;
         let mut packages = BTreeMap::new();
-        let base = self.root.join("packages");
+        let base = self.root.join(PACKAGES_DIR);
         for (id, family) in &cached.index.families {
             let search_text = format!("{} {}", id, json!(family.family)).to_lowercase();
             for (version, entry) in &family.versions {
-                if entry.source == 1
+                if entry.source == SOURCE_EXTERNAL
                     && entry
                         .extra
                         .get("discovery")
-                        .is_some_and(|d| d["discoveryIndexVersion"].as_u64() == Some(1))
+                        .is_some_and(|d| {
+                            d["discoveryIndexVersion"].as_u64()
+                                == Some(u64::from(DISCOVERY_INDEX_VERSION))
+                        })
                 {
                     packages.insert(
                         base.join(id).join(version),
@@ -522,14 +557,14 @@ impl EngineCatalog {
                     LibraryFilter::Enabled => family.enabled,
                     LibraryFilter::Disabled => !family.enabled,
                     LibraryFilter::BuiltIn => {
-                        family.versions.values().any(|version| version.source == 0)
+                        family.versions.values().any(|version| version.source == SOURCE_BUILT_IN)
                     }
                     LibraryFilter::External => {
-                        family.versions.values().any(|version| version.source == 1)
+                        family.versions.values().any(|version| version.source == SOURCE_EXTERNAL)
                     }
                     LibraryFilter::History => {
                         !family.versions.is_empty()
-                            && family.versions.values().all(|version| version.source == 2)
+                            && family.versions.values().all(|version| version.source == SOURCE_HISTORY)
                     }
                 }
             })
@@ -558,7 +593,7 @@ impl EngineCatalog {
         let families = matches
             .iter()
             .skip(offset)
-            .take(limit.clamp(1, 500))
+            .take(limit.clamp(1, MAX_PAGE_SIZE))
             .map(|id| {
                 let stored = &cached.index.families[*id];
                 EngineLibraryFamily {
@@ -602,7 +637,10 @@ impl EngineCatalog {
                 let is_current = current
                     .as_ref()
                     .is_some_and(|p| p.adapter_id == *id && p.version == version.version);
-                if !version.exists || (!family.enabled && !is_current) || version.source > 1 {
+                if !version.exists
+                    || (!family.enabled && !is_current)
+                    || version.source > SOURCE_EXTERNAL
+                {
                     continue;
                 }
                 options.push(ProjectAdapterOption {
@@ -650,13 +688,13 @@ impl EngineCatalog {
                 adapter_id: id.into(),
                 version: version.version.clone(),
                 source: match version.source {
-                    0 => EngineLibrarySource::BuiltIn,
-                    1 => EngineLibrarySource::External,
+                    SOURCE_BUILT_IN => EngineLibrarySource::BuiltIn,
+                    SOURCE_EXTERNAL => EngineLibrarySource::External,
                     _ => EngineLibrarySource::History,
                 },
                 exists: version.exists,
-                directory_path: (version.source == 1)
-                    .then(|| self.root.join("packages").join(id).join(&version.version)),
+                directory_path: (version.source == SOURCE_EXTERNAL)
+                    .then(|| self.root.join(PACKAGES_DIR).join(id).join(&version.version)),
                 published_at: version.published_at.clone(),
                 enabled: family.enabled,
                 is_candidate: family.enabled && version.is_candidate,
@@ -695,7 +733,7 @@ impl EngineCatalog {
     fn package_path(&self, adapter_id: &str, version: &str) -> Result<PathBuf, CoreError> {
         validate_family_id(adapter_id)?;
         validate_part(version)?;
-        Ok(self.root.join("packages").join(adapter_id).join(version))
+        Ok(self.root.join(PACKAGES_DIR).join(adapter_id).join(version))
     }
 
     /// Checks only the selected manifest and required entry files; payload hashes are checked for execution.
@@ -714,8 +752,8 @@ impl EngineCatalog {
             return Ok(detail);
         }
         let directory = self.package_path(adapter_id, version)?;
-        let manifest = safe_path(&directory, "package.json")
-            .and_then(|path| read_bounded_json::<Value>(&path, 16 * 1024 * 1024));
+        let manifest = safe_path(&directory, PACKAGE_MANIFEST_FILE)
+            .and_then(|path| read_bounded_json::<Value>(&path, MAX_METADATA_JSON_BYTES));
         match manifest {
             Ok(manifest) => {
                 let id = property(&manifest, "id").and_then(Value::as_str);
@@ -729,11 +767,11 @@ impl EngineCatalog {
                     let runtime = property(&manifest, "runtime").and_then(Value::as_str);
                     let python = runtime == Some("python")
                         || property(&manifest, "manifestVersion").and_then(Value::as_u64)
-                            == Some(4);
+                            == Some(u64::from(PYTHON_MANIFEST_VERSION));
                     let entry = property(&manifest, "entryFile")
                         .and_then(Value::as_str)
                         .unwrap_or(if python {
-                            "src/adapter.py"
+                            ADAPTER_ENTRY_PATH
                         } else {
                             "adapter.dll"
                         });
@@ -758,11 +796,11 @@ impl EngineCatalog {
 
     pub fn knowledge_path(&self, id: &str) -> Result<PathBuf, CoreError> {
         validate_part(id)?;
-        safe_path(&self.root, &format!("engine-knowledge/{id}.json"))
+        safe_path(&self.root, &format!("{ENGINE_KNOWLEDGE_SUBDIR}/{id}.json"))
     }
 
     pub fn knowledge_detail(&self, id: &str) -> Result<Value, CoreError> {
-        read_bounded_json(&self.knowledge_path(id)?, 512 * 1024)
+        read_bounded_json(&self.knowledge_path(id)?, MAX_KNOWLEDGE_JSON_BYTES)
     }
 
     pub fn set_family_enabled(&self, ids: &[String], enabled: bool) -> Result<(), CoreError> {
@@ -789,7 +827,7 @@ impl EngineCatalog {
                 family.enabled = enabled;
             }
         }
-        write_json(&safe_path(&self.root, "library-state.json")?, &state)?;
+        write_json(&safe_path(&self.root, LIBRARY_STATE_FILE)?, &state)?;
         self.commit_index(&mut cached, index)
     }
 
@@ -846,7 +884,9 @@ impl EngineCatalog {
                 let is_pinned = pinned
                     .is_some_and(|(pin_id, pin_version)| pin_id == id && pin_version == version);
                 pin_known |= is_pinned;
-                if entry.source != 1 || (!is_pinned && (!family.enabled || !entry.is_candidate)) {
+                if entry.source != SOURCE_EXTERNAL
+                    || (!is_pinned && (!family.enabled || !entry.is_candidate))
+                {
                     continue;
                 }
                 let descriptor = entry
@@ -857,7 +897,7 @@ impl EngineCatalog {
                 candidates.push(EngineDiscoveryCandidate {
                     adapter_id: id.clone(),
                     version: version.clone(),
-                    directory: self.root.join("packages").join(id).join(version),
+                    directory: self.root.join(PACKAGES_DIR).join(id).join(version),
                     published_at: entry.published_at.clone(),
                     descriptor,
                     is_pinned,
@@ -872,7 +912,7 @@ impl EngineCatalog {
             candidates.push(EngineDiscoveryCandidate {
                 adapter_id: id.into(),
                 version: version.into(),
-                directory: self.root.join("packages").join(id).join(version),
+                directory: self.root.join(PACKAGES_DIR).join(id).join(version),
                 published_at: None,
                 descriptor: None,
                 is_pinned: true,
@@ -905,7 +945,7 @@ impl EngineCatalog {
         let _write = write_gate()?;
         let mut cached = self.lock()?;
         let path = self.knowledge_path(id)?;
-        let mut entry: Value = read_bounded_json(&path, 512 * 1024)?;
+        let mut entry: Value = read_bounded_json(&path, MAX_KNOWLEDGE_JSON_BYTES)?;
         let field = if entry.get("Enabled").is_some() {
             "Enabled"
         } else {
@@ -943,8 +983,8 @@ impl EngineCatalog {
     ) -> Result<(), CoreError> {
         let _write = write_gate()?;
         let package: Value = read_bounded_json(
-            &safe_path(package_directory, "package.json")?,
-            16 * 1024 * 1024,
+            &safe_path(package_directory, PACKAGE_MANIFEST_FILE)?,
+            MAX_METADATA_JSON_BYTES,
         )?;
         let id = property(&package, "id")
             .and_then(Value::as_str)
@@ -1047,7 +1087,7 @@ impl EngineCatalog {
             version.into(),
             IndexVersion {
                 version: version.into(),
-                source: 1,
+                source: SOURCE_EXTERNAL,
                 exists: true,
                 published_at: Some(published_at),
                 is_candidate: lifecycle.can_reuse(),
@@ -1061,10 +1101,10 @@ impl EngineCatalog {
             }
             stored.games.retain(|prior| prior.game_id != game.game_id);
             stored.games.push(game);
-            let path = safe_path(&self.root, &format!("catalog/{id}/games.json"))?;
+            let path = safe_path(&self.root, &format!("{CATALOG_DIR}/{id}/{GAMES_COMPAT_FILE}"))?;
             write_json(&path, &json!({"family": family, "games":stored.games}))?;
         }
-        write_json(&safe_path(&self.root, "library-state.json")?, &state)?;
+        write_json(&safe_path(&self.root, LIBRARY_STATE_FILE)?, &state)?;
         self.commit_index(&mut cached, index)
     }
 
@@ -1076,11 +1116,11 @@ impl EngineCatalog {
         }
         // The existing registry hashes the raw project identity, independently of its project-directory name.
         let directory = safe_path(&self.root, &format!("games/{}", hash_text(game_id)))?;
-        let active = safe_path(&directory, "active.json")?;
-        let previous = safe_path(&directory, "previous.json")?;
+        let active = safe_path(&directory, ACTIVE_PIN_FILE)?;
+        let previous = safe_path(&directory, PREVIOUS_PIN_FILE)?;
         let mut cached = self.lock()?;
         if active.is_file() {
-            let activation: Value = read_bounded_json(&active, 4096)?;
+            let activation: Value = read_bounded_json(&active, MAX_PIN_JSON_BYTES)?;
             let id = property(&activation, "id")
                 .and_then(Value::as_str)
                 .ok_or_else(|| invalid("引擎激活记录缺少标识。"))?;
@@ -1145,7 +1185,7 @@ impl EngineCatalog {
                     .entry(version.into())
                     .or_insert_with(|| IndexVersion {
                         version: version.into(),
-                        source: 1,
+                        source: SOURCE_EXTERNAL,
                         exists: true,
                         published_at: property(&activation, "activatedAt")
                             .and_then(Value::as_str)
@@ -1153,15 +1193,15 @@ impl EngineCatalog {
                         is_candidate: false,
                         extra: BTreeMap::new(),
                     });
-                if entry.source == 2 {
-                    entry.source = 1;
+                if entry.source == SOURCE_HISTORY {
+                    entry.source = SOURCE_EXTERNAL;
                     entry.exists = true;
                 }
                 let lifecycle = lifecycle(&Value::Object(setting.clone()), version)?;
                 entry.is_candidate = !excluded && lifecycle.can_reuse();
                 entry.extra.insert("lifecycle".into(), json!(lifecycle));
                 // Commit retention before removing either pin. Any failure leaves the project references available for retry.
-                write_json(&safe_path(&self.root, "library-state.json")?, &state)?;
+                write_json(&safe_path(&self.root, LIBRARY_STATE_FILE)?, &state)?;
                 self.commit_index(&mut cached, index)?;
             }
         }
@@ -1254,7 +1294,7 @@ impl EngineCatalog {
             .families
             .get(adapter_id)
             .and_then(|family| family.versions.get(version))
-            .is_some_and(|entry| entry.source == 0)
+            .is_some_and(|entry| entry.source == SOURCE_BUILT_IN)
         {
             return Err(invalid("内置引擎不能删除。"));
         }
@@ -1274,14 +1314,14 @@ impl EngineCatalog {
             }) || lifecycle(&state["families"][adapter_id], version)?
                 .feedback
                 .iter()
-                .any(|(id, feedback)| id != game_id && feedback.status == "passed");
+                .any(|(id, feedback)| id != game_id && feedback.status == TEST_STATUS_PASSED);
             if shared_reference || used_by_other_game {
                 return Ok(EngineLibraryDeleteResult::default());
             }
         }
-        let catalog_dir = safe_path(&self.root, &format!("catalog/{adapter_id}"))?;
+        let catalog_dir = safe_path(&self.root, &format!("{CATALOG_DIR}/{adapter_id}"))?;
         for file in json_files(&catalog_dir)? {
-            let mut record: Value = read_bounded_json(&file, 16 * 1024 * 1024)?;
+            let mut record: Value = read_bounded_json(&file, MAX_METADATA_JSON_BYTES)?;
             if let Some(games) = record.get_mut("games").and_then(Value::as_array_mut) {
                 games.retain(|game| {
                     property(game, "adapterVersion").and_then(Value::as_str) != Some(version)
@@ -1341,7 +1381,7 @@ impl EngineCatalog {
         // Metadata is prepared before deleting payloads; retry finishes an interrupted cleanup.
         let result = (|| -> Result<(), CoreError> {
             apply_metadata_changes(writes)?;
-            write_json(&safe_path(&self.root, "library-state.json")?, &state)?;
+            write_json(&safe_path(&self.root, LIBRARY_STATE_FILE)?, &state)?;
             if let Some(family) = index.families.get_mut(adapter_id) {
                 family.versions.remove(version);
                 family.games.retain(|game| game.adapter_version != version);
@@ -1369,7 +1409,11 @@ impl EngineCatalog {
         let mut cached = self.lock()?;
         let mut index = load_index(&self.root)?;
         let family = index.families.get(adapter_id);
-        if family.is_some_and(|f| f.versions.values().any(|version| version.source == 0)) {
+        if family.is_some_and(|f| {
+            f.versions
+                .values()
+                .any(|version| version.source == SOURCE_BUILT_IN)
+        }) {
             return Err(invalid("内置引擎随程序提供，不能删除。"));
         }
         let owns_knowledge =
@@ -1378,14 +1422,14 @@ impl EngineCatalog {
             return Err(invalid("找不到要删除的引擎。"));
         }
 
-        let packages = safe_path(&self.root, &format!("packages/{adapter_id}"))?;
-        let records = safe_path(&self.root, &format!("catalog/{adapter_id}"))?;
+        let packages = safe_path(&self.root, &format!("{PACKAGES_DIR}/{adapter_id}"))?;
+        let records = safe_path(&self.root, &format!("{CATALOG_DIR}/{adapter_id}"))?;
         validate_tree(&packages)?;
         validate_tree(&records)?;
         let mut writes = Vec::new();
         plan_reference_removal(&self.root, adapter_id, None, &mut writes)?;
         let prefix = format!("{adapter_id}.");
-        for file in json_files(&safe_path(&self.root, "engine-knowledge")?)? {
+        for file in json_files(&safe_path(&self.root, ENGINE_KNOWLEDGE_SUBDIR)?)? {
             // Family and knowledge keys can both contain dots. Check ownership in the file.
             if file
                 .file_stem()
@@ -1400,7 +1444,7 @@ impl EngineCatalog {
         if let Some(families) = state["families"].as_object_mut() {
             families.remove(adapter_id);
         }
-        writes.push((safe_path(&self.root, "library-state.json")?, Some(state)));
+        writes.push((safe_path(&self.root, LIBRARY_STATE_FILE)?, Some(state)));
         for directory in [packages, records] {
             if directory.try_exists()? {
                 fs::remove_dir_all(&directory).map_err(|error| {
@@ -1415,10 +1459,12 @@ impl EngineCatalog {
     }
 
     fn commit_index(&self, cached: &mut CachedIndex, index: LibraryIndex) -> Result<(), CoreError> {
-        let path = safe_path(&self.root, "library-index.json")?;
+        let path = safe_path(&self.root, LIBRARY_INDEX_FILE)?;
         let mut persisted = index.clone();
         for family in persisted.families.values_mut() {
-            family.versions.retain(|_, version| version.source != 0);
+            family
+                .versions
+                .retain(|_, version| version.source != SOURCE_BUILT_IN);
         }
         if let Err(error) = write_json(&path, &persisted) {
             if path.is_file() {
@@ -1444,9 +1490,9 @@ fn plan_reference_removal(
     version: Option<&str>,
     writes: &mut Vec<(PathBuf, Option<Value>)>,
 ) -> Result<(), CoreError> {
-    let mapping_path = safe_path(root, "runtime-migrations.json")?;
+    let mapping_path = safe_path(root, RUNTIME_MIGRATIONS_FILE)?;
     if mapping_path.is_file() {
-        let mut mappings: Value = read_bounded_json(&mapping_path, 16 * 1024 * 1024)?;
+        let mut mappings: Value = read_bounded_json(&mapping_path, MAX_METADATA_JSON_BYTES)?;
         let matches = |identity: &str| {
             identity
                 .split_once('/')
@@ -1469,10 +1515,10 @@ fn plan_reference_removal(
         }
     }
     for directory in directories(&safe_path(root, "games")?)? {
-        for name in ["active.json", "previous.json"] {
+        for name in [ACTIVE_PIN_FILE, PREVIOUS_PIN_FILE] {
             let pin = safe_path(&directory, name)?;
             if pin.is_file() {
-                let activation: Value = read_bounded_json(&pin, 4096)?;
+                let activation: Value = read_bounded_json(&pin, MAX_PIN_JSON_BYTES)?;
                 if property(&activation, "id").and_then(Value::as_str) == Some(adapter_id)
                     && version.is_none_or(|wanted| {
                         property(&activation, "version").and_then(Value::as_str) == Some(wanted)
@@ -1498,9 +1544,9 @@ fn apply_metadata_changes(writes: Vec<(PathBuf, Option<Value>)>) -> Result<(), C
 }
 
 fn load_index(root: &Path) -> Result<LibraryIndex, CoreError> {
-    let path = safe_path(root, "library-index.json")?;
+    let path = safe_path(root, LIBRARY_INDEX_FILE)?;
     let mut index = if path.is_file() {
-        match read_bounded_json::<LibraryIndex>(&path, 64 * 1024 * 1024).and_then(|index| {
+        match read_bounded_json::<LibraryIndex>(&path, MAX_INDEX_JSON_BYTES).and_then(|index| {
             validate_index(&index)?;
             Ok(index)
         }) {
@@ -1557,7 +1603,7 @@ fn load_index(root: &Path) -> Result<LibraryIndex, CoreError> {
 }
 
 fn validate_index(index: &LibraryIndex) -> Result<(), CoreError> {
-    if index.schema_version != 1 {
+    if index.schema_version != LIBRARY_SCHEMA_VERSION {
         return Err(invalid("引擎索引版本不支持。"));
     }
     for (id, family) in &index.families {
@@ -1585,8 +1631,8 @@ fn validate_index(index: &LibraryIndex) -> Result<(), CoreError> {
 
 fn rebuild_index(root: &Path) -> Result<LibraryIndex, CoreError> {
     let mut index = LibraryIndex::default();
-    for directory in directories(&safe_path(root, "catalog")?)? {
-        let consolidated = safe_path(&directory, "games.json")?;
+    for directory in directories(&safe_path(root, CATALOG_DIR)?)? {
+        let consolidated = safe_path(&directory, GAMES_COMPAT_FILE)?;
         let files = if consolidated.is_file() {
             vec![consolidated]
         } else {
@@ -1594,7 +1640,7 @@ fn rebuild_index(root: &Path) -> Result<LibraryIndex, CoreError> {
         };
         for path in files {
             let result = (|| -> Result<(), CoreError> {
-                let record: Value = read_bounded_json(&path, 16 * 1024 * 1024)?;
+                let record: Value = read_bounded_json(&path, MAX_METADATA_JSON_BYTES)?;
                 let family: AdapterFamily = serde_json::from_value(
                     property(&record, "family")
                         .cloned()
@@ -1628,7 +1674,7 @@ fn rebuild_index(root: &Path) -> Result<LibraryIndex, CoreError> {
                         .entry(game.adapter_version.clone())
                         .or_insert_with(|| IndexVersion {
                             version: game.adapter_version.clone(),
-                            source: 2,
+                            source: SOURCE_HISTORY,
                             exists: false,
                             published_at: None,
                             is_candidate: false,
@@ -1656,7 +1702,7 @@ fn rebuild_index(root: &Path) -> Result<LibraryIndex, CoreError> {
         }
     }
     let state = load_state(root)?;
-    for family_directory in directories(&safe_path(root, "packages")?)? {
+    for family_directory in directories(&safe_path(root, PACKAGES_DIR)?)? {
         let id = family_directory
             .file_name()
             .and_then(|name| name.to_str())
@@ -1673,8 +1719,8 @@ fn rebuild_index(root: &Path) -> Result<LibraryIndex, CoreError> {
                 continue;
             }
             let package: Value = match read_bounded_json(
-                &safe_path(&directory, "package.json")?,
-                16 * 1024 * 1024,
+                &safe_path(&directory, PACKAGE_MANIFEST_FILE)?,
+                MAX_METADATA_JSON_BYTES,
             ) {
                 Ok(package) => package,
                 Err(error) => {
@@ -1715,7 +1761,9 @@ fn rebuild_index(root: &Path) -> Result<LibraryIndex, CoreError> {
             let published_at = safe_path(&directory, "verification.json")
                 .ok()
                 .filter(|path| path.is_file())
-                .and_then(|path| read_bounded_json::<Value>(&path, 1024 * 1024).ok())
+                .and_then(|path| {
+                    read_bounded_json::<Value>(&path, MAX_VERIFICATION_JSON_BYTES).ok()
+                })
                 .and_then(|value| {
                     value
                         .get("verifiedAt")
@@ -1731,7 +1779,7 @@ fn rebuild_index(root: &Path) -> Result<LibraryIndex, CoreError> {
                 version.into(),
                 IndexVersion {
                     version: version.into(),
-                    source: 1,
+                    source: SOURCE_EXTERNAL,
                     exists: true,
                     published_at,
                     is_candidate: candidate,
@@ -1743,7 +1791,7 @@ fn rebuild_index(root: &Path) -> Result<LibraryIndex, CoreError> {
             );
         }
     }
-    for file in json_files(&safe_path(root, "engine-knowledge")?)? {
+    for file in json_files(&safe_path(root, ENGINE_KNOWLEDGE_SUBDIR)?)? {
         match read_knowledge_summary(&file) {
             Ok(summary) => {
                 index.knowledge.insert(summary.id.clone(), summary);
@@ -1755,7 +1803,7 @@ fn rebuild_index(root: &Path) -> Result<LibraryIndex, CoreError> {
 }
 
 fn read_knowledge_summary(file: &Path) -> Result<EngineKnowledgeSummary, CoreError> {
-    let entry: Value = read_bounded_json(file, 512 * 1024)?;
+    let entry: Value = read_bounded_json(file, MAX_KNOWLEDGE_JSON_BYTES)?;
     let family: AdapterFamily = serde_json::from_value(
         property(&entry, "family")
             .cloned()
@@ -1894,7 +1942,7 @@ fn insert_builtin(index: &mut LibraryIndex, family: AdapterFamily, version: &str
         version.into(),
         IndexVersion {
             version: version.into(),
-            source: 0,
+            source: SOURCE_BUILT_IN,
             exists: true,
             published_at: None,
             is_candidate: true,
@@ -1904,12 +1952,12 @@ fn insert_builtin(index: &mut LibraryIndex, family: AdapterFamily, version: &str
 }
 
 fn load_state(root: &Path) -> Result<Value, CoreError> {
-    let path = safe_path(root, "library-state.json")?;
+    let path = safe_path(root, LIBRARY_STATE_FILE)?;
     if !path.is_file() {
-        return Ok(json!({"schemaVersion":1,"families":{}}));
+        return Ok(json!({"schemaVersion":LIBRARY_SCHEMA_VERSION,"families":{}}));
     }
-    let state: Value = read_bounded_json(&path, 16 * 1024 * 1024)?;
-    if state.get("schemaVersion").and_then(Value::as_u64) != Some(1)
+    let state: Value = read_bounded_json(&path, MAX_METADATA_JSON_BYTES)?;
+    if state.get("schemaVersion").and_then(Value::as_u64) != Some(u64::from(LIBRARY_SCHEMA_VERSION))
         || !state.get("families").is_some_and(Value::is_object)
     {
         return Err(invalid("引擎库启停状态格式无效。"));

@@ -9,7 +9,7 @@ use std::{
 };
 
 use gamel10n_engines::{
-    protocol::{AdapterRequest, ExtractionResult},
+    protocol::{AdapterRequest, ExtractionResult, OP_BUILD, OP_EXTRACT, OP_VALIDATE},
     vntextpatch::VnTextPatch,
 };
 use gamel10n_translation::{
@@ -21,9 +21,24 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, broadcast};
 
 use crate::{
-    CancellationToken, CoreError, GameProject, ProjectSummary, ToolPaths, logs::LogSource,
+    CancellationToken, CoreError, GameProject, MAX_PAGE_SIZE, ProjectSummary, ToolPaths,
+    engine_tasks::ADAPTATION_RESULT_FILE,
+    logs::LogSource,
+    patching::PATCHES_DIR,
     projects::ProjectStore,
+    settings::project_settings_keys::RECOGNITION_GOAL,
+    task_op,
 };
+
+pub(crate) const MAX_CACHED_PROJECTS: usize = 4;
+pub(crate) const MAX_CACHE_BYTES: usize = 128 * 1024 * 1024;
+pub(crate) const EXTRACTION_DIR: &str = "extraction";
+pub(crate) const NATIVE_EXTRACTION_FILE: &str = "extraction/native.json";
+pub(crate) const ANALYSIS_SCHEMA_SNAPSHOT: u32 = 1;
+pub(crate) const ANALYSIS_SCHEMA_REFERENCE: u32 = 2;
+
+const TASK_STATE_FILENAME: &str = "rust-task.json";
+const EVENT_CHANNEL_CAPACITY: usize = 256;
 
 /// UI-neutral task state. Status records belong to the project, not to a window.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -112,10 +127,13 @@ pub(crate) fn load_analysis(
     project: &GameProject,
     markers: &mut BTreeMap<String, bool>,
 ) -> Result<Option<CachedAnalysis>, CoreError> {
-    let path = directory.join("extraction/native.json");
+    let path = directory.join(NATIVE_EXTRACTION_FILE);
     if path.is_file() {
         let mut native: StoredAnalysis = read_json(&path)?;
-        if !matches!(native.schema_version, 1 | 2) {
+        if !matches!(
+            native.schema_version,
+            ANALYSIS_SCHEMA_SNAPSHOT | ANALYSIS_SCHEMA_REFERENCE
+        ) {
             return Err(CoreError::InvalidData(
                 "不支持的提取缓存版本，请重新提取。".into(),
             ));
@@ -229,7 +247,7 @@ impl AnalysisCache {
         self.entries.push_back((id.into(), analysis, bytes));
         // Keep the current large project, but do not retain every game ever opened.
         while self.entries.len() > 1
-            && (self.entries.len() > 4 || self.retained_bytes > 128 * 1024 * 1024)
+            && (self.entries.len() > MAX_CACHED_PROJECTS || self.retained_bytes > MAX_CACHE_BYTES)
         {
             if let Some((_, _, bytes)) = self.entries.pop_front() {
                 self.retained_bytes -= bytes;
@@ -388,7 +406,7 @@ pub struct Application {
 
 impl Application {
     pub async fn open(data_directory: PathBuf, tools: &ToolPaths) -> Result<Self, CoreError> {
-        let (events, _) = broadcast::channel(256);
+        let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         Ok(Self {
             store: Arc::new(ProjectStore::open(data_directory).await?),
             write_ready: Default::default(),
@@ -504,7 +522,7 @@ impl Application {
         let saved = if let Some(saved) = cached {
             saved
         } else {
-            let path = self.project_directory(id)?.join("rust-task.json");
+            let path = self.project_directory(id)?.join(TASK_STATE_FILENAME);
             if !path.is_file() {
                 return Ok(project);
             }
@@ -859,8 +877,10 @@ impl Application {
             return Err(CoreError::ProjectBusy);
         }
         if entry.state.running {
-            if !matches!(entry.state.operation.as_str(), "adapt" | "recognize")
-                || (!resuming && entry.preview.is_none())
+            if !matches!(
+                entry.state.operation.as_str(),
+                task_op::ADAPT | task_op::RECOGNIZE
+            ) || (!resuming && entry.preview.is_none())
             {
                 return Err(CoreError::ProjectBusy);
             }
@@ -869,7 +889,7 @@ impl Application {
         }
         let state = TaskState {
             project_id: id.into(),
-            operation: "translate".into(),
+            operation: task_op::TRANSLATE.into(),
             running: true,
             message: "翻译任务等待执行。".into(),
             succeeded: None,
@@ -965,7 +985,9 @@ impl Application {
         if query.is_empty() {
             let all = &analysis.extraction().units;
             let offset = offset.min(all.len());
-            let end = offset.saturating_add(limit.clamp(1, 500)).min(all.len());
+            let end = offset
+                .saturating_add(limit.clamp(1, MAX_PAGE_SIZE))
+                .min(all.len());
             return Ok(TextPage {
                 total: all.len(),
                 offset,
@@ -982,7 +1004,7 @@ impl Application {
             {
                 continue;
             }
-            if total >= offset && units.len() < limit.clamp(1, 500) {
+            if total >= offset && units.len() < limit.clamp(1, MAX_PAGE_SIZE) {
                 units.push(unit.clone());
             }
             total += 1;
@@ -996,11 +1018,13 @@ impl Application {
 
     pub async fn extract_native(&self, id: &str, format: &str) -> Result<usize, CoreError> {
         let project = self.store.get(id).await?;
-        let cancellation = self.begin(id, "extract", "正在检查脚本格式。").await?;
+        let cancellation = self
+            .begin(id, task_op::EXTRACT, "正在检查脚本格式。")
+            .await?;
         let result = self.extract_inner(&project, format, &cancellation).await;
         self.finish(
             id,
-            "extract",
+            task_op::EXTRACT,
             result
                 .as_ref()
                 .map(|count| format!("提取完成，共 {count} 条文本。"))
@@ -1025,7 +1049,7 @@ impl Application {
                 "该目录没有匹配的已解包脚本；封包或其他格式需要对应的引擎适配。".into(),
             )
         })?;
-        self.progress(&project.id, "extract", "正在核对原始脚本。")
+        self.progress(&project.id, task_op::EXTRACT, "正在核对原始脚本。")
             .await;
         let project_directory = self.store.directory(&project.id)?;
         let files = probe.required_files.clone();
@@ -1036,7 +1060,7 @@ impl Application {
         let selected = files.clone();
         let token = cancellation.clone();
         let (input, hashes) = self
-            .run_file_task(&project.id, "extract", move |progress| {
+            .run_file_task(&project.id, task_op::EXTRACT, move |progress| {
                 crate::engine_tasks::prepare_source(
                     &project_directory,
                     &source,
@@ -1047,9 +1071,9 @@ impl Application {
                 )
             })
             .await?;
-        self.progress(&project.id, "extract", "正在提取脚本文本。")
+        self.progress(&project.id, task_op::EXTRACT, "正在提取脚本文本。")
             .await;
-        let mut request = AdapterRequest::new("extract", input.directory());
+        let mut request = AdapterRequest::new(OP_EXTRACT, input.directory());
         request.format = Some(format.into());
         request.resource_files = Some(files.clone());
         let response = self.parser.execute(&request, cancellation).await?;
@@ -1057,10 +1081,10 @@ impl Application {
             .extraction
             .ok_or_else(|| CoreError::InvalidData("解析器未返回提取结果。".into()))?;
         validate_units(&extraction.units)?;
-        self.progress(&project.id, "extract", "正在验证原文字节回填。")
+        self.progress(&project.id, task_op::EXTRACT, "正在验证原文字节回填。")
             .await;
         let roundtrip = tempfile::tempdir()?;
-        request.operation = "build".into();
+        request.operation = OP_BUILD.into();
         request.output_directory = Some(roundtrip.path().to_path_buf());
         self.parser.execute(&request, cancellation).await?;
         for (relative, expected) in &hashes {
@@ -1072,7 +1096,7 @@ impl Application {
         }
         let count = extraction.units.len();
         let stored = StoredAnalysis {
-            schema_version: 2,
+            schema_version: ANALYSIS_SCHEMA_REFERENCE,
             coverage_pending: false,
             format: format.into(),
             source_directory: project.game_directory.clone(),
@@ -1092,11 +1116,13 @@ impl Application {
         id: &str,
         translations: BTreeMap<String, String>,
     ) -> Result<PathBuf, CoreError> {
-        let cancellation = self.begin(id, "build", "正在检查原始脚本和译文。").await?;
+        let cancellation = self
+            .begin(id, task_op::BUILD, "正在检查原始脚本和译文。")
+            .await?;
         let result = self.build_inner(id, translations, &cancellation).await;
         self.finish(
             id,
-            "build",
+            task_op::BUILD,
             result
                 .as_ref()
                 .map(|path| format!("补丁已生成：{}", path.display()))
@@ -1122,7 +1148,7 @@ impl Application {
         let baseline = Arc::clone(&cached);
         let token = cancellation.clone();
         let (source, _) = self
-            .run_file_task(id, "build", move |progress| {
+            .run_file_task(id, task_op::BUILD, move |progress| {
                 let baseline = baseline.native()?;
                 let inputs = crate::engine_tasks::source_inputs(
                     &root,
@@ -1141,20 +1167,20 @@ impl Application {
                 )
             })
             .await?;
-        let patch_root = self.store.directory(id)?.join("patches");
+        let patch_root = self.store.directory(id)?.join(PATCHES_DIR);
         fs::create_dir_all(&patch_root)?;
         let patch = tempfile::Builder::new()
             .prefix("native-")
             .tempdir_in(&patch_root)?;
-        let mut request = AdapterRequest::new("build", source.directory());
+        let mut request = AdapterRequest::new(OP_BUILD, source.directory());
         request.format = Some(analysis.format.clone());
         request.resource_files = Some(analysis.resource_files.clone());
         request.output_directory = Some(patch.path().to_path_buf());
         request.translations = Some(translations.into());
-        self.progress(id, "build", "正在回填译文并检查脚本结构。")
+        self.progress(id, task_op::BUILD, "正在回填译文并检查脚本结构。")
             .await;
         self.parser.execute(&request, cancellation).await?;
-        request.operation = "validate".into();
+        request.operation = OP_VALIDATE.into();
         let response = self.parser.execute(&request, cancellation).await?;
         let validation = response
             .validation
@@ -1188,7 +1214,7 @@ impl Application {
                 "completedAt": chrono::Utc::now().to_rfc3339(),
                 "warnings": stored.extraction.warnings,
                 "coveragePending": stored.coverage_pending,
-                "sourceMode": if stored.schema_version == 2 { "reference" } else { "snapshot" },
+                "sourceMode": if stored.schema_version == ANALYSIS_SCHEMA_REFERENCE { "reference" } else { "snapshot" },
             }),
         );
         if let Some(probe) = probe {
@@ -1200,7 +1226,7 @@ impl Application {
                 serde_json::json!(probe.adapter_version),
             );
         }
-        let path = self.project_directory(id)?.join("extraction/native.json");
+        let path = self.project_directory(id)?.join(NATIVE_EXTRACTION_FILE);
         let (stored, project) = tokio::task::spawn_blocking(move || -> Result<_, CoreError> {
             crate::launch::discover(&mut project, stored.probe.as_ref())?;
             write_json_compact(&path, &stored)?;
@@ -1268,7 +1294,7 @@ impl Application {
             id,
             operation,
             message,
-            matches!(operation, "recognize" | "adapt"),
+            matches!(operation, task_op::RECOGNIZE | task_op::ADAPT),
         )
         .await
     }
@@ -1288,7 +1314,8 @@ impl Application {
         self.ensure_writable().await?;
         if self.tasks.lock().await.get(id).is_some_and(|entry| {
             entry.state.running
-                || (entry.translation.is_some() && !matches!(operation, "adapt" | "recognize"))
+                || (entry.translation.is_some()
+                    && !matches!(operation, task_op::ADAPT | task_op::RECOGNIZE))
         }) {
             return Err(CoreError::ProjectBusy);
         }
@@ -1309,11 +1336,15 @@ impl Application {
         let project_directory = self.project_directory(id)?;
         if matches!(
             operation,
-            "recognize" | "adapt" | "extract" | "install" | "restore"
+            task_op::RECOGNIZE
+                | task_op::ADAPT
+                | task_op::EXTRACT
+                | task_op::INSTALL
+                | task_op::RESTORE
         ) {
             let _ = crate::workflow::clear_session(&project_directory);
         }
-        let path = project_directory.join("rust-task.json");
+        let path = project_directory.join(TASK_STATE_FILENAME);
         let saved = state.clone();
         tokio::task::spawn_blocking(move || write_json(&path, &saved)).await??;
         let order = self.next_task_order.fetch_add(1, Ordering::Relaxed);
@@ -1377,7 +1408,7 @@ impl Application {
         let state = TaskState {
             project_id: id.into(),
             operation: if entry.state.workflow.is_some() {
-                "workflow".into()
+                task_op::WORKFLOW.into()
             } else {
                 operation.into()
             },
@@ -1404,7 +1435,7 @@ impl Application {
             // A custom failure branch may continue with the last committed extraction.
             entry.clear_preview(&self.events);
             entry.translation_progress = None;
-            entry.state.operation = "workflow".into();
+            entry.state.operation = task_op::WORKFLOW.into();
             entry.state.message = format!(
                 "全自动汉化 · {}（{}）",
                 workflow.action.title(),
@@ -1413,7 +1444,7 @@ impl Application {
             entry.state.workflow = Some(workflow);
             entry.state.clone()
         };
-        let path = self.project_directory(id)?.join("rust-task.json");
+        let path = self.project_directory(id)?.join(TASK_STATE_FILENAME);
         let saved = state.clone();
         tokio::task::spawn_blocking(move || write_json(&path, &saved)).await??;
         let _ = self.events.send(AppEvent::TaskChanged(state.clone()));
@@ -1459,7 +1490,7 @@ impl Application {
             entry.state.succeeded = None;
             entry.state.clone()
         };
-        let path = self.project_directory(id)?.join("rust-task.json");
+        let path = self.project_directory(id)?.join(TASK_STATE_FILENAME);
         let saved = StoredTaskState {
             state: state.clone(),
             task_summary: Some(task_summary(&state)),
@@ -1536,7 +1567,7 @@ impl Application {
             Err(error) => (task_summary(&state), Some(error)),
         };
         self.finish_metrics(id, operation, state.succeeded).await;
-        let path = self.store.directory(id)?.join("rust-task.json");
+        let path = self.store.directory(id)?.join(TASK_STATE_FILENAME);
         let saved = StoredTaskState {
             state: state.clone(),
             task_summary: Some(summary.clone()),
@@ -1598,12 +1629,12 @@ impl Application {
         summary: serde_json::Value,
     ) -> Result<(), CoreError> {
         if crate::projects::recognition_completed(&summary)
-            && project.settings["recognitionGoal"] != "repair"
+            && project.settings[RECOGNITION_GOAL] != task_op::REPAIR
         {
             if !project.settings.is_object() {
                 project.settings = serde_json::json!({});
             }
-            project.settings["recognitionGoal"] = "repair".into();
+            project.settings[RECOGNITION_GOAL] = task_op::REPAIR.into();
         } else if project.extra.get("taskSummary") == Some(&summary) {
             return Ok(());
         }
@@ -1615,11 +1646,11 @@ impl Application {
 
     fn completed_task_summary(&self, state: &TaskState) -> Result<serde_json::Value, CoreError> {
         let mut summary = task_summary(state);
-        if state.operation == "adapt" && state.succeeded == Some(true) {
+        if state.operation == task_op::ADAPT && state.succeeded == Some(true) {
             let path = self
                 .store
                 .directory(&state.project_id)?
-                .join("adaptation-result.json");
+                .join(ADAPTATION_RESULT_FILE);
             if path.is_file() {
                 let result: serde_json::Value = read_json(&path)?;
                 summary["adaptationStatus"] = result["status"].clone();
@@ -1684,7 +1715,7 @@ pub(crate) fn resolve_relative(root: &Path, relative: &str) -> Result<PathBuf, C
             #[cfg(windows)]
             {
                 use std::os::windows::fs::MetadataExt;
-                if metadata.file_attributes() & 0x400 != 0 {
+                if metadata.file_attributes() & crate::WIN32_FILE_ATTRIBUTE_REPARSE_POINT != 0 {
                     return Err(CoreError::InvalidData("资源路径包含重解析点。".into()));
                 }
             }

@@ -4,12 +4,19 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use gamel10n_translation::{
     TokenUsage, TranslationUnit,
-    provider::{SpeakerSample, TranslationFormat},
+    provider::{SpeakerSample, TranslationFormat, diagnostic_codes},
+    storage::DEFAULT_TARGET_LANGUAGE,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::{Application, CancellationToken, CoreError, workbench::parse_terminology};
+use crate::{
+    Application, CancellationToken, CoreError,
+    metrics::{STATUS_CANCELLED, STATUS_COMPLETED, STATUS_FAILED},
+    settings::{DEFAULT_TRANSLATION_STYLE, FORMAT_PLAIN_TEXT, project_settings_keys},
+    task_op,
+    workbench::parse_terminology,
+};
 
 const MAX_SPEAKERS: usize = 60;
 const MAX_SPEAKER_SAMPLES: usize = 2;
@@ -221,7 +228,7 @@ impl Application {
                 .profiles
                 .iter()
                 .find(|profile| profile.id == *profile_id)
-                .is_some_and(|profile| profile.translation_format != "PlainText")
+                .is_some_and(|profile| profile.translation_format != FORMAT_PLAIN_TEXT)
         }))
     }
 
@@ -248,19 +255,23 @@ impl Application {
         let project = self.store.get(id).await?;
         let target_language = project
             .settings
-            .get("targetLanguage")
+            .get(project_settings_keys::TARGET_LANGUAGE)
             .and_then(Value::as_str)
             .filter(|value| !value.trim().is_empty())
-            .unwrap_or("简体中文")
+            .unwrap_or(DEFAULT_TARGET_LANGUAGE)
             .to_owned();
         let style = project
             .settings
-            .get("style")
+            .get(project_settings_keys::STYLE)
             .and_then(Value::as_str)
-            .unwrap_or("自然流畅，保留人物语气、情绪和原文含义。")
+            .unwrap_or(DEFAULT_TRANSLATION_STYLE)
             .to_owned();
-        let existing =
-            parse_terminology(project.settings.get("terminology").unwrap_or(&Value::Null));
+        let existing = parse_terminology(
+            project
+                .settings
+                .get(project_settings_keys::TERMINOLOGY)
+                .unwrap_or(&Value::Null),
+        );
         let units = &analysis.extraction().units;
         let (speakers, samples) = build_extraction_inputs(units);
         if speakers.is_empty() && samples.is_empty() {
@@ -279,13 +290,13 @@ impl Application {
             )
             .await;
         let metrics_status = match &raw_result {
-            Ok(_) => "completed",
-            Err(error) if error.is_cancelled() => "cancelled",
-            Err(_) => "failed",
+            Ok(_) => STATUS_COMPLETED,
+            Err(error) if error.is_cancelled() => STATUS_CANCELLED,
+            Err(_) => STATUS_FAILED,
         };
         self.record_single_provider_metrics(
             id,
-            "terminology",
+            task_op::TERMINOLOGY,
             &provider,
             false,
             started_at,
@@ -296,7 +307,7 @@ impl Application {
         let result = raw_result.map_err(|error| {
             if error.is_cancelled() {
                 CoreError::Engine(gamel10n_engines::EngineError::Cancelled)
-            } else if error.diagnostic.code == "output-token-limit" {
+            } else if error.diagnostic.code == diagnostic_codes::OUTPUT_TOKEN_LIMIT {
                 CoreError::InvalidData(
                     "术语提取失败：模型输出达到长度上限，结果被截断（常见于推理模型思考过长），请重试或在项目翻译链中优先配置非推理模型。"
                         .into(),
@@ -349,7 +360,7 @@ impl Application {
         let project = self.store.get(id).await?;
         let before_raw = project
             .settings
-            .get("terminology")
+            .get(project_settings_keys::TERMINOLOGY)
             .and_then(Value::as_str)
             .unwrap_or("");
         let merged = merge_terminology_text(before_raw, entries)?;
@@ -363,14 +374,19 @@ impl Application {
         terminology: String,
     ) -> Result<TerminologySaveResult, CoreError> {
         let project = self.store.get(id).await?;
-        let before = parse_terminology(project.settings.get("terminology").unwrap_or(&Value::Null));
+        let before = parse_terminology(
+            project
+                .settings
+                .get(project_settings_keys::TERMINOLOGY)
+                .unwrap_or(&Value::Null),
+        );
         let after = parse_terminology(&Value::String(terminology.clone()));
         let changed_terms = changed_terminology_keys(&before, &after);
         // Compute impacted translated rows before saving invalidates TranslationMemory keys.
         let affected_unit_ids = self
             .translated_unit_ids_matching_terms(id, &changed_terms)
             .await?;
-        self.save_project_settings(id, json!({ "terminology": terminology }))
+        self.save_project_settings(id, json!({ project_settings_keys::TERMINOLOGY: terminology }))
             .await?;
         Ok(TerminologySaveResult {
             terminology,
@@ -387,7 +403,7 @@ impl Application {
         updates: Value,
     ) -> Result<Option<TerminologySaveResult>, CoreError> {
         let Some(new_raw) = updates
-            .get("terminology")
+            .get(project_settings_keys::TERMINOLOGY)
             .and_then(Value::as_str)
             .map(str::to_owned)
         else {
@@ -395,7 +411,12 @@ impl Application {
             return Ok(None);
         };
         let project = self.store.get(id).await?;
-        let before = parse_terminology(project.settings.get("terminology").unwrap_or(&Value::Null));
+        let before = parse_terminology(
+            project
+                .settings
+                .get(project_settings_keys::TERMINOLOGY)
+                .unwrap_or(&Value::Null),
+        );
         let after = parse_terminology(&Value::String(new_raw.clone()));
         let changed_terms = changed_terminology_keys(&before, &after);
         let affected_unit_ids = self

@@ -1,6 +1,68 @@
 //! Extraction compatibility and resource roundtrip verification.
 use super::*;
+use crate::protocol::{OP_BUILD, VALIDATION_CONTEXT_VERSION};
 use std::borrow::Cow;
+
+const PHASE_ORIGINAL_RESOURCE_CHECK: &str = "original-resource-check";
+const PHASE_PARTIAL_REEXTRACTION: &str = "partial-translation-re-extraction";
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RoundtripStage {
+    Original,
+    Partial,
+    Full,
+}
+
+impl RoundtripStage {
+    const ALL: [Self; 3] = [Self::Original, Self::Partial, Self::Full];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Original => "原文回填",
+            Self::Partial => "部分试译",
+            Self::Full => "中文修改",
+        }
+    }
+
+    fn dir_name(self) -> &'static str {
+        match self {
+            Self::Original => "original",
+            Self::Partial => "partial",
+            Self::Full => "changed",
+        }
+    }
+
+    fn build_phase(self) -> &'static str {
+        match self {
+            Self::Original => "original-byte-roundtrip",
+            Self::Partial => "partial-translation-build",
+            Self::Full => "full-translation-build",
+        }
+    }
+
+    fn display_phase(self) -> &'static str {
+        match self {
+            Self::Partial => "partial-display-readback",
+            Self::Original | Self::Full => "full-display-readback",
+        }
+    }
+
+    fn reextract_phase(self) -> &'static str {
+        match self {
+            Self::Original => "original-re-extraction",
+            Self::Partial => PHASE_PARTIAL_REEXTRACTION,
+            Self::Full => "full-translation-re-extraction",
+        }
+    }
+
+    fn validate_phase(self) -> &'static str {
+        match self {
+            Self::Original => "original-validation",
+            Self::Partial => "partial-translation-validation",
+            Self::Full => "full-translation-validation",
+        }
+    }
+}
 
 struct Verification<'a> {
     service: &'a EngineService,
@@ -115,9 +177,9 @@ impl EngineService {
         fs::create_dir_all(directory)?;
         for resource in resources
             .iter()
-            .filter(|path| path.to_lowercase().ends_with(".exe"))
+            .filter(|path| path.to_lowercase().ends_with(EXE_EXTENSION))
         {
-            let profile = format!("{resource}.le.config");
+            let profile = format!("{resource}{LE_CONFIG_SUFFIX}");
             if resolve_relative(source, &profile)?.is_file()
                 && !resources
                     .iter()
@@ -185,7 +247,7 @@ impl EngineService {
         };
         let verified = run.verify(baseline, coverage, preview).await;
         let phase = run.phase;
-        run.enter("original-resource-check");
+        run.enter(PHASE_ORIGINAL_RESOURCE_CHECK);
         let mut result = run.result;
         let mut verified_extraction = None;
         match verified {
@@ -255,7 +317,7 @@ fn check_original_resources(
             result.issues.push(
                 crate::VerificationIssue::new(
                     crate::VerificationIssueCode::InputChanged,
-                    "original-resource-check",
+                    PHASE_ORIGINAL_RESOURCE_CHECK,
                 )
                 .difference("原始资源", "content changed"),
             );
@@ -267,7 +329,7 @@ fn check_original_resources(
             result.issues.push(
                 crate::VerificationIssue::new(
                     crate::VerificationIssueCode::Storage,
-                    "original-resource-check",
+                    PHASE_ORIGINAL_RESOURCE_CHECK,
                 )
                 .difference("原始资源", &error.to_string()),
             );
@@ -299,7 +361,7 @@ impl Verification<'_> {
             "验收文本提取",
             "正在检查文本身份与已有译文可复用性。",
         );
-        let mut request = AdapterRequest::new("extract", self.source_directory);
+        let mut request = AdapterRequest::new(OP_EXTRACT, self.source_directory);
         request.resource_files = Some(self.resources.to_vec());
         if let Some(probe) = self.probe {
             request.set_probe_context(probe);
@@ -317,7 +379,7 @@ impl Verification<'_> {
         let accepts_validation_context = matches!(
             self.adapter,
             AdapterHandle::Python { .. } | AdapterHandle::BuiltinKirikiriSmil
-        ) && response.validation_context_version == Some(1);
+        ) && response.validation_context_version == Some(VALIDATION_CONTEXT_VERSION);
         let mut extracted = response
             .extraction
             .ok_or_else(|| EngineError::Protocol("缺少提取结果。".into()))?;
@@ -333,12 +395,8 @@ impl Verification<'_> {
             publish(Arc::clone(&extracted));
         }
         let mut changed = BTreeMap::new();
-        for stage in ["原文回填", "部分试译", "中文修改"] {
-            self.enter(match stage {
-                "原文回填" => "original-byte-roundtrip",
-                "部分试译" => "partial-translation-build",
-                _ => "full-translation-build",
-            });
+        for stage in RoundtripStage::ALL {
+            self.enter(stage.build_phase());
             let translations = roundtrip_translations(stage, units, &mut changed)?;
             self.roundtrip(
                 stage,
@@ -482,7 +540,7 @@ impl Verification<'_> {
 
     async fn roundtrip(
         &mut self,
-        stage: &str,
+        stage: RoundtripStage,
         units: &[TranslationUnit],
         translations: Arc<BTreeMap<String, String>>,
         accepts_validation_context: bool,
@@ -490,20 +548,16 @@ impl Verification<'_> {
         EngineService::report(
             self.progress,
             "验收资源回填",
-            format!("正在检查{stage}和未改动文本。"),
+            format!("正在检查{}和未改动文本。", stage.label()),
         );
-        let output = self.directory.join(match stage {
-            "原文回填" => "original",
-            "中文修改" => "changed",
-            _ => "partial",
-        });
+        let output = self.directory.join(stage.dir_name());
         if output.exists() {
             return Err(EngineError::Rejected(
                 "验收输出目录已存在，请使用新的验收目录。".into(),
             ));
         }
         fs::create_dir_all(&output)?;
-        let mut build = AdapterRequest::new("build", self.source_directory);
+        let mut build = AdapterRequest::new(OP_BUILD, self.source_directory);
         build.resource_files = Some(self.resources.to_vec());
         build.output_directory = Some(output.clone());
         build.translations = Some(translations.clone());
@@ -524,7 +578,7 @@ impl Verification<'_> {
             .ok_or_else(|| EngineError::Protocol("缺少回填结果。".into()))?;
         let overlay = built.mode == BuildMode::Overlay;
         self.check_output_files(stage, &output, overlay)?;
-        if stage == "原文回填" && (!overlay || built.files.is_empty()) {
+        if stage == RoundtripStage::Original && (!overlay || built.files.is_empty()) {
             self.result.original_roundtrip_passed = true;
             if self.cleanup_stage_outputs {
                 let _ = fs::remove_dir_all(&output);
@@ -532,13 +586,9 @@ impl Verification<'_> {
             return Ok(());
         }
         if let Some(check) = self.display_check
-            && stage != "原文回填"
+            && stage != RoundtripStage::Original
         {
-            self.enter(if stage == "部分试译" {
-                "partial-display-readback"
-            } else {
-                "full-display-readback"
-            });
+            self.enter(stage.display_phase());
             let warnings = check
                 .verify(self.service, &built, &build, units, self.cancellation)
                 .await?;
@@ -552,11 +602,7 @@ impl Verification<'_> {
         if let Some(probe) = self.probe {
             extract.set_probe_context(probe);
         }
-        self.enter(match stage {
-            "原文回填" => "original-re-extraction",
-            "部分试译" => "partial-translation-re-extraction",
-            _ => "full-translation-re-extraction",
-        });
+        self.enter(stage.reextract_phase());
         // Bind reused text to actual output bytes, including companion files.
         let output_hashes = (accepts_validation_context || overlay)
             .then(|| directory_hashes(&output))
@@ -582,13 +628,9 @@ impl Verification<'_> {
             .extraction
             .ok_or_else(|| EngineError::Protocol("缺少回填后的提取结果。".into()))?;
         self.check_reextraction(stage, units, &translations, &reextracted, overlay)?;
-        self.enter(match stage {
-            "原文回填" => "original-validation",
-            "部分试译" => "partial-translation-validation",
-            _ => "full-translation-validation",
-        });
+        self.enter(stage.validate_phase());
         let mut validate = build;
-        validate.operation = "validate".into();
+        validate.operation = OP_VALIDATE.into();
         built.set_output_context(&mut validate);
         let validation_context = if accepts_validation_context {
             let temporary = tempfile::Builder::new()
@@ -598,7 +640,7 @@ impl Verification<'_> {
             write_json(
                 &path,
                 &ValidationContext {
-                    schema_version: 1,
+                    schema_version: VALIDATION_CONTEXT_VERSION,
                     source_directory: self.source_directory,
                     output_directory: &output,
                     resource_files: self.resources,
@@ -633,7 +675,7 @@ impl Verification<'_> {
             self.result.adapter_issues = validation.issues;
             return Err(EngineError::Rejected(summary));
         }
-        if stage == "原文回填" {
+        if stage == RoundtripStage::Original {
             self.result.original_roundtrip_passed = true;
         }
         if self.cleanup_stage_outputs {
@@ -644,7 +686,7 @@ impl Verification<'_> {
 
     fn check_output_files(
         &mut self,
-        stage: &str,
+        stage: RoundtripStage,
         output: &Path,
         overlay: bool,
     ) -> Result<(), EngineError> {
@@ -653,7 +695,7 @@ impl Verification<'_> {
             if !target.is_file() {
                 return Err(EngineError::Rejected(format!("回填遗漏原资源：{relative}")));
             }
-            if stage == "原文回填"
+            if stage == RoundtripStage::Original
                 && hash_file(&target).map_err(|error| EngineError::Protocol(error.to_string()))?
                     != self.before[relative]
             {
@@ -668,7 +710,7 @@ impl Verification<'_> {
                     "原文回填改变了资源字节：{relative}"
                 )));
             }
-            if relative.to_lowercase().ends_with(".le.config")
+            if relative.to_lowercase().ends_with(LE_CONFIG_SUFFIX)
                 && hash_file(&target).map_err(|error| EngineError::Protocol(error.to_string()))?
                     != self.before[relative]
             {
@@ -682,12 +724,13 @@ impl Verification<'_> {
 
     fn check_reextraction(
         &mut self,
-        stage: &str,
+        stage: RoundtripStage,
         units: &[TranslationUnit],
         translations: &BTreeMap<String, String>,
         reextracted: &ExtractionResult,
         overlay: bool,
     ) -> Result<(), EngineError> {
+        let stage_label = stage.label();
         let after: BTreeMap<_, _> = reextracted
             .units
             .iter()
@@ -699,7 +742,9 @@ impl Verification<'_> {
                 crate::VerificationIssue::new(crate::VerificationIssueCode::TextCount, self.phase)
                     .difference(&units.len().to_string(), &after.len().to_string()),
             );
-            return Err(EngineError::Rejected(format!("{stage}改变了文本数量。")));
+            return Err(EngineError::Rejected(format!(
+                "{stage_label}改变了文本数量。"
+            )));
         }
         for unit in units {
             let actual = after
@@ -716,7 +761,7 @@ impl Verification<'_> {
                 })?;
             let expected = translations.get(&unit.id).unwrap_or(&unit.source_text);
             let builtin_sfa = matches!(self.adapter, AdapterHandle::BuiltinSfa16);
-            let expected = if builtin_sfa && stage != "原文回填" {
+            let expected = if builtin_sfa && stage != RoundtripStage::Original {
                 Cow::Owned(expected.replace('・', "·").replace('♪', "～"))
             } else {
                 Cow::Borrowed(expected.as_str())
@@ -739,7 +784,7 @@ impl Verification<'_> {
                 let mismatch = crate::VerificationIssue::new(code, self.phase)
                     .at(&unit.resource_path, Some(&unit.id))
                     .unit_difference(unit, Some(actual), &expected, overlay, !builtin_sfa);
-                if self.phase == "partial-translation-re-extraction" && !overlay {
+                if self.phase == PHASE_PARTIAL_REEXTRACTION && !overlay {
                     self.result.archive_member_retry = ArchiveMemberRetry::for_speaker_difference(
                         &mismatch,
                         unit,
@@ -750,7 +795,7 @@ impl Verification<'_> {
                 let fields = mismatch.field_names();
                 self.issue = Some(mismatch);
                 return Err(EngineError::Rejected(format!(
-                    "{stage}未保留文本、身份或上下文：{}（变化字段：{fields}）",
+                    "{stage_label}未保留文本、身份或上下文：{}（变化字段：{fields}）",
                     unit.id
                 )));
             }
@@ -760,16 +805,16 @@ impl Verification<'_> {
 }
 
 fn roundtrip_translations(
-    stage: &str,
+    stage: RoundtripStage,
     units: &[TranslationUnit],
     changed: &mut BTreeMap<String, String>,
 ) -> Result<BTreeMap<String, String>, EngineError> {
     Ok(match stage {
-        "原文回填" => units
+        RoundtripStage::Original => units
             .iter()
             .map(|unit| (unit.id.clone(), unit.source_text.clone()))
             .collect(),
-        "部分试译" => {
+        RoundtripStage::Partial => {
             *changed = units
                 .iter()
                 .enumerate()
@@ -806,6 +851,6 @@ fn roundtrip_translations(
             }
             partial
         }
-        _ => std::mem::take(changed),
+        RoundtripStage::Full => std::mem::take(changed),
     })
 }

@@ -67,7 +67,7 @@ pub enum EngineError {
 }
 
 fn analysis_api_summary(error: &gamel10n_translation::provider::ProviderError) -> String {
-    if error.diagnostic.code == "output-token-limit" {
+    if error.diagnostic.code == gamel10n_translation::provider::diagnostic_codes::OUTPUT_TOKEN_LIMIT {
         "单次分析输出被截断，请拆分本轮生成内容或检查模型配置中的分析输出上限。".into()
     } else {
         error.failure_summary()
@@ -86,7 +86,9 @@ impl ToolPaths {
     }
 
     pub fn vntextpatch(&self) -> PathBuf {
-        self.root.join("vntextpatch/GameL10n.VnTextPatch.exe")
+        self.root
+            .join(native_tools::VNTEXTPATCH_DIR)
+            .join(native_tools::EXECUTABLE)
     }
 
     pub fn python(&self) -> PathBuf {

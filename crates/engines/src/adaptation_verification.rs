@@ -119,22 +119,28 @@ fn require_launch_resources(state: &Session, inputs: &AdaptationInputs) -> Resul
     Ok(())
 }
 
+pub(super) const MILESTONE_NONE: u32 = 0;
+pub(super) const MILESTONE_COMPILED: u32 = 1;
+pub(super) const MILESTONE_DISCOVERY: u32 = 2;
+pub(super) const MILESTONE_ORIGINAL_ROUNDTRIP: u32 = 3;
+pub(super) const MILESTONE_COMPLETE: u32 = 4;
+
 fn progress(state: &mut Session, milestone: u32) {
     let previous = state
         .extra
         .get("highestVerificationMilestone")
         .and_then(|value| {
             value.as_u64().or_else(|| match value.as_str()? {
-                "None" => Some(0),
-                "Compiled" => Some(1),
-                "Discovery" => Some(2),
-                "OriginalRoundtrip" => Some(3),
-                "Complete" => Some(4),
+                "None" => Some(u64::from(MILESTONE_NONE)),
+                "Compiled" => Some(u64::from(MILESTONE_COMPILED)),
+                "Discovery" => Some(u64::from(MILESTONE_DISCOVERY)),
+                "OriginalRoundtrip" => Some(u64::from(MILESTONE_ORIGINAL_ROUNDTRIP)),
+                "Complete" => Some(u64::from(MILESTONE_COMPLETE)),
                 _ => None,
             })
         })
         .unwrap_or(0);
-    if u64::from(milestone) > previous || milestone == 4 {
+    if u64::from(milestone) > previous || milestone == MILESTONE_COMPLETE {
         if u64::from(milestone) > previous {
             state
                 .extra
@@ -765,7 +771,7 @@ async fn replay_archive_member(
     let library = service.reference_library(&reference)?;
     let sample = service.helper(
         &json!({"operation":"archive_samples","format":retry_spec.format,"archive":archive,
-            "members":retry.members,"directory":scratch.path(),"library":library,"timeoutSeconds":10}),
+            "members":retry.members,"directory":scratch.path(),"library":library,"timeoutSeconds":ARCHIVE_SAMPLE_HELPER_TIMEOUT_SECS}),
         cancellation,
     ).await?;
     if sample["status"] != "sampled" {
@@ -981,10 +987,10 @@ impl TestScope {
                 ));
             }
             let unique: BTreeSet<_> = files.iter().map(|file| file.to_lowercase()).collect();
-            if files.is_empty() || files.len() > 12 || unique.len() != files.len() {
-                return Err(EngineError::Rejected(
-                    "trialFiles 需要 1–12 个不重复的完整资源路径。".into(),
-                ));
+            if files.is_empty() || files.len() > MAX_TRIAL_FILES || unique.len() != files.len() {
+                return Err(EngineError::Rejected(format!(
+                    "trialFiles 需要 1–{MAX_TRIAL_FILES} 个不重复的完整资源路径。"
+                )));
             }
             let approved = state.extra.get("resourceHashes");
             for file in files {
@@ -1004,11 +1010,11 @@ impl TestScope {
     }
     fn cache_key(&self) -> &'static str {
         if self.discovery_only {
-            "discoveryVerificationCache"
+            DISCOVERY_VERIFICATION_CACHE_KEY
         } else if self.trial.is_some() {
-            "trialVerificationCache"
+            TRIAL_VERIFICATION_CACHE_KEY
         } else {
-            "verificationCache"
+            VERIFICATION_CACHE_KEY
         }
     }
 }
@@ -1113,20 +1119,25 @@ async fn prepare_test_package(
             .collect::<BTreeMap<_, _>>();
         let source_sha256 = hash_text(&serde_json::to_string(&sources)?);
         let assembly_sha256 = package_files
-            .get("src/adapter.py")
+            .get(crate::discovery::ADAPTER_ENTRY_PATH)
             .ok_or_else(|| EngineError::Protocol("缺少适配器入口。".into()))?;
-        let manifest = json!({"id":id,"version":version,"manifestVersion":4,"protocolVersion":1,"discoveryIndexVersion":1,"family":state.family,"resourceFiles":[],"resourcePatterns":state.resource_patterns,"recognition":state.recognition,"sourceSha256":source_sha256,"assemblySha256":assembly_sha256,"packageFiles":package_files,"releaseFiles":state.release_files});
-        write_json(&package.join("package.json"), &manifest).map_err(file_error)?;
+        let manifest = json!({"id":id,"version":version,"manifestVersion":crate::discovery::PYTHON_MANIFEST_VERSION,"protocolVersion":crate::protocol::PROTOCOL_VERSION,"discoveryIndexVersion":1,"family":state.family,"resourceFiles":[],"resourcePatterns":state.resource_patterns,"recognition":state.recognition,"sourceSha256":source_sha256,"assemblySha256":assembly_sha256,"packageFiles":package_files,"releaseFiles":state.release_files});
+        write_json(
+            &package.join(crate::discovery::PACKAGE_MANIFEST_FILE),
+            &manifest,
+        )
+        .map_err(file_error)?;
         let parsed = PackageManifest::load(&package)?;
         let handle = parsed.handle(&package)?;
         (package, parsed, handle)
     };
-    progress(state, 1);
+    progress(state, MILESTONE_COMPILED);
     let compile_ms = preparation_started.elapsed().as_millis();
     Ok(TestPackage {
         implementation,
         directory,
-        manifest_hash: hash_file(&package.join("package.json")).map_err(file_error)?,
+        manifest_hash: hash_file(&package.join(crate::discovery::PACKAGE_MANIFEST_FILE))
+            .map_err(file_error)?,
         path: package,
         parsed,
         handle,
@@ -1274,7 +1285,7 @@ impl AdapterTest<'_, '_> {
             return Ok(cached["result"]["passed"] == true);
         }
         if self.scope.trial.is_none() {
-            progress(state, 2);
+            progress(state, MILESTONE_DISCOVERY);
         }
         if self.scope.discovery_only {
             return Ok(true);
@@ -1405,7 +1416,7 @@ impl AdapterTest<'_, '_> {
         self.cacheable &= result.cacheable;
         if self.scope.trial.is_none() {
             if result.original_roundtrip_passed {
-                progress(state, 3);
+                progress(state, MILESTONE_ORIGINAL_ROUNDTRIP);
             }
             if result.passed {
                 self.stage = "finish-ready";
@@ -1509,7 +1520,7 @@ impl AdapterTest<'_, '_> {
             }
         }
         if passed && stage == "finish-ready" && !reused {
-            progress(state, 4);
+            progress(state, MILESTONE_COMPLETE);
         }
         let selected = trial
             .as_ref()

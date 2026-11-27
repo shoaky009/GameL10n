@@ -1,20 +1,50 @@
-use crate::{Context, UiInput, refresh_projects, settings_ui, show_dialog, view::App};
+use crate::{
+    Context, OPEN_COMMAND, REPOSITORY_URL, TASK_STOP_POLL_INTERVAL, TASK_STOP_TIMEOUT, UiInput,
+    refresh_projects, settings_ui, show_dialog,
+    ui_contract::{modal, page, page_arg, project_tab},
+    view::App,
+};
 use gamel10n_core::{
     CoreError,
     engine_tasks::{AdaptationObjective, RecognitionMode, RepairIssue},
-    patching::PatchInstaller,
+    logs::LOGS_DIR,
+    patching::{PAYLOAD_DIRECTORY, PatchInstaller, TEST_STATUS_FAILED, TEST_STATUS_PASSED},
+    settings::project_settings_keys,
+    task_op::{self, locks_editor},
     workflow::{WorkflowChoice, WorkflowFinish, WorkflowPauseKind, WorkflowPreset},
 };
 use serde_json::Value;
 use slint::{ComponentHandle, Model, ModelRc};
 use std::{future::Future, path::PathBuf, pin::Pin, sync::atomic::Ordering};
 
+const BYTES_PER_KIB: f64 = 1024.0;
+const WORKFLOW_FINISH_TRIAL: i32 = 0;
+const WORKFLOW_FINISH_BUILD: i32 = 1;
+const WORKFLOW_FINISH_INSTALL: i32 = 2;
+const WORKFLOW_FINISH_CUSTOM: i32 = 3;
+const OBJECTIVE_RECOGNIZE: i32 = 0;
+const OBJECTIVE_REPAIR: i32 = 1;
+const OBJECTIVE_EXPAND: i32 = 2;
+const OBJECTIVE_WORKFLOW: i32 = 3;
+const REPAIR_ISSUE_CRASH: i32 = 0;
+const REPAIR_ISSUE_FONT: i32 = 1;
+const REPAIR_ISSUE_PATCH_NOT_APPLIED: i32 = 2;
+const REPAIR_ISSUE_OTHER: i32 = 3;
+const PATCH_SCOPE_SELECTED: i32 = 1;
+const PATCH_SCOPE_REVIEWED: i32 = 2;
+const GOAL_RECOGNIZE: &str = task_op::RECOGNIZE;
+const GOAL_REPAIR: &str = task_op::REPAIR;
+const GOAL_EXPAND_COVERAGE: &str = "expandCoverage";
+const GOAL_WORKFLOW: &str = task_op::WORKFLOW;
+const WORKFLOW_STAGE_SELECT: &str = "select";
+const WORKFLOW_STAGE_REVIEW: &str = "review";
+
 fn file_size(bytes: u64) -> String {
     let units = ["B", "KB", "MB", "GB", "TB"];
     let mut value = bytes as f64;
     let mut unit = 0;
-    while value >= 1024.0 && unit < units.len() - 1 {
-        value /= 1024.0;
+    while value >= BYTES_PER_KIB && unit < units.len() - 1 {
+        value /= BYTES_PER_KIB;
         unit += 1;
     }
     if unit == 0 {
@@ -52,10 +82,10 @@ async fn confirm_game_directory(directory: PathBuf) -> Result<bool, CoreError> {
 
 fn workflow_choice(input: &UiInput) -> Result<WorkflowChoice, CoreError> {
     let finish = match input.workflow_finish {
-        0 => WorkflowFinish::Trial,
-        1 => WorkflowFinish::Build,
-        2 => WorkflowFinish::Install,
-        3 => return Ok(WorkflowChoice::Custom),
+        WORKFLOW_FINISH_TRIAL => WorkflowFinish::Trial,
+        WORKFLOW_FINISH_BUILD => WorkflowFinish::Build,
+        WORKFLOW_FINISH_INSTALL => WorkflowFinish::Install,
+        WORKFLOW_FINISH_CUSTOM => return Ok(WorkflowChoice::Custom),
         _ => return Err(CoreError::InvalidData("请选择自动汉化的完成目标。".into())),
     };
     Ok(WorkflowChoice::Preset(WorkflowPreset {
@@ -68,13 +98,13 @@ fn load_workflow_preferences(app: &App<'_>, choice: WorkflowChoice, has_custom: 
     let (finish, use_existing_text) = match choice {
         WorkflowChoice::Preset(preset) => {
             let finish = match preset.finish {
-                WorkflowFinish::Trial => 0,
-                WorkflowFinish::Build => 1,
-                WorkflowFinish::Install => 2,
+                WorkflowFinish::Trial => WORKFLOW_FINISH_TRIAL,
+                WorkflowFinish::Build => WORKFLOW_FINISH_BUILD,
+                WorkflowFinish::Install => WORKFLOW_FINISH_INSTALL,
             };
             (finish, preset.use_existing_text)
         }
-        WorkflowChoice::Custom => (3, false),
+        WorkflowChoice::Custom => (WORKFLOW_FINISH_CUSTOM, false),
     };
     app.set_workflow_has_custom(has_custom);
     app.set_workflow_finish(finish);
@@ -151,7 +181,7 @@ async fn adapt(ctx: &Context, input: &UiInput) -> Result<bool, CoreError> {
         ctx.update(move |ui| {
             let app = ui.global::<App>();
             if app.get_project_id().as_str() == id && context.is_requested_project(&id) {
-                app.set_modal("adapt".into());
+                app.set_modal(modal::ADAPT.into());
             }
         });
     };
@@ -160,13 +190,13 @@ async fn adapt(ctx: &Context, input: &UiInput) -> Result<bool, CoreError> {
         return Ok(true);
     }
     let (goal, objective) = match input.adaptation_objective {
-        0 => ("recognize", AdaptationObjective::Develop),
-        1 => ("repair", AdaptationObjective::Repair),
-        2 => ("expandCoverage", AdaptationObjective::ExpandCoverage),
-        3 => ("workflow", AdaptationObjective::Develop),
+        OBJECTIVE_RECOGNIZE => (GOAL_RECOGNIZE, AdaptationObjective::Develop),
+        OBJECTIVE_REPAIR => (GOAL_REPAIR, AdaptationObjective::Repair),
+        OBJECTIVE_EXPAND => (GOAL_EXPAND_COVERAGE, AdaptationObjective::ExpandCoverage),
+        OBJECTIVE_WORKFLOW => (GOAL_WORKFLOW, AdaptationObjective::Develop),
         _ => return Err(CoreError::InvalidData("请选择本次适配目标。".into())),
     };
-    let workflow = (input.adaptation_objective == 3)
+    let workflow = (input.adaptation_objective == OBJECTIVE_WORKFLOW)
         .then(|| workflow_choice(input))
         .transpose()?;
     let saved = async {
@@ -177,7 +207,7 @@ async fn adapt(ctx: &Context, input: &UiInput) -> Result<bool, CoreError> {
             })) => serde_json::json!({}),
             _ => settings_ui::adaptation_budget_updates(input)?,
         };
-        updates["recognitionGoal"] = goal.into();
+        updates[project_settings_keys::RECOGNITION_GOAL] = goal.into();
         app.save_project_settings(&input.project_id, updates).await
     }
     .await;
@@ -205,10 +235,10 @@ async fn adapt(ctx: &Context, input: &UiInput) -> Result<bool, CoreError> {
         }
     } else {
         let repair_issue =
-            (objective == AdaptationObjective::Repair).then(|| match input.repair_issue {
-                0 => RepairIssue::Crash,
-                1 => RepairIssue::Font,
-                2 => RepairIssue::PatchNotApplied,
+            (objective == AdaptationObjective::Repair).then_some(match input.repair_issue {
+                REPAIR_ISSUE_CRASH => RepairIssue::Crash,
+                REPAIR_ISSUE_FONT => RepairIssue::Font,
+                REPAIR_ISSUE_PATCH_NOT_APPLIED => RepairIssue::PatchNotApplied,
                 _ => RepairIssue::Other,
             });
         app.adapt_with_issue(
@@ -251,7 +281,7 @@ async fn handle_project_action(
             ctx.update(|ui| ui.global::<App>().set_delete_files(false));
             show_dialog(
                 ctx,
-                "remove",
+                modal::REMOVE,
                 "移除游戏项目",
                 "默认只从列表移除。保留的数据可在重新添加相同游戏目录后继续使用。".into(),
             );
@@ -259,8 +289,8 @@ async fn handle_project_action(
         "remove" => remove_projects(ctx, input).await?,
         "adapt-dialog" => show_adaptation_dialog(ctx, input).await?,
         "adapt-cancel" => {
-            let reuse_text = input.adaptation_objective == 3
-                && input.workflow_finish != 3
+            let reuse_text = input.adaptation_objective == OBJECTIVE_WORKFLOW
+                && input.workflow_finish != WORKFLOW_FINISH_CUSTOM
                 && input.workflow_use_existing_text;
             if !reuse_text && let Ok(updates) = settings_ui::adaptation_budget_updates(input) {
                 ctx.app()
@@ -279,7 +309,9 @@ async fn handle_project_action(
             let id = input.project_id.clone();
             ctx.update(move |ui| {
                 let app = ui.global::<App>();
-                if app.get_project_id().as_str() == id && app.get_modal() == "workflow-settings" {
+                if app.get_project_id().as_str() == id
+                    && app.get_modal() == modal::WORKFLOW_SETTINGS
+                {
                     app.set_modal("".into());
                     app.set_status("已保存自动汉化设置".into());
                     app.set_error("".into());
@@ -305,7 +337,7 @@ async fn handle_project_action(
         }
         "patch-dialog" => show_dialog(
             ctx,
-            "patch",
+            modal::PATCH,
             "生成汉化补丁",
             "使用已保存的有效译文。未包含的文本保留原文，不调用翻译 API。".into(),
         ),
@@ -313,7 +345,7 @@ async fn handle_project_action(
             if !crate::workbench_ui::flush_editor(ctx, input).await? {
                 return Ok(true);
             }
-            let ids = if input.patch_scope == 1 {
+            let ids = if input.patch_scope == PATCH_SCOPE_SELECTED {
                 Some(
                     crate::workbench_ui::ensure_selection(ctx, &input.project_id)
                         .await?
@@ -324,14 +356,18 @@ async fn handle_project_action(
             };
             ctx.app()
                 .await
-                .generate_patch(&input.project_id, ids, input.patch_scope == 2)
+                .generate_patch(
+                    &input.project_id,
+                    ids,
+                    input.patch_scope == PATCH_SCOPE_REVIEWED,
+                )
                 .await?;
             refresh_patch(ctx, &input.project_id).await?;
-            ctx.update(|ui| ui.global::<App>().set_tab(2));
+            ctx.update(|ui| ui.global::<App>().set_tab(project_tab::PATCH));
         }
         "restore-dialog" => show_dialog(
             ctx,
-            "restore",
+            modal::RESTORE,
             "恢复原版",
             "请关闭游戏及汉化启动器。程序会核对原文件哈希，恢复原文件并移除工具添加的补丁文件。"
                 .into(),
@@ -346,7 +382,7 @@ async fn handle_project_action(
             Err(CoreError::ModifiedInstalledFiles(paths)) => {
                 show_dialog(
                     ctx,
-                    "install-overwrite",
+                    modal::INSTALL_OVERWRITE,
                     "已安装文件有改动",
                     format!(
                         "以下已安装文件在运行游戏后发生改动（如游戏保存配置）：\n{}\n\n原版备份（.bak）仍完好。是否覆盖这些改动并安装新补丁？（原版备份不会被覆盖）",
@@ -372,7 +408,7 @@ async fn handle_project_action(
                 crate::launch_ui::refresh(ctx, &input.project_id, false).await?;
                 show_dialog(
                     ctx,
-                    "restore-overwrite",
+                    modal::RESTORE_OVERWRITE,
                     "部分文件安装后有改动",
                     format!(
                         "以下文件在安装补丁后被游戏（如保存配置）或其他程序修改，未自动覆盖：\n{}\n\n确认后程序会先核对原版备份（.bak）哈希，校验通过后再用原版备份覆盖恢复（补丁新增文件将被移除）。是否放弃这些改动并恢复原版？",
@@ -397,7 +433,7 @@ async fn handle_project_action(
         }
         "directory-dialog" => show_dialog(
             ctx,
-            "directory",
+            modal::DIRECTORY,
             "更换数据保存位置",
             "可迁移现有数据，或只切换到另一份数据。切换完成后立即生效。".into(),
         ),
@@ -433,12 +469,8 @@ fn open_project_link(input: &UiInput) -> Result<(), CoreError> {
         "third-party" => "/blob/main/THIRD-PARTY-NOTICES.md",
         _ => return Err(CoreError::InvalidData("未知的项目链接。".into())),
     };
-    let url = format!("{}{path}", env!("CARGO_PKG_REPOSITORY"));
-    #[cfg(windows)]
-    let command = "explorer.exe";
-    #[cfg(not(windows))]
-    let command = "xdg-open";
-    std::process::Command::new(command).arg(url).spawn()?;
+    let url = format!("{REPOSITORY_URL}{path}");
+    std::process::Command::new(OPEN_COMMAND).arg(url).spawn()?;
 
     Ok(())
 }
@@ -474,7 +506,7 @@ async fn follow_project_reference(ctx: &Context, input: &UiInput) -> Result<(), 
         {
             app.set_project_scroll_y(-(position as f32) * app.get_project_row_height());
         }
-        app.set_tab(0);
+        app.set_tab(project_tab::RECOGNITION);
         app.invoke_action("project".into(), id.into());
     });
 
@@ -539,12 +571,12 @@ async fn select_project(ctx: &Context, input: &UiInput) -> Result<(), CoreError>
         }
         if matches!(
             a.get_modal().as_str(),
-            "install" | "adapt" | "project-adapter"
+            modal::INSTALL | modal::ADAPT | modal::PROJECT_ADAPTER
         ) {
             a.set_modal("".into());
         }
         a.set_project_id(requested.into());
-        a.set_page(0);
+        a.set_page(page::PROJECT);
         a.set_error("".into());
         a.set_log_text("".into());
         a.set_progress(0.0);
@@ -584,7 +616,10 @@ async fn switch_project_tab(ctx: &Context, input: &UiInput) -> Result<(), CoreEr
     if !crate::workbench_ui::flush_editor(ctx, input).await? {
         return Ok(());
     }
-    let tab = input.argument.parse::<i32>().unwrap_or(0);
+    let tab = input
+        .argument
+        .parse::<i32>()
+        .unwrap_or(project_tab::RECOGNITION);
     let id = input.project_id.clone();
     let editor_generation = ctx.edit_generation.clone();
     let editor_revision = input.editor_revision;
@@ -598,17 +633,17 @@ async fn switch_project_tab(ctx: &Context, input: &UiInput) -> Result<(), CoreEr
         }
         let a = ui.global::<App>();
         if a.get_project_id().as_str() == id {
-            a.set_page(0);
+            a.set_page(page::PROJECT);
             a.set_tab(tab);
-            if tab == 1 {
-                a.invoke_action("texts".into(), "current".into());
+            if tab == project_tab::WORKBENCH {
+                a.invoke_action("texts".into(), page_arg::CURRENT.into());
             }
         }
     });
-    if tab == 3 {
+    if tab == project_tab::SETTINGS {
         settings_ui::refresh(ctx, Some(&input.project_id)).await?;
     }
-    if tab == 2 {
+    if tab == project_tab::PATCH {
         refresh_patch(ctx, &input.project_id).await?;
     }
 
@@ -619,12 +654,12 @@ async fn navigate(ctx: &Context, input: &UiInput) -> Result<(), CoreError> {
     if !crate::workbench_ui::flush_editor(ctx, input).await? {
         return Ok(());
     }
-    let page = match input.argument.as_str() {
-        "apis" => 1,
-        "catalog" => 2,
-        "about" => 4,
-        "metrics" => 5,
-        _ => 3,
+    let target_page = match input.argument.as_str() {
+        "apis" => page::APIS,
+        "catalog" => page::CATALOG,
+        "about" => page::ABOUT,
+        "metrics" => page::METRICS,
+        _ => page::SETTINGS,
     };
     let editor_generation = ctx.edit_generation.clone();
     let editor_revision = input.editor_revision;
@@ -637,17 +672,17 @@ async fn navigate(ctx: &Context, input: &UiInput) -> Result<(), CoreError> {
             return;
         }
         let a = ui.global::<App>();
-        a.set_page(page);
+        a.set_page(target_page);
         a.set_activity("".into());
         a.set_error("".into());
-        if page == 2 {
-            a.invoke_action("catalog".into(), "0".into());
+        if target_page == page::CATALOG {
+            a.invoke_action("catalog".into(), page_arg::FIRST.into());
         }
-        if page == 5 {
-            a.invoke_action("metrics".into(), "refresh".into());
+        if target_page == page::METRICS {
+            a.invoke_action("metrics".into(), page_arg::REFRESH.into());
         }
     });
-    if matches!(page, 1 | 3) {
+    if matches!(target_page, page::APIS | page::SETTINGS) {
         settings_ui::refresh(ctx, None).await?;
     }
 
@@ -716,7 +751,7 @@ async fn remove_projects(ctx: &Context, input: &UiInput) -> Result<(), CoreError
         a.set_project_name("".into());
         a.set_project_files_path("".into());
         a.set_log_text("".into());
-        a.set_page(0);
+        a.set_page(page::PROJECT);
         a.set_texts(ModelRc::default());
     });
     refresh_projects(ctx, &input.project_query).await?;
@@ -729,14 +764,14 @@ async fn show_adaptation_dialog(ctx: &Context, input: &UiInput) -> Result<(), Co
     let host = ctx.app().await;
     let project = host.open_project(&input.project_id).await?;
     let goal = match project.next_recognition_goal() {
-        Some("recognize") => 0,
-        Some("repair") => 1,
-        Some("expandCoverage") => 2,
-        Some("workflow") => 3,
+        Some(GOAL_RECOGNIZE) => OBJECTIVE_RECOGNIZE,
+        Some(GOAL_REPAIR) => OBJECTIVE_REPAIR,
+        Some(GOAL_EXPAND_COVERAGE) => OBJECTIVE_EXPAND,
+        Some(GOAL_WORKFLOW) => OBJECTIVE_WORKFLOW,
         _ => match host.recognition_objective(&input.project_id).await? {
-            AdaptationObjective::Develop => 0,
-            AdaptationObjective::Repair => 1,
-            AdaptationObjective::ExpandCoverage => 2,
+            AdaptationObjective::Develop => OBJECTIVE_RECOGNIZE,
+            AdaptationObjective::Repair => OBJECTIVE_REPAIR,
+            AdaptationObjective::ExpandCoverage => OBJECTIVE_EXPAND,
         },
     };
     let issue = project
@@ -753,10 +788,10 @@ async fn show_adaptation_dialog(ctx: &Context, input: &UiInput) -> Result<(), Co
         }
         app.set_force_intelligent(false);
         app.set_repair_issue(match issue {
-            Some(RepairIssue::Crash) => 0,
-            Some(RepairIssue::Font) => 1,
-            Some(RepairIssue::PatchNotApplied) => 2,
-            _ => 3,
+            Some(RepairIssue::Crash) => REPAIR_ISSUE_CRASH,
+            Some(RepairIssue::Font) => REPAIR_ISSUE_FONT,
+            Some(RepairIssue::PatchNotApplied) => REPAIR_ISSUE_PATCH_NOT_APPLIED,
+            _ => REPAIR_ISSUE_OTHER,
         });
         load_workflow_preferences(&app, choice, has_custom);
         app.invoke_select_adaptation_objective(goal);
@@ -764,7 +799,7 @@ async fn show_adaptation_dialog(ctx: &Context, input: &UiInput) -> Result<(), Co
         app.set_modal_message(
             "优先复用已有适配器，必要时继续智能适配。也可选择修复或补全已有结果。".into(),
         );
-        app.set_modal("adapt".into());
+        app.set_modal(modal::ADAPT.into());
     });
 
     Ok(())
@@ -787,7 +822,7 @@ async fn show_workflow_settings(ctx: &Context, input: &UiInput) -> Result<(), Co
         app.set_error("".into());
         app.set_modal_title("自动汉化设置".into());
         app.set_modal_message("".into());
-        app.set_modal("workflow-settings".into());
+        app.set_modal(modal::WORKFLOW_SETTINGS.into());
     });
 
     Ok(())
@@ -839,7 +874,7 @@ async fn preview_cleanup(ctx: &Context, input: &UiInput) -> Result<(), CoreError
         a.set_modal_message(
             "按类别选择要清理的文件。项目记录、提取文本、译文、校对数据和安装记录始终保留。".into(),
         );
-        a.set_modal("cleanup".into());
+        a.set_modal(modal::CLEANUP.into());
     });
     let preview = ctx
         .app()
@@ -872,7 +907,7 @@ async fn preview_cleanup(ctx: &Context, input: &UiInput) -> Result<(), CoreError
         .collect::<Vec<_>>();
     ctx.update(move |ui| {
         let a = ui.global::<App>();
-        if a.get_project_id().as_str() != id || a.get_modal() != "cleanup" {
+        if a.get_project_id().as_str() != id || a.get_modal() != modal::CLEANUP {
             return;
         }
         let patch = preview
@@ -940,23 +975,23 @@ async fn record_runtime_feedback(ctx: &Context, input: &UiInput) -> Result<(), C
     refresh_patch(ctx, &input.project_id).await?;
     let message = feedback.message;
     ctx.update(move |ui| ui.global::<App>().set_status(message.into()));
-    if input.argument == "failed" && feedback.can_repair_current {
+    if input.argument == TEST_STATUS_FAILED && feedback.can_repair_current {
         settings_ui::refresh(ctx, Some(&input.project_id)).await?;
         let notes = input.runtime_note.clone();
         let id = input.project_id.clone();
         let context = ctx.clone();
         ctx.update(move |ui| {
-        let app = ui.global::<App>();
-        if app.get_project_id().as_str() != id || !context.is_requested_project(&id) {
-            return;
-        }
-        app.invoke_select_adaptation_objective(1);
-        app.set_instruction(notes.into());
-        app.set_error("".into());
-        app.set_modal_title("修复游戏显示问题".into());
-        app.set_modal_message("修复当前补丁对应的适配器。确认新版补丁效果正常后，会自动清理未被其他项目使用的历史版本。".into());
-        app.set_modal("adapt".into());
-    });
+            let app = ui.global::<App>();
+            if app.get_project_id().as_str() != id || !context.is_requested_project(&id) {
+                return;
+            }
+            app.invoke_select_adaptation_objective(OBJECTIVE_REPAIR);
+            app.set_instruction(notes.into());
+            app.set_error("".into());
+            app.set_modal_title("修复游戏显示问题".into());
+            app.set_modal_message("修复当前补丁对应的适配器。确认新版补丁效果正常后，会自动清理未被其他项目使用的历史版本。".into());
+            app.set_modal(modal::ADAPT.into());
+        });
     }
 
     Ok(())
@@ -971,14 +1006,14 @@ async fn open_workflow_repair(ctx: &Context, input: &UiInput) -> Result<(), Core
         if app.get_project_id().as_str() != id || !context.is_requested_project(&id) {
             return;
         }
-        app.invoke_select_adaptation_objective(1);
+        app.invoke_select_adaptation_objective(OBJECTIVE_REPAIR);
         app.set_error("".into());
         app.set_modal_title("修复试译显示问题".into());
         app.set_modal_message(
             "请描述在游戏中看到的现象（如乱码、字体异常或补丁未生效），确认后会以修复模式调整当前适配器。"
                 .into(),
         );
-        app.set_modal("adapt".into());
+        app.set_modal(modal::ADAPT.into());
     });
     Ok(())
 }
@@ -1007,7 +1042,7 @@ async fn show_patch_texts(ctx: &Context, input: &UiInput, opening: bool) -> Resu
         app.set_patch_text_loading(true);
         app.set_modal_message("".into());
         app.set_error("".into());
-        app.set_modal("patch-texts".into());
+        app.set_modal(modal::PATCH_TEXTS.into());
     });
     let host = ctx.app().await;
     let result = host
@@ -1023,7 +1058,7 @@ async fn show_patch_texts(ctx: &Context, input: &UiInput, opening: bool) -> Resu
         let a = ui.global::<App>();
         if generation.load(Ordering::SeqCst) != revision
             || a.get_project_id().as_str() != id
-            || a.get_modal().as_str() != "patch-texts"
+            || a.get_modal().as_str() != modal::PATCH_TEXTS
             || a.get_patch_text_offset() != offset as i32
         {
             return;
@@ -1055,12 +1090,12 @@ async fn switch_directory(ctx: &Context, input: &UiInput) -> Result<(), CoreErro
         a.set_activity("正在暂停任务并保存进度…".into());
     });
     let host = ctx.app().await;
-    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+    tokio::time::timeout(TASK_STOP_TIMEOUT, async {
         loop {
             if !host.cancel_all_tasks().await && ctx.active_actions.load(Ordering::Acquire) <= 1 {
                 break;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            tokio::time::sleep(TASK_STOP_POLL_INTERVAL).await;
         }
     })
     .await
@@ -1149,12 +1184,12 @@ async fn open_project_target(ctx: &Context, input: &UiInput) -> Result<(), CoreE
         "game" => Some(host.open_project(&input.project_id).await?.game_directory),
         "logs" => Some(
             root.unwrap_or_else(|| host.data_directory().into())
-                .join("logs"),
+                .join(LOGS_DIR),
         ),
-        "patch" => host.latest_patch(&input.project_id).await?.map(|p| {
-            p.patch_directory
-                .join(gamel10n_core::patching::PAYLOAD_DIRECTORY)
-        }),
+        "patch" => host
+            .latest_patch(&input.project_id)
+            .await?
+            .map(|p| p.patch_directory.join(PAYLOAD_DIRECTORY)),
         "data" => Some(host.data_directory().into()),
         _ => None,
     }
@@ -1262,7 +1297,7 @@ pub async fn refresh_project(ctx: &Context, id: &str, opening: bool) -> Result<(
             a.set_preview_translation_usage(usage.clone());
             if state
                 .as_ref()
-                .is_some_and(|task| task.operation == "translate")
+                .is_some_and(|task| task.operation == task_op::TRANSLATE)
             {
                 a.set_task_message(run.task.message.as_str().into());
                 a.set_progress(fraction);
@@ -1299,14 +1334,12 @@ pub async fn refresh_project(ctx: &Context, id: &str, opening: bool) -> Result<(
         {
             a.set_error(snapshot.warnings.join("\n").into());
         }
-        a.set_editor_editable(state.as_ref().is_none_or(|s| {
-            !s.running
-                || !matches!(
-                    s.operation.as_str(),
-                    "retranslate" | "extract" | "recognize" | "adapt" | "workflow"
-                )
-        }));
-        if opening || a.get_page() != 0 || a.get_tab() != 1 {
+        a.set_editor_editable(
+            state
+                .as_ref()
+                .is_none_or(|s| !s.running || !locks_editor(&s.operation)),
+        );
+        if opening || a.get_page() != page::PROJECT || a.get_tab() != project_tab::WORKBENCH {
             a.set_loading(false);
         }
         a.set_activity("".into());
@@ -1349,8 +1382,12 @@ pub async fn refresh_project(ctx: &Context, id: &str, opening: bool) -> Result<(
         a.set_can_resume_adaptation(snapshot.can_resume_adaptation);
         if let Some(session) = &workflow_session {
             let (stage, title) = match session.pause_kind {
-                WorkflowPauseKind::SelectTrial => ("select", "自动汉化 · 等待勾选试译文本"),
-                WorkflowPauseKind::ReviewTrial => ("review", "自动汉化 · 请进入游戏实机把关"),
+                WorkflowPauseKind::SelectTrial => {
+                    (WORKFLOW_STAGE_SELECT, "自动汉化 · 等待勾选试译文本")
+                }
+                WorkflowPauseKind::ReviewTrial => {
+                    (WORKFLOW_STAGE_REVIEW, "自动汉化 · 请进入游戏实机把关")
+                }
             };
             a.set_workflow_pause_stage(stage.into());
             a.set_workflow_pause_title(title.into());
@@ -1366,14 +1403,14 @@ pub async fn refresh_project(ctx: &Context, id: &str, opening: bool) -> Result<(
         let matches_operation = |operation: &str| {
             progress["operation"]
                 .as_str()
-                .map_or(operation == "adapt", |saved| saved == operation)
+                .map_or(operation == task_op::ADAPT, |saved| saved == operation)
         };
         let adaptation_usage = crate::token_ui::saved_analysis(
             if state
                 .as_ref()
-                .is_some_and(|state| state.running && state.operation == "adapt")
+                .is_some_and(|state| state.running && state.operation == task_op::ADAPT)
             {
-                if matches_operation("adapt") {
+                if matches_operation(task_op::ADAPT) {
                     &progress
                 } else {
                     &Value::Null
@@ -1385,7 +1422,7 @@ pub async fn refresh_project(ctx: &Context, id: &str, opening: bool) -> Result<(
         a.set_adaptation_usage(adaptation_usage.clone());
         if state
             .as_ref()
-            .is_some_and(|state| state.operation == "adapt")
+            .is_some_and(|state| state.operation == task_op::ADAPT)
         {
             a.set_task_usage(adaptation_usage);
         }
@@ -1404,10 +1441,15 @@ pub async fn refresh_project(ctx: &Context, id: &str, opening: bool) -> Result<(
             a.set_review_message("".into());
             a.set_review_usage(Default::default());
         }
-        if a.get_page() == 0 && a.get_tab() == 1 {
+        if a.get_page() == page::PROJECT && a.get_tab() == project_tab::WORKBENCH {
             a.invoke_action(
                 "texts".into(),
-                if opening { "current" } else { "refresh" }.into(),
+                if opening {
+                    page_arg::CURRENT
+                } else {
+                    page_arg::REFRESH
+                }
+                .into(),
             );
         }
     });
@@ -1500,8 +1542,8 @@ pub async fn refresh_patch(ctx: &Context, id: &str) -> Result<(), CoreError> {
                     format!(
                         "{}\n{}",
                         match r.status.as_str() {
-                            "passed" => "已记录效果正常",
-                            "failed" => "已记录存在问题",
+                            TEST_STATUS_PASSED => "已记录效果正常",
+                            TEST_STATUS_FAILED => "已记录存在问题",
                             _ => "尚未验证",
                         },
                         r.notes

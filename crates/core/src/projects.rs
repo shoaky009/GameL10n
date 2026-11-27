@@ -9,7 +9,32 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
-use crate::CoreError;
+use crate::{
+    CoreError,
+    settings::project_settings_keys::{INDEXED_API_SETTINGS, RECOGNITION_GOAL},
+    task_op,
+};
+
+pub const ENV_DATA_DIR: &str = "GAMEL10N_DATA";
+pub const ENV_LEGACY_DATA_DIR: &str = "AVG_TRANSLATOR_DATA";
+pub const ENV_LOCAL_APP_DATA: &str = "LOCALAPPDATA";
+pub const APP_DATA_DIR_NAME: &str = "GameL10n";
+pub const LEGACY_APP_DATA_DIR_NAME: &str = "AvgTranslator";
+pub const LOCATION_FILENAME: &str = "location.json";
+pub const APP_LOCK_FILENAME: &str = ".app.lock";
+
+pub(crate) const GAMES_DIR: &str = "games";
+pub(crate) const GAME_METADATA_FILENAME: &str = "game.json";
+pub(crate) const SHORT_ID_LEN: usize = 24;
+
+const PROJECT_SCHEMA_VERSION: u32 = 2;
+const PROJECT_INDEX_SCHEMA_VERSION: u32 = 1;
+const INDEX_FILE: &str = "games/index.json";
+const INDEX_PENDING_FILE: &str = "games/index-pending.json";
+const WIN32_ERROR_SHARING_VIOLATION: i32 = 32;
+const WIN32_ERROR_LOCK_VIOLATION: i32 = 33;
+#[cfg(windows)]
+const WIN32_FILE_SHARE_READ: u32 = 1;
 
 /// Retained extraction whose candidate adapter still needs coverage confirmation.
 pub fn extraction_coverage_pending(extra: &BTreeMap<String, Value>) -> bool {
@@ -41,9 +66,9 @@ impl GameProject {
             .get("taskSummary")
             .is_some_and(recognition_completed)
         {
-            return Some("repair");
+            return Some(task_op::REPAIR);
         }
-        self.settings["recognitionGoal"].as_str()
+        self.settings[RECOGNITION_GOAL].as_str()
     }
 
     pub(crate) fn mark_updated(&mut self) {
@@ -57,8 +82,8 @@ impl GameProject {
 pub(crate) fn recognition_completed(summary: &Value) -> bool {
     summary["succeeded"].as_bool() == Some(true)
         && match summary["operation"].as_str() {
-            Some("recognize") => true,
-            Some("adapt") => matches!(
+            Some(task_op::RECOGNIZE) => true,
+            Some(task_op::ADAPT) => matches!(
                 summary["adaptationStatus"].as_str(),
                 Some("Activated" | "Reused")
             ),
@@ -92,12 +117,6 @@ impl ProjectSummary {
             .and_then(Value::as_u64)
     }
 }
-
-const INDEXED_API_SETTINGS: [&str; 3] = [
-    "analysisProfileId",
-    "translationProfileIds",
-    "translationProfileId",
-];
 
 impl From<&GameProject> for ProjectSummary {
     fn from(project: &GameProject) -> Self {
@@ -167,10 +186,13 @@ impl ProjectStore {
                 #[cfg(windows)]
                 {
                     use std::os::windows::fs::OpenOptionsExt;
-                    options.share_mode(1); // FILE_SHARE_READ: compatible with the existing app's writer exclusion.
+                    options.share_mode(WIN32_FILE_SHARE_READ); // FILE_SHARE_READ: compatible with the existing app's writer exclusion.
                 }
-                let file = options.open(root.join(".app.lock")).map_err(|error| {
-                    if matches!(error.raw_os_error(), Some(32 | 33)) {
+                let file = options.open(root.join(APP_LOCK_FILENAME)).map_err(|error| {
+                    if matches!(
+                        error.raw_os_error(),
+                        Some(WIN32_ERROR_SHARING_VIOLATION | WIN32_ERROR_LOCK_VIOLATION)
+                    ) {
                         CoreError::InvalidData(
                             "数据目录正被其他程序写入，请先关闭另一个程序。".into(),
                         )
@@ -182,7 +204,7 @@ impl ProjectStore {
                     CoreError::InvalidData(format!("无法取得数据目录写入锁：{error}"))
                 })?;
                 let index = load_index(&root)?;
-                if root.join("games/index-pending.json").exists() {
+                if root.join(INDEX_PENDING_FILE).exists() {
                     persist_index(&root, &index, &pending_index_ids(&root)?)?;
                 }
                 Ok((file, index))
@@ -196,7 +218,7 @@ impl ProjectStore {
 
     pub fn directory(&self, id: &str) -> Result<PathBuf, CoreError> {
         validate_id(id)?;
-        Ok(self.root.join("games").join(id))
+        Ok(self.root.join(GAMES_DIR).join(id))
     }
 
     pub async fn list(&self, query: &str) -> Vec<ProjectSummary> {
@@ -249,7 +271,7 @@ impl ProjectStore {
         if !project.is_removed {
             next.projects.push(ProjectSummary::from(project));
         }
-        let path = self.directory(&project.id)?.join("game.json");
+        let path = self.directory(&project.id)?.join(GAME_METADATA_FILENAME);
         let root = self.root.clone();
         let saved = project.clone();
         tokio::task::spawn_blocking(move || -> Result<(), CoreError> {
@@ -279,11 +301,11 @@ impl ProjectStore {
                     "项目目录与游戏目录重叠，不能删除；可仅移除记录。".into(),
                 ));
             }
-            crate::application::resolve_relative(&self.root, &format!("games/{id}"))?;
+            crate::application::resolve_relative(&self.root, &format!("{GAMES_DIR}/{id}"))?;
         }
         let root = self.root.clone();
         let pending_id = id.to_owned();
-        let metadata_path = directory.join("game.json");
+        let metadata_path = directory.join(GAME_METADATA_FILENAME);
         tokio::task::spawn_blocking(move || -> Result<(), CoreError> {
             if delete_data {
                 mark_index_pending(&root, &pending_id)?;
@@ -316,7 +338,7 @@ impl ProjectStore {
     }
 
     pub async fn get(&self, id: &str) -> Result<GameProject, CoreError> {
-        let path = self.directory(id)?.join("game.json");
+        let path = self.directory(id)?.join(GAME_METADATA_FILENAME);
         match tokio::task::spawn_blocking(move || read_json::<GameProject>(&path)).await? {
             Ok(project) => {
                 validate_project(&project, id)?;
@@ -335,7 +357,7 @@ impl ProjectStore {
                     .filter_map(|key| extra.remove(key).map(|value| (key.into(), value)))
                     .collect();
                 Ok(GameProject {
-                    schema_version: 2,
+                    schema_version: PROJECT_SCHEMA_VERSION,
                     id: summary.id.clone(),
                     name: summary.name.clone(),
                     game_directory: summary.game_directory.clone(),
@@ -367,14 +389,14 @@ impl ProjectStore {
             return self.get(&id).await;
         }
         let id = project_id(&directory)?;
-        let game_path = self.directory(&id)?.join("game.json");
+        let game_path = self.directory(&id)?.join(GAME_METADATA_FILENAME);
         let mut project = if game_path.exists() {
             let existing: GameProject = read_json(&game_path)?;
             validate_project(&existing, &id)?;
             existing
         } else {
             GameProject {
-                schema_version: 2,
+                schema_version: PROJECT_SCHEMA_VERSION,
                 id,
                 name: directory
                     .file_name()
@@ -395,11 +417,11 @@ impl ProjectStore {
 }
 
 fn load_index(root: &Path) -> Result<ProjectIndex, CoreError> {
-    let path = root.join("games/index.json");
+    let path = root.join(INDEX_FILE);
     let pending = pending_index_ids(root)?;
     let mut index = if path.exists() {
         let index: ProjectIndex = read_json(&path)?;
-        if index.schema_version != 1 {
+        if index.schema_version != PROJECT_INDEX_SCHEMA_VERSION {
             return Err(CoreError::InvalidData("不支持的项目列表版本。".into()));
         }
         for project in &index.projects {
@@ -408,7 +430,7 @@ fn load_index(root: &Path) -> Result<ProjectIndex, CoreError> {
         index
     } else {
         let mut projects = Vec::new();
-        let games = root.join("games");
+        let games = root.join(GAMES_DIR);
         if games.is_dir() {
             for entry in fs::read_dir(games)? {
                 let entry = entry?;
@@ -416,7 +438,7 @@ fn load_index(root: &Path) -> Result<ProjectIndex, CoreError> {
                 if validate_id(&name).is_err() || !entry.file_type()?.is_dir() {
                     continue;
                 }
-                let path = entry.path().join("game.json");
+                let path = entry.path().join(GAME_METADATA_FILENAME);
                 if !path.is_file() {
                     continue;
                 }
@@ -428,7 +450,7 @@ fn load_index(root: &Path) -> Result<ProjectIndex, CoreError> {
             }
         }
         ProjectIndex {
-            schema_version: 1,
+            schema_version: PROJECT_INDEX_SCHEMA_VERSION,
             projects,
             extra: BTreeMap::new(),
         }
@@ -436,7 +458,7 @@ fn load_index(root: &Path) -> Result<ProjectIndex, CoreError> {
     // A valid index needs only the few projects whose last commit was interrupted.
     for id in pending {
         index.projects.retain(|project| project.id != id);
-        let path = root.join("games").join(&id).join("game.json");
+        let path = root.join(GAMES_DIR).join(&id).join(GAME_METADATA_FILENAME);
         if path.exists() {
             let project: GameProject = read_json(&path)?;
             validate_project(&project, &id)?;
@@ -449,7 +471,7 @@ fn load_index(root: &Path) -> Result<ProjectIndex, CoreError> {
 }
 
 fn pending_index_ids(root: &Path) -> Result<Vec<String>, CoreError> {
-    let path = root.join("games/index-pending.json");
+    let path = root.join(INDEX_PENDING_FILE);
     let ids: Vec<String> = if path.exists() {
         read_json(&path)?
     } else {
@@ -466,7 +488,7 @@ fn mark_index_pending(root: &Path, id: &str) -> Result<(), CoreError> {
     if !ids.iter().any(|pending| pending == id) {
         ids.push(id.into());
     }
-    write_json(&root.join("games/index-pending.json"), &ids)?;
+    write_json(&root.join(INDEX_PENDING_FILE), &ids)?;
     Ok(())
 }
 
@@ -475,14 +497,14 @@ fn persist_index(
     index: &ProjectIndex,
     committed_ids: &[String],
 ) -> Result<(), CoreError> {
-    write_json(&root.join("games/index.json"), index)?;
+    write_json(&root.join(INDEX_FILE), index)?;
     let mut pending = pending_index_ids(root)?;
     pending.retain(|id| !committed_ids.contains(id));
     if !pending.is_empty() {
-        write_json(&root.join("games/index-pending.json"), &pending)?;
+        write_json(&root.join(INDEX_PENDING_FILE), &pending)?;
         return Ok(());
     }
-    match fs::remove_file(root.join("games/index-pending.json")) {
+    match fs::remove_file(root.join(INDEX_PENDING_FILE)) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error.into()),
@@ -508,7 +530,10 @@ pub(crate) fn paths_overlap(left: &Path, right: &Path) -> bool {
 }
 
 fn validate_project(project: &GameProject, id: &str) -> Result<(), CoreError> {
-    if project.schema_version != 2 || project.id != id || !project.game_directory.is_absolute() {
+    if project.schema_version != PROJECT_SCHEMA_VERSION
+        || project.id != id
+        || !project.game_directory.is_absolute()
+    {
         return Err(CoreError::InvalidData(format!(
             "项目记录不完整或版本不支持：{id}"
         )));
@@ -517,7 +542,7 @@ fn validate_project(project: &GameProject, id: &str) -> Result<(), CoreError> {
 }
 
 pub(crate) fn validate_id(id: &str) -> Result<(), CoreError> {
-    if id.len() != 24 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if id.len() != SHORT_ID_LEN || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(CoreError::InvalidData("无效的游戏项目 ID。".into()));
     }
     Ok(())
@@ -542,7 +567,7 @@ pub fn project_id(directory: &Path) -> Result<String, CoreError> {
             }
         })
         .collect();
-    Ok(hash_text(&normalized)[..24].to_owned())
+    Ok(hash_text(&normalized)[..SHORT_ID_LEN].to_owned())
 }
 
 fn same_path(left: &Path, right: &Path) -> bool {
@@ -557,24 +582,24 @@ fn same_path(left: &Path, right: &Path) -> bool {
 /// Environment overrides remain compatible with the existing desktop application.
 pub fn default_data_directory() -> PathBuf {
     if let Some(path) =
-        std::env::var_os("GAMEL10N_DATA").or_else(|| std::env::var_os("AVG_TRANSLATOR_DATA"))
+        std::env::var_os(ENV_DATA_DIR).or_else(|| std::env::var_os(ENV_LEGACY_DATA_DIR))
     {
         return path.into();
     }
-    let local = std::env::var_os("LOCALAPPDATA")
+    let local = std::env::var_os(ENV_LOCAL_APP_DATA)
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
-    let current = local.join("GameL10n");
-    let old = local.join("AvgTranslator");
-    let base = if current.join("location.json").is_file()
-        || current.join("games").is_dir()
+    let current = local.join(APP_DATA_DIR_NAME);
+    let old = local.join(LEGACY_APP_DATA_DIR_NAME);
+    let base = if current.join(LOCATION_FILENAME).is_file()
+        || current.join(GAMES_DIR).is_dir()
         || !old.is_dir()
     {
         current
     } else {
         old
     };
-    if let Ok(location) = read_json::<Value>(&base.join("location.json"))
+    if let Ok(location) = read_json::<Value>(&base.join(LOCATION_FILENAME))
         && let Some(path) = location.get("dataDirectory").and_then(Value::as_str)
     {
         return PathBuf::from(path);

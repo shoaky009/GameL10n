@@ -10,7 +10,7 @@ use std::{collections::BTreeSet, ffi::OsString, fs, io::Write, path::Path};
 
 const VERSION: &str = "2.11.0";
 const USAGE: &str = "按 api 和 example 接入组件，有 probeCall 时可直接运行小样。work/ 下的探针用于分析，src/tools/ 下的组件供正式适配器复用。接入后仍需当前资源验收和游戏显示验证";
-const QLIE_LAUNCHER: &str = "qlie-japanese-font-launcher";
+use crate::adaptation_assets::QLIE_LAUNCHER_COMPONENT as QLIE_LAUNCHER;
 const QLIE_LAUNCHER_BINARY: &str = "tools/QlieLauncher.exe";
 pub(super) const LAUNCHER_SOURCE_DIRECTORY: &str = "tools/launcher-source";
 const QLIE_LAUNCHER_SOURCES: &[(&str, &[u8])] = &[
@@ -221,16 +221,18 @@ pub(super) async fn check_sample(
     fs::write(&entry, source)?;
     let driver = "import json,runpy,sys;sys.dont_write_bytecode=True;sys.path.insert(0,sys.argv[1]);component=runpy.run_path(sys.argv[2]);print(json.dumps(component['main'](json.load(sys.stdin)),ensure_ascii=True))";
     crate::ToolProcess::new(service.tools.python())
-        .with_arguments([
-            OsString::from("-I"),
-            OsString::from("-X"),
-            OsString::from("utf8"),
-            OsString::from("-c"),
-            OsString::from(driver),
-            library.as_os_str().to_owned(),
-            entry.into_os_string(),
-        ])
-        .with_timeout(std::time::Duration::from_secs(20))
+        .with_arguments(
+            crate::python::PYTHON_BASE_ARGS
+                .into_iter()
+                .map(OsString::from)
+                .chain([
+                    OsString::from("-c"),
+                    OsString::from(driver),
+                    library.as_os_str().to_owned(),
+                    entry.into_os_string(),
+                ]),
+        )
+        .with_timeout(super::COMPONENT_PROBE_TIMEOUT)
         .with_maximum_output_bytes(64 * 1024)
         .execute(request, cancellation)
         .await
@@ -330,11 +332,14 @@ fn page(id: &str, path: &str, content: &str, args: &Value) -> Result<Value, Engi
         })
     };
     let offset = integer("offset", 0)?;
-    let length = integer("length", 12000)?;
-    if !(0..=i64::from(i32::MAX)).contains(&offset) || !(1..=24000).contains(&length) {
-        return Err(EngineError::Protocol(
-            "offset 必须非负，length 必须为 1 到 24000。".into(),
-        ));
+    let length = integer("length", super::DEFAULT_READBACK_CHARS)?;
+    if !(0..=i64::from(i32::MAX)).contains(&offset)
+        || !(1..=super::MAX_READBACK_CHARS).contains(&length)
+    {
+        return Err(EngineError::Protocol(format!(
+            "offset 必须非负，length 必须为 1 到 {}。",
+            super::MAX_READBACK_CHARS
+        )));
     }
     let units: Vec<_> = content.encode_utf16().collect();
     let start = (offset as usize).min(units.len());

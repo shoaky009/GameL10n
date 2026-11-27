@@ -14,10 +14,29 @@ use gamel10n_translation::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{Application, CoreError};
+use crate::{Application, CoreError, task_op};
 
 pub const SOFTWARE_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const BUILD_GIT_HASH: &str = env!("GAMEL10N_BUILD_GIT_HASH");
+
+pub(crate) const MODE_NEW: &str = "new";
+pub(crate) const MODE_CONTINUED: &str = "continued";
+pub(crate) const MODE_REUSED: &str = "reused";
+
+pub const STATUS_RUNNING: &str = "running";
+pub const STATUS_COMPLETED: &str = "completed";
+pub const STATUS_FAILED: &str = "failed";
+pub const STATUS_CANCELLED: &str = "cancelled";
+pub const STATUS_PAUSED: &str = "paused";
+pub const STATUS_INTERRUPTED: &str = "interrupted";
+pub const STATUS_UNSUPPORTED: &str = "unsupported";
+
+const METRICS_DIR: &str = "metrics";
+const RUNS_FILE_PREFIX: &str = "runs-";
+const RUNS_FILE_SUFFIX: &str = ".jsonl";
+const CHECKPOINT_INTERVAL_SECS: u64 = 60;
+const RECORD_ID_HEX_LEN: usize = 32;
+const SHORT_GIT_HASH_LEN: usize = 8;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -50,7 +69,10 @@ impl ConsumptionRecord {
         format!(
             "{} · {}",
             self.software_version,
-            self.build_git_hash.chars().take(8).collect::<String>()
+            self.build_git_hash
+                .chars()
+                .take(SHORT_GIT_HASH_LEN)
+                .collect::<String>()
         )
     }
 
@@ -79,38 +101,38 @@ impl ConsumptionRecord {
 
 pub fn task_label(task: &str) -> &str {
     match task {
-        "translate" => "文本翻译",
-        "preview-translate" => "试译",
-        "retranslate" => "重新翻译",
-        "candidate" => "候选译文",
-        "terminology" => "术语提取",
-        "recognize" => "常规识别",
-        "adapt" => "智能适配",
-        "repair" => "修复适配",
-        "expand" => "扩展覆盖",
-        "review" => "经验总结",
+        task_op::TRANSLATE => "文本翻译",
+        task_op::PREVIEW_TRANSLATE => "试译",
+        task_op::RETRANSLATE => "重新翻译",
+        task_op::CANDIDATE => "候选译文",
+        task_op::TERMINOLOGY => "术语提取",
+        task_op::RECOGNIZE => "常规识别",
+        task_op::ADAPT => "智能适配",
+        task_op::REPAIR => "修复适配",
+        task_op::EXPAND => "扩展覆盖",
+        task_op::REVIEW => "经验总结",
         _ => task,
     }
 }
 
 pub fn mode_label(mode: &str) -> &str {
     match mode {
-        "new" => "新运行",
-        "continued" => "续接",
-        "reused" => "复用结果",
+        MODE_NEW => "新运行",
+        MODE_CONTINUED => "续接",
+        MODE_REUSED => "复用结果",
         _ => mode,
     }
 }
 
 pub fn status_label(status: &str) -> &str {
     match status {
-        "running" => "运行中",
-        "completed" => "完成",
-        "failed" => "失败",
-        "cancelled" => "取消",
-        "paused" => "等待继续",
-        "interrupted" => "中断",
-        "unsupported" => "不支持",
+        STATUS_RUNNING => "运行中",
+        STATUS_COMPLETED => "完成",
+        STATUS_FAILED => "失败",
+        STATUS_CANCELLED => "取消",
+        STATUS_PAUSED => "等待继续",
+        STATUS_INTERRUPTED => "中断",
+        STATUS_UNSUPPORTED => "不支持",
         _ => status,
     }
 }
@@ -229,7 +251,7 @@ pub(crate) struct MetricsState {
 
 impl MetricsState {
     fn runs(&mut self, operation: &str) -> &mut HashMap<String, ActiveRun> {
-        if operation == "review" {
+        if operation == task_op::REVIEW {
             &mut self.reviews
         } else {
             &mut self.active
@@ -244,9 +266,12 @@ pub struct ConsumptionHistory {
 }
 
 fn append(root: &Path, record: &ConsumptionRecord) -> Result<(), CoreError> {
-    let directory = root.join("metrics");
+    let directory = root.join(METRICS_DIR);
     fs::create_dir_all(&directory)?;
-    let path = directory.join(format!("runs-{}.jsonl", record.started_at.format("%Y%m")));
+    let path = directory.join(format!(
+        "{RUNS_FILE_PREFIX}{}{RUNS_FILE_SUFFIX}",
+        record.started_at.format("%Y%m")
+    ));
     let mut bytes = vec![b'\n'];
     serde_json::to_writer(&mut bytes, record)
         .map_err(|error| CoreError::InvalidData(error.to_string()))?;
@@ -272,12 +297,12 @@ fn new_record_id(project_id: &str, task: &str, started_at: DateTime<Utc>) -> Str
         "{project_id}:{task}:{}:{}",
         started_at.to_rfc3339(),
         std::process::id()
-    ))[..32]
+    ))[..RECORD_ID_HEX_LEN]
         .into()
 }
 
 fn read_history(root: &Path) -> Result<ConsumptionHistory, CoreError> {
-    let directory = root.join("metrics");
+    let directory = root.join(METRICS_DIR);
     if !directory.is_dir() {
         return Ok(ConsumptionHistory::default());
     }
@@ -288,7 +313,9 @@ fn read_history(root: &Path) -> Result<ConsumptionHistory, CoreError> {
     for entry in files {
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if !name.starts_with("runs-") || !name.ends_with(".jsonl") || !entry.file_type()?.is_file()
+        if !name.starts_with(RUNS_FILE_PREFIX)
+            || !name.ends_with(RUNS_FILE_SUFFIX)
+            || !entry.file_type()?.is_file()
         {
             continue;
         }
@@ -320,7 +347,7 @@ fn read_history(root: &Path) -> Result<ConsumptionHistory, CoreError> {
 
 impl Application {
     pub(crate) async fn start_metrics(&self, id: &str, task: &str) {
-        if !matches!(task, "recognize" | "adapt" | "review") {
+        if !matches!(task, task_op::RECOGNIZE | task_op::ADAPT | task_op::REVIEW) {
             return;
         }
         let Ok(project) = self.store.get(id).await else {
@@ -337,8 +364,8 @@ impl Application {
             profile_name: None,
             reasoning_effort: None,
             task: task.into(),
-            mode: "new".into(),
-            status: "running".into(),
+            mode: MODE_NEW.into(),
+            status: STATUS_RUNNING.into(),
             started_at: now,
             ended_at: None,
             elapsed_ms: 0,
@@ -397,7 +424,7 @@ impl Application {
                 return;
             };
             // Save enough progress for crash recovery without writing on every task update.
-            if run.last_saved.elapsed().as_secs() < 60 {
+            if run.last_saved.elapsed().as_secs() < CHECKPOINT_INTERVAL_SECS {
                 return;
             }
             run.last_saved = Instant::now();
@@ -421,9 +448,9 @@ impl Application {
         let mut record = run.snapshot();
         record.ended_at = Some(Utc::now());
         record.status = match succeeded {
-            None => "cancelled",
-            Some(false) => "failed",
-            Some(true) if record.status == "running" => "completed",
+            None => STATUS_CANCELLED,
+            Some(false) => STATUS_FAILED,
+            Some(true) if record.status == STATUS_RUNNING => STATUS_COMPLETED,
             Some(true) => &record.status,
         }
         .into();
@@ -446,7 +473,10 @@ impl Application {
     ) {
         if !matches!(
             task,
-            "translate" | "preview-translate" | "retranslate" | "candidate"
+            task_op::TRANSLATE
+                | task_op::PREVIEW_TRANSLATE
+                | task_op::RETRANSLATE
+                | task_op::CANDIDATE
         ) {
             return;
         }
@@ -478,10 +508,10 @@ impl Application {
             let Some(run) = metrics.translations.get_mut(id) else {
                 return;
             };
-            if run.last_saved.elapsed().as_secs() < 60 {
+            if run.last_saved.elapsed().as_secs() < CHECKPOINT_INTERVAL_SECS {
                 return;
             }
-            let snapshots = run.snapshots(None, "running");
+            let snapshots = run.snapshots(None, STATUS_RUNNING);
             if snapshots.is_empty() {
                 return;
             }
@@ -504,9 +534,9 @@ impl Application {
             return;
         };
         let status = match succeeded {
-            None => "cancelled",
-            Some(false) => "failed",
-            Some(true) => "completed",
+            None => STATUS_CANCELLED,
+            Some(false) => STATUS_FAILED,
+            Some(true) => STATUS_COMPLETED,
         };
         let records = run.snapshots(Some(Utc::now()), status);
         if records.is_empty() {
@@ -552,7 +582,7 @@ impl Application {
                 .then(|| provider.analysis_reasoning_effort().map(str::to_owned))
                 .flatten(),
             task: task.into(),
-            mode: "new".into(),
+            mode: MODE_NEW.into(),
             status: status.into(),
             started_at,
             ended_at: Some(Utc::now()),
@@ -583,7 +613,7 @@ impl Application {
                     metrics
                         .translations
                         .values()
-                        .flat_map(|run| run.snapshots(None, "running")),
+                        .flat_map(|run| run.snapshots(None, STATUS_RUNNING)),
                 )
                 .collect()
         };
@@ -595,8 +625,8 @@ impl Application {
             .records
             .retain(|record| !active_ids.contains(record.id.as_str()));
         for record in &mut history.records {
-            if record.status == "running" {
-                record.status = "interrupted".into();
+            if record.status == STATUS_RUNNING {
+                record.status = STATUS_INTERRUPTED.into();
             }
         }
         history.records.extend(active_records);
@@ -629,17 +659,20 @@ impl ConsumptionFilter {
             "" => true,
             "translation" => matches!(
                 record.task.as_str(),
-                "translate" | "preview-translate" | "retranslate" | "candidate"
+                task_op::TRANSLATE
+                    | task_op::PREVIEW_TRANSLATE
+                    | task_op::RETRANSLATE
+                    | task_op::CANDIDATE
             ),
             "adaptation" => matches!(
                 record.task.as_str(),
-                "adapt" | "repair" | "expand" | "recognize"
+                task_op::ADAPT | task_op::REPAIR | task_op::EXPAND | task_op::RECOGNIZE
             ),
             exact => exact == record.task,
         };
         let api_matches = !self.only_with_api
             || has_recorded_api_usage(&record.api)
-            || record.status == "running";
+            || record.status == STATUS_RUNNING;
         self.from.is_none_or(|from| date >= from)
             && self.through.is_none_or(|through| date <= through)
             && (self.version.is_empty() || self.version == record.version_key())

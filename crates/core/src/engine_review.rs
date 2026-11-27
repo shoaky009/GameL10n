@@ -1,11 +1,20 @@
 use crate::application::{TaskGuard, TaskKind};
-use gamel10n_engines::{EngineProgress, review::EngineReviewResult};
+use gamel10n_engines::{
+    EngineProgress,
+    review::{ADAPTATION_SESSION_PATH, EngineReviewResult},
+};
 use gamel10n_translation::files::write_json;
 use std::sync::Arc;
 
 use crate::{
-    AppEvent, Application, CancellationToken, CoreError, catalog::EngineCatalog, logs::LogSource,
+    AppEvent, Application, CancellationToken, CoreError,
+    catalog::{ENGINE_KNOWLEDGE_DIR, EngineCatalog},
+    logs::LogSource,
+    metrics::MODE_REUSED,
+    task_op,
 };
+
+pub const ENGINE_REVIEW_RESULT_FILE: &str = "engine-review-result.json";
 
 #[derive(Clone, Debug, Default)]
 pub struct ReviewState {
@@ -81,7 +90,7 @@ impl Application {
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             },
         );
-        self.start_metrics(id, "review").await;
+        self.start_metrics(id, task_op::REVIEW).await;
         self.publish_review(id, &state);
         drop(_lifecycle);
         self.log_task_message(id, &state.message).await;
@@ -96,7 +105,7 @@ impl Application {
     }
 
     async fn review_progress(&self, id: &str, progress: EngineProgress) {
-        self.checkpoint_metrics(id, "review").await;
+        self.checkpoint_metrics(id, task_op::REVIEW).await;
         let log = {
             let mut reviews = self.review_tasks();
             let Some(task) = reviews.get_mut(id) else {
@@ -139,7 +148,7 @@ impl Application {
             Err(_) if cancelled => "经验总结已停止。".into(),
             Err(error) => error.clone(),
         };
-        self.finish_metrics(id, "review", succeeded).await;
+        self.finish_metrics(id, task_op::REVIEW, succeeded).await;
         if let Some(task) = self.review_tasks().get_mut(id) {
             if let Ok(result) = result {
                 task.state.progress = (!result.reused).then(|| EngineProgress {
@@ -161,7 +170,7 @@ impl Application {
 
     pub async fn review_engine(&self, id: &str) -> Result<EngineReviewResult, CoreError> {
         let directory = self.project_directory(id)?;
-        if !directory.join("adaptation/current/session.json").is_file() {
+        if !directory.join(ADAPTATION_SESSION_PATH).is_file() {
             return Err(CoreError::InvalidData(
                 "此项目没有可用于总结的适配记录，或相关工作文件已清理。已有经验总结仍可查看。"
                     .into(),
@@ -169,10 +178,10 @@ impl Application {
         }
         let (provider, limits) = self.analysis_provider(id).await?;
         let cancellation = self.begin_review(id).await?;
-        self.metrics_provider(id, "review", &provider).await;
+        self.metrics_provider(id, task_op::REVIEW, &provider).await;
         let result = async {
             let service = self.engine_service()?;
-            let knowledge = self.data_directory().join("extensions/engine-knowledge");
+            let knowledge = self.data_directory().join(ENGINE_KNOWLEDGE_DIR);
             let api = self.task_api_summary(id).await?;
             self.log_task_message(id, api.lines().next().unwrap_or("分析 API 已选择。"))
                 .await;
@@ -200,10 +209,10 @@ impl Application {
             }
             let result = result?;
             if result.reused {
-                self.metrics_details(id, "review", None, Some("reused"), None)
+                self.metrics_details(id, task_op::REVIEW, None, Some(MODE_REUSED), None)
                     .await;
             }
-            write_json(&directory.join("engine-review-result.json"), &result)?;
+            write_json(&directory.join(ENGINE_REVIEW_RESULT_FILE), &result)?;
             if let Some(entry) = &result.entry_id {
                 EngineCatalog::open(self.data_directory())?.register_knowledge(entry)?;
                 let _ = self.events.send(AppEvent::EngineLibraryChanged);

@@ -17,9 +17,9 @@ impl<'a> ProviderBatch<'a> {
                         issue.unit_id.as_deref() == Some(&unit.id)
                             && !matches!(
                                 issue.code.as_str(),
-                                "provider-refusal"
-                                    | "provider-request-failed"
-                                    | "request-outcome-unknown"
+                                ISSUE_PROVIDER_REFUSAL
+                                    | ISSUE_PROVIDER_REQUEST_FAILED
+                                    | ISSUE_REQUEST_OUTCOME_UNKNOWN
                             )
                             && issue
                                 .memory_key
@@ -61,7 +61,6 @@ impl<F: FnMut(TranslationProgress)> TranslationRun<'_, F> {
         edit_store: &EditStore,
         mut state: CommitState,
     ) -> Result<CommitState, ExecutionError> {
-        const MAX_RETRIES: usize = 5;
         let batch_size = self.providers[0]
             .maximum_batch_size()
             .min(self.options.batch_size);
@@ -162,8 +161,8 @@ impl<F: FnMut(TranslationProgress)> TranslationRun<'_, F> {
                     let legacy_refusal = self
                         .engine
                         .directory
-                        .join("responses")
-                        .join(format!("{key}.refusal.json"));
+                        .join(LEGACY_RESPONSES_DIR)
+                        .join(format!("{key}{LEGACY_REFUSAL_SUFFIX}"));
                     if self.journal.refusals.contains_key(&key) || legacy_refusal.is_file() {
                         pending_batch = Some(current);
                         index += 1;
@@ -217,7 +216,7 @@ impl<F: FnMut(TranslationProgress)> TranslationRun<'_, F> {
                         break;
                     }
                     self.emit(
-                        "翻译",
+                        STAGE_TRANSLATING,
                         format!(
                             "正在使用 {}（{}/{}）翻译 {} 条新文本。",
                             provider.display_name(),
@@ -303,7 +302,7 @@ impl<F: FnMut(TranslationProgress)> TranslationRun<'_, F> {
                     );
                     match self.record_response(scope, task.intent, response) {
                         Ok(key) => {
-                            self.emit("翻译", message);
+                            self.emit(STAGE_TRANSLATING, message);
                             match self
                                 .commit_batch(
                                     task.groups,
@@ -380,17 +379,17 @@ impl<F: FnMut(TranslationProgress)> TranslationRun<'_, F> {
                                 next_failure,
                             ));
                         }
-                    } else if matches!(error.status_code, Some(400..=499) if !matches!(error.status_code, Some(408 | 409 | 425 | 429)))
+                    } else if error.is_non_retryable_client_error()
                         || matches!(
                             error.diagnostic.code.as_str(),
-                            "configuration" | "request-size-limit"
+                            diagnostic_codes::CONFIGURATION | diagnostic_codes::REQUEST_SIZE_LIMIT
                         )
                     {
                         self.journal.pending.remove(key);
                         let _ = self.save_journal();
                         stopping_error.get_or_insert(ExecutionError::Invalid(reason));
                         run_cancel.cancel();
-                    } else if task.retries == MAX_RETRIES {
+                    } else if task.retries == MAX_BATCH_RETRIES {
                         if !error.outcome_unknown {
                             self.journal.pending.remove(key);
                         }
@@ -411,18 +410,19 @@ impl<F: FnMut(TranslationProgress)> TranslationRun<'_, F> {
                         task.retries += 1;
                         let immediate = error.is_response_format_error();
                         let (stage, timing) = if immediate {
-                            ("重试翻译", "立即")
+                            ("重试翻译", "立即".to_owned())
                         } else {
-                            ("等待重试", "10 秒后")
+                            ("等待重试", format!("{RETRY_DELAY_SECS} 秒后"))
                         };
                         self.emit(
                             stage,
                             format!(
-                                "API 请求失败：{reason}。{timing}进行第 {} / {MAX_RETRIES} 次重试。",
+                                "API 请求失败：{reason}。{timing}进行第 {} / {MAX_BATCH_RETRIES} 次重试。",
                                 task.retries
                             ),
                         );
-                        let retry_delay = (!immediate).then_some(Duration::from_secs(10));
+                        let retry_delay =
+                            (!immediate).then_some(Duration::from_secs(RETRY_DELAY_SECS));
                         let new_task_id = next_task_id;
                         next_task_id += 1;
                         let owned_units: Vec<TranslationUnit> = task
@@ -499,9 +499,9 @@ impl<F: FnMut(TranslationProgress)> TranslationRun<'_, F> {
     ) -> Result<(), ExecutionError> {
         let units: Vec<_> = groups.into_iter().flatten().collect();
         let code = if matches!(error, ExecutionError::Refused) {
-            "provider-refusal"
+            ISSUE_PROVIDER_REFUSAL
         } else {
-            "provider-request-failed"
+            ISSUE_PROVIDER_REQUEST_FAILED
         };
         mark_failed(
             &units,

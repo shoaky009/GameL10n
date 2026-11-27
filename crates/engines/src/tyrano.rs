@@ -4,6 +4,8 @@ use crate::discovery::{Inventory, resolve_relative};
 use std::{collections::BTreeSet, path::Path};
 
 const RUNTIME: [&str; 2] = ["tyrano/tyrano.js", "tyrano/plugins/kag/kag.js"];
+const TYRANO_DATA_DIR: &str = "data";
+const KS_EXTENSION: &str = "ks";
 
 pub(crate) struct TyranoData {
     pub(crate) directories: Vec<String>,
@@ -17,11 +19,11 @@ impl TyranoData {
         let mut roots = BTreeSet::new();
         for path in paths.filter(|p| {
             p.rsplit_once('.')
-                .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("ks"))
+                .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case(KS_EXTENSION))
         }) {
             let mut prefix = 0;
             for part in path.split('/') {
-                if part.eq_ignore_ascii_case("data") {
+                if part.eq_ignore_ascii_case(TYRANO_DATA_DIR) {
                     roots.insert(&path[..prefix]);
                 }
                 prefix += part.len() + 1;
@@ -34,7 +36,7 @@ impl TyranoData {
                     .iter()
                     .all(|marker| exists(&format!("{root}{marker}")))
             })
-            .map(|root| format!("{root}data/"))
+            .map(|root| format!("{root}{TYRANO_DATA_DIR}/"))
             .collect();
         Self { directories }
     }
@@ -50,7 +52,10 @@ impl TyranoData {
             .iter()
             .filter(|file| {
                 let name = file.path.rsplit('/').next().unwrap_or_default();
-                name.eq_ignore_ascii_case("tyrano.js") || name.eq_ignore_ascii_case("kag.js")
+                RUNTIME
+                    .iter()
+                    .filter_map(|marker| marker.rsplit('/').next())
+                    .any(|marker_name| name.eq_ignore_ascii_case(marker_name))
             })
             .map(|file| file.path.to_ascii_lowercase())
             .collect();

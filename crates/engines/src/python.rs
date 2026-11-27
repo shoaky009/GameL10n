@@ -7,8 +7,15 @@ use std::{
 
 use crate::{
     CancellationToken, EngineError, EngineService, ToolPaths, ToolProcess, adapter_assets,
-    protocol::{AdapterRequest, AdapterResponse},
+    protocol::{
+        AdapterRequest, AdapterResponse, OP_BUILD, OP_VALIDATE, PROTOCOL_VERSION, RESPONSE_FILE_KEY,
+    },
 };
+
+pub(crate) const MAX_PYTHON_TIMEOUT_SECS: u64 = 600;
+pub(crate) const PYTHON_BASE_ARGS: [&str; 3] = ["-I", "-X", "utf8"];
+pub(crate) const ISOLATED_FLAG: &str = "--isolated";
+const MAX_ADAPTER_DIAGNOSTIC_BYTES: u64 = 8 * 1024 * 1024;
 
 // Embedded CPython ignores PYTHONPATH. Bootstrap restores the established package import roots.
 const BOOTSTRAP: &str = "import runpy,sys,json,io,os;from pathlib import Path;configure_tempfiles('--isolated' in sys.argv[2:]);p=Path(sys.argv[1]).resolve();r=sys.stdin.read();d=json.loads(r);t=d.get('toolPaths') or {};l=t.get('engineLibrary');sys.path[:0]=[str(p.parent),str(p.parent.parent)]+([l,str(Path(l).parent/'native')] if l else []);os.environ['GAMEL10N_ADAPTER_HOST']=json.dumps(t.get('hostCommand'));os.environ['GAMEL10N_VNTEXTPATCH_COMMAND']=json.dumps(t.get('vnTextPatchCommand'));sys.dont_write_bytecode=True;protect_inputs(d.get('sourceDirectory'));sys.stdin=io.TextIOWrapper(io.BytesIO(r.encode('utf-8')),encoding='utf-8');sys.argv=[str(p)];runpy.run_path(str(p),run_name='__main__')";
@@ -32,20 +39,22 @@ impl PythonAdapter {
             entry: entry.clone(),
             isolate_execution: cfg!(windows),
             process: ToolProcess::new(paths.python())
-                .with_timeout(Duration::from_secs(600))
-                .with_maximum_output_bytes(8 * 1024 * 1024)
-                .with_arguments([
-                    OsString::from("-I"),
-                    OsString::from("-X"),
-                    OsString::from("utf8"),
-                    OsString::from("-c"),
-                    OsString::from(format!(
-                        "{}\n{}\n{BOOTSTRAP}",
-                        include_str!("../python/isolation.py"),
-                        include_str!("../python/readonly_inputs.py")
-                    )),
-                    entry.into_os_string(),
-                ]),
+                .with_timeout(Duration::from_secs(MAX_PYTHON_TIMEOUT_SECS))
+                .with_maximum_output_bytes(MAX_ADAPTER_DIAGNOSTIC_BYTES)
+                .with_arguments(
+                    PYTHON_BASE_ARGS
+                        .into_iter()
+                        .map(OsString::from)
+                        .chain([
+                            OsString::from("-c"),
+                            OsString::from(format!(
+                                "{}\n{}\n{BOOTSTRAP}",
+                                include_str!("../python/isolation.py"),
+                                include_str!("../python/readonly_inputs.py")
+                            )),
+                            entry.into_os_string(),
+                        ]),
+                ),
         })
     }
 
@@ -71,10 +80,10 @@ impl PythonAdapter {
         cancellation: &CancellationToken,
     ) -> Result<AdapterResponse, EngineError> {
         let response = self.run(request, &[], cancellation).await?;
-        if response.protocol_version == 1
+        if response.protocol_version == PROTOCOL_VERSION
             && !response.success
             && response.error_kind.as_deref() == Some("dependency")
-            && matches!(request.operation.as_str(), "build" | "validate")
+            && matches!(request.operation.as_str(), OP_BUILD | OP_VALIDATE)
             && let Some(required) = &response.required_assets
         {
             let assets = adapter_assets::resolve(service, required, cancellation).await?;
@@ -101,7 +110,7 @@ impl PythonAdapter {
         let mut request = request.clone();
         request
             .extra
-            .insert("responseFile".into(), serde_json::json!(response_file));
+            .insert(RESPONSE_FILE_KEY.into(), serde_json::json!(response_file));
         if let Some(translations) = request.translations.take() {
             let path = directory.path().join("translations.json");
             let file = std::fs::File::create(&path)?;
@@ -114,7 +123,7 @@ impl PythonAdapter {
         }
         let mut process = self.process.clone();
         if self.isolate_execution {
-            process = process.with_arguments([OsString::from("--isolated")]);
+            process = process.with_arguments([OsString::from(ISOLATED_FLAG)]);
             let mut read_paths = vec![self.paths.root.clone()];
             read_paths.extend_from_slice(asset_paths);
             if let Some(parent) = self.entry.parent() {

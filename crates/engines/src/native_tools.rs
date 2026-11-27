@@ -5,16 +5,26 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use gamel10n_translation::files::{hash_file, hash_text, read_json};
+use gamel10n_translation::{
+    files::{hash_file, hash_text, read_json},
+    storage::SHA256_HEX_LEN,
+};
 use serde_json::{Value, json};
 
-use crate::{EngineError, EngineService, PackageManifest, discovery::resolve_relative};
+use crate::{
+    EngineError, EngineService, PackageManifest, discovery::resolve_relative,
+    protocol::STAGE_RUNTIME,
+};
 
-const EXECUTABLE: &str = "GameL10n.VnTextPatch.exe";
+pub(crate) const VNTEXTPATCH_DIR: &str = "vntextpatch";
+pub(crate) const EXECUTABLE: &str = "GameL10n.VnTextPatch.exe";
 const RUNTIME_FILES: [&str; 2] = [EXECUTABLE, "capstone.dll"];
-const RUNTIME_MANIFEST: &str = "runtime.json";
+pub(crate) const RUNTIME_MANIFEST: &str = "runtime.json";
 pub(crate) const PIN_PATH: &str = "tools/vntextpatch-reference.json";
 pub(crate) const PIN_PURPOSE: &str = "记录验收时使用的原生解析器与组件宿主版本。";
+const LEGACY_PIN_SCHEMA: u64 = 1;
+const NATIVE_PIN_SCHEMA: u64 = 2;
+const NATIVE_RUNTIME: &str = "native";
 
 struct NativePin {
     files: BTreeMap<String, String>,
@@ -30,19 +40,19 @@ impl NativePin {
 
     fn parse(value: &Value) -> Result<Self, EngineError> {
         let schema = Self::schema(value);
-        if schema == Some(1)
+        if schema == Some(LEGACY_PIN_SCHEMA)
             || value
                 .get("runtime")
                 .and_then(Value::as_str)
-                .is_some_and(|runtime| runtime != "native")
+                .is_some_and(|runtime| runtime != NATIVE_RUNTIME)
         {
             return Err(EngineError::Incompatible {
-                stage: "runtime",
+                stage: STAGE_RUNTIME,
                 message: "适配器依赖的旧 DLL 工具已不再支持，请重新识别游戏".into(),
             });
         }
-        if schema != Some(2)
-            || value.get("runtime").and_then(Value::as_str) != Some("native")
+        if schema != Some(NATIVE_PIN_SCHEMA)
+            || value.get("runtime").and_then(Value::as_str) != Some(NATIVE_RUNTIME)
             || value
                 .get("entryPoint")
                 .is_some_and(|entry| entry.as_str() != Some(EXECUTABLE))
@@ -62,7 +72,7 @@ impl NativePin {
             let expected = expected
                 .as_str()
                 .filter(|hash| {
-                    hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    hash.len() == SHA256_HEX_LEN && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
                 })
                 .ok_or_else(|| EngineError::Protocol("原生解析器依赖文件哈希无效。".into()))?;
             hashes.insert(relative.clone(), expected.to_ascii_lowercase());
@@ -84,7 +94,7 @@ impl NativePin {
 }
 
 fn runtime_pin(files: &BTreeMap<String, String>) -> Value {
-    json!({"schemaVersion":2,"runtime":"native","entryPoint":EXECUTABLE,"files":files})
+    json!({"schemaVersion":NATIVE_PIN_SCHEMA,"runtime":NATIVE_RUNTIME,"entryPoint":EXECUTABLE,"files":files})
 }
 
 fn required_file(root: &Path, relative: &str) -> Result<PathBuf, EngineError> {
@@ -105,7 +115,7 @@ impl EngineService {
         &self,
         files: impl IntoIterator<Item = &'a str>,
     ) -> Result<BTreeMap<String, String>, EngineError> {
-        let current = self.tools.root.join("vntextpatch");
+        let current = self.tools.root.join(VNTEXTPATCH_DIR);
         files
             .into_iter()
             .map(|name| Ok((name.to_owned(), file_hash(&current, name)?)))
@@ -133,7 +143,7 @@ impl EngineService {
 
     pub(crate) fn resolve_native_tools(&self, value: &Value) -> Result<PathBuf, EngineError> {
         let pin = NativePin::parse(value)?;
-        let current = self.tools.root.join("vntextpatch");
+        let current = self.tools.root.join(VNTEXTPATCH_DIR);
         // Hashes identify the build used for verification. Compatible adapters use the installed runtime.
         for relative in pin.required_files() {
             required_file(&current, relative)?;
@@ -142,7 +152,7 @@ impl EngineService {
     }
 
     pub(super) fn updated_native_pin(&self, value: &Value) -> Result<Option<Value>, EngineError> {
-        if NativePin::schema(value) == Some(1) {
+        if NativePin::schema(value) == Some(LEGACY_PIN_SCHEMA) {
             return self.create_native_pin().map(Some);
         }
         let pin = NativePin::parse(value)?;

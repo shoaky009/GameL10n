@@ -7,6 +7,11 @@ use std::{
 
 use crate::CoreError;
 
+const MAX_SCAN_ENTRIES: usize = 128;
+const MAX_CHECKED_DIRS: usize = 32;
+const SUSPECTED_GAMES_LIMIT: usize = 3;
+const SCAN_BUDGET: Duration = Duration::from_millis(250);
+
 pub(crate) fn validate(directory: &Path) -> Result<PathBuf, CoreError> {
     let directory = std::path::absolute(directory)?;
     if directory.parent().is_none() {
@@ -27,11 +32,11 @@ pub fn suspected_games(directory: &Path) -> Result<Vec<PathBuf>, CoreError> {
     let Ok(entries) = fs::read_dir(&directory) else {
         return Ok(vec![]);
     };
-    let deadline = Instant::now() + Duration::from_millis(250);
+    let deadline = Instant::now() + SCAN_BUDGET;
     let mut checked = 0;
     let mut games = Vec::new();
-    for entry in entries.take(128).flatten() {
-        if Instant::now() >= deadline || checked >= 32 {
+    for entry in entries.take(MAX_SCAN_ENTRIES).flatten() {
+        if Instant::now() >= deadline || checked >= MAX_CHECKED_DIRS {
             break;
         }
         let Ok(metadata) = entry.metadata() else {
@@ -43,7 +48,7 @@ pub fn suspected_games(directory: &Path) -> Result<Vec<PathBuf>, CoreError> {
         checked += 1;
         if looks_like_game(&entry.path(), deadline) {
             games.push(PathBuf::from(entry.file_name()));
-            if games.len() == 3 {
+            if games.len() == SUSPECTED_GAMES_LIMIT {
                 break;
             }
         }
@@ -61,7 +66,7 @@ fn looks_like_game(directory: &Path, deadline: Instant) -> bool {
     };
     let mut executable = false;
     let mut resources = false;
-    for entry in entries.take(128).flatten() {
+    for entry in entries.take(MAX_SCAN_ENTRIES).flatten() {
         if Instant::now() >= deadline {
             break;
         }
@@ -115,7 +120,7 @@ fn is_link(metadata: &fs::Metadata) -> bool {
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
-        metadata.file_attributes() & 0x400 != 0
+        metadata.file_attributes() & crate::WIN32_FILE_ATTRIBUTE_REPARSE_POINT != 0
     }
     #[cfg(not(windows))]
     {

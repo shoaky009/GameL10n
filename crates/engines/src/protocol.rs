@@ -10,6 +10,23 @@ use crate::EngineError;
 /// Runtime contract returned by `adapter_protocol` and retained across model compaction.
 pub const ADAPTER_PROTOCOL: &str = include_str!("../prompts/adapter-protocol.md");
 
+pub const PROTOCOL_VERSION: u32 = 1;
+pub const VALIDATION_CONTEXT_VERSION: u32 = 1;
+pub const MAX_LAUNCH_ARGUMENTS_BYTES: usize = 30_000;
+pub const GAME_ROOT_DIR: &str = ".";
+pub const EXE_EXTENSION: &str = ".exe";
+pub const OP_PROBE: &str = "probe";
+pub const OP_EXTRACT: &str = "extract";
+pub const OP_BUILD: &str = "build";
+pub const OP_VALIDATE: &str = "validate";
+pub const RESPONSE_FILE_KEY: &str = "responseFile";
+
+pub(crate) const STAGE_PROBE: &str = "probe";
+pub(crate) const STAGE_EXTRACTION: &str = "extraction";
+pub(crate) const STAGE_BUILD: &str = "build";
+pub(crate) const STAGE_VALIDATION: &str = "validation";
+pub(crate) const STAGE_RUNTIME: &str = "runtime";
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AdapterRequest {
@@ -31,7 +48,7 @@ pub struct AdapterRequest {
 impl AdapterRequest {
     pub fn new(operation: &str, source: impl Into<PathBuf>) -> Self {
         Self {
-            protocol_version: 1,
+            protocol_version: PROTOCOL_VERSION,
             operation: operation.into(),
             source_directory: source.into(),
             output_directory: None,
@@ -106,7 +123,7 @@ pub struct LaunchConfiguration {
 }
 
 fn game_directory() -> String {
-    ".".into()
+    GAME_ROOT_DIR.into()
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -139,9 +156,9 @@ impl LaunchConfiguration {
                     .all(|part| matches!(part, Component::Normal(_) | Component::CurDir))
         };
         if !relative(&self.executable)
-            || !self.executable.to_ascii_lowercase().ends_with(".exe")
+            || !self.executable.to_ascii_lowercase().ends_with(EXE_EXTENSION)
             || !relative(&self.working_directory)
-            || self.arguments.len() > 30000
+            || self.arguments.len() > MAX_LAUNCH_ARGUMENTS_BYTES
             || self.arguments.chars().any(|c| c.is_control() && c != '\t')
         {
             return Err(EngineError::Protocol(
@@ -188,7 +205,7 @@ impl BuildResult {
                 configuration: LaunchConfiguration {
                     executable: executable.clone(),
                     arguments: String::new(),
-                    working_directory: ".".into(),
+                    working_directory: GAME_ROOT_DIR.into(),
                 },
             }))
     }
@@ -209,7 +226,7 @@ impl BuildResult {
         resources: &[String],
     ) -> AdapterRequest {
         let mut request = AdapterRequest::new(
-            "extract",
+            OP_EXTRACT,
             if self.mode == BuildMode::Overlay {
                 source
             } else {
@@ -275,9 +292,9 @@ impl AdapterResponse {
     /// Resource-operation failures make a candidate unusable, including unclassified legacy replies.
     pub fn checked_for_operation(self, operation: &str) -> Result<Self, EngineError> {
         let stage = match operation {
-            "extract" => Some("extraction"),
-            "build" => Some("build"),
-            "validate" => Some("validation"),
+            OP_EXTRACT => Some(STAGE_EXTRACTION),
+            OP_BUILD => Some(STAGE_BUILD),
+            OP_VALIDATE => Some(STAGE_VALIDATION),
             _ => None,
         };
         let candidate_failure =
@@ -291,7 +308,7 @@ impl AdapterResponse {
     }
 
     pub fn checked(self) -> Result<Self, EngineError> {
-        if self.protocol_version != 1 {
+        if self.protocol_version != PROTOCOL_VERSION {
             return Err(EngineError::Protocol("不支持的协议版本。".into()));
         }
         if !self.success {

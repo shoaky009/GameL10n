@@ -8,7 +8,7 @@ use crate::{
     compatibility::legacy_json,
     edits::{EditChanges, EditStore},
     files::{hash_text, read_json, write_json},
-    provider::{OpenAiProvider, ProviderError, TranslationResponse},
+    provider::{OpenAiProvider, ProviderError, TranslationResponse, diagnostic_codes},
     storage::{
         MemoryEntry, StorageError, TranslationEdit, TranslationMemory, TranslationPolicy,
         memory_key, now, read_recoverable,
@@ -26,6 +26,21 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
+pub const MEMORY_DIR: &str = "memory";
+pub const TRANSLATION_ERRORS_FILE: &str = "translation-errors.json";
+pub const RETRANSLATION_ID_HEX_LEN: usize = 32;
+pub const ISSUE_PROVIDER_REFUSAL: &str = "provider-refusal";
+pub const ISSUE_PROVIDER_REQUEST_FAILED: &str = "provider-request-failed";
+pub const ISSUE_REQUEST_OUTCOME_UNKNOWN: &str = "request-outcome-unknown";
+
+const MAX_BATCH_RETRIES: usize = 5;
+const RETRY_DELAY_SECS: u64 = 10;
+const LEGACY_RESPONSES_DIR: &str = "responses";
+const LEGACY_REQUEST_SUFFIX: &str = ".request.json";
+const LEGACY_REFUSAL_SUFFIX: &str = ".refusal.json";
+const STAGE_CACHE_LOOKUP: &str = "查询缓存";
+const STAGE_TRANSLATING: &str = "翻译";
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct TranslationOptions {
@@ -40,10 +55,14 @@ pub struct TranslationOptions {
     #[serde(skip)]
     pub collect_translations: bool,
 }
+impl TranslationOptions {
+    pub const DEFAULT_BATCH_SIZE: usize = 50;
+    pub const MAX_BATCH_SIZE: usize = 80;
+}
 impl Default for TranslationOptions {
     fn default() -> Self {
         Self {
-            batch_size: 50,
+            batch_size: Self::DEFAULT_BATCH_SIZE,
             unit_ids: None,
             candidate_only: false,
             retranslation_id: None,
@@ -110,7 +129,7 @@ pub struct RecordedIssue {
     pub memory_key: Option<String>,
 }
 pub fn load_issues(directory: &Path) -> Vec<RecordedIssue> {
-    read_json::<Vec<RecordedIssue>>(&directory.join("translation-errors.json")).unwrap_or_default()
+    read_json::<Vec<RecordedIssue>>(&directory.join(TRANSLATION_ERRORS_FILE)).unwrap_or_default()
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -287,8 +306,10 @@ impl TranslationEngine {
         F: FnMut(TranslationProgress),
     {
         let (selected, units) = planning::select_units(all_units, providers, policy, options)?;
-        let memory =
-            TranslationMemory::load(self.directory.join("memory"), self.legacy_memory.as_deref())?;
+        let memory = TranslationMemory::load(
+            self.directory.join(MEMORY_DIR),
+            self.legacy_memory.as_deref(),
+        )?;
         let journal_path = self.directory.join("translation-execution.json");
         let journal = if journal_path.is_file() {
             read_json(&journal_path)?
@@ -315,7 +336,7 @@ impl TranslationEngine {
             report,
         };
 
-        run.emit("查询缓存", "正在加载历史译文。".into());
+        run.emit(STAGE_CACHE_LOOKUP, "正在加载历史译文。".into());
         state = run
             .recover_receipts(all_units, selected.as_ref(), state)
             .await?;
@@ -327,7 +348,7 @@ impl TranslationEngine {
         run.load_history(&units, &edit_store, &mut state)?;
         let groups = run.group_pending(&units, &mut state.issues)?;
         run.emit(
-            "查询缓存",
+            STAGE_CACHE_LOOKUP,
             format!("已加载 {} 条历史译文。", run.cache_hits),
         );
 
@@ -445,19 +466,19 @@ impl TranslationEngine {
             Ok(((), changes))
         })?;
         memory.store_batch(entries.into_iter().collect())?;
-        write_json(&self.directory.join("translation-errors.json"), issues)?;
+        write_json(&self.directory.join(TRANSLATION_ERRORS_FILE), issues)?;
         Ok(completed)
     }
 
     fn import_legacy_receipts(&self, journal: &mut ExecutionJournal) -> Result<(), ExecutionError> {
-        let directory = self.directory.join("responses");
+        let directory = self.directory.join(LEGACY_RESPONSES_DIR);
         if !directory.is_dir() {
             return Ok(());
         }
         for entry in fs::read_dir(directory)? {
             let path = entry?.path();
             let name = path.file_name().unwrap_or_default().to_string_lossy();
-            let Some(key) = name.strip_suffix(".request.json") else {
+            let Some(key) = name.strip_suffix(LEGACY_REQUEST_SUFFIX) else {
                 continue;
             };
             if !crate::storage::valid_key(key)
@@ -471,7 +492,10 @@ impl TranslationEngine {
                 return Err(ExecutionError::Invalid("旧版请求回执键不一致。".into()));
             }
             let response = read_recoverable(&path.with_file_name(format!("{key}.json")))?;
-            if !path.with_file_name(format!("{key}.refusal.json")).is_file() {
+            if !path
+                .with_file_name(format!("{key}{LEGACY_REFUSAL_SUFFIX}"))
+                .is_file()
+            {
                 journal.pending.insert(
                     key.into(),
                     Receipt {
@@ -533,7 +557,7 @@ impl<F: FnMut(TranslationProgress)> TranslationRun<'_, F> {
         updates: BTreeMap<String, String>,
         issues: &[RecordedIssue],
     ) {
-        let mut progress = self.progress("翻译", message);
+        let mut progress = self.progress(STAGE_TRANSLATING, message);
         progress.failure_updates = units
             .iter()
             .map(|unit| {
@@ -558,7 +582,7 @@ impl<F: FnMut(TranslationProgress)> TranslationRun<'_, F> {
 
     fn save_issues(&self, issues: &[RecordedIssue]) -> Result<(), ExecutionError> {
         Ok(write_json(
-            &self.engine.directory.join("translation-errors.json"),
+            &self.engine.directory.join(TRANSLATION_ERRORS_FILE),
             &issues,
         )?)
     }

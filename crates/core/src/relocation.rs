@@ -1,5 +1,14 @@
 //! Data-directory transfer that retains the source and refuses differing destination files.
-use crate::{Application, CoreError, ToolPaths};
+use crate::{
+    Application, CoreError, ToolPaths,
+    application::NATIVE_EXTRACTION_FILE,
+    engine_tasks::{LATEST_PATCH_RESULT_FILE, PATCH_RESULT_SUFFIX},
+    patching::RUNTIME_TEST_FILENAME,
+    projects::{
+        APP_DATA_DIR_NAME, APP_LOCK_FILENAME, ENV_DATA_DIR, ENV_LEGACY_DATA_DIR,
+        ENV_LOCAL_APP_DATA, LOCATION_FILENAME,
+    },
+};
 use gamel10n_translation::files::{hash_file, read_json, write_json};
 use serde_json::{Value, json};
 use std::{
@@ -78,15 +87,15 @@ impl Application {
         }
         // Validate copied project metadata before committing the application's location pointer.
         next.store.reload().await?;
-        let local = std::env::var_os("LOCALAPPDATA")
+        let local = std::env::var_os(ENV_LOCAL_APP_DATA)
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("."));
-        if std::env::var_os("GAMEL10N_DATA")
-            .or_else(|| std::env::var_os("AVG_TRANSLATOR_DATA"))
+        if std::env::var_os(ENV_DATA_DIR)
+            .or_else(|| std::env::var_os(ENV_LEGACY_DATA_DIR))
             .is_none()
         {
             write_json(
-                &local.join("GameL10n/location.json"),
+                &local.join(APP_DATA_DIR_NAME).join(LOCATION_FILENAME),
                 &json!({"dataDirectory":destination}),
             )?;
         }
@@ -133,7 +142,7 @@ fn transfer(source: &Path, target: &Path) -> Result<(), CoreError> {
             let mut writer = BufWriter::new(temporary.as_file_mut());
             let result = if relative
                 .replace('\\', "/")
-                .ends_with("/extraction/native.json")
+                .ends_with(&format!("/{NATIVE_EXTRACTION_FILE}"))
             {
                 serde_json::to_writer(&mut writer, &value)
             } else {
@@ -178,7 +187,7 @@ fn collect(root: &Path, path: &Path, files: &mut Vec<String>) -> Result<(), Core
         #[cfg(windows)]
         {
             use std::os::windows::fs::MetadataExt;
-            if metadata.file_attributes() & 0x400 != 0 {
+            if metadata.file_attributes() & crate::WIN32_FILE_ATTRIBUTE_REPARSE_POINT != 0 {
                 return Err(CoreError::InvalidData(
                     "数据目录包含重解析点，不能自动迁移。".into(),
                 ));
@@ -192,7 +201,7 @@ fn collect(root: &Path, path: &Path, files: &mut Vec<String>) -> Result<(), Core
         if metadata.is_dir() {
             collect(root, &p, files)?;
         } else if metadata.is_file()
-            && entry.file_name() != ".app.lock"
+            && entry.file_name() != APP_LOCK_FILENAME
             && entry.file_name() != ".task.lock"
         {
             files.push(
@@ -212,10 +221,10 @@ fn relocated_metadata(
     target: &Path,
 ) -> Result<Option<Value>, CoreError> {
     let relative = relative.replace('\\', "/");
-    let native = relative.ends_with("/extraction/native.json");
-    let patch = relative.ends_with("/latest-result.json")
-        || relative.ends_with(".result.json")
-        || relative.ends_with("/runtime-test.json");
+    let native = relative.ends_with(&format!("/{NATIVE_EXTRACTION_FILE}"));
+    let patch = relative.ends_with(&format!("/{LATEST_PATCH_RESULT_FILE}"))
+        || relative.ends_with(PATCH_RESULT_SUFFIX)
+        || relative.ends_with(&format!("/{RUNTIME_TEST_FILENAME}"));
     if !native && !patch {
         return Ok(None);
     }

@@ -1,24 +1,34 @@
 use crate::view::TokenDisplay;
 
+const THOUSAND: u64 = 1_000;
+const MILLION: u128 = 1_000_000;
+const MILLION_PROMOTION_THRESHOLD: u64 = 999_995;
+const COMPACT_DECIMAL_SCALE: u128 = 100;
+const DIGIT_GROUP_LEN: usize = 3;
+
 pub(crate) fn compact(value: u64) -> String {
-    if value < 1_000 {
+    if value < THOUSAND {
         return value.to_string();
     }
     // Promote when rounding would otherwise produce 1000.00K.
-    let (unit, suffix) = if value >= 999_995 {
-        (1_000_000_u128, "M")
+    let (unit, suffix) = if value >= MILLION_PROMOTION_THRESHOLD {
+        (MILLION, "M")
     } else {
-        (1_000_u128, "K")
+        (u128::from(THOUSAND), "K")
     };
-    let hundredths = (u128::from(value) * 100 + unit / 2) / unit;
-    format!("{}.{:02}{suffix}", hundredths / 100, hundredths % 100)
+    let hundredths = (u128::from(value) * COMPACT_DECIMAL_SCALE + unit / 2) / unit;
+    format!(
+        "{}.{:02}{suffix}",
+        hundredths / COMPACT_DECIMAL_SCALE,
+        hundredths % COMPACT_DECIMAL_SCALE
+    )
 }
 
 pub(crate) fn exact(value: u64) -> String {
     let digits = value.to_string();
-    let mut result = String::with_capacity(digits.len() + digits.len() / 3);
+    let mut result = String::with_capacity(digits.len() + digits.len() / DIGIT_GROUP_LEN);
     for (index, digit) in digits.chars().enumerate() {
-        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+        if index > 0 && (digits.len() - index).is_multiple_of(DIGIT_GROUP_LEN) {
             result.push(',');
         }
         result.push(digit);

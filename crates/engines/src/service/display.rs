@@ -1,8 +1,19 @@
 //! Independent readback of display codepoints from supported game resources.
 use super::*;
-use crate::protocol::{BuildResult, LaunchLocation};
+use crate::{
+    adaptation_assets::{QLIE_PACK_TEMPLATE, QLIE_PACK31_TEMPLATE},
+    adaptation_context::QLIE_FILEPACK_FOOTER_BYTES,
+    protocol::{BuildResult, GAME_ROOT_DIR, LaunchLocation},
+};
 use serde::ser::Serializer;
 use std::io::{BufWriter, Write};
+
+const MAX_FONT_BYTES: u64 = 64 << 20;
+
+fn is_qlie_pack_adapter(id: &str) -> bool {
+    id.strip_prefix("template.")
+        .is_some_and(|template| matches!(template, QLIE_PACK_TEMPLATE | QLIE_PACK31_TEMPLATE))
+}
 
 #[derive(Deserialize)]
 struct FontSelection {
@@ -64,10 +75,7 @@ impl QlieDisplay {
         if !matches!(adapter, AdapterHandle::Python { .. }) {
             return Ok(None);
         }
-        if matches!(
-            adapter.id(),
-            "template.qlie-pack3-imos" | "template.qlie-pack31-imos"
-        ) {
+        if is_qlie_pack_adapter(adapter.id()) {
             return Ok(Some(Self { template: true }));
         }
         for path in files.iter().filter(|path| {
@@ -79,9 +87,9 @@ impl QlieDisplay {
             })
         }) {
             let mut file = File::open(inputs.file(root, path)?)?;
-            if file.metadata()?.len() >= 28 {
-                file.seek(SeekFrom::End(-28))?;
-                let mut footer = [0; 28];
+            if file.metadata()?.len() >= QLIE_FILEPACK_FOOTER_BYTES as u64 {
+                file.seek(SeekFrom::End(-(QLIE_FILEPACK_FOOTER_BYTES as i64)))?;
+                let mut footer = [0; QLIE_FILEPACK_FOOTER_BYTES];
                 file.read_exact(&mut footer)?;
                 if crate::adaptation_context::filepack_version(&footer).is_some() {
                     return Ok(Some(Self { template: false }));
@@ -100,10 +108,11 @@ fn verify_font(
     let path = resolve_relative(root, &font.path)?;
     let file = File::open(path)?;
     let mut bytes = Vec::new();
-    file.take((64 << 20) + 1).read_to_end(&mut bytes)?;
-    if bytes.len() > 64 << 20 {
+    file.take(MAX_FONT_BYTES + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_FONT_BYTES {
         return Err(EngineError::Rejected(format!(
-            "字体超过 64 MiB：{}",
+            "字体超过 {} MiB：{}",
+            MAX_FONT_BYTES / (1024 * 1024),
             font.path
         )));
     }
@@ -192,10 +201,8 @@ impl EngineService {
         translations: &BTreeMap<String, String>,
         cancellation: &CancellationToken,
     ) -> Result<BTreeMap<String, String>, EngineError> {
-        if !matches!(
-            adapter.id(),
-            "template.qlie-pack3-imos" | "template.qlie-pack31-imos"
-        ) || translations.len() == units.len()
+        if !is_qlie_pack_adapter(adapter.id())
+            || translations.len() == units.len()
             || files
                 .iter()
                 .filter(|p| p.to_ascii_lowercase().ends_with(".pack"))
@@ -208,7 +215,7 @@ impl EngineService {
         let samples = write_samples(units, translations, true)?;
         let output = tempfile::NamedTempFile::new()?;
         self.helper(&json!({
-            "operation":"qlie_patch_copies", "components":self.asset_root.join("adapters/components"),
+            "operation":"qlie_patch_copies", "components":self.asset_root.join(ADAPTER_COMPONENTS_DIR),
             "library":self.reference_library(&self.current_reference()?)?, "source":source,
             "resources":files, "samplesFile":samples.path(), "output":output.path(),
         }), cancellation).await?;
@@ -247,12 +254,12 @@ impl QlieDisplay {
             .as_ref()
             .filter(|launch| {
                 launch.location == LaunchLocation::Patch
-                    && launch.configuration.working_directory == "."
+                    && launch.configuration.working_directory == GAME_ROOT_DIR
                     && launch.configuration.arguments.is_empty()
             })
             .map(|launch| &launch.configuration.executable);
         let evidence: DisplayEvidence = serde_json::from_value(service.helper(&json!({
-            "operation":"qlie_display", "components":service.asset_root.join("adapters/components"),
+            "operation":"qlie_display", "components":service.asset_root.join(ADAPTER_COMPONENTS_DIR),
             "library":service.reference_library(&service.current_reference()?)?, "output":output,
             "template":self.template, "source":request.source_directory, "resources":request.resource_files,
             "mode":build.mode, "files":build.files, "samplesFile":samples.path(), "launcher":launcher,

@@ -2,6 +2,7 @@
 
 use crate::{
     Context, UiInput,
+    ui_contract::{modal, page_arg, project_tab},
     view::{App, MainWindow, TermCandidateRow},
 };
 use gamel10n_core::{CancellationToken, CoreError, terminology::TerminologySaveResult};
@@ -22,7 +23,7 @@ impl PendingTerminologyExtract {
         app.set_terminology_candidates(ModelRc::new(VecModel::default()));
         app.set_terminology_selected_count(0);
         app.set_error("".into());
-        app.set_modal("terminology-extract".into());
+        app.set_modal(modal::TERMINOLOGY_EXTRACT.into());
         Some(Self(ctx.clone()))
     }
 }
@@ -97,8 +98,8 @@ pub fn apply_save_result(ctx: &Context, id: &str, saved: TerminologySaveResult) 
         app.set_terminology_count(term_count);
         app.set_terminology_affected_count(affected_count as i32);
         app.set_status(status.into());
-        if app.get_tab() == 1 {
-            app.invoke_action("texts".into(), "refresh".into());
+        if app.get_tab() == project_tab::WORKBENCH {
+            app.invoke_action("texts".into(), page_arg::REFRESH.into());
         }
     });
 }
@@ -168,7 +169,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                     ctx.update(move |ui| {
                         let app = ui.global::<App>();
                         if app.get_project_id().as_str() != id
-                            || app.get_modal().as_str() != "terminology-extract"
+                            || app.get_modal().as_str() != modal::TERMINOLOGY_EXTRACT
                         {
                             return;
                         }
@@ -190,7 +191,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                     ctx.update(move |ui| {
                         let app = ui.global::<App>();
                         if app.get_project_id().as_str() != id
-                            || app.get_modal().as_str() != "terminology-extract"
+                            || app.get_modal().as_str() != modal::TERMINOLOGY_EXTRACT
                         {
                             return;
                         }
@@ -237,7 +238,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
             ctx.update(move |ui| {
                 let app = ui.global::<App>();
                 if app.get_project_id().as_str() == id
-                    && app.get_modal().as_str() == "terminology-extract"
+                    && app.get_modal().as_str() == modal::TERMINOLOGY_EXTRACT
                 {
                     app.set_modal("".into());
                 }
@@ -249,7 +250,7 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                 app.set_term_draft_source("".into());
                 app.set_term_draft_target("".into());
                 app.set_error("".into());
-                app.set_modal("add-term".into());
+                app.set_modal(modal::ADD_TERM.into());
             });
         }
         "add-term-save" => {
@@ -268,7 +269,8 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
             let id = input.project_id.clone();
             ctx.update(move |ui| {
                 let app = ui.global::<App>();
-                if app.get_project_id().as_str() == id && app.get_modal().as_str() == "add-term" {
+                if app.get_project_id().as_str() == id && app.get_modal().as_str() == modal::ADD_TERM
+                {
                     app.set_modal("".into());
                 }
             });
@@ -304,8 +306,8 @@ pub async fn handle(ctx: &Context, action: &str, input: &UiInput) -> Result<bool
                 app.set_kind_filter(0);
                 app.set_status_filter(0);
                 app.set_only_selected(true);
-                app.set_tab(1);
-                app.invoke_action("texts".into(), "0".into());
+                app.set_tab(project_tab::WORKBENCH);
+                app.invoke_action("texts".into(), page_arg::FIRST.into());
             });
         }
         "terminology-dismiss-affected" => {

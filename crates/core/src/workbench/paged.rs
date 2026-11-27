@@ -217,8 +217,8 @@ impl Session {
         if f.query.is_empty()
             && f.source_query.is_empty()
             && f.translation_query.is_empty()
-            && matches!(f.status.as_str(), "" | "all")
-            && matches!(f.kind.as_str(), "" | "all")
+            && matches!(f.status.as_str(), "" | FILTER_ALL)
+            && matches!(f.kind.as_str(), "" | FILTER_ALL)
             && f.resource_path.is_none()
             && f.selected_ids.is_none()
         {
@@ -275,7 +275,7 @@ impl Session {
         let mut rows = Vec::new();
         let mut loaded = None;
         let mut detail = Vec::new();
-        for rank in offset..offset.saturating_add(limit.clamp(1, 500)).min(total) {
+        for rank in offset..offset.saturating_add(limit.clamp(1, MAX_PAGE_SIZE)).min(total) {
             let i = self.ordinal(rank);
             if loaded != Some(i / SIZE) {
                 detail = self.pages.rows(i / SIZE)?;
@@ -386,7 +386,7 @@ impl Application {
         }
         let policy = validated_policy(&project.settings)?;
         let dir = self.store.directory(id)?;
-        let legacy = self.data_directory().join("memory").join(id);
+        let legacy = self.data_directory().join(MEMORY_DIR).join(id);
         let cache = {
             let mut slot = self
                 .paged_workbench
