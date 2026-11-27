@@ -1,4 +1,4 @@
-"""Unity 2022 SerializedFile v22, preserving type tables and object identities.
+"""Unity SerializedFile v22, preserving type tables and object identities.
 
 This handles ordinary serialized assets, not UnityFS bundles. Object payloads
 are opaque unless an adapter supplies a verified replacement.
@@ -112,8 +112,6 @@ class SerializedFile:
             raise ValueError('Unity 文件头边界不匹配')
         r = Reader(raw[:48 + metadata_size], 48)
         self.unity_version = r.cstring()
-        if not self.unity_version.startswith('2022.'):
-            raise ValueError('仅支持已验证的 Unity 2022 序列化布局')
         r.i32()  # build target
         tree = r.number('B')
         if tree not in (0, 1):

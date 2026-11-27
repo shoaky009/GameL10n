@@ -15,7 +15,7 @@
 | [WillPlus WSC](../../adapters/components/willplus_wsc.py) | 封包与脚本组件 | ARC v1 中带八字节结束参数的 WSC v2 子集，支持对白、姓名、选项与变长跳转回填。[指令格式参考](https://github.com/kevlu123/VN-Patching-Tools/blob/766c2565c6acbdc2f31f58fa99f3bae72dd85dea/Ws2Explorer/Ws2Explorer/Scripts/lib/wsc_op_list.py) |
 | [EAGLS / ALIS SCPACK](engines/eagls-scpack.md) | 脚本组件 | 完整成员的解析与回填，封包和中文运行另行确认 |
 | [Flash AVM1](engines/flash-avm1.md) | 脚本组件与组合模板 | FWS/CWS 顶层动作的 UTF-8 常量池，支持变长回填和分支重定位 |
-| [Unity SerializedFile](engines/unity-serialized-text.md) | 容器组件 | Unity 2022 小端 v22，TextAsset 文本布局另行确认 |
+| [Unity SerializedFile](engines/unity-serialized-text.md) | 容器组件 | 小端 Unity SerializedFile v22，TextAsset 文本布局另行确认 |
 | [QLIE 封包适配、字体与启动](engines/qlie-filepack3-systemfont.md) | 脚本组合模板、中文字体补丁和启动组件 | ImoScripter FormatType=1，带外部密钥的 PACK 3.0 与 Hash 1.3，带内置密钥的 PACK 3.1 与 Hash 1.4。支持系统字体布局及配套的 Locale Emulator 启动入口 |
 | [AliceSoft System4 AIN 与 FNL](engines/system4-ain14-msg1-fnl.md) | 脚本组件、组合模板和字形组件 | AI2 封装的 MSG1 对话支持变长回填。FNL 按原字形尺寸补字，运行字库路径按游戏确认 |
 | [Artemis PFS](engines/artemis-pfs.md) | AST 组合模板与覆盖卷参考 | PFS v8、UTF-8 AST 2.0，覆盖加载按游戏确认 |

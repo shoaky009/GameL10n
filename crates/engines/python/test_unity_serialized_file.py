@@ -20,10 +20,10 @@ def text_payload(name, script):
     return aligned_bytes(name.encode('utf-8'), b'\xa5') + aligned_bytes(script, b'\xb6') + b'unknown-tail'
 
 
-def container(objects, *, tree=False):
+def container(objects, *, tree=False, unity_version=b'2022.3.62f2'):
     """Write independent v22 metadata; objects are (path ID, class ID, payload)."""
     classes = list(dict.fromkeys(class_id for _, class_id, _ in objects))
-    meta = bytearray(b'2022.3.62f2\0' + struct.pack('<iBi', 5, tree, len(classes)))
+    meta = bytearray(unity_version + b'\0' + struct.pack('<iBi', 5, tree, len(classes)))
     for class_id in classes:
         meta.extend(struct.pack('<iBh', class_id, 0, -1))
         if class_id == 114:
@@ -136,6 +136,21 @@ class UnitySerializedFileTests(unittest.TestCase):
         self.assertTrue(result['matched'])
         self.assertEqual(result['textAssetCount'], 0)
         self.assertEqual(result['textAssets'], [])
+
+    def test_non_2022_unity_v22_versions_roundtrip_and_probe(self):
+        for version in (b'2021.3.35f1', b'6000.0.32f1'):
+            with self.subTest(version=version):
+                raw, _ = container([(7, 49, text_payload('story', b'hello'))], unity_version=version)
+                self.path.write_bytes(raw)
+                result = probe(self.path)
+                self.assertTrue(result['matched'])
+                self.assertEqual(result['unityVersion'], version.decode('ascii'))
+                asset = SerializedFile(self.path)
+                self.assertEqual(asset.rebuild_text_assets({}), raw)
+                rebuilt = asset.rebuild_text_assets({7: '中文'.encode('utf-8')})
+                output = self.root / f'{version.decode("ascii")}.assets'
+                output.write_bytes(rebuilt)
+                self.assertEqual(SerializedFile(output).text_asset(7).script, '中文'.encode('utf-8'))
 
     def test_probe_cli_returns_json_and_never_writes_the_input(self):
         completed = subprocess.run([sys.executable, '-I', '-X', 'utf8',
