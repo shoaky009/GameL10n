@@ -2,8 +2,10 @@
 from contextlib import nullcontext
 import json
 from pathlib import Path
+import struct
 import sys
 import traceback
+import zlib
 
 from kirikiri_text import Script, escape, scan_ks, scan_static_tjs
 from kirikiri_scn_text import SceneText, tokens
@@ -77,11 +79,19 @@ def resources(request):
     return sorted((file for file in files if file.lower().endswith('.xp3')), key=str.lower)
 
 
+MAX_PROBE_RANGES = 64
+MAX_PROBE_BYTES = 8 << 20
+
+
 def probe(request):
     files = request.get('probeFiles')
     if files is None:
         files = [dict(path=file, length=resource_path(request['sourceDirectory'], file).stat().st_size)
                  for file in resources(request)]
+    existing_ranges = request.get('probeRanges') or []
+    used_ranges = len(existing_ranges)
+    used_bytes = sum(int(part.get('length', 0)) for part in existing_ranges)
+    seen_ranges = {(part['path'], part['offset'], part['length']) for part in existing_ranges}
     reads, selected = [], []
     for file in files:
         if not file['path'].lower().endswith('.xp3'):
@@ -106,8 +116,15 @@ def probe(request):
                 if verified >= 2:
                     selected.append(file['path'])
         except Missing as missing:
-            reads.append(dict(path=file['path'], offset=missing.offset, length=missing.count))
-        except (ValueError, EOFError):
+            key = (file['path'], missing.offset, missing.count)
+            if (missing.count > 0
+                    and key not in seen_ranges
+                    and used_ranges + len(reads) < MAX_PROBE_RANGES
+                    and used_bytes + missing.count <= MAX_PROBE_BYTES):
+                seen_ranges.add(key)
+                used_bytes += missing.count
+                reads.append(dict(path=file['path'], offset=missing.offset, length=missing.count))
+        except (ValueError, EOFError, struct.error, zlib.error):
             continue
     if reads:
         return dict(probeReads=reads)

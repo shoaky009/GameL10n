@@ -231,6 +231,25 @@ class SmilTest(unittest.TestCase):
         else:
             self.fail('SMIL probe exceeded the host round limit')
 
+    def test_probe_skips_invalid_zlib_index_and_bounds_sparse_reads(self):
+        obfuscated = bytearray(MAGIC + struct.pack('<Q', 19))
+        obfuscated.extend(b'\1' + struct.pack('<QQ', 16, 64) + b'\xff' * 16)
+        (self.source / 'data.xp3').write_bytes(obfuscated)
+        self.assertIsNone(adapter.execute(dict(self.request, operation='probe'))['probe'])
+
+        staged = self.root / 'many'
+        staged.mkdir()
+        probe_files = []
+        for index in range(70):
+            name = f'part_{index:02d}.xp3'
+            header = MAGIC + struct.pack('<Q', 128 << 10)
+            (staged / name).write_bytes(header + bytes(64 - len(header)))
+            probe_files.append(dict(path=name, length=(128 << 10) + 256))
+        result = adapter.execute(dict(operation='probe', sourceDirectory=str(staged),
+                                      probeFiles=probe_files, probeRanges=[]))
+        self.assertEqual(len(result['probeReads']), adapter.MAX_PROBE_RANGES)
+        self.assertLessEqual(sum(part['length'] for part in result['probeReads']), adapter.MAX_PROBE_BYTES)
+
     def test_scn_strict_and_partial_component_contracts(self):
         script = FIXTURES / 'check_kirikiri_scn_component.py'
         component = ROOT / 'adapters/components/kirikiri_scn_text.py'

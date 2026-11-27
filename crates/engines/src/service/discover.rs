@@ -187,9 +187,26 @@ impl Discovery<'_> {
             "检查内置解析器",
             "正在检查 KiriKiri SMIL 映射、过滤器及脚本样本。",
         );
-        let probe = self
+        let probe = match self
             .probe_with_remaining_budget(&adapter, &resources)
-            .await?;
+            .await
+        {
+            Ok(probe) => probe,
+            Err(error @ (EngineError::Cancelled | EngineError::Isolation(_))) => {
+                return Err(error);
+            }
+            Err(error @ (EngineError::Io(_) | EngineError::ToolMissing(_)))
+                if self.verification == DiscoveryVerification::ProbeOnly =>
+            {
+                return Err(error);
+            }
+            Err(error) => {
+                let message = format!("内置解析器 {} 检查失败：{error}", adapter.id());
+                EngineService::report(self.progress, "适配器检查未通过", &message);
+                self.diagnostics.push(message);
+                return Ok(None);
+            }
+        };
         let Some(probe) = probe else { return Ok(None) };
         if self.verification == DiscoveryVerification::ProbeOnly {
             return Ok(Some((adapter, probe)));
@@ -210,12 +227,13 @@ impl Discovery<'_> {
                 Ok(Some((adapter, probe)))
             }
             Ok(_) => Ok(None),
-            Err(EngineError::Incompatible { message, .. }) => {
-                self.diagnostics
-                    .push(format!("内置解析器 {} 提取不兼容：{message}", adapter.id()));
+            Err(error @ (EngineError::Cancelled | EngineError::Isolation(_))) => Err(error),
+            Err(error) => {
+                let message = format!("内置解析器 {} 提取失败：{error}", adapter.id());
+                EngineService::report(self.progress, "适配器检查未通过", &message);
+                self.diagnostics.push(message);
                 Ok(None)
             }
-            Err(error) => Err(error),
         }
     }
 

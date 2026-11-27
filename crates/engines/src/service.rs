@@ -2856,4 +2856,49 @@ with open(r['responseFile'],'w',encoding='utf-8') as output:
             "shared helper temp directory should be deleted when its last owner drops"
         );
     }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn smil_probe_rejection_falls_through_to_other_packages() {
+        let root = tempfile::tempdir().expect("fixture");
+        let game = root.path().join("game");
+        let package = root.path().join("package");
+        let tools_root = root.path().join("tools");
+        fs::create_dir_all(&game).expect("game");
+        fs::create_dir_all(package.join("src")).expect("package");
+        let tools = ToolPaths::new(tools_root);
+        fs::create_dir_all(tools.python().parent().expect("python dir")).expect("python dir");
+        std::os::unix::fs::symlink("/usr/bin/python3", tools.python()).expect("symlink python");
+        fs::write(game.join("data.xp3"), b"XP3\r\n \n\x1a\x8bg\x01corrupt").expect("xp3");
+        fs::write(game.join("text.json"), "[\"one\"]").expect("json");
+        let entry = package.join("src/adapter.py");
+        fs::write(&entry, include_str!("../tests/fixtures/json_adapter.py")).expect("adapter");
+        write_json(
+            &package.join("package.json"),
+            &json!({
+                "id": "engine.fixture", "version": "1", "manifestVersion": 4,
+                "protocolVersion": 1, "resourcePatterns": ["*.json"],
+                "packageFiles": {"src/adapter.py": hash_file(&entry).expect("hash")}
+            }),
+        )
+        .expect("manifest");
+        // Omit the shared reference library so BuiltinKirikiriSmil probe returns Rejected;
+        // discovery must record a diagnostic and continue to the matching package.
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let service = EngineService::new(&repo, tools)
+            .with_shared_directory(root.path().join("shared"));
+        let discovered = service
+            .discover(&game, &[package], &CancellationToken::new(), None)
+            .await
+            .expect("smil failure must not abort discovery");
+        assert_eq!(discovered.adapter.expect("fallback").id(), "engine.fixture");
+        assert!(
+            discovered
+                .diagnostics
+                .iter()
+                .any(|message| message.contains("engine.kirikiri-smil-smile")),
+            "{:?}",
+            discovered.diagnostics
+        );
+    }
 }
