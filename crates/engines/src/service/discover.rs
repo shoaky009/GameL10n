@@ -541,6 +541,7 @@ impl Discovery<'_> {
         &mut self,
     ) -> Result<Option<(AdapterHandle, ProbeResult)>, EngineError> {
         let inventory = self.inventory;
+        let mut recorded_incomplete_native = false;
         for (adapter, native_resources) in builtin_candidates(inventory) {
             let format = match &adapter {
                 AdapterHandle::Native { format } => Some(format.as_str()),
@@ -565,7 +566,15 @@ impl Discovery<'_> {
             );
             let mut request = AdapterRequest::new("probe", self.source);
             if let Some(resources) = native_resources {
-                inventory.require_complete_native_inventory()?;
+                if let Err(error) = inventory.require_complete_native_inventory() {
+                    if !recorded_incomplete_native {
+                        let message = error.to_string();
+                        EngineService::report(self.progress, "适配器检查未通过", &message);
+                        self.diagnostics.push(message);
+                        recorded_incomplete_native = true;
+                    }
+                    continue;
+                }
                 request.resource_files = Some(resources.into_iter().map(str::to_owned).collect());
             }
             let original = self.original_builtin_probe(&adapter, &mut request)?;

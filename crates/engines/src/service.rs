@@ -2901,4 +2901,26 @@ with open(r['responseFile'],'w',encoding='utf-8') as output:
             discovered.diagnostics
         );
     }
+
+    #[tokio::test]
+    async fn incomplete_inventory_skips_implicit_native_discovery_with_diagnostic() {
+        let root = tempfile::tempdir().expect("fixture");
+        let game = root.path().join("game");
+        fs::create_dir_all(&game).expect("game");
+        fs::write(game.join("story.txt"), "hello").expect("story");
+        let mut inventory = Inventory::scan(&game).expect("scan");
+        inventory.complete = false;
+        let service = EngineService::new(root.path(), ToolPaths::new(root.path().join("tools")));
+        let discovered = service
+            .discover_with_inventory(&game, &[], &inventory, &CancellationToken::new(), None)
+            .await
+            .expect("incomplete inventory must degrade instead of aborting discovery");
+        assert!(discovered.adapter.is_none());
+        assert_eq!(discovered.diagnostics.len(), 1);
+        assert!(
+            discovered.diagnostics[0].contains("资源目录扫描不完整"),
+            "{:?}",
+            discovered.diagnostics
+        );
+    }
 }
