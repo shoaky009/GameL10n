@@ -128,13 +128,31 @@ pub(super) fn remove_file(
     let relative = text(args, "path")?.replace('\\', "/");
     let path = write_path(workspace, &relative)?;
     if path.exists() {
-        fs::remove_file(path)?;
+        fs::remove_file(&path)?;
+        prune_empty_parents(workspace, &relative, &path);
     }
     state
         .release_files
         .retain(|file| !workspace_file(&file.path).eq_ignore_ascii_case(&relative));
     state.verified_fingerprint = None;
     Ok(json!({"removed": args["path"]}))
+}
+
+fn prune_empty_parents(workspace: &Path, relative: &str, path: &Path) {
+    let Some(root_name) = relative.split('/').next() else {
+        return;
+    };
+    let stop = workspace.join(root_name);
+    let mut current = path.parent();
+    while let Some(directory) = current {
+        if directory == stop || !directory.starts_with(&stop) {
+            break;
+        }
+        if fs::remove_dir(directory).is_err() {
+            break;
+        }
+        current = directory.parent();
+    }
 }
 
 fn record_edit(state: &mut Session, relative: &str) {
@@ -168,5 +186,54 @@ fn editing_next_action(state: &Session, relative: &str) -> &'static str {
         "本批编辑完成且所选文件与资源齐备后，宿主将按已登记参数验收。"
     } else {
         "继续已确定的编辑或验收；局部变化用 replace_text，复用已有代码可用 copyFrom。"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remove_file_prunes_empty_subdirectories_without_removing_workspace_roots() {
+        let root = tempfile::tempdir().expect("workspace");
+        let workspace = root.path();
+        let nested = workspace.join("src/tools/sub/helper.py");
+        let sibling = workspace.join("src/tools/keep.py");
+        let probe = workspace.join("work/nested/probe.py");
+        fs::create_dir_all(nested.parent().expect("nested")).expect("dirs");
+        fs::create_dir_all(probe.parent().expect("probe")).expect("work dir");
+        fs::write(&nested, "x = 1\n").expect("nested file");
+        fs::write(&sibling, "y = 2\n").expect("sibling file");
+        fs::write(&probe, "print(1)\n").expect("probe file");
+        let mut state = Session::default();
+
+        remove_file(
+            workspace,
+            &mut state,
+            &json!({"path": "src/tools/sub/helper.py"}),
+        )
+        .expect("remove nested");
+        assert!(!workspace.join("src/tools/sub").exists());
+        assert!(sibling.is_file());
+
+        remove_file(workspace, &mut state, &json!({"path": "src/tools/keep.py"}))
+            .expect("remove sibling");
+        assert!(!workspace.join("src/tools").exists());
+        assert!(workspace.join("src").is_dir());
+        assert!(
+            fs::read_dir(workspace.join("src"))
+                .expect("read src")
+                .next()
+                .is_none()
+        );
+
+        remove_file(
+            workspace,
+            &mut state,
+            &json!({"path": "work/nested/probe.py"}),
+        )
+        .expect("remove work probe");
+        assert!(!workspace.join("work/nested").exists());
+        assert!(workspace.join("work").is_dir());
     }
 }
