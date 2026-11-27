@@ -391,7 +391,8 @@ async fn discover_inputs(
     let recognition = game.recognize_with(package.recognition.as_ref(), &|relative| {
         request.inputs.file(&request.game_directory, relative).ok()
     });
-    if package.recognition.is_some() && recognition.0 != crate::discovery::RecognitionStatus::Match
+    if package.recognition.is_some()
+        && recognition.0 == crate::discovery::RecognitionStatus::NoMatch
     {
         return Err(EngineError::Rejected(
             "声明的必要识别条件不符合实际游戏。".into(),
@@ -2677,5 +2678,105 @@ mod tests {
         progress(&mut state, 4);
         assert_eq!(state.extra["lastVerificationProgressTurn"], 12);
         assert_eq!(state.extra["highestVerificationMilestone"], 4);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unknown_recognition_from_scan_cap_proceeds_to_probe_while_nomatch_is_rejected() {
+        let root = tempfile::tempdir().expect("fixture");
+        let (_, request, workspace, mut state) = fixture(root.path());
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let tools = crate::ToolPaths::new(root.path().join("tools"));
+        fs::create_dir_all(tools.python().parent().expect("python dir")).expect("python dir");
+        std::os::unix::fs::symlink("/usr/bin/python3", tools.python()).expect("symlink python");
+        write_json(
+            &tools.root.join("python/runtime.json"),
+            &json!({"archiveSha256":"fixture"}),
+        )
+        .expect("runtime");
+        let pin: Value =
+            read_json(&repo.join("third_party/engine-tools/current.json")).expect("pin");
+        let relative = format!(
+            "references/{}/library.zip",
+            pin["revision"].as_str().expect("rev")
+        );
+        let target = tools.root.join("engine-tools").join(&relative);
+        fs::create_dir_all(target.parent().expect("ref dir")).expect("ref dir");
+        fs::copy(repo.join("third_party/engine-tools").join(relative), target).expect("ref");
+        write_json(&tools.root.join("engine-tools/current.json"), &pin).expect("pin copy");
+        let service =
+            EngineService::new(&repo, tools).with_shared_directory(root.path().join("shared"));
+
+        // Place 130 non-matching *.json files sorting before z_target.json so recognition hits
+        // RULE_FILE_LIMIT (128) and returns RecognitionStatus::Unknown rather than Match.
+        for index in 0..130 {
+            fs::write(
+                request.game_directory.join(format!("a_{index:03}.json")),
+                "{}",
+            )
+            .expect("filler");
+        }
+        fs::write(request.game_directory.join("text.json"), "[\"原文\",\"二\"]").expect("target");
+        fs::copy(
+            request.game_directory.join("text.json"),
+            workspace.join("resources/text.json"),
+        )
+        .expect("staged");
+        state.extra.insert(
+            "resourceHashes".into(),
+            json!({"text.json": hash_file(&request.game_directory.join("text.json")).expect("hash")}),
+        );
+
+        let mut args = arguments();
+        args["resourcePatterns"] = json!(["text.json"]);
+        args["discoveryOnly"] = json!(true);
+        args["recognition"] = json!({
+            "schemaVersion": 1,
+            "required": [{
+                "patterns": ["*.json"],
+                "signatures": [{"offset": 0, "hex": "5b22", "origin": "start"}]
+            }],
+            "hints": []
+        });
+        let unknown_result = test_adapter(
+            &service,
+            &request,
+            &workspace,
+            &mut state,
+            &args,
+            &CancellationToken::new(),
+            None,
+        )
+        .await
+        .expect("unknown recognition proceeds to bounded probe");
+        assert_eq!(unknown_result["passed"], true, "{unknown_result}");
+
+        // A genuinely missing signature (NoMatch) must still be rejected.
+        args["recognition"] = json!({
+            "schemaVersion": 1,
+            "required": [{
+                "patterns": ["text.json"],
+                "signatures": [{"offset": 0, "hex": "deadbeef", "origin": "start"}]
+            }],
+            "hints": []
+        });
+        let nomatch_result = test_adapter(
+            &service,
+            &request,
+            &workspace,
+            &mut state,
+            &args,
+            &CancellationToken::new(),
+            None,
+        )
+        .await
+        .expect("nomatch result");
+        assert_eq!(nomatch_result["passed"], false, "{nomatch_result}");
+        assert!(
+            nomatch_result["diagnostics"]
+                .to_string()
+                .contains("声明的必要识别条件不符合实际游戏"),
+            "{nomatch_result}"
+        );
     }
 }

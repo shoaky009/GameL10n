@@ -2279,7 +2279,7 @@ impl EngineService {
                     request.inputs.file(&request.game_directory, relative).ok()
                 })
                 .0
-                != crate::discovery::RecognitionStatus::Match
+                == crate::discovery::RecognitionStatus::NoMatch
         {
             return Err(EngineError::Rejected(
                 "声明的必要识别条件不再符合实际游戏，请重新验收。".into(),
