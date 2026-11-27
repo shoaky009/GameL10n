@@ -358,6 +358,30 @@ Path(os.environ['GAMEL10N_REPORT_FILE']).write_text(sys.stdin.read(), encoding='
         self.assertEqual(result['launchScripts'][0]['content'], 'Write-Output "中文"')
         self.assertTrue(result['partial'])
 
+    def test_launch_inspection_records_link_errors_without_aborting(self):
+        outside = tempfile.TemporaryDirectory()
+        self.addCleanup(outside.cleanup)
+        target_exe = Path(outside.name) / 'real.exe'
+        target_exe.write_bytes(b'fixture')
+        target_bat = Path(outside.name) / 'real.bat'
+        target_bat.write_text('echo hi', encoding='utf-8')
+        try:
+            (self.root / 'linked.exe').symlink_to(target_exe)
+            (self.root / 'linked.bat').symlink_to(target_bat)
+        except OSError:
+            self.skipTest('Symbolic links require local OS permission')
+        (self.root / 'linked.exe.le.config').write_text(
+            '<LEConfig><Profiles><Profile><Location>ja-JP</Location></Profile></Profiles></LEConfig>',
+            encoding='utf-8',
+        )
+        result = self.execute('inspect_game_launch')
+        self.assertEqual(len(result['localeProfiles']), 1)
+        self.assertFalse(result['localeProfiles'][0]['executableExists'])
+        self.assertTrue(result['localeProfiles'][0]['error'])
+        sample = HOST['launch_text_sample'](self.root, 'linked.bat', None)
+        self.assertEqual(sample['encoding'], 'unknown')
+        self.assertTrue(sample['error'])
+
 
 if __name__ == '__main__':
     unittest.main()

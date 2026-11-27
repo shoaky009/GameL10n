@@ -1136,7 +1136,7 @@ def launch_text_sample(root, relative, fallback, tail=False):
             units = units[-2400:] if tail else units[:2400]
             content = units.decode('utf-16-le', errors='replace')
         return dict(path=relative, encoding=encoding, content=content, truncated=truncated, error=None)
-    except (OSError, LookupError) as error:
+    except (OSError, LookupError, ValueError) as error:
         return dict(path=relative, encoding='unknown', content='', truncated=False, error=str(error))
 
 
@@ -1154,9 +1154,10 @@ def inspect_game_launch(request):
     partial |= len(candidates) > 8
     for relative in candidates[:8]:
         executable = relative[:-len('.le.config')]
-        record = dict(path=relative, executable=executable, executableExists=safe(root, executable).is_file(),
+        record = dict(path=relative, executable=executable, executableExists=False,
                       location=None, runAsAdmin=None, runWithSuspend=None, error=None)
         try:
+            record['executableExists'] = safe(root, executable).is_file()
             with safe(root, relative).open('rb') as stream:
                 data = stream.read(32769)
             if len(data) > 32768:
