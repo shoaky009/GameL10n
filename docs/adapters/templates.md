@@ -13,7 +13,7 @@
 | `archive.ypf482` | `inspect`、`extract` | YPF 482，成员名使用 Murmur2 校验和 FF 异或。 |
 | `archive.ypf474` | `inspect`、`extract`、`rebuild` | 32 位偏移、FF 文件名异或、名称 CRC32 和成员 Adler32。支持最多 64 MiB 的脚本卷回填。 |
 | `archive.will-v1` | `inspect`、`extract`、`rebuild` | 按扩展名分组、13 字节基础名。保留成员的存储字节，最多 64 MiB 的卷可回填。 |
-| `archive.pfs8` | `inspect`、`extract` | Artemis PFS v8，使用索引派生的密钥读取成员。 |
+| `archive.pfs8` | `inspect`、`extract`、`rebuild` | Artemis PFS v8，使用索引派生的密钥流式读取和重建成员，受 32 位封包地址空间约束。 |
 | `archive.nekopack4a` | `inspect`、`extract` | NEKOPACK4A，按索引读取选定成员并验证 zlib 解压长度。 |
 | `archive.whale-dat` | `inspect`、`extract`、`rebuild` | Whale DAT v2，脚本解码使用 `gameTitle`，媒体成员使用 `filenameManifest` 匹配 CRC64。重建适用于纯脚本卷。 |
 

@@ -176,3 +176,32 @@ class IndexedArchivesTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unsafe archive"):
             self.run_component("archive.pfs8", "extract", outputDirectory=str(output), members=["scene.ast"])
         self.assertFalse(output.exists())
+
+    def test_pfs8_rebuild_replaces_members_and_preserves_untouched_bytes(self):
+        original = pfs.build([("scripts\\scene.ast", b"original script"), ("media\\bg.png", b"untouched-media")])
+        self.source.write_bytes(original)
+        unchanged_path = self.root / "same.ast"
+        unchanged_path.write_bytes(b"original script")
+        noop_output = self.root / "noop.pfs"
+        noop = self.run_component("archive.pfs8", "rebuild", outputFile=str(noop_output),
+                                  replacements={"scripts\\scene.ast": str(unchanged_path)})
+        self.assertTrue(noop["byteIdentical"])
+        self.assertEqual(noop["changedCount"], 0)
+        self.assertEqual(noop_output.read_bytes(), original)
+
+        patched_bytes = b"translated script with longer utf-8 text"
+        patched_path = self.root / "patched.ast"
+        patched_path.write_bytes(patched_bytes)
+        rebuilt_output = self.root / "rebuilt.pfs"
+        rebuilt = self.run_component("archive.pfs8", "rebuild", outputFile=str(rebuilt_output),
+                                     replacements={"scripts\\scene.ast": str(patched_path)})
+        self.assertFalse(rebuilt["byteIdentical"])
+        self.assertEqual(rebuilt["changedCount"], 1)
+        self.assertEqual(rebuilt["entryCount"], 2)
+        extracted = self.root / "verified"
+        report = archive.execute(dict(protocolVersion=1, component="archive.pfs8", operation="extract",
+                                      archive=str(rebuilt_output), outputDirectory=str(extracted),
+                                      verifyContents=True))
+        self.assertTrue(report["allContentsVerified"])
+        self.assertEqual((extracted / "scripts/scene.ast").read_bytes(), patched_bytes)
+        self.assertEqual((extracted / "media/bg.png").read_bytes(), b"untouched-media")

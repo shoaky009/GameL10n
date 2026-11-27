@@ -417,6 +417,65 @@ def check_pfs8_replacement(source, output, changed):
                 offset += len(left)
 
 
+def rebuild_pfs8_request(request, source):
+    from python.archives import pfs
+
+    output = checked_path(request["outputFile"])
+    separate(source, output)
+    if output.exists():
+        raise ValueError("rebuild output already exists")
+    with source.open("rb") as raw:
+        before = os.fstat(raw.fileno())
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError("component input must be a regular file")
+        index = pfs8_index(raw)
+        by_name = {entry.name: entry for entry in index.entries}
+        replacements = request.get("replacements")
+        if replacements is None:
+            replacements = {}
+        if not isinstance(replacements, dict) or len(replacements) > MAX_ENTRIES:
+            raise ValueError("invalid PFS replacement mapping")
+        if replacements.keys() - by_name.keys():
+            raise ValueError("unknown PFS replacement member")
+        changed, total = {}, 0
+        for name, path in replacements.items():
+            replacement = checked_path(path)
+            separate(replacement, output)
+            value = read_file(replacement, MAX_FILE)
+            total += len(value)
+            if total > MAX_TOTAL:
+                raise ValueError("replacement budget exceeded")
+            original = pfs.read_member(raw, index, by_name[name], max_stored_size=MAX_FILE).data
+            if value != original:
+                changed[name] = value
+    try:
+        rebuild_pfs8(source, output, changed)
+        with output.open("rb") as target:
+            out_stat = os.fstat(target.fileno())
+            checksum = hash_range(target, 0, out_stat.st_size)
+            if changed:
+                rebuilt = pfs8_index(target)
+                rebuilt_map = {entry.name: entry for entry in rebuilt.entries}
+                for name, expected in changed.items():
+                    if name not in rebuilt_map:
+                        raise ValueError(f"PFS replacement missing after rebuild: {name}")
+                    actual = pfs.read_member(target, rebuilt, rebuilt_map[name], max_stored_size=MAX_FILE).data
+                    if actual != expected:
+                        raise ValueError(f"PFS replacement readback differs: {name}")
+        if changed:
+            check_pfs8_replacement(source, output, set(changed))
+        else:
+            with source.open("rb") as raw:
+                if checksum != hash_range(raw, 0, before.st_size):
+                    raise ValueError("unchanged PFS archive differs from its source")
+    except BaseException:
+        output.unlink(missing_ok=True)
+        raise
+    return dict(protocolVersion=VERSION, success=True, component="archive.pfs8", operation="rebuild",
+                formatVersion=index.version, inputBytes=before.st_size, entryCount=len(index.entries),
+                outputSha256=checksum, changedCount=len(changed), byteIdentical=not changed)
+
+
 def rebuild_bgi(request, source):
     from python.archives import bgi, bgi_writer
     from python.engines.bgi import MAGIC
@@ -1063,6 +1122,8 @@ def execute(request):
         return execute_whale(request, source)
     if component == "archive.bgi" and operation == "rebuild":
         return rebuild_bgi(request, source)
+    if component == "archive.pfs8" and operation == "rebuild":
+        return rebuild_pfs8_request(request, source)
     if component in ("archive.ypf474", "archive.will-v1") and operation == "rebuild":
         return rebuild_script_volume(request, source)
     if component in INDEXED_COMPONENTS:
