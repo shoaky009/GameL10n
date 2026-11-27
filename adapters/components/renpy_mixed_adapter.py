@@ -81,8 +81,10 @@ def load(source, files, scratch, verify=False, include_tl=False):
             if not include_tl and compiled.is_other_translation_script(name):
                 continue
             extension = PurePosixPath(name).suffix.lower()
-            # Ren'Py ignores archived .rpy when dir is None; prefer the paired .rpyc.
+            # Ren'Py ignores archived .rpy/_ren.py when dir is None; prefer the paired .rpyc.
             if extension == ".rpy" and (name + "c").casefold() in compiled_names:
+                continue
+            if name.lower().endswith("_ren.py") and (name[:-3] + ".rpyc").casefold() in compiled_names:
                 continue
             if extension in (".rpy", ".rpyc"):
                 register(name, resource + " → " + name, member["length"])

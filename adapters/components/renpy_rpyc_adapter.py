@@ -155,7 +155,7 @@ def load(source, files, packed, scratch, verify=False, include_tl=False):
         }
         lengths = {archive.member_name(entry["name"]).casefold(): entry["length"] for entry in report["entries"]}
         # Ren'Py skips archived .rpy/_ren.py/.rpym (dir is None) and only loads .rpyc.
-        # Ignore paired .rpy alongside .rpyc and non-default tl/<lang>/ translations.
+        # Ignore paired .rpy/_ren.py alongside .rpyc and non-default tl/<lang>/ translations.
         unsupported = []
         for entry in report["entries"]:
             name = archive.member_name(entry["name"])
@@ -164,6 +164,8 @@ def load(source, files, packed, scratch, verify=False, include_tl=False):
             lower = name.lower()
             suffix = Path(name).suffix.lower()
             if suffix == ".rpy" and (name + "c").casefold() in compiled_names:
+                continue
+            if lower.endswith("_ren.py") and (name[:-3] + ".rpyc").casefold() in compiled_names:
                 continue
             if suffix in (".rpy", ".rpym", ".rpymc") or lower.endswith("_ren.py"):
                 unsupported.append(entry["name"])

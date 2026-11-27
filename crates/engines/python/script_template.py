@@ -99,7 +99,7 @@ def execute(request):
             with (root / resource).open('rb') as stream:
                 header = stream.read(64)
             if packed == 'archive.rpa3':
-                valid = header.startswith(b'RPA-3.0 ')
+                valid = header.startswith((b'RPA-3.0 ', b'ARC-3.0 '))
             elif packed == 'archive.xp3':
                 valid = header.startswith(b'XP3\r\n \n\x1a\x8bg\x01')
             else:

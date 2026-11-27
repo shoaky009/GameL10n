@@ -96,12 +96,16 @@ reject(lambda: adapter.execute(packed), "相同 RPYC 路径")
 archive(source / "one.rpa", {
     "same.rpyc": original,
     "same.rpy": b"ignored archived source",
+    "logic_ren.rpyc": original,
+    "logic_ren.py": b"ignored archived ren.py source",
     "tl/russian/other.rpyc": original,
     "tl/russian/other.rpy": b"ignored russian source",
 })
 paired_units = adapter.execute(dict(packed, resourceFiles=["one.rpa"]))["extraction"]["units"]
-assert len(paired_units) == 4
+assert len(paired_units) == 8
 archive(source / "one.rpa", {"same.rpyc": original, "orphan.rpy": b"no paired rpyc"})
+reject(lambda: adapter.execute(dict(packed, resourceFiles=["one.rpa"])), "加载顺序")
+archive(source / "one.rpa", {"same.rpyc": original, "orphan_ren.py": b"no paired ren.rpyc"})
 reject(lambda: adapter.execute(dict(packed, resourceFiles=["one.rpa"])), "加载顺序")
 # rpa3-renpy-rpyc defaults to fast overlay output anchored at the archive directory.
 (source / "game").mkdir()

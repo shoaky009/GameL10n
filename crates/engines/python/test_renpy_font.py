@@ -222,6 +222,53 @@ class RenpyFontTest(unittest.TestCase):
                         with self.assertRaisesRegex(ValueError, "字体回退脚本"):
                             adapter.execute(dict(validate, outputFiles=scripts))
 
+    def test_paired_archived_ren_py_is_ignored_while_unpaired_is_rejected(self):
+        fixtures = ROOT / "crates/engines/tests/fixtures"
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            sys, "path", [str(ROOT), str(fixtures / "renpy-rpyc-reference-e9b8018.zip"), str(fixtures), *sys.path]
+        ):
+            renpy_rpyc_adapter = importlib.import_module("adapters.components.renpy_rpyc_adapter")
+            mixed = importlib.import_module("adapters.components.renpy_mixed_adapter")
+            fixture_mod = importlib.import_module("renpy_rpyc_fixture")
+
+            root = Path(directory)
+            package = root / "package"
+            (package / "tools").mkdir(parents=True)
+            source = root / "source"
+            (source / "game").mkdir(parents=True)
+            original = fixture_mod.sample()
+            archive_path = source / "game/archive.rpa"
+            base_req = dict(
+                protocolVersion=1,
+                adapterDirectory=str(package),
+                sourceDirectory=str(source),
+                resourceFiles=["game/archive.rpa"],
+                operation="extract",
+            )
+            cases = [
+                (renpy_rpyc_adapter, dict(schemaVersion=1, templateVersion=1, templateId="rpa3-renpy-rpyc",
+                                           format="Renpy", archiveComponent="archive.rpa3", scriptExtensions=[".rpyc"]),
+                 "加载顺序"),
+                (mixed, dict(schemaVersion=1, templateVersion=1, templateId="renpy-mixed",
+                             format="Renpy", archiveComponent="archive.rpa3", scriptExtensions=[".rpy", ".rpyc"]),
+                 "未覆盖"),
+            ]
+            for adapter, cfg, error_pattern in cases:
+                with self.subTest(template=cfg["templateId"]):
+                    (package / "tools/adapter-template.json").write_text(json.dumps(cfg), encoding="utf-8")
+                    _rpa_file(archive_path, {
+                        "logic_ren.rpyc": original,
+                        "logic_ren.py": b'"""renpy\ninit python:\n    pass\n"""\n',
+                    })
+                    units = adapter.execute(base_req)["extraction"]["units"]
+                    self.assertEqual(len(units), 4)
+                    _rpa_file(archive_path, {
+                        "logic_ren.rpyc": original,
+                        "orphan_ren.py": b'"""renpy\ninit python:\n    pass\n"""\n',
+                    })
+                    with self.assertRaisesRegex(ValueError, error_pattern):
+                        adapter.execute(base_req)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -296,6 +296,21 @@ class ScriptTemplateTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, '不会加载封包内的 .rpy'):
                 TEMPLATE.execute(request)
 
+    def test_rpa3_probe_accepts_arc30_header(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, package = root / 'source', root / 'package'
+            source.mkdir()
+            (package / 'tools').mkdir(parents=True)
+            config = dict(schemaVersion=1, templateVersion=1, templateId='rpa3-renpy', format='Renpy',
+                          archiveComponent='archive.rpa3', scriptExtensions=['.rpy'], resourcePatterns=['**/*.rpa'])
+            (package / 'tools/adapter-template.json').write_text(json.dumps(config), encoding='utf-8')
+            (source / 'archive.rpa').write_bytes(b'ARC-3.0 0000000000000022 00000000\n')
+            probe = TEMPLATE.execute(dict(protocolVersion=1, operation='probe', sourceDirectory=str(source),
+                                          adapterDirectory=str(package), resourceFiles=['archive.rpa']))['probe']
+            self.assertIsNotNone(probe)
+            self.assertEqual(probe['requiredFiles'], ['archive.rpa'])
+
 
 if __name__ == '__main__':
     unittest.main()
