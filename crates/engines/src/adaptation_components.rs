@@ -884,6 +884,24 @@ mod tests {
                 .iter()
                 .any(|item| item["id"] == "vntextproxy-runtime")
         );
+        assert!(
+            related(Some("yuris"))
+                .expect("related")
+                .iter()
+                .any(|item| item["id"] == "sjis-tunnel")
+        );
+        assert!(
+            related(Some("system4"))
+                .expect("related")
+                .iter()
+                .any(|item| item["id"] == "system4-fnl-glyph")
+        );
+        assert!(
+            related(Some("system4"))
+                .expect("related")
+                .iter()
+                .any(|item| item["id"] == "cp932-glyph-map")
+        );
         let workspace = root.path().join("workspace");
         fs::create_dir_all(&workspace).expect("workspace");
         let mut state = Session::default();

@@ -149,7 +149,26 @@
     "engineFamilies": [
       "kaguya",
       "kirikiri",
-      "valkyria"
+      "valkyria",
+      "yuris",
+      "yu-ris",
+      "system4",
+      "alicesoft",
+      "eagls",
+      "nekosdk",
+      "willplus",
+      "advhd",
+      "ai5v",
+      "whale",
+      "catsystem",
+      "ethornell",
+      "bgi",
+      "softpal",
+      "majiro",
+      "reallive",
+      "artemis",
+      "siglus",
+      "qlie"
     ]
   },
   {
@@ -217,7 +236,26 @@
     ],
     "engineFamilies": [
       "kaguya",
-      "valkyria"
+      "valkyria",
+      "yuris",
+      "yu-ris",
+      "eagls",
+      "alis",
+      "nekosdk",
+      "willplus",
+      "will",
+      "wsc",
+      "advhd",
+      "ai5v",
+      "silv",
+      "elf",
+      "whale",
+      "catsystem",
+      "ethornell",
+      "bgi",
+      "softpal",
+      "majiro",
+      "reallive"
     ]
   },
   {
@@ -242,7 +280,25 @@
     "engineFamilies": [
       "kaguya",
       "yuris",
-      "valkyria"
+      "yu-ris",
+      "valkyria",
+      "eagls",
+      "alis",
+      "nekosdk",
+      "willplus",
+      "will",
+      "wsc",
+      "advhd",
+      "ai5v",
+      "silv",
+      "elf",
+      "whale",
+      "catsystem",
+      "ethornell",
+      "bgi",
+      "softpal",
+      "majiro",
+      "reallive"
     ]
   },
   {
@@ -257,7 +313,19 @@
       {"name":"GameL10n.FontBridge.dll","path":"src/tools/GameL10n.FontBridge.dll","binary":true},
       {"name":"GameL10n.FontBridge.LICENSE","path":"src/tools/GameL10n.FontBridge.LICENSE","binary":false}
     ],
-    "engineFamilies": ["valkyria"]
+    "engineFamilies": [
+      "valkyria",
+      "kaguya",
+      "yuris",
+      "yu-ris",
+      "catsystem",
+      "ethornell",
+      "bgi",
+      "willplus",
+      "advhd",
+      "nekosdk",
+      "eagls"
+    ]
   },
   {
     "id": "kirikiri-scn-text",
@@ -311,7 +379,26 @@
         "binary": false
       }
     ],
-    "engineFamilies": []
+    "engineFamilies": [
+      "qlie",
+      "system4",
+      "system4ain",
+      "alicesoft",
+      "ain",
+      "kaguya",
+      "yuris",
+      "yu-ris",
+      "valkyria",
+      "eagls",
+      "nekosdk",
+      "willplus",
+      "ai5v",
+      "whale",
+      "catsystem",
+      "ethornell",
+      "bgi",
+      "softpal"
+    ]
   },
   {
     "id": "qlie-sfnt-font",
@@ -358,7 +445,7 @@
         "binary": false
       }
     ],
-    "engineFamilies": []
+    "engineFamilies": ["system4", "system4ain", "alicesoft", "ain"]
   },
   {
     "id": "qlie-systemfont-assets",
