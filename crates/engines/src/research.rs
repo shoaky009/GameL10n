@@ -290,15 +290,24 @@ fn shared_public_client() -> Result<reqwest::Client, EngineError> {
         .map_err(EngineError::Research)
 }
 
+fn public_accept_header(url: &reqwest::Url) -> &'static str {
+    if github_git_repository(url, "blobs").is_some() {
+        "application/vnd.github.raw+json"
+    } else if url
+        .host_str()
+        .is_some_and(|host| host.eq_ignore_ascii_case("api.github.com"))
+    {
+        "application/json"
+    } else {
+        "*/*"
+    }
+}
+
 async fn public_response(mut current: reqwest::Url) -> Result<reqwest::Response, EngineError> {
     let client = shared_public_client()?;
     for _ in 0..6 {
         validate_url(&current)?;
-        let accept = if github_git_repository(&current, "blobs").is_some() {
-            "application/vnd.github.raw+json"
-        } else {
-            "application/json"
-        };
+        let accept = public_accept_header(&current);
         let response = client
             .get(current.clone())
             .header("User-Agent", "GameL10n/1.0")
@@ -500,5 +509,23 @@ mod tests {
                 "{url}"
             );
         }
+    }
+
+    #[test]
+    fn accept_header_restricts_json_to_github_api_and_uses_wildcard_for_general_downloads() {
+        let blob = reqwest::Url::parse(
+            "https://api.github.com/repos/example/repo/git/blobs/0123456789abcdef0123456789abcdef01234567",
+        )
+        .expect("blob URL");
+        let api = reqwest::Url::parse("https://api.github.com/repos/example/repo/releases/latest")
+            .expect("API URL");
+        let font = reqwest::Url::parse("https://cdn.example.com/fonts/NotoSansSC-VF.ttf")
+            .expect("font URL");
+        assert_eq!(
+            public_accept_header(&blob),
+            "application/vnd.github.raw+json"
+        );
+        assert_eq!(public_accept_header(&api), "application/json");
+        assert_eq!(public_accept_header(&font), "*/*");
     }
 }
